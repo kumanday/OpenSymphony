@@ -1,6 +1,7 @@
 import {
   applyGraphFilters,
   createFixtureGraphAdapter,
+  createInitialGraphState,
   createGatewayGraphAdapter,
   createTauriNativeGraphAdapter,
   fixtureGraphSnapshot,
@@ -110,5 +111,20 @@ describe("@opensymphony/graph", () => {
     await expect(native.getCommunities("local-default")).resolves.toMatchObject({
       communities: [{ id: "area:graph-view", concept_count: 1 }],
     });
+  });
+
+  it("returns fresh objects for graph and filter resets", () => {
+    const dirty = {
+      ...createInitialGraphState(),
+      filters: { ...initialGraphFilters, tags: ["graph-view"] },
+    };
+    const filtersReset = graphReducer(dirty, { type: "FILTERS_RESET" });
+    const graphReset = graphReducer(dirty, { type: "GRAPH_RESET" });
+
+    expect(filtersReset.filters).toEqual(initialGraphFilters);
+    expect(filtersReset.filters).not.toBe(initialGraphFilters);
+    expect(graphReset).toEqual(initialGraphState);
+    expect(graphReset).not.toBe(initialGraphState);
+    expect(graphReset.filters).not.toBe(initialGraphFilters);
   });
 });

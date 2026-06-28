@@ -137,40 +137,47 @@ export const graphModes: readonly GraphMode[] = [
   "evidence",
 ];
 
-export const initialGraphFilters: GraphFilters = {
-  bundleIds: [],
-  nodeKinds: [],
-  tags: [],
-  areas: [],
-  projects: [],
-  milestones: [],
-  issues: [],
-  repositories: [],
-  visibility: [],
-  freshness: [],
-  warning: "all",
-  sourceKinds: [],
-  edgeKinds: [],
-  communities: [],
-};
+export const initialGraphFilters: GraphFilters = createInitialGraphFilters();
+export const initialGraphState: GraphState = createInitialGraphState();
 
-export const initialGraphState: GraphState = {
-  bundles: null,
-  snapshots: {},
-  conceptDetails: {},
-  communities: {},
-  mode: "atlas",
-  selectedBundleId: null,
-  focusedNodeId: null,
-  selectedNodeIds: [],
-  searchQuery: "",
-  searchResults: [],
-  filters: initialGraphFilters,
-  layoutStatus: "idle",
-  layoutError: null,
-  neighborhoodDepth: 1,
-  lastUpdatedAt: null,
-};
+export function createInitialGraphFilters(): GraphFilters {
+  return {
+    bundleIds: [],
+    nodeKinds: [],
+    tags: [],
+    areas: [],
+    projects: [],
+    milestones: [],
+    issues: [],
+    repositories: [],
+    visibility: [],
+    freshness: [],
+    warning: "all",
+    sourceKinds: [],
+    edgeKinds: [],
+    communities: [],
+  };
+}
+
+export function createInitialGraphState(): GraphState {
+  return {
+    bundles: null,
+    snapshots: {},
+    conceptDetails: {},
+    communities: {},
+    mode: "atlas",
+    selectedBundleId: null,
+    focusedNodeId: null,
+    selectedNodeIds: [],
+    searchQuery: "",
+    searchResults: [],
+    filters: createInitialGraphFilters(),
+    layoutStatus: "idle",
+    layoutError: null,
+    neighborhoodDepth: 1,
+    lastUpdatedAt: null,
+  };
+}
 
 export function graphReducer(state: GraphState, action: GraphAction): GraphState {
   switch (action.type) {
@@ -223,7 +230,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
     case "FILTERS_SET":
       return { ...state, filters: normalizeFilters({ ...state.filters, ...action.filters }) };
     case "FILTERS_RESET":
-      return { ...state, filters: initialGraphFilters };
+      return { ...state, filters: createInitialGraphFilters() };
     case "SEARCH_SET":
       return { ...state, searchQuery: normalizeQuery(action.query) };
     case "SEARCH_RESULTS_LOADED":
@@ -246,7 +253,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         neighborhoodDepth: action.state.neighborhoodDepth ?? state.neighborhoodDepth,
       };
     case "GRAPH_RESET":
-      return initialGraphState;
+      return createInitialGraphState();
     default:
       return state;
   }
