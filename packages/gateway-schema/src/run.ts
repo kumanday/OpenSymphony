@@ -143,6 +143,10 @@ export interface RunDetail {
   workspace_id?: string;
   /** Local filesystem path (absent in hosted mode). */
   workspace_path?: string;
+  /** Git branch associated with the issue workspace, when known. */
+  branch_name?: string;
+  /** Pull request URL associated with the issue workspace, when known. */
+  pr_url?: string;
   /** Harness type (e.g. "openhands"). */
   harness_type?: string;
   /** Brief human-readable summary of the run. */

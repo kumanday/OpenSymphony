@@ -60,6 +60,7 @@ mod tests {
                 category: IssueStateCategory::Active,
             },
             branch_name: None,
+            pr_url: None,
             url: None,
             labels: Vec::new(),
             project_id: None,

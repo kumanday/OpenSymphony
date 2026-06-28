@@ -2420,7 +2420,7 @@ async fn get_task_graph(
                     .map(|blocker| blocker.identifier.clone())
                     .collect(),
                 url: Some(issue.url.clone()).filter(|url| !url.is_empty()),
-                branch_name: None,
+                branch_name: snapshot_issue.and_then(|issue| issue.branch_name.clone()),
                 labels: issue.labels.clone(),
                 created_at: Some(issue.created_at),
                 updated_at: Some(issue.updated_at),
@@ -2601,6 +2601,8 @@ async fn get_run_detail(
                     conversation_id: None,
                     workspace_id: None,
                     workspace_path: None,
+                    branch_name: None,
+                    pr_url: None,
                     harness_type: None,
                     summary: None,
                     blocker: None,
@@ -2684,6 +2686,8 @@ async fn get_run_detail(
             workspace_id: (!issue.workspace_path_suffix.is_empty())
                 .then(|| issue.workspace_path_suffix.clone()),
             workspace_path: None,
+            branch_name: issue.branch_name.clone(),
+            pr_url: issue.pr_url.clone(),
             harness_type: issue.server_base_url.as_ref().map(|_| "openhands".into()),
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
@@ -4043,6 +4047,8 @@ exit 2
             } else {
                 String::new()
             },
+            branch_name: None,
+            pr_url: None,
             project_id: None,
             project_slug: None,
             project_name: None,

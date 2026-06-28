@@ -42,6 +42,7 @@ pub struct NormalizedIssue {
     pub priority: Option<u8>,
     pub state: IssueState,
     pub branch_name: Option<String>,
+    pub pr_url: Option<String>,
     pub url: Option<String>,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

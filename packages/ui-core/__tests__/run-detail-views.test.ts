@@ -51,7 +51,7 @@ const dashboard: DashboardSnapshot = {
     retry_queue_depth: 0,
     total_input_tokens: 100,
     total_output_tokens: 50,
-    total_cache_read_tokens: 0,
+    total_cache_read_tokens: 25,
     total_cost_micros: 0,
   },
   projects: [
@@ -102,8 +102,10 @@ const runDetail: RunDetail = {
   max_turns: 8,
   input_tokens: 100,
   output_tokens: 50,
-  cache_read_tokens: 0,
+  cache_read_tokens: 25,
   runtime_seconds: 30,
+  branch_name: "feat/coe-414-run-detail",
+  pr_url: "https://github.com/kumanday/OpenSymphony/pull/414",
   allowed_actions: ["retry", "cancel", "rehydrate", "detach", "comment", "create_followup", "open_workspace", "debug"],
   safe_actions: {
     retry: true,
@@ -237,7 +239,7 @@ async function openRun(root: HTMLElement): Promise<void> {
 }
 
 describe("Run detail views", () => {
-  it("renders changed files, diff, validation, and approvals", async () => {
+  it("renders changed files, diff, validation, approvals, and TUI-parity metadata", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -255,6 +257,20 @@ describe("Run detail views", () => {
     expect(root.querySelector("[data-testid='validation-summary']")).not.toBeNull();
     expect(root.querySelector("[data-testid='approval-list']")).not.toBeNull();
     expect(root.querySelector("[data-testid='run-action-bar']")).not.toBeNull();
+    const metricText = root.querySelector(".os-run-grid")?.textContent ?? "";
+    expect(metricText).toContain("Turns1");
+    expect(metricText).not.toContain("1 / 8");
+    expect(metricText).toContain("Branchfeat/coe-414-run-detail");
+    expect(metricText).toContain("Input100");
+    expect(metricText).toContain("Cache25");
+    expect(metricText).toContain("Output50");
+    expect(metricText).toContain("Total175");
+    const pr = root.querySelector("a[href='https://github.com/kumanday/OpenSymphony/pull/414']") as HTMLAnchorElement;
+    expect(pr).not.toBeNull();
+    expect(pr.target).toBe("_blank");
+    expect(pr.textContent).toBe("kumanday/OpenSymphony#414");
+    expect(root.querySelector(".os-lines-added")?.textContent).toBe("+4");
+    expect(root.querySelector(".os-lines-removed")?.textContent).toBe("-1");
 
     await handle.destroy();
   });
@@ -279,10 +295,43 @@ describe("Run detail views", () => {
 
     const metricText = root.querySelector(".os-run-grid")?.textContent ?? "";
     expect(metricText).toContain("Turns2");
+    expect(metricText).not.toContain("2 /");
     expect(metricText).toContain("Runtimeunknown");
     expect(root.querySelector("style")?.textContent ?? "").toContain(
       ".os-run-detail-panel .os-run-grid { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));",
     );
+
+    await handle.destroy();
+  });
+
+  it("hides validation and approval panels when no gateway data backs them", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new MockGatewayTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: runDetail.run_id, files }],
+      runDiffs: [{ runId: runDetail.run_id, filePath: "src/config.ts", diff }],
+      runApprovals: [{ runId: runDetail.run_id, approvals: [] }],
+      runValidation: [{
+        runId: runDetail.run_id,
+        summary: { ...validation, commands: [], evidence: [] },
+      }],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport,
+    });
+
+    await openRun(root);
+
+    expect(root.querySelector(".os-run-panels")).toBeNull();
+    expect(root.querySelector("[data-testid='validation-summary']")).toBeNull();
+    expect(root.querySelector("[data-testid='approval-list']")).toBeNull();
 
     await handle.destroy();
   });
