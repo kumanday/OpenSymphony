@@ -341,6 +341,10 @@ describe("Run detail views", () => {
     });
 
     await openRun(root);
+    const actions = Array.from(root.querySelectorAll("[data-testid='run-action-button']")).map((button) =>
+      (button as HTMLElement).dataset.action,
+    );
+    expect(actions).toEqual(["cancel", "open_workspace", "debug"]);
     const cancelButton = root.querySelector("[data-action='cancel']") as HTMLButtonElement;
     expect(cancelButton).not.toBeNull();
     expect(cancelButton.disabled).toBe(false);
@@ -392,8 +396,8 @@ describe("Run action availability across states", () => {
     {
       name: "active",
       run: { ...runDetail, liveness: { phase: "active", stream: "healthy" }, safe_actions: { retry: false, cancel: true, rehydrate: true, detach: false } },
-      expectedDisabled: ["retry"],
-      expectedWarnings: ["retry"],
+      expectedDisabled: [],
+      expectedWarnings: [],
     },
     {
       name: "quiet",
@@ -404,14 +408,14 @@ describe("Run action availability across states", () => {
     {
       name: "degraded",
       run: { ...runDetail, liveness: { phase: "degraded", stream: "stale" }, safe_actions: { retry: false, cancel: true, rehydrate: true, detach: true } },
-      expectedDisabled: ["retry"],
-      expectedWarnings: ["retry"],
+      expectedDisabled: [],
+      expectedWarnings: [],
     },
     {
       name: "stalled",
       run: { ...runDetail, liveness: { phase: "stalled", stream: "dead" }, safe_actions: { retry: false, cancel: false, rehydrate: true, detach: true } },
-      expectedDisabled: ["retry", "cancel"],
-      expectedWarnings: ["retry", "cancel"],
+      expectedDisabled: ["cancel"],
+      expectedWarnings: ["cancel"],
     },
     {
       name: "detached",
@@ -422,14 +426,14 @@ describe("Run action availability across states", () => {
     {
       name: "cancel-failed",
       run: { ...runDetail, status: "released", release_reason: "cancel_failed", cancel_failed: true, liveness: { phase: "cancelled", stream: "dead" }, safe_actions: { retry: true, cancel: false, rehydrate: false, detach: true } },
-      expectedDisabled: ["cancel", "rehydrate"],
-      expectedWarnings: ["cancel", "rehydrate"],
+      expectedDisabled: ["cancel"],
+      expectedWarnings: ["cancel"],
     },
     {
       name: "terminal",
       run: { ...runDetail, status: "released", release_reason: "completed", liveness: { phase: "completed", stream: "healthy" }, safe_actions: { retry: false, cancel: false, rehydrate: true, detach: false } },
-      expectedDisabled: ["retry", "cancel"],
-      expectedWarnings: ["retry", "cancel"],
+      expectedDisabled: ["cancel"],
+      expectedWarnings: ["cancel"],
     },
   ];
 
@@ -444,11 +448,16 @@ describe("Run action availability across states", () => {
       });
 
       await openRun(root);
+      const actions = Array.from(root.querySelectorAll("[data-testid='run-action-button']")).map((button) =>
+        (button as HTMLElement).dataset.action,
+      );
+      expect(actions).toEqual(["cancel", "open_workspace", "debug"]);
       const phase = root.querySelector(".os-run-grid strong")?.textContent;
       expect(phase).toBe(run.liveness?.phase);
 
       for (const action of expectedDisabled) {
         const button = root.querySelector(`[data-action='${action}']`) as HTMLButtonElement | null;
+        expect(button).not.toBeNull();
         expect(button?.disabled).toBe(true);
       }
 

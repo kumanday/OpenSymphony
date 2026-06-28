@@ -166,6 +166,38 @@ pub async fn copy_to_clipboard(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct OpenDeeplinkRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenDeeplinkResponse {
+    pub opened: bool,
+}
+
+fn validate_deeplink(url: &str) -> Result<(), DesktopError> {
+    if url.starts_with("codex://threads/") {
+        Ok(())
+    } else {
+        Err(DesktopError::PermissionDenied)
+    }
+}
+
+#[command]
+pub async fn open_deeplink(
+    app: tauri::AppHandle,
+    req: OpenDeeplinkRequest,
+) -> CommandResult<OpenDeeplinkResponse> {
+    validate_deeplink(&req.url)?;
+    app.opener()
+        .open_url(&req.url, None::<&str>)
+        .map_err(|e| DesktopError::Internal {
+            message: format!("failed to open deeplink: {e}"),
+        })?;
+    Ok(OpenDeeplinkResponse { opened: true })
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OpenLinearLinkRequest {
     pub issue_id: String,
 }
@@ -334,6 +366,23 @@ mod tests {
         let req: NotifyRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.title, "T");
         assert_eq!(req.body, "B");
+    }
+
+    #[test]
+    fn test_validate_deeplink_allows_codex_threads() {
+        assert!(validate_deeplink("codex://threads/thread-123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_deeplink_rejects_other_schemes() {
+        assert!(matches!(
+            validate_deeplink("https://example.com"),
+            Err(DesktopError::PermissionDenied)
+        ));
+        assert!(matches!(
+            validate_deeplink("codex://settings"),
+            Err(DesktopError::PermissionDenied)
+        ));
     }
 
     #[cfg(unix)]

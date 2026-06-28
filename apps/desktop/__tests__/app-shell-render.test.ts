@@ -362,6 +362,96 @@ describe("desktop app shell render", () => {
     ]);
   });
 
+  it("copies OpenHands debug commands and workspace paths through native clipboard", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          if (command === "run_detail") {
+            return {
+              run_id: args?.runId,
+              issue_identifier: "COE-491",
+              harness_type: "openhands_agent_server",
+              workspace_path: "/tmp/work space/COE-491",
+            };
+          }
+          if (command === "copy_to_clipboard") {
+            return { copied: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const transport = createDesktopTransport("http://127.0.0.1:2468");
+    await expect(transport.debugRun("run-1")).resolves.toMatchObject({
+      status: "accepted",
+      reason: "debug command copied",
+    });
+    await expect(transport.openWorkspace("run-1")).resolves.toMatchObject({
+      status: "accepted",
+      reason: "workspace path copied",
+    });
+
+    expect(calls).toEqual([
+      { command: "run_detail", args: { runId: "run-1" } },
+      {
+        command: "copy_to_clipboard",
+        args: { req: { text: "cd '/tmp/work space/COE-491' && opensymphony debug 'COE-491'" } },
+      },
+      { command: "run_detail", args: { runId: "run-1" } },
+      { command: "copy_to_clipboard", args: { req: { text: "/tmp/work space/COE-491" } } },
+    ]);
+  });
+
+  it("opens Codex debug deeplinks and copies them when opening fails", async () => {
+    const calls: TauriInvokeCall[] = [];
+    let rejectOpen = false;
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          if (command === "run_detail") {
+            return {
+              run_id: args?.runId,
+              issue_identifier: "COE-491",
+              harness_type: "codex_app_server",
+              conversation_id: "thread-123",
+            };
+          }
+          if (command === "open_deeplink") {
+            if (rejectOpen) throw new Error("no handler");
+            return { opened: true };
+          }
+          if (command === "copy_to_clipboard") {
+            return { copied: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const transport = createDesktopTransport("http://127.0.0.1:2468");
+    await expect(transport.debugRun("run-1")).resolves.toMatchObject({
+      status: "accepted",
+      reason: "Codex thread opened",
+    });
+    rejectOpen = true;
+    await expect(transport.debugRun("run-1")).resolves.toMatchObject({
+      status: "accepted",
+      reason: expect.stringContaining("Codex deeplink copied"),
+    });
+
+    expect(calls).toEqual([
+      { command: "run_detail", args: { runId: "run-1" } },
+      { command: "open_deeplink", args: { req: { url: "codex://threads/thread-123" } } },
+      { command: "run_detail", args: { runId: "run-1" } },
+      { command: "open_deeplink", args: { req: { url: "codex://threads/thread-123" } } },
+      { command: "copy_to_clipboard", args: { req: { text: "codex://threads/thread-123" } } },
+    ]);
+  });
+
   it("surfaces native desktop command failures instead of masking them with HTTP fallback", async () => {
     const calls: TauriInvokeCall[] = [];
     const fetchCalls: string[] = [];
