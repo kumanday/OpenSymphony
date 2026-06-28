@@ -176,6 +176,7 @@ pub struct OpenDeeplinkResponse {
 }
 
 fn validate_deeplink(url: &str) -> Result<(), DesktopError> {
+    // Reject traversal before url::Url normalizes the path.
     if url.contains("/../") || url.contains("/./") {
         return Err(DesktopError::PermissionDenied);
     }

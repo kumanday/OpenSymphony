@@ -443,6 +443,41 @@ describe("desktop app shell render", () => {
     ]);
   });
 
+  it("does not route non-Codex harness names through Codex deeplinks", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          if (command === "run_detail") {
+            return {
+              run_id: args?.runId,
+              issue_identifier: "COE-491",
+              harness_type: "openhands_codex_bridge",
+              workspace_path: "/tmp/COE-491",
+              conversation_id: "thread-123",
+            };
+          }
+          if (command === "copy_to_clipboard") {
+            return { copied: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const transport = createDesktopTransport("http://127.0.0.1:2468");
+    await transport.debugRun("run-1");
+
+    expect(calls).toEqual([
+      { command: "run_detail", args: { runId: "run-1" } },
+      {
+        command: "copy_to_clipboard",
+        args: { req: { text: "cd '/tmp/COE-491' && opensymphony debug 'COE-491'" } },
+      },
+    ]);
+  });
+
   it("opens Codex debug deeplinks and copies them when opening fails", async () => {
     const calls: TauriInvokeCall[] = [];
     let rejectOpen = false;
@@ -455,7 +490,7 @@ describe("desktop app shell render", () => {
               run_id: args?.runId,
               issue_identifier: "COE-491",
               harness_type: "codex_app_server",
-              conversation_id: "thread-123",
+              conversation_id: "thread_123-ABC",
             };
           }
           if (command === "open_deeplink") {
@@ -483,10 +518,10 @@ describe("desktop app shell render", () => {
 
     expect(calls).toEqual([
       { command: "run_detail", args: { runId: "run-1" } },
-      { command: "open_deeplink", args: { req: { url: "codex://threads/thread-123" } } },
+      { command: "open_deeplink", args: { req: { url: "codex://threads/thread_123-ABC" } } },
       { command: "run_detail", args: { runId: "run-1" } },
-      { command: "open_deeplink", args: { req: { url: "codex://threads/thread-123" } } },
-      { command: "copy_to_clipboard", args: { req: { text: "codex://threads/thread-123" } } },
+      { command: "open_deeplink", args: { req: { url: "codex://threads/thread_123-ABC" } } },
+      { command: "copy_to_clipboard", args: { req: { text: "codex://threads/thread_123-ABC" } } },
     ]);
   });
 

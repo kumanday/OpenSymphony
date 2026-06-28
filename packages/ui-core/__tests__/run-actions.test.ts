@@ -57,7 +57,7 @@ describe("buildActionBarItems", () => {
     expect(items.every((i) => i.enabled)).toBe(true);
   });
 
-  it("disables unsafe retry and warns against duplicate-run retries", () => {
+  it("filters out unbacked retry action", () => {
     const run = runFixture({
       allowed_actions: ["retry"],
       safe_actions: {
