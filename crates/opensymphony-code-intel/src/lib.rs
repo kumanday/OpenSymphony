@@ -12,6 +12,7 @@ pub const RUST_QUERY_PACK_VERSION: &str = "rust-query-pack-v2";
 pub const TYPESCRIPT_GRAMMAR_VERSION: &str = "0.23.2";
 pub const JAVASCRIPT_GRAMMAR_VERSION: &str = "0.25.0";
 pub const PYTHON_GRAMMAR_VERSION: &str = "0.25.0";
+pub const LIGHTWEIGHT_PARSER_VERSION: &str = "lightweight-text-v1";
 
 const RUST_METADATA: &str = include_str!("../queries/rust/metadata.toml");
 const TYPESCRIPT_METADATA: &str = include_str!("../queries/typescript/metadata.toml");
@@ -813,6 +814,8 @@ fn parse_lightweight_source(
     if language == SourceLanguage::Markdown {
         captures.extend(markdown_fence_captures(source));
     }
+    // Lightweight config/doc languages record file presence and spans only.
+    // JSON, YAML, and TOML are not validated by this fast path.
 
     ParsedDocumentSummary {
         source: SourceIdentity {
@@ -839,7 +842,7 @@ fn parse_lightweight_source(
                 .to_string(),
             rendered_span: span.render(),
             span,
-            parser_version: TREE_SITTER_VERSION.to_string(),
+            parser_version: LIGHTWEIGHT_PARSER_VERSION.to_string(),
             query_pack_version: query_pack,
         }],
         captures,
@@ -1180,8 +1183,20 @@ mod tests {
             let summary = parse_path(path, source).expect("lightweight document parses");
             assert_eq!(summary.source.language, language);
             assert_eq!(summary.root_kind, "document");
+            assert_eq!(
+                summary.versions.grammar, "lightweight-text",
+                "lightweight summaries do not use a tree-sitter grammar"
+            );
             assert_eq!(summary.symbols[0].kind, SymbolKind::Document);
             assert_eq!(summary.symbols[0].span.start_line, 1);
+            assert_eq!(
+                summary.symbols[0].parser_version,
+                LIGHTWEIGHT_PARSER_VERSION
+            );
+            assert_eq!(
+                summary.symbols[0].query_pack_version,
+                format!("{}-lightweight-v1", language.id())
+            );
         }
 
         let markdown =
