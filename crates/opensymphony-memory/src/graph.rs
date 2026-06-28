@@ -400,14 +400,16 @@ pub fn memory_graph_search(
     limit: usize,
     access: MemoryGraphAccess,
 ) -> Result<MemorySearchResponse, MemoryGraphProjectionError> {
-    let issues = accessible_issues(config, access)?;
+    let all_issues = load_indexed_issues(config)?;
+    let search_limit = all_issues.len().max(limit.max(1));
+    let issues = filter_issues_for_access(all_issues, access);
     let limit = limit.max(1);
     let by_issue = issues
         .iter()
         .map(|issue| (issue.issue_key.clone(), issue))
         .collect::<BTreeMap<_, _>>();
     let scope = MemoryScopeFilter::default();
-    let results = search_with_scope(config, query, usize::MAX, &scope)?
+    let results = search_with_scope(config, query, search_limit, &scope)?
         .into_iter()
         .filter_map(|result| {
             let issue = by_issue.get(&result.issue_key)?;
@@ -450,11 +452,17 @@ fn accessible_issues(
     config: &MemoryConfig,
     access: MemoryGraphAccess,
 ) -> Result<Vec<IndexedIssue>, MemoryGraphProjectionError> {
-    let mut issues = load_indexed_issues(config)?;
+    Ok(filter_issues_for_access(load_indexed_issues(config)?, access))
+}
+
+fn filter_issues_for_access(
+    mut issues: Vec<IndexedIssue>,
+    access: MemoryGraphAccess,
+) -> Vec<IndexedIssue> {
     if access == MemoryGraphAccess::Public {
         issues.retain(|issue| issue.visibility == MemoryVisibility::Public);
     }
-    Ok(issues)
+    issues
 }
 
 fn ensure_default_memory_bundle(bundle_id: &str) -> Result<(), MemoryGraphProjectionError> {
@@ -655,11 +663,18 @@ fn resolve_index_path(config: &MemoryConfig, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
+    if path.starts_with(DEFAULT_MEMORY_ROOT) {
+        return config.repo_root.join(path);
+    }
+    let memory_path = config.memory_root.join(path);
+    if memory_path.exists() {
+        return memory_path;
+    }
     let repo_path = config.repo_root.join(path);
     if repo_path.exists() {
         return repo_path;
     }
-    config.memory_root.join(path)
+    memory_path
 }
 
 fn redact_for_dto(config: &MemoryConfig, value: &str) -> String {

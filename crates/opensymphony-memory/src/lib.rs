@@ -1667,6 +1667,33 @@ opensymphony:
     }
 
     #[test]
+    fn memory_graph_resolves_relative_capsules_under_memory_root_first() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        fs::create_dir_all(repo.path().join("issues")).expect("repo issues dir");
+        fs::create_dir_all(config.memory_root.join("issues")).expect("memory issues dir");
+        fs::write(repo.path().join("issues/COE-200.md"), "repo file").expect("repo file");
+        fs::write(config.memory_root.join("issues/COE-200.md"), "memory file")
+            .expect("memory file");
+
+        assert_eq!(
+            resolve_index_path(&config, Path::new("issues/COE-200.md")),
+            config.memory_root.join("issues/COE-200.md")
+        );
+        assert_eq!(
+            resolve_index_path(
+                &config,
+                Path::new(DEFAULT_MEMORY_ROOT)
+                    .join("issues/COE-200.md")
+                    .as_path(),
+            ),
+            repo.path()
+                .join(DEFAULT_MEMORY_ROOT)
+                .join("issues/COE-200.md")
+        );
+    }
+
+    #[test]
     fn migration_adds_okf_columns_with_new_table_nullability() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());

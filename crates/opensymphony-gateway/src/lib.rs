@@ -1131,7 +1131,7 @@ fn memory_graph_error(error: MemoryGraphProjectionError) -> (StatusCode, Json<se
         }
         MemoryGraphProjectionError::Memory(source) => {
             let (status, code) = memory_graph_memory_error_status(&source);
-            memory_graph_response(status, code, &source.to_string())
+            memory_graph_response(status, code, memory_graph_memory_error_message(&source))
         }
     }
 }
@@ -1140,6 +1140,13 @@ fn memory_graph_memory_error_status(error: &MemoryError) -> (StatusCode, &'stati
     match error {
         MemoryError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid_memory_request"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "memory_graph_error"),
+    }
+}
+
+fn memory_graph_memory_error_message(error: &MemoryError) -> &'static str {
+    match error {
+        MemoryError::InvalidInput(_) => "invalid memory graph request",
+        _ => "memory graph projection failed",
     }
 }
 
@@ -3813,6 +3820,28 @@ mod tests {
             )),
             TaskGraphStateCategory::Todo
         );
+    }
+
+    #[test]
+    fn memory_graph_memory_errors_do_not_expose_local_paths() {
+        let local_path = PathBuf::from("/tmp/private/index.duckdb");
+        let (status, Json(body)) = memory_graph_error(MemoryGraphProjectionError::Memory(
+            MemoryError::PathOutsideRepo {
+                path: local_path.clone(),
+                repo_root: PathBuf::from("/tmp/private/repo"),
+            },
+        ));
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "memory graph projection failed");
+        assert!(!body.to_string().contains("/tmp/private"));
+
+        let (status, Json(body)) = memory_graph_error(MemoryGraphProjectionError::Memory(
+            MemoryError::InvalidInput(format!("bad request for {}", local_path.display())),
+        ));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], "invalid memory graph request");
+        assert!(!body.to_string().contains("/tmp/private"));
     }
 
     #[cfg(unix)]
