@@ -481,7 +481,7 @@ impl AstCodeIntelReport {
                 self.fallback_reasons.join("; ")
             ),
             (false, false) => format!(
-                "fallback: CodebaseAnalyzer not used; fallback budget exhausted ({})",
+                "fallback: CodebaseAnalyzer not used; no fallback target ({})",
                 self.fallback_reasons.join("; ")
             ),
         }
@@ -989,6 +989,24 @@ mod tests {
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace" && artifact.summary.contains("not UTF-8")
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn composite_rejects_symlink_to_outside_repo() {
+        let repo = TempDir::new().expect("temp repo");
+        let outside = TempDir::new().expect("outside repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        let outside_file = outside.path().join("lib.rs");
+        fs::write(&outside_file, "pub fn outside() {}\n").expect("outside file");
+        std::os::unix::fs::symlink(&outside_file, repo.path().join("src/outside.rs"))
+            .expect("symlink");
+
+        let error = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/outside.rs")], &[], 20)
+            .expect_err("outside symlink should be rejected");
+
+        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
     }
 
     #[test]
