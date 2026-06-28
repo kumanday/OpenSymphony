@@ -5,12 +5,13 @@ use std::{
 };
 
 use crate::opensymphony_domain::{
-    ComponentHealthSnapshot, ConversationMetadata, DaemonSnapshot, DurationMs, HealthStatus,
-    IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef, IssueSnapshot, IssueState,
-    IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, ReleaseReason,
-    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals,
-    SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue,
-    TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
+    ComponentHealthSnapshot, ConversationMetadata, DaemonSnapshot, DurationMs,
+    HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
+    HealthStatus, IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef,
+    IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
+    ReleaseReason, RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt,
+    RuntimeUsageTotals, SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory,
+    TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceRecord,
 };
@@ -181,6 +182,11 @@ pub enum WorkerAbortReason {
     Stalled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerInterruptAcknowledgement {
+    pub detail: Option<String>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait TrackerBackend {
     type Error: std::fmt::Display + Send + Sync + 'static;
@@ -268,6 +274,11 @@ pub trait WorkerBackend {
         worker_id: &WorkerId,
         reason: WorkerAbortReason,
     ) -> Result<(), Self::Error>;
+
+    async fn interrupt_worker(
+        &mut self,
+        command: HarnessInterruptCommand,
+    ) -> Result<WorkerInterruptAcknowledgement, Self::Error>;
 }
 
 #[derive(Debug, Error)]
@@ -296,6 +307,7 @@ pub struct Scheduler<T, W, M> {
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
     worker_index: HashMap<WorkerId, IssueId>,
+    worker_harness_kind: HashMap<WorkerId, String>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     recovered: bool,
     next_worker_ordinal: u64,
@@ -328,6 +340,7 @@ where
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
             worker_index: HashMap::new(),
+            worker_harness_kind: HashMap::new(),
             pending_recovery: None,
             recovered: false,
             next_worker_ordinal: 0,
@@ -863,6 +876,12 @@ where
     ) -> Result<(), SchedulerError> {
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+            if self
+                .interrupt_human_review_polling_for_merging(&normalized, observed_at)
+                .await?
+            {
+                continue;
+            }
             self.upsert_active_execution(normalized, observed_at, None)?;
         }
 
@@ -898,6 +917,12 @@ where
                     if let Some(existing) = self.executions.get(&issue_id) {
                         let mut issue = existing.issue().clone();
                         issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
+                        if self
+                            .interrupt_human_review_polling_for_merging(&issue, observed_at)
+                            .await?
+                        {
+                            continue;
+                        }
                         self.refresh_execution_issue(&issue_id, issue)?;
                     }
                     continue;
@@ -970,6 +995,98 @@ where
             self.insert_execution(issue_id.clone(), execution);
         }
         Ok(())
+    }
+
+    async fn interrupt_human_review_polling_for_merging(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let Some(existing) = self.executions.get(&issue.id) else {
+            return Ok(false);
+        };
+        if !is_human_review_to_merging(existing.issue(), issue)
+            || !matches!(
+                existing.status(),
+                SchedulerStatus::Claimed | SchedulerStatus::Running
+            )
+        {
+            return Ok(false);
+        }
+
+        let issue_id = issue.id.clone();
+        let mut execution = self
+            .remove_execution(&issue_id)
+            .expect("execution existed before removal");
+        let Some(run) = execution.current_run().cloned() else {
+            self.insert_execution(issue_id, execution);
+            return Ok(false);
+        };
+        let harness_kind = self
+            .worker_harness_kind
+            .get(&run.worker_id)
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        execution.refresh_issue(issue.clone())?;
+        execution.observe_runtime_event(
+            observed_at,
+            Some(format!(
+                "tracker-merging-supersedes-human-review-{}",
+                observed_at.as_u64()
+            )),
+            Some("scheduler.interrupt_requested".to_string()),
+            Some(
+                "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
+                    .to_string(),
+            ),
+            Some(serde_json::json!({
+                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                "from_state": "Human Review",
+                "to_state": issue.state.name,
+                "worker_id": run.worker_id.as_str(),
+            })),
+        )?;
+        let (command, queued) = execution.request_interrupt(
+            harness_kind,
+            None,
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            observed_at,
+        )?;
+        self.insert_execution(issue_id.clone(), execution);
+
+        if queued {
+            let result = self.worker.interrupt_worker(command).await;
+            let Some(mut execution) = self.remove_execution(&issue_id) else {
+                return Ok(true);
+            };
+            match result {
+                Ok(acknowledgement) => {
+                    execution.acknowledge_interrupt(observed_at)?;
+                    if let Some(detail) = acknowledgement.detail {
+                        execution.observe_runtime_event(
+                            observed_at,
+                            Some(format!(
+                                "tracker-merging-interrupt-acknowledged-{}",
+                                observed_at.as_u64()
+                            )),
+                            Some("scheduler.interrupt_acknowledged".to_string()),
+                            Some(detail),
+                            Some(serde_json::json!({
+                                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                            })),
+                        )?;
+                    }
+                }
+                Err(error) => {
+                    execution.fail_interrupt(observed_at, error.to_string())?;
+                }
+            }
+            self.insert_execution(issue_id, execution);
+        }
+
+        Ok(true)
     }
 
     fn has_running_executions(&self) -> bool {
@@ -1167,7 +1284,7 @@ where
             )
             .await;
 
-        for ((issue_id, mut execution, claimed_run, _), result) in
+        for ((issue_id, mut execution, claimed_run, start_request), result) in
             pending_launches.into_iter().zip(start_results.into_iter())
         {
             match result {
@@ -1180,6 +1297,10 @@ where
                     execution.record_turn_started(observed_at)?;
                     self.worker_index
                         .insert(claimed_run.worker_id.clone(), issue_id.clone());
+                    self.worker_harness_kind.insert(
+                        claimed_run.worker_id.clone(),
+                        start_request.route.harness_kind,
+                    );
                     debug!(issue_id = %issue_id, "dispatched scheduler worker");
                 }
                 Err(error) => {
@@ -1233,6 +1354,7 @@ where
                     let Some(issue_id) = self.worker_index.remove(&worker_id) else {
                         continue;
                     };
+                    self.worker_harness_kind.remove(&worker_id);
                     let Some(execution) = self.remove_execution(&issue_id) else {
                         continue;
                     };
@@ -1394,6 +1516,7 @@ where
         reason: WorkerAbortReason,
     ) -> Result<(), SchedulerError> {
         self.worker_index.remove(worker_id);
+        self.worker_harness_kind.remove(worker_id);
         self.worker
             .abort_worker(worker_id, reason)
             .await
@@ -1438,7 +1561,12 @@ where
         let run = execution
             .current_run()
             .expect("running execution must have a run");
-        let retry = match retry_reason_for_outcome(outcome.outcome) {
+        let retry_reason = if tracker_merging_interrupt_cancelled(&execution, &outcome) {
+            None
+        } else {
+            retry_reason_for_outcome(outcome.outcome)
+        };
+        let retry = match retry_reason {
             None => RetryEntry::continuation(
                 execution.issue(),
                 run.attempt,
@@ -1727,6 +1855,16 @@ fn retry_reason_for_outcome(outcome: WorkerOutcomeKind) -> Option<RetryReason> {
     }
 }
 
+fn tracker_merging_interrupt_cancelled(
+    execution: &IssueExecution,
+    outcome: &WorkerOutcomeRecord,
+) -> bool {
+    outcome.outcome == WorkerOutcomeKind::Cancelled
+        && execution.interrupt().is_some_and(|interrupt| {
+            interrupt.command.reason == HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+        })
+}
+
 fn normalized_state_set(states: &[String]) -> HashSet<String> {
     states
         .iter()
@@ -1744,6 +1882,11 @@ fn matches_state_name(name: &str, states: &[String]) -> bool {
 fn running_state_key_for_execution(execution: &IssueExecution) -> Option<String> {
     (execution.status() == SchedulerStatus::Running)
         .then(|| normalized_state_name(&execution.issue().state.name))
+}
+
+fn is_human_review_to_merging(previous: &NormalizedIssue, current: &NormalizedIssue) -> bool {
+    normalized_state_name(&previous.state.name) == "human review"
+        && normalized_state_name(&current.state.name) == "merging"
 }
 
 fn normalized_state_name(name: &str) -> String {

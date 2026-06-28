@@ -30,8 +30,9 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
+    WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -89,6 +90,8 @@ pub(super) enum CliWorkerError {
     LaunchChannelClosed,
     #[error("worker task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("worker interrupt failed: {0}")]
+    InterruptFailed(String),
 }
 
 #[derive(Debug)]
@@ -2047,6 +2050,40 @@ impl WorkerBackend for RuntimeWorkerBackend {
     ) -> Result<(), Self::Error> {
         self.abort_tracked_task(worker_id.as_str());
         Ok(())
+    }
+
+    async fn interrupt_worker(
+        &mut self,
+        command: crate::opensymphony_domain::HarnessInterruptCommand,
+    ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
+        if command.harness_kind == CODEX_APP_SERVER_KIND {
+            return Err(CliWorkerError::InterruptFailed(
+                "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
+                    .to_string(),
+            ));
+        }
+
+        let mut runner = IssueSessionRunner::with_environment(
+            self.client.clone(),
+            self.runner_config.clone(),
+            OverlayEnvironment {
+                overrides: self.worker_env.clone(),
+            },
+        );
+        if let Some(source) = self.workpad_comment_source.clone() {
+            runner = runner.with_workpad_comment_source(source);
+        }
+        let acknowledgement = runner
+            .interrupt(&command)
+            .await
+            .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?;
+        Ok(WorkerInterruptAcknowledgement {
+            detail: acknowledgement.diagnostic.or_else(|| {
+                acknowledgement
+                    .execution_status
+                    .map(|status| format!("OpenHands interrupt acknowledged with `{status}`"))
+            }),
+        })
     }
 }
 

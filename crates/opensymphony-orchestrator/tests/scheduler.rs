@@ -4,15 +4,18 @@ use std::{
     time::Duration,
 };
 
-use crate::opensymphony_domain::TrackerErrorCategory;
+use crate::opensymphony_domain::{
+    HarnessInterruptCommand, HarnessInterruptReason, HarnessInterruptStatus, TrackerErrorCategory,
+};
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
     IssueStateCategory, NormalizedIssue, RecoveryRecord, ReleaseReason, RetryReason,
     RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
     TrackerIssue, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId, WorkerLaunch,
-    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
-    WorkspaceKey, WorkspaceRecord, decide_issue_route,
+    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
+    decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -98,7 +101,7 @@ fn tracker_issue_state_kind_from_name(state: &str) -> TrackerIssueStateKind {
     match state.trim().to_ascii_lowercase().as_str() {
         "backlog" => TrackerIssueStateKind::Backlog,
         "todo" => TrackerIssueStateKind::Unstarted,
-        "in progress" | "review" | "human review" => TrackerIssueStateKind::Started,
+        "in progress" | "review" | "human review" | "merging" => TrackerIssueStateKind::Started,
         "done" | "completed" | "closed" => TrackerIssueStateKind::Completed,
         "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
         other => TrackerIssueStateKind::Unknown(other.to_owned()),
@@ -417,6 +420,8 @@ struct FakeWorker {
     launches: Vec<WorkerStartRequest>,
     updates: VecDeque<WorkerUpdate>,
     aborted: Vec<(String, WorkerAbortReason)>,
+    interrupts: Vec<HarnessInterruptCommand>,
+    interrupt_results: VecDeque<Result<WorkerInterruptAcknowledgement, FakeError>>,
     launch_results: VecDeque<Result<WorkerLaunch, FakeError>>,
 }
 
@@ -447,6 +452,16 @@ impl WorkerBackend for FakeWorker {
     ) -> Result<(), Self::Error> {
         self.aborted.push((worker_id.to_string(), reason));
         Ok(())
+    }
+
+    async fn interrupt_worker(
+        &mut self,
+        command: HarnessInterruptCommand,
+    ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
+        self.interrupts.push(command);
+        self.interrupt_results
+            .pop_front()
+            .unwrap_or(Ok(WorkerInterruptAcknowledgement { detail: None }))
     }
 }
 
@@ -727,6 +742,110 @@ async fn running_state_polling_uses_lightweight_state_refresh_interval() {
             .state
             .name,
         "Human Review"
+    );
+}
+
+#[tokio::test]
+async fn merging_supersedes_human_review_polling_once_and_continues_same_issue() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-492", "COE-492", "Human Review", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    config.active_states.push("Human Review".to_string());
+    config.active_states.push("Merging".to_string());
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should dispatch Human Review polling");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler.tracker_mut().states.insert(
+        "lin-492".to_string(),
+        tracker_state_snapshot("lin-492", "COE-492", "Merging", "started", 30_000),
+    );
+
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("Merging state refresh should interrupt Human Review polling");
+
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(
+        scheduler.worker().interrupts[0].reason,
+        HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+    );
+    let execution = scheduler
+        .execution(&IssueId::new("lin-492").expect("issue id should be valid"))
+        .expect("execution should still be active");
+    assert_eq!(execution.issue().state.name, "Merging");
+    let interrupt = execution.interrupt().expect("interrupt should be recorded");
+    assert_eq!(interrupt.status, HarnessInterruptStatus::Acknowledged);
+    assert_eq!(
+        interrupt.command.reason,
+        HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+    );
+    assert!(
+        execution
+            .conversation()
+            .expect("conversation should remain attached")
+            .recent_activity
+            .iter()
+            .any(|event| event
+                .summary
+                .contains("tracker_merging_supersedes_human_review"))
+    );
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("repeated Merging observation should stay idempotent");
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(scheduler.worker().launches.len(), 1);
+
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Cancelled,
+                ts(60_200),
+                Some("Human Review polling interrupted by Merging".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect("interrupted worker should queue same-issue continuation");
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-492").expect("issue id should be valid"))
+            .expect("execution should remain tracked")
+            .status(),
+        SchedulerStatus::RetryQueued
+    );
+
+    scheduler
+        .tick(ts(61_300))
+        .await
+        .expect("same issue should continue after interrupt handling");
+
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1].issue.identifier.as_str(),
+        "COE-492"
+    );
+    assert_eq!(
+        scheduler.worker().launches[1].issue.state.name.as_str(),
+        "Merging"
     );
 }
 
