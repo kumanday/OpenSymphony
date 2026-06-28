@@ -20,6 +20,8 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         priority: normalize_priority(node.priority)?,
         state: state.name,
         state_kind: state.kind,
+        branch_name: normalize_branch_name(node.branch_name),
+        pr_url: normalize_pr_url(node.attachments.nodes),
         labels: normalize_labels(node.labels.nodes),
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug: node.project.as_ref().map(|project| project.slug_id.clone()),
@@ -79,6 +81,47 @@ fn normalize_labels(labels: Vec<LinearLabelNode>) -> Vec<String> {
     labels.sort_unstable();
     labels.dedup();
     labels
+}
+
+fn normalize_branch_name(branch_name: Option<String>) -> Option<String> {
+    branch_name.and_then(|branch_name| {
+        let branch_name = branch_name.trim();
+        (!branch_name.is_empty()).then(|| branch_name.to_owned())
+    })
+}
+
+fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> Option<String> {
+    attachments
+        .into_iter()
+        .filter(|attachment| {
+            attachment
+                .source_type
+                .as_deref()
+                .map(|source_type| source_type.eq_ignore_ascii_case("github"))
+                .unwrap_or(false)
+        })
+        .map(|attachment| attachment.url)
+        .find(|url| is_canonical_github_pr_url(url))
+}
+
+fn is_canonical_github_pr_url(url: &str) -> bool {
+    let Some(path) = url.trim().strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = path.split('/');
+    let (Some(owner), Some(repo), Some("pull"), Some(number), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repo.is_empty()
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn normalize_blockers(relations: Vec<LinearRelationNode>) -> Vec<TrackerIssueBlocker> {
@@ -172,7 +215,7 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_priority;
+    use super::{is_canonical_github_pr_url, normalize_priority};
 
     #[test]
     fn priority_zero_becomes_none() {
@@ -202,5 +245,21 @@ mod tests {
     #[test]
     fn undocumented_linear_priority_values_are_rejected() {
         assert!(normalize_priority(5.0).is_err());
+    }
+
+    #[test]
+    fn github_pr_url_matching_requires_canonical_pull_path() {
+        assert!(is_canonical_github_pr_url(
+            "https://github.com/kumanday/OpenSymphony/pull/155"
+        ));
+        assert!(!is_canonical_github_pr_url(
+            "https://github.com/kumanday/OpenSymphony/wiki/pull/155"
+        ));
+        assert!(!is_canonical_github_pr_url(
+            "https://github.com/kumanday/OpenSymphony/pull/not-a-number"
+        ));
+        assert!(!is_canonical_github_pr_url(
+            "https://example.com/kumanday/OpenSymphony/pull/155"
+        ));
     }
 }

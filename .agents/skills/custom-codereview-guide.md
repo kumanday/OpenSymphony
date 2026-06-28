@@ -13,6 +13,16 @@ triggers:
 - Treat behavior changes as incomplete unless the PR includes concrete verification or evidence.
 - Call out risky data migrations, auth changes, concurrency hazards, and production operability regressions explicitly.
 
+## Headless Shared UI Evidence
+
+For `packages/ui-core` shared-shell changes, DOM fixture tests that mount
+`renderOpenSymphonyApp` with `MockGatewayTransport` are acceptable product
+evidence when the PR also includes a browser-rendered proof image or explains why
+the unattended environment could not capture one. Do not block solely because the
+evidence is not a full desktop app video when the code path under review is the
+shared DOM renderer and the relevant selectors, links, token labels, and
+visibility rules are asserted end-to-end.
+
 ## COE-409 Desktop Settings & Native Actions -- Review Context
 
 PR #108: `feat: desktop settings, keychain, and native actions`

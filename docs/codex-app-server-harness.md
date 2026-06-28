@@ -19,7 +19,7 @@ The Rust module provides:
 
 - launch argument construction for stdio and loopback WebSocket,
 - JSON-RPC request construction for `initialize`, `thread/start`, and
-  `turn/start`, plus resume, cancel, and approval responses,
+  `turn/start`, plus resume, `turn/interrupt`, and approval responses,
 - normalization of thread, turn, item, approval, cancellation, error, and
   unknown notifications while preserving the raw payload,
 - bounded human-readable summaries for high-value notifications such as

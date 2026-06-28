@@ -13,6 +13,7 @@ use crate::opensymphony_codex::{
     CodexAppServerSchemaValidator, CodexContractGeneration, CodexJsonRpcSession,
     JsonRpcRequestEnvelope, NormalizedCodexEvent, NormalizedCodexEventKind,
     codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
+    turn_status,
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
@@ -1703,7 +1704,11 @@ fn emit_codex_notification(
 fn codex_terminal_outcome(event: &NormalizedCodexEvent) -> Option<CodexTerminalOutcome> {
     let (outcome, status) = match event.kind {
         NormalizedCodexEventKind::TurnCompleted => {
-            (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+            if turn_status(event).as_deref() == Some("interrupted") {
+                (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+            } else {
+                (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+            }
         }
         NormalizedCodexEventKind::TurnCancelled => {
             (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
@@ -1721,7 +1726,7 @@ fn codex_terminal_outcome(event: &NormalizedCodexEvent) -> Option<CodexTerminalO
                     (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
                 }
                 Some("failed" | "error") => (WorkerOutcomeKind::Failed, RunStatus::Failed),
-                Some("cancelled" | "canceled") => {
+                Some("cancelled" | "canceled" | "interrupted") => {
                     (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
                 }
                 _ => return None,
@@ -2053,6 +2058,7 @@ fn normalized_issue_from_manifest(
             category: issue_state_category(&manifest.current_state, active_states, terminal_states),
         },
         branch_name: None,
+        pr_url: None,
         url: None,
         labels: Vec::new(),
         project_id: None,
@@ -2135,6 +2141,41 @@ mod tests {
             cache_read_tokens: 0,
             last_token_accumulation_at: None,
         }
+    }
+
+    #[test]
+    fn codex_interrupted_turn_completion_is_cancelled_terminal_outcome() {
+        let event = normalize_server_notification(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "status": "Interrupted"
+            }
+        }))
+        .expect("notification should normalize");
+
+        let outcome = codex_terminal_outcome(&event).expect("interrupted turn is terminal");
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(outcome.status, RunStatus::Cancelled);
+    }
+
+    #[test]
+    fn codex_interrupted_thread_status_is_cancelled_terminal_outcome() {
+        let event = normalize_server_notification(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "thread/status/changed",
+            "params": {
+                "threadId": "thread-1",
+                "status": "Interrupted"
+            }
+        }))
+        .expect("notification should normalize");
+
+        let outcome = codex_terminal_outcome(&event).expect("interrupted thread is terminal");
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(outcome.status, RunStatus::Cancelled);
     }
 
     #[test]
@@ -3382,6 +3423,7 @@ Run the scheduler.
                 category: IssueStateCategory::Active,
             },
             branch_name: None,
+            pr_url: None,
             url: None,
             labels: Vec::new(),
             project_id: None,
@@ -3634,6 +3676,8 @@ exit 64
             priority: issue.priority,
             state: issue.state.name.clone(),
             state_kind: tracker_issue_state_kind_from_category(&issue.state.category),
+            branch_name: issue.branch_name.clone(),
+            pr_url: issue.pr_url.clone(),
             labels: issue.labels.clone(),
             project_id: issue.project_id.clone(),
             project_slug: issue.project_slug.clone(),

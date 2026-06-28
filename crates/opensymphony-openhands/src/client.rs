@@ -1066,6 +1066,40 @@ impl OpenHandsClient {
         decode_accepted(response, "trigger conversation run").await
     }
 
+    pub async fn interrupt_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<AcceptedResponse, OpenHandsError> {
+        let request = serde_json::json!({});
+        let response = send(
+            self.json_request(
+                self.post_request(&format!("/api/conversations/{conversation_id}/interrupt"))?,
+                "interrupt conversation",
+                &request,
+            )?,
+            "interrupt conversation",
+        )
+        .await?;
+        decode_accepted(response, "interrupt conversation").await
+    }
+
+    pub async fn pause_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<AcceptedResponse, OpenHandsError> {
+        let request = serde_json::json!({});
+        let response = send(
+            self.json_request(
+                self.post_request(&format!("/api/conversations/{conversation_id}/pause"))?,
+                "pause conversation",
+                &request,
+            )?,
+            "pause conversation",
+        )
+        .await?;
+        decode_accepted(response, "pause conversation").await
+    }
+
     pub async fn search_events_page(
         &self,
         conversation_id: Uuid,
