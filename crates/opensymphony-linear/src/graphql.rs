@@ -19,6 +19,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
       title
       description
       priority
+      branchName
       createdAt
       updatedAt
       state {
@@ -43,6 +44,13 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
       projectMilestone {
         id
         name
+      }
+      attachments {
+        nodes {
+          title
+          url
+          sourceType
+        }
       }
       children(includeArchived: true, first: 100) {
         nodes {
@@ -172,6 +180,7 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
       title
       description
       priority
+      branchName
       createdAt
       updatedAt
       state {
@@ -196,6 +205,13 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
       projectMilestone {
         id
         name
+      }
+      attachments {
+        nodes {
+          title
+          url
+          sourceType
+        }
       }
       children(includeArchived: true, first: 100) {
         nodes {
@@ -327,6 +343,7 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
     title
     description
     priority
+    branchName
     createdAt
     updatedAt
     state {
@@ -351,6 +368,13 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
     projectMilestone {
       id
       name
+    }
+    attachments {
+      nodes {
+        title
+        url
+        sourceType
+      }
     }
     children(includeArchived: true, first: 100) {
       nodes {
@@ -883,6 +907,8 @@ pub(super) struct LinearIssueNode {
     pub title: String,
     pub description: Option<String>,
     pub priority: f64,
+    #[serde(default)]
+    pub branch_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub state: LinearWorkflowState,
@@ -892,6 +918,8 @@ pub(super) struct LinearIssueNode {
     pub parent: Option<LinearParentNode>,
     #[serde(default)]
     pub project_milestone: Option<LinearProjectMilestoneNode>,
+    #[serde(default)]
+    pub attachments: LinearAttachmentConnection,
     #[serde(default)]
     pub children: LinearChildConnection,
     #[serde(default)]
@@ -955,6 +983,21 @@ pub(super) struct LinearParentNode {
 pub(super) struct LinearProjectMilestoneNode {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct LinearAttachmentConnection {
+    pub nodes: Vec<LinearAttachmentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LinearAttachmentNode {
+    #[allow(dead_code)]
+    pub title: Option<String>,
+    pub url: String,
+    #[serde(default)]
+    pub source_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

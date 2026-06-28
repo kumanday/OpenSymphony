@@ -222,6 +222,8 @@ mod tests {
             priority: Some(1),
             state: state.to_string(),
             state_kind: tracker_issue_state_kind_from_name(state),
+            branch_name: None,
+            pr_url: None,
             labels: vec!["backend".to_string()],
             project_id: None,
             project_slug: None,

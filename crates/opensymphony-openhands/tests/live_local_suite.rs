@@ -751,6 +751,7 @@ fn sample_issue() -> NormalizedIssue {
             category: IssueStateCategory::Active,
         },
         branch_name: None,
+        pr_url: None,
         url: None,
         labels: vec!["live-suite".to_string()],
         project_id: None,
