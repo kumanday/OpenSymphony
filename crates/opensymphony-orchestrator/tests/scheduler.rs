@@ -799,6 +799,16 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
                 .summary
                 .contains("tracker_merging_supersedes_human_review"))
     );
+    assert_eq!(
+        execution
+            .conversation()
+            .expect("conversation should remain attached")
+            .recent_activity
+            .iter()
+            .filter(|event| event.kind == "scheduler.interrupt_requested")
+            .count(),
+        1
+    );
 
     scheduler
         .tick(ts(60_100))
@@ -806,6 +816,19 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
         .expect("repeated Merging observation should stay idempotent");
     assert_eq!(scheduler.worker().interrupts.len(), 1);
     assert_eq!(scheduler.worker().launches.len(), 1);
+    let execution = scheduler
+        .execution(&IssueId::new("lin-492").expect("issue id should be valid"))
+        .expect("execution should still be active");
+    assert_eq!(
+        execution
+            .conversation()
+            .expect("conversation should remain attached")
+            .recent_activity
+            .iter()
+            .filter(|event| event.kind == "scheduler.interrupt_requested")
+            .count(),
+        1
+    );
 
     scheduler
         .worker_mut()
@@ -1264,6 +1287,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             issue: normalized_issue("lin-272", "COE-272", "In Progress"),
             workspace: recovered_workspace.clone(),
             had_in_flight_run: true,
+            harness_kind: Some("openhands_agent_server".to_string()),
         }],
         records: HashMap::from([("lin-272".to_string(), recovered_workspace.clone())]),
         ..Default::default()
@@ -1439,6 +1463,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             issue: normalized_issue("lin-283-a", "COE-283-A", "In Progress"),
             workspace: recovered_workspace,
             had_in_flight_run: true,
+            harness_kind: Some("openhands_agent_server".to_string()),
         }],
         ..Default::default()
     };

@@ -108,6 +108,7 @@ pub struct RecoveryRecord {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
     pub had_in_flight_run: bool,
+    pub harness_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -840,9 +841,11 @@ where
 
         for record in records {
             let issue_id = record.issue.id.clone();
+            let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
                 self.upsert_active_execution(normalized, observed_at, Some(record.workspace))?;
+                self.restore_recovered_harness_kind(&issue_id, recovered_harness_kind);
                 continue;
             }
 
@@ -865,6 +868,7 @@ where
             execution.attach_workspace(record.workspace)?;
             let execution = execution.release(observed_at, ReleaseReason::TrackerInactive, None)?;
             self.executions.entry(issue.id.clone()).or_insert(execution);
+            self.restore_recovered_harness_kind(&issue_id, recovered_harness_kind);
         }
 
         self.recovered = true;
@@ -1031,24 +1035,6 @@ where
             .unwrap_or_else(|| "<unknown>".to_string());
 
         execution.refresh_issue(issue.clone())?;
-        execution.observe_runtime_event(
-            observed_at,
-            Some(format!(
-                "tracker-merging-supersedes-human-review-{}",
-                observed_at.as_u64()
-            )),
-            Some("scheduler.interrupt_requested".to_string()),
-            Some(
-                "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
-                    .to_string(),
-            ),
-            Some(serde_json::json!({
-                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
-                "from_state": "Human Review",
-                "to_state": issue.state.name,
-                "worker_id": run.worker_id.as_str(),
-            })),
-        )?;
         let (command, queued) = execution.request_interrupt(
             harness_kind,
             None,
@@ -1057,6 +1043,24 @@ where
             observed_at,
         )?;
         if queued {
+            execution.observe_runtime_event(
+                observed_at,
+                Some(format!(
+                    "tracker-merging-supersedes-human-review-{}",
+                    observed_at.as_u64()
+                )),
+                Some("scheduler.interrupt_requested".to_string()),
+                Some(
+                    "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
+                        .to_string(),
+                ),
+                Some(serde_json::json!({
+                    "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                    "from_state": HUMAN_REVIEW_STATE,
+                    "to_state": issue.state.name,
+                    "worker_id": run.worker_id.as_str(),
+                })),
+            )?;
             let result = self.worker.interrupt_worker(command).await;
             match result {
                 Ok(acknowledgement) => {
@@ -1084,6 +1088,20 @@ where
         self.insert_execution(issue_id, execution);
 
         Ok(true)
+    }
+
+    fn restore_recovered_harness_kind(&mut self, issue_id: &IssueId, harness_kind: Option<String>) {
+        let Some(harness_kind) = harness_kind.filter(|kind| !kind.trim().is_empty()) else {
+            return;
+        };
+        let Some(execution) = self.executions.get(issue_id) else {
+            return;
+        };
+        let Some(run) = execution.current_run() else {
+            return;
+        };
+        self.worker_harness_kind
+            .insert(run.worker_id.clone(), harness_kind);
     }
 
     fn has_running_executions(&self) -> bool {

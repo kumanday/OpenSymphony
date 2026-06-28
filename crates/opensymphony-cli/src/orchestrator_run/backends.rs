@@ -63,6 +63,7 @@ const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
+const OPENHANDS_AGENT_SERVER_KIND: &str = "openhands_agent_server";
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -647,6 +648,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
                 )
             });
+            let harness_kind = recovered_harness_kind(&self.manager, &handle).await?;
 
             recoveries.push(RecoveryRecord {
                 issue: normalized_issue_from_manifest(
@@ -665,6 +667,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                         .map(datetime_to_timestamp_ms),
                 },
                 had_in_flight_run,
+                harness_kind,
             });
         }
         Ok(recoveries)
@@ -689,6 +692,34 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         }
         Ok(())
     }
+}
+
+async fn recovered_harness_kind(
+    manager: &WorkspaceManager,
+    handle: &WorkspaceHandle,
+) -> Result<Option<String>, WorkspaceError> {
+    let manifest_path = handle.conversation_manifest_path();
+    let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? else {
+        return Ok(None);
+    };
+    let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(
+                manifest = %manifest_path.display(),
+                %error,
+                "skipping recovered scheduler harness kind for invalid conversation manifest"
+            );
+            return Ok(None);
+        }
+    };
+    if let Some(transport_target) = manifest.transport_target {
+        return Ok(Some(transport_target));
+    }
+    if conversation_manifest_is_codex(&manifest) {
+        return Ok(Some(CODEX_APP_SERVER_KIND.to_string()));
+    }
+    Ok(Some(OPENHANDS_AGENT_SERVER_KIND.to_string()))
 }
 
 impl RuntimeWorkerBackend {
@@ -2062,6 +2093,12 @@ impl WorkerBackend for RuntimeWorkerBackend {
                     .to_string(),
             ));
         }
+        if command.harness_kind != OPENHANDS_AGENT_SERVER_KIND {
+            return Err(CliWorkerError::InterruptFailed(format!(
+                "harness `{}` does not expose a scheduler-side interrupt channel",
+                command.harness_kind
+            )));
+        }
 
         let mut runner = IssueSessionRunner::with_environment(
             self.client.clone(),
@@ -3193,6 +3230,17 @@ mod tests {
             .start_run(&ensured.handle, &RunDescriptor::new("run-recovery", 2))
             .await
             .expect("run manifest should be written");
+        let mut conversation_manifest = sample_conversation_manifest("conv-recovery");
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
 
         let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
         let recoveries = backend
@@ -3208,6 +3256,10 @@ mod tests {
         );
         assert_eq!(recovered.issue.state.category, IssueStateCategory::Active);
         assert!(recovered.had_in_flight_run);
+        assert_eq!(
+            recovered.harness_kind.as_deref(),
+            Some(CODEX_APP_SERVER_KIND)
+        );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
     }
 
@@ -3483,6 +3535,45 @@ Run the scheduler.
                 "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_scheduler_interrupt_harness_is_rejected_before_openhands() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+
+        let error = backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: "COE-492".to_string(),
+                issue_id: IssueId::new("issue-unknown-interrupt")
+                    .expect("issue id should be valid"),
+                harness_kind: "experimental_worker".to_string(),
+                conversation_id: ConversationId::new("conv-unknown")
+                    .expect("conversation id should be valid"),
+                turn_id: None,
+                reason: HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
+            })
+            .await
+            .expect_err("unknown harnesses must not be routed to OpenHands");
+
+        assert!(error.to_string().contains(
+            "harness `experimental_worker` does not expose a scheduler-side interrupt channel"
+        ));
     }
 
     #[tokio::test]
