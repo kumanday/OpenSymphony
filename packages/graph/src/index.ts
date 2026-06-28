@@ -125,13 +125,8 @@ export interface GraphSearchOptions extends GraphRequestOptions {
   bundleId?: string;
 }
 
-export interface NativeGraphApi {
-  listBundles(): Promise<MemoryBundleList>;
-  getGraphSnapshot(bundleId: string, options?: GraphRequestOptions): Promise<MemoryGraphSnapshot>;
-  getConceptDetail(bundleId: string, conceptId: string, options?: GraphRequestOptions): Promise<MemoryConceptDetail>;
-  getCommunities(bundleId: string, options?: GraphRequestOptions): Promise<MemoryCommunityList>;
-  search(query: string, options?: GraphSearchOptions): Promise<MemorySearchResponse>;
-}
+/** Tauri/native providers expose the same graph DTO contract without importing Tauri here. */
+export type NativeGraphApi = GraphDataAdapter;
 
 export const graphModes: readonly GraphMode[] = [
   "atlas",
@@ -293,7 +288,10 @@ export function applyGraphFilters(
     .map((community) => ({
       ...community,
       node_ids: community.node_ids.filter((nodeId) => nodeIds.has(nodeId)).sort(),
-      concept_count: community.node_ids.filter((nodeId) => nodeIds.has(nodeId)).length,
+      concept_count: community.node_ids.filter((nodeId) => {
+        const node = snapshot.nodes.find((candidate) => candidate.id === nodeId);
+        return nodeIds.has(nodeId) && node?.kind === "concept";
+      }).length,
     }))
     .filter((community) => community.node_ids.length > 0)
     .sort((a, b) => a.id.localeCompare(b.id));

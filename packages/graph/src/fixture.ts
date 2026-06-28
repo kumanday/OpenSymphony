@@ -17,7 +17,7 @@ export const fixtureBundleList: MemoryBundleList = {
       title: "OpenSymphony Memory",
       okf_version: "0.1",
       visibility: "private",
-      concept_count: 3,
+      concept_count: 1,
       updated_at: generated_at,
     },
   ],

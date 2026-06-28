@@ -2,6 +2,7 @@ import {
   applyGraphFilters,
   createFixtureGraphAdapter,
   createGatewayGraphAdapter,
+  createTauriNativeGraphAdapter,
   fixtureGraphSnapshot,
   graphReducer,
   graphStateToHistory,
@@ -71,5 +72,43 @@ describe("@opensymphony/graph", () => {
     const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock);
     await gateway.listBundles();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/memory/bundles");
+  });
+
+  it("keeps filtered community concept counts aligned to concept nodes only", () => {
+    const filtered = applyGraphFilters(fixtureGraphSnapshot, {
+      ...initialGraphFilters,
+      communities: ["area:graph-view"],
+    });
+    expect(filtered.communities).toEqual([
+      {
+        id: "area:graph-view",
+        label: "Graph View",
+        node_ids: ["concept:coe-465", "tag:graph-view"],
+        concept_count: 1,
+      },
+    ]);
+  });
+
+  it("expands neighborhoods beyond direct neighbors deterministically", () => {
+    const filtered = applyGraphFilters(
+      fixtureGraphSnapshot,
+      initialGraphFilters,
+      "neighborhood",
+      "tag:graph-view",
+      2,
+    );
+    expect(filtered.nodes.map((node) => node.id)).toEqual([
+      "concept:coe-465",
+      "tag:graph-view",
+      "bundle:local-default",
+      "source:osym-822",
+    ]);
+  });
+
+  it("passes through native graph adapters without importing Tauri", async () => {
+    const native = createTauriNativeGraphAdapter(createFixtureGraphAdapter());
+    await expect(native.getCommunities("local-default")).resolves.toMatchObject({
+      communities: [{ id: "area:graph-view", concept_count: 1 }],
+    });
   });
 });
