@@ -118,9 +118,6 @@ async fn run_accepts_existing_repo_config_shape_with_extra_doctor_fields() {
 
 #[tokio::test]
 async fn run_routing_dry_run_selects_codex_and_emits_route_decision() {
-    let openhands = FakeOpenHandsServer::start()
-        .await
-        .expect("fake OpenHands server should start");
     let linear = MockLinearGraphqlServer::start_with_active_issue().await;
     let project = TempDir::new().expect("temp project should exist");
     let bind_addr = reserve_socket_addr();
@@ -128,9 +125,13 @@ async fn run_routing_dry_run_selects_codex_and_emits_route_decision() {
     write_project_files_with_workflow_extra(
         project.path(),
         linear.base_url(),
-        openhands.base_url(),
+        "http://127.0.0.1:9",
         format!("control_plane:\n  bind: {bind_addr}\n"),
-        r#"routing:
+        r#"  conversation:
+    agent:
+      llm:
+        model: ${LLM_MODEL}
+routing:
   harness: codex_app_server
   model: gpt-5-codex-test
   model_profile: codex-chatgpt-local-keychain
@@ -304,6 +305,9 @@ fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child
         .env_remove("OPENSYMPHONY_HARNESS")
         .env_remove("OPENSYMPHONY_MODEL")
         .env_remove("OPENSYMPHONY_MODEL_PROFILE")
+        .env_remove("LLM_MODEL")
+        .env_remove("LLM_API_KEY")
+        .env_remove("LLM_BASE_URL")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

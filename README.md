@@ -125,7 +125,8 @@ export OPENSYMPHONY_CODEX_BIN="$(command -v codex)"
 
 `OPENSYMPHONY_CODEX_BIN` is optional when `codex` is already on `PATH`. In
 Codex mode, OpenSymphony uses the operator-owned Codex CLI login; it does not
-need `LLM_API_KEY`/`LLM_BASE_URL` for the Codex worker.
+need `LLM_MODEL`/`LLM_API_KEY`/`LLM_BASE_URL`, and it does not launch the
+managed OpenHands server for Codex-only routing.
 
 The model configuration panel in the alpha web and desktop shells records model
 strings, API-compatible endpoint metadata, subscription bootstrap metadata, and

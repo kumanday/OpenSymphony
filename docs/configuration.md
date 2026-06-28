@@ -202,7 +202,9 @@ or `OPENSYMPHONY_MODEL` becomes the OpenHands conversation LLM model. When
 `routing.harness` is `codex_app_server`, a selected model is passed to Codex
 `thread/start` and `turn/start`; if no model is selected, OpenSymphony omits
 the model and lets the Codex CLI/app-server use its own default from Codex
-configuration such as `~/.codex/config.toml`.
+configuration such as `~/.codex/config.toml`. Codex-only routing does not
+resolve OpenHands LLM environment variables or launch the managed OpenHands
+server.
 
 Local Codex execution uses a full-automation profile. OpenSymphony launches the
 installed Codex CLI as
