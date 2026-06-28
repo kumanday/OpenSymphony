@@ -1776,6 +1776,8 @@ fn tracker_issue_from_normalized(issue: &NormalizedIssue) -> TrackerIssue {
         priority: issue.priority,
         state: issue.state.name.clone(),
         state_kind: tracker_state_kind_from_issue_state(&issue.state),
+        branch_name: issue.branch_name.clone(),
+        pr_url: issue.pr_url.clone(),
         labels: issue.labels.clone(),
         project_id: issue.project_id.clone(),
         project_slug: issue.project_slug.clone(),
