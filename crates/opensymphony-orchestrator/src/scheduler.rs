@@ -1450,7 +1450,9 @@ where
                         Some("failed to start worker".to_string()),
                         Some(detail),
                     );
-                    execution = self.resolve_finished_execution(execution, outcome, observed_at)?;
+                    execution = self
+                        .resolve_finished_execution(execution, outcome, observed_at)
+                        .await?;
                 }
             }
 
@@ -1500,8 +1502,9 @@ where
                         continue;
                     };
                     let finished_at = outcome.finished_at;
-                    let execution =
-                        self.resolve_finished_execution(execution, outcome, finished_at)?;
+                    let execution = self
+                        .resolve_finished_execution(execution, outcome, finished_at)
+                        .await?;
                     self.insert_execution(issue_id, execution);
                 }
                 WorkerUpdate::ConversationMetadataUpdate {
@@ -1584,7 +1587,9 @@ where
                 Some("worker exceeded the configured stall timeout".to_string()),
                 Some("scheduler stall timeout reached".to_string()),
             );
-            execution = self.resolve_finished_execution(execution, outcome, observed_at)?;
+            execution = self
+                .resolve_finished_execution(execution, outcome, observed_at)
+                .await?;
             self.insert_execution(issue_id, execution);
         }
 
@@ -1673,14 +1678,16 @@ where
             })
     }
 
-    fn resolve_finished_execution(
-        &self,
-        execution: IssueExecution,
+    async fn resolve_finished_execution(
+        &mut self,
+        mut execution: IssueExecution,
         outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
     ) -> Result<IssueExecution, SchedulerError> {
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
-            return Ok(execution.release(observed_at, reason, Some(outcome))?);
+            return self
+                .release_finished_execution(execution, observed_at, reason, Some(outcome))
+                .await;
         }
 
         // Detached and CancelFailed are terminal outcomes: release the execution instead of
@@ -1690,14 +1697,79 @@ where
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
         ) {
-            return Ok(execution.release(
-                observed_at,
-                ReleaseReason::TrackerInactive,
-                Some(outcome),
-            )?);
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::TrackerInactive,
+                    Some(outcome),
+                )
+                .await;
+        }
+
+        let issue_id = execution.issue().id.clone();
+        if let Some(state) = self
+            .refresh_finished_issue_state(&issue_id, observed_at)
+            .await
+        {
+            let mut issue = execution.issue().clone();
+            issue.state = state;
+            execution.refresh_issue(issue)?;
+            if let Some(reason) =
+                non_active_release_reason(execution.issue().state.category.clone())
+            {
+                return self
+                    .release_finished_execution(execution, observed_at, reason, Some(outcome))
+                    .await;
+            }
         }
 
         self.queue_retry_for_outcome(execution, outcome, observed_at)
+    }
+
+    async fn refresh_finished_issue_state(
+        &mut self,
+        issue_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Option<IssueState> {
+        let issue_ids = vec![issue_id.as_str().to_string()];
+        let snapshots = match self.tracker.issue_states_by_ids(&issue_ids).await {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                self.set_linear_cooldown_from_tracker_error(&error, observed_at);
+                warn!(
+                    issue_id = %issue_id,
+                    %error,
+                    "failed to refresh tracker state after worker finished; falling back to retry policy"
+                );
+                return None;
+            }
+        };
+
+        snapshots
+            .into_iter()
+            .next()
+            .map(|snapshot| issue_state_from_name(&snapshot.state.name, &self.config))
+    }
+
+    async fn release_finished_execution(
+        &mut self,
+        execution: IssueExecution,
+        observed_at: TimestampMs,
+        reason: ReleaseReason,
+        outcome: Option<WorkerOutcomeRecord>,
+    ) -> Result<IssueExecution, SchedulerError> {
+        let cleanup_terminal = matches!(reason, ReleaseReason::TrackerTerminal);
+        let execution = execution.release(observed_at, reason, outcome)?;
+        if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
+            self.workspace
+                .cleanup_workspace(&workspace, true)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+        }
+        Ok(execution)
     }
 
     fn queue_retry_for_outcome(

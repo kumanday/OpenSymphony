@@ -1057,6 +1057,68 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
 }
 
 #[tokio::test]
+async fn worker_finish_rechecks_tracker_state_before_continuation_retry() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-492", "COE-492", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch");
+
+    scheduler.tracker_mut().states.insert(
+        "lin-492".to_string(),
+        tracker_state_snapshot("lin-492", "COE-492", "Done", "completed", 200),
+    );
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(200),
+                Some("worker exited cleanly".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("finish tick should release terminal issue");
+
+    let issue_id = IssueId::new("lin-492").expect("issue id should be valid");
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("execution should still exist");
+    assert_eq!(execution.status(), SchedulerStatus::Released);
+    assert!(execution.retry().is_none());
+    match execution.state() {
+        crate::opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+            assert_eq!(*reason, ReleaseReason::TrackerTerminal);
+        }
+        other => panic!("expected released state, got {other:?}"),
+    }
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![("COE-492".to_string(), true)]
+    );
+    assert_eq!(
+        scheduler.tracker().state_requests,
+        vec![vec!["lin-492".to_string()]]
+    );
+}
+
+#[tokio::test]
 async fn failures_schedule_exponential_backoff() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-269", "COE-269", "In Progress", 0)],
