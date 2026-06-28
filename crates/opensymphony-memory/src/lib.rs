@@ -1438,6 +1438,22 @@ public graph
 "#,
         )
         .expect("private search concept should write");
+        fs::write(
+            issues_dir.join("COE-333.md"),
+            r#"---
+type: issue
+title: "COE-333: Isolated private concept"
+description: No semantic graph edges.
+opensymphony:
+  visibility: private
+---
+
+# COE-333: Isolated private concept
+
+This concept intentionally has no tags, links, citations, resources, or refs.
+"#,
+        )
+        .expect("isolated private concept should write");
         fs::create_dir_all(bundle.join("backlog")).expect("backlog dir should write");
         fs::write(
             bundle.join("backlog/COE-222.md"),
@@ -1472,6 +1488,10 @@ opensymphony:
             MemoryGraphAccess::AllAccessible,
         )
         .expect("graph snapshot");
+        assert_eq!(all_graph.metrics.broken_link_count, 1);
+        assert_eq!(all_graph.metrics.stale_concept_count, 1);
+        assert!(all_graph.metrics.warning_count >= 1);
+        assert_eq!(all_graph.metrics.orphan_count, 1);
         let node_kinds = all_graph
             .nodes
             .iter()
@@ -1530,6 +1550,24 @@ opensymphony:
             all_graph
                 .edges
                 .iter()
+                .any(|edge| edge.kind == EdgeKind::MarkdownLink && edge.unresolved)
+        );
+        let linked_private_node = all_graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "concept:issues/COE-123")
+            .expect("linked private concept node");
+        assert!(linked_private_node.metrics.degree > 0);
+        assert!(linked_private_node.metrics.centrality.is_some());
+        assert!(linked_private_node.metrics.bridge_score.is_some());
+        assert_eq!(
+            linked_private_node.metrics.community_id.as_deref(),
+            Some("area:openhands-runtime")
+        );
+        assert!(
+            all_graph
+                .edges
+                .iter()
                 .any(|edge| edge.id.ends_with(":label:external"))
         );
         assert!(
@@ -1573,6 +1611,57 @@ opensymphony:
         assert!(!public_json.contains(&format!("{}/", repo.path().display())));
         assert!(!public_json.contains(&format!("{}.", repo.path().display())));
         assert!(!public_json.contains("[redacted-local-path]bed"));
+        assert!(
+            public_graph
+                .communities
+                .iter()
+                .any(|community| community.label == "graph-view")
+        );
+        assert!(public_graph.communities.iter().all(|community| {
+            !community
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "tag:graph")
+        }));
+        let public_graph_with_aux = memory_graph_snapshot_with_options(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::Public,
+            MemoryGraphCommunityOptions {
+                include_tags: true,
+                include_citations: true,
+                include_source_refs: true,
+            },
+        )
+        .expect("public graph with auxiliary community inputs");
+        let graph_view = public_graph_with_aux
+            .communities
+            .iter()
+            .find(|community| community.id == "area:graph-view")
+            .expect("graph-view community");
+        assert!(
+            graph_view
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "tag:graph")
+        );
+        assert!(
+            graph_view
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "citation:1")
+        );
+        assert!(
+            graph_view
+                .node_ids
+                .iter()
+                .any(|node_id| { node_id == "source_ref:linear_issue:COE-200" })
+        );
+        assert!(
+            public_graph_with_aux
+                .filters_applied
+                .contains(&"communities:include_tags".to_string())
+        );
 
         let detail = memory_concept_detail(
             &config,

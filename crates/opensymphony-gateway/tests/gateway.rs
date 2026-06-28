@@ -1780,6 +1780,7 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
             .iter()
             .any(|edge| edge.kind == MemoryGraphEdgeKind::ExternalLink)
     );
+    assert_eq!(graph.metrics.orphan_count, 0);
 
     let all_graph = client
         .get(format!("{base}/bundles/local-default/graph"))
@@ -1842,6 +1843,23 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
             .iter()
             .any(|community| { community.id == "area:graph-view" && community.concept_count == 1 })
     );
+    let communities_with_tags = client
+        .get(format!(
+            "{base}/bundles/local-default/communities?visibility=public&include_tags=true"
+        ))
+        .send()
+        .await
+        .expect("fetch communities with tags")
+        .json::<MemoryCommunityList>()
+        .await
+        .expect("decode communities with tags");
+    assert!(communities_with_tags.communities.iter().any(|community| {
+        community.id == "area:graph-view"
+            && community
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "tag:graph")
+    }));
 
     let search = client
         .get(format!(

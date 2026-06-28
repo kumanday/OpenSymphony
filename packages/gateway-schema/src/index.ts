@@ -42,6 +42,7 @@ export type {
   MemoryGraphNodeKind,
   MemoryGraphNodeMetrics,
   MemoryGraphSnapshot,
+  MemoryGraphSnapshotMetrics,
   MemoryGraphSourceRef,
   MemoryGraphUpdatedEvent,
   MemoryGraphVisibility,

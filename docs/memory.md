@@ -151,6 +151,22 @@ Migration is intentionally incremental:
 - Phase 3 can expose graph, hosted import/export, and visibility-filtered APIs
   from the OKF-derived catalog.
 
+The memory graph projection is derived from the OKF catalog, not from client
+edits. Graph snapshots include bundle, directory, concept, tag, resource,
+citation, source-ref, and community nodes plus derived containment, Markdown,
+external, citation, tag, resource, scope, source-support, and same-resource
+edges. Broken Markdown links are kept as unresolved edges. Snapshot metrics
+report orphan, broken-link, stale-concept, and warning counts, while node
+metrics report degree, normalized centrality, bridge score, and community ID.
+Community labels prefer concept areas, then tags, directories, and concept type.
+Tags, citations, and source refs are excluded from community membership by
+default and can be included with the memory graph endpoint query flags.
+
+No graph-library dependency is currently selected for memory graph extraction:
+the shipped backend work only derives deterministic catalog relationships and
+metadata communities. Add a graph library when the server owns true clustering
+or graph algorithms beyond these deterministic DTO metrics.
+
 The default visibility posture is private memory with optional public docs.
 Private capsules may include Linear comments, review context, and source
 snapshots, while public docs should contain public source refs such as issue

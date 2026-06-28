@@ -183,6 +183,7 @@ fn memory_graph_dtos_roundtrip_required_kinds_and_update_event() {
             metadata: BTreeMap::new(),
         }],
         communities: Vec::new(),
+        metrics: Default::default(),
         filters_applied: Vec::new(),
         generated_at: Utc::now(),
     };
