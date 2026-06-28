@@ -1659,6 +1659,24 @@ fn issue_file_changes(
         .collect()
 }
 
+fn workspace_pr_url(
+    envelope: &SnapshotEnvelope,
+    issue: &ControlPlaneIssueSnapshot,
+) -> Option<String> {
+    let workspace_path = workspace_path_for_issue(envelope, issue)?;
+    workspace_pr_url_from_command(&workspace_path, "gh")
+}
+
+fn workspace_pr_url_from_command(workspace_path: &StdPath, program: &str) -> Option<String> {
+    command_single_line(
+        workspace_path,
+        program,
+        &["pr", "view", "--json", "url", "--jq", ".url"],
+    )
+    .ok()
+    .filter(|url| !url.is_empty())
+}
+
 async fn issue_file_changes_async(
     envelope: SnapshotEnvelope,
     issue: ControlPlaneIssueSnapshot,
@@ -2662,6 +2680,10 @@ async fn get_run_detail(
             _ => None,
         }
     };
+    let pr_url = issue
+        .pr_url
+        .clone()
+        .or_else(|| workspace_pr_url(&envelope, issue));
 
     (
         StatusCode::OK,
@@ -2694,7 +2716,7 @@ async fn get_run_detail(
                 .then(|| issue.workspace_path_suffix.clone()),
             workspace_path: None,
             branch_name: issue.branch_name.clone(),
-            pr_url: issue.pr_url.clone(),
+            pr_url,
             harness_type: issue.server_base_url.as_ref().map(|_| "openhands".into()),
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
@@ -4134,6 +4156,33 @@ exit 2
             "git {:?} failed: {}",
             args,
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_pr_url_uses_gh_pr_view_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("COE-461");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let fake_gh = temp.path().join("gh");
+        std::fs::write(
+            &fake_gh,
+            "#!/bin/sh\nprintf '%s\\n' 'https://github.com/kumanday/OpenSymphony/pull/461'\n",
+        )
+        .expect("write fake gh");
+        let mut perms = std::fs::metadata(&fake_gh)
+            .expect("fake gh metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_gh, perms).expect("chmod fake gh");
+
+        assert_eq!(
+            workspace_pr_url_from_command(&workspace, fake_gh.to_str().expect("utf-8 path"))
+                .as_deref(),
+            Some("https://github.com/kumanday/OpenSymphony/pull/461")
         );
     }
 

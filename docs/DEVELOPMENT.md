@@ -75,22 +75,18 @@ this checkout.
 # 1. Install frontend dependencies once from the workspace root.
 npm install
 
-# 2. Rebuild the desktop frontend when apps/desktop or shared packages changed.
-npm run build --workspace=@opensymphony/desktop
-
-# 3. Launch the Tauri shell.
+# 2. Launch the Tauri shell.
 cd apps/desktop/src-tauri
 cargo run
 ```
 
-The root workspace build command is equivalent to running `npm run build` from
-`apps/desktop`. From `apps/desktop/src-tauri`, use `npm --prefix .. run build`
-if you want to rebuild the frontend without changing directories.
+`cargo run` rebuilds the desktop frontend first, so local source changes under
+`apps/desktop` and shared frontend packages are reflected in the Tauri shell.
 
 For frontend hot reload, run `npm run dev --workspace=@opensymphony/desktop`
 from the workspace root in one terminal and `cargo run` from
-`apps/desktop/src-tauri` in another. Plain `cargo run` does not run the Vite dev
-server; it reads the current `apps/desktop/dist` bundle.
+`apps/desktop/src-tauri` in another. Plain `cargo run` rebuilds and reads the
+current `apps/desktop/dist` bundle; it does not start Vite.
 
 To see live OpenSymphony state instead of the empty or disconnected UI states,
 run an OpenSymphony control plane separately, usually with `opensymphony run` in
