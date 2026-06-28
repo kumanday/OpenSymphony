@@ -46,7 +46,7 @@ export interface MemoryGraphSnapshot {
   nodes: MemoryGraphNode[];
   edges: MemoryGraphEdge[];
   communities: MemoryGraphCommunity[];
-  metrics: MemoryGraphSnapshotMetrics;
+  metrics?: MemoryGraphSnapshotMetrics;
   filters_applied: string[];
   generated_at: string;
 }

@@ -1724,6 +1724,145 @@ opensymphony:
     }
 
     #[test]
+    fn memory_graph_snapshot_metrics_count_only_semantic_orphans() {
+        use crate::opensymphony_gateway_schema::memory_graph::{
+            MemoryGraphEdgeKind as EdgeKind, MemoryGraphNodeKind as NodeKind,
+        };
+
+        let nodes = vec![
+            simple_node(
+                "bundle:local-default",
+                NodeKind::Bundle,
+                "bundle",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:isolated",
+                NodeKind::Concept,
+                "isolated",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:linked",
+                NodeKind::Concept,
+                "linked",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "tag:memory",
+                NodeKind::Tag,
+                "memory",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+        ];
+        let mut edges = BTreeMap::new();
+        insert_edge(
+            &mut edges,
+            EdgeKind::Contains,
+            "bundle:local-default",
+            "concept:isolated",
+            None,
+            false,
+        );
+        insert_edge(
+            &mut edges,
+            EdgeKind::Contains,
+            "bundle:local-default",
+            "concept:linked",
+            None,
+            false,
+        );
+        insert_edge(
+            &mut edges,
+            EdgeKind::TaggedWith,
+            "concept:linked",
+            "tag:memory",
+            None,
+            false,
+        );
+
+        let metrics = graph_snapshot_metrics(&nodes, &edges.into_values().collect::<Vec<_>>());
+
+        assert_eq!(metrics.orphan_count, 1);
+    }
+
+    #[test]
+    fn memory_graph_bridge_score_counts_only_cross_community_edges() {
+        use crate::opensymphony_gateway_schema::memory_graph::{
+            MemoryGraphCommunity, MemoryGraphEdgeKind as EdgeKind, MemoryGraphNodeKind as NodeKind,
+        };
+
+        let mut nodes = vec![
+            simple_node(
+                "concept:left",
+                NodeKind::Concept,
+                "left",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:unknown",
+                NodeKind::Concept,
+                "unknown",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:right",
+                NodeKind::Concept,
+                "right",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+        ];
+        let communities = vec![
+            MemoryGraphCommunity {
+                id: "area:left".to_string(),
+                label: "left".to_string(),
+                node_ids: vec!["concept:left".to_string()],
+                concept_count: 1,
+            },
+            MemoryGraphCommunity {
+                id: "area:right".to_string(),
+                label: "right".to_string(),
+                node_ids: vec!["concept:right".to_string()],
+                concept_count: 1,
+            },
+        ];
+        let mut edges = BTreeMap::new();
+        insert_edge(
+            &mut edges,
+            EdgeKind::MarkdownLink,
+            "concept:left",
+            "concept:unknown",
+            None,
+            false,
+        );
+        insert_edge(
+            &mut edges,
+            EdgeKind::MarkdownLink,
+            "concept:left",
+            "concept:right",
+            None,
+            false,
+        );
+
+        apply_node_metrics(
+            &mut nodes,
+            &edges.into_values().collect::<Vec<_>>(),
+            &communities,
+        );
+
+        let metric = |id: &str| {
+            &nodes
+                .iter()
+                .find(|node| node.id == id)
+                .expect("node")
+                .metrics
+        };
+        assert_eq!(metric("concept:left").bridge_score, Some(1.0));
+        assert_eq!(metric("concept:right").bridge_score, Some(1.0));
+        assert_eq!(metric("concept:unknown").bridge_score, None);
+    }
+
+    #[test]
     fn memory_graph_path_redaction_respects_token_boundaries() {
         assert_eq!(
             replace_path_token("/tmp/repo/file.md", "/tmp/repo", "[redacted]"),
