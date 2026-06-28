@@ -8,6 +8,7 @@ use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator}
 pub const PROVIDER_NAME: &str = "tree-sitter";
 pub const TREE_SITTER_VERSION: &str = "0.26.9";
 pub const RUST_GRAMMAR_VERSION: &str = "0.24.2";
+pub const RUST_QUERY_PACK_VERSION: &str = "rust-query-pack-v2";
 pub const TYPESCRIPT_GRAMMAR_VERSION: &str = "0.23.2";
 pub const JAVASCRIPT_GRAMMAR_VERSION: &str = "0.25.0";
 pub const PYTHON_GRAMMAR_VERSION: &str = "0.25.0";
@@ -154,6 +155,7 @@ const PYTHON_QUERIES: &[QueryAsset] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SourceLanguage {
     Rust,
     #[serde(rename = "typescript")]
@@ -262,6 +264,7 @@ impl SourceSpan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SymbolKind {
     Module,
     Class,
@@ -847,17 +850,17 @@ fn parse_lightweight_source(
 fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
     let mut captures = Vec::new();
     let mut byte_offset = 0;
-    let mut open_fence: Option<(String, usize, usize)> = None;
+    let mut open_fence: Option<MarkdownFence> = None;
 
     for (line_index, line) in source.split_inclusive('\n').enumerate() {
         let line_number = line_index + 1;
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("```") {
-            if let Some((language, content_start, start_line)) = open_fence.take() {
+            if let Some(fence) = open_fence.take() {
                 let span = SourceSpan {
-                    start_byte: content_start,
+                    start_byte: fence.content_start_byte,
                     end_byte: byte_offset,
-                    start_line: start_line + 1,
+                    start_line: fence.content_start_line,
                     start_column: 1,
                     end_line: line_number,
                     end_column: 1,
@@ -865,34 +868,49 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
                 captures.push(CaptureRecord {
                     query_name: "markdown_fences".to_string(),
                     capture_name: "injection.content".to_string(),
-                    text: source[content_start..byte_offset].to_string(),
+                    text: source[fence.content_start_byte..byte_offset].to_string(),
                     rendered_span: span.render(),
                     span,
                 });
-                let language_span = SourceSpan {
-                    start_byte: byte_offset + line.len() - trimmed.len() + 3,
-                    end_byte: byte_offset + line.trim_end().len(),
-                    start_line,
-                    start_column: line.len() - trimmed.len() + 4,
-                    end_line: start_line,
-                    end_column: line.trim_end().len() + 1,
-                };
                 captures.push(CaptureRecord {
                     query_name: "markdown_fences".to_string(),
                     capture_name: "injection.language".to_string(),
-                    text: language,
-                    rendered_span: language_span.render(),
-                    span: language_span,
+                    text: fence.language,
+                    rendered_span: fence.language_span.render(),
+                    span: fence.language_span,
                 });
             } else {
                 let language = rest.trim().to_string();
-                open_fence = Some((language, byte_offset + line.len(), line_number));
+                let indent = line.len() - trimmed.len();
+                let language_start_in_rest = rest.find(language.as_str()).unwrap_or(0);
+                let language_start_byte = byte_offset + indent + 3 + language_start_in_rest;
+                let language_span = SourceSpan {
+                    start_byte: language_start_byte,
+                    end_byte: language_start_byte + language.len(),
+                    start_line: line_number,
+                    start_column: indent + 4 + language_start_in_rest,
+                    end_line: line_number,
+                    end_column: indent + 4 + language_start_in_rest + language.len(),
+                };
+                open_fence = Some(MarkdownFence {
+                    language,
+                    language_span,
+                    content_start_byte: byte_offset + line.len(),
+                    content_start_line: line_number + 1,
+                });
             }
         }
         byte_offset += line.len();
     }
 
     captures
+}
+
+struct MarkdownFence {
+    language: String,
+    language_span: SourceSpan,
+    content_start_byte: usize,
+    content_start_line: usize,
 }
 
 fn source_sha256(source: &str) -> String {
@@ -1171,6 +1189,14 @@ mod tests {
         assert_eq!(markdown.source.language, SourceLanguage::Markdown);
         assert_capture(&markdown, "injection.language", "python");
         assert_capture(&markdown, "injection.content", "print(\"hello\")\n");
+        let language = find_capture(&markdown, "injection.language", "python");
+        assert_eq!(language.span.start_byte, 12);
+        assert_eq!(language.span.end_byte, 18);
+        assert_eq!(language.rendered_span, "3:4-3:10");
+        let content = find_capture(&markdown, "injection.content", "print(\"hello\")\n");
+        assert_eq!(content.span.start_byte, 19);
+        assert_eq!(content.span.end_byte, 34);
+        assert_eq!(content.rendered_span, "4:1-5:1");
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
@@ -1196,6 +1222,23 @@ mod tests {
             "missing @{capture_name} capture with text {text:?}; captures: {:?}",
             summary.captures
         );
+    }
+
+    fn find_capture<'a>(
+        summary: &'a ParsedDocumentSummary,
+        capture_name: &str,
+        text: &str,
+    ) -> &'a CaptureRecord {
+        summary
+            .captures
+            .iter()
+            .find(|capture| capture.capture_name == capture_name && capture.text == text)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing @{capture_name} capture with text {text:?}; captures: {:?}",
+                    summary.captures
+                )
+            })
     }
 
     fn assert_symbol(summary: &ParsedDocumentSummary, kind: SymbolKind, name: &str) {
