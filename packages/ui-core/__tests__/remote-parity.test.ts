@@ -182,8 +182,8 @@ async function snapshotMode(mode: "web" | "desktop"): Promise<ModeSnapshot> {
     transport: buildTransport(),
   });
 
-  // Dashboard + task graph (both modes render the panel heading and nodes)
-  await flushUntil(() => root.querySelector(".os-task-graph-panel h2") !== null);
+  // Dashboard + task graph (both modes render the shared graph toggle and nodes)
+  await flushUntil(() => root.querySelector("[data-testid='graph-view-toggle']") !== null);
   await flushUntil(() => root.querySelector("[data-node-id='run-parity']") !== null);
   // Run detail: navigate to the run node so the run panel loads the mock run.
   (root.querySelector("[data-node-id='run-parity']") as HTMLElement).click();
