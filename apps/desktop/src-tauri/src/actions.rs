@@ -166,6 +166,64 @@ pub async fn copy_to_clipboard(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct OpenDeeplinkRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenDeeplinkResponse {
+    pub opened: bool,
+}
+
+fn validate_deeplink(url: &str) -> Result<(), DesktopError> {
+    // Reject traversal before url::Url normalizes the path.
+    if url.contains("/../") || url.contains("/./") {
+        return Err(DesktopError::PermissionDenied);
+    }
+    let parsed = url::Url::parse(url).map_err(|_| DesktopError::PermissionDenied)?;
+    if parsed.scheme() != "codex" || parsed.host_str() != Some("threads") {
+        return Err(DesktopError::PermissionDenied);
+    }
+    if parsed.port().is_some() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(DesktopError::PermissionDenied);
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(DesktopError::PermissionDenied);
+    }
+    let Some(mut segments) = parsed.path_segments() else {
+        return Err(DesktopError::PermissionDenied);
+    };
+    let Some(thread_id) = segments.next() else {
+        return Err(DesktopError::PermissionDenied);
+    };
+    if segments.next().is_some()
+        || thread_id.is_empty()
+        || thread_id == "."
+        || thread_id == ".."
+        || !thread_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err(DesktopError::PermissionDenied);
+    }
+    Ok(())
+}
+
+#[command]
+pub async fn open_deeplink(
+    app: tauri::AppHandle,
+    req: OpenDeeplinkRequest,
+) -> CommandResult<OpenDeeplinkResponse> {
+    validate_deeplink(&req.url)?;
+    app.opener()
+        .open_url(&req.url, None::<&str>)
+        .map_err(|e| DesktopError::Internal {
+            message: format!("failed to open deeplink: {e}"),
+        })?;
+    Ok(OpenDeeplinkResponse { opened: true })
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OpenLinearLinkRequest {
     pub issue_id: String,
 }
@@ -334,6 +392,44 @@ mod tests {
         let req: NotifyRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.title, "T");
         assert_eq!(req.body, "B");
+    }
+
+    #[test]
+    fn test_validate_deeplink_allows_codex_threads() {
+        assert!(validate_deeplink("codex://threads/thread-123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_deeplink_rejects_other_schemes() {
+        assert!(matches!(
+            validate_deeplink("https://example.com"),
+            Err(DesktopError::PermissionDenied)
+        ));
+        assert!(matches!(
+            validate_deeplink("codex://settings"),
+            Err(DesktopError::PermissionDenied)
+        ));
+    }
+
+    #[test]
+    fn test_validate_deeplink_rejects_malformed_threads() {
+        for url in [
+            "codex://threads/",
+            "codex://threads/../evil",
+            "codex://threads/@foo",
+            "codex://threads/thread-123/extra",
+            "codex://threads/thread-123?x=1",
+            "codex://threads/thread-123#frag",
+            "codex://user@threads/thread-123",
+            "codex://:pass@threads/thread-123",
+            "codex://user:pass@threads/thread-123",
+            "codex://threads:123/thread-123",
+        ] {
+            assert!(
+                matches!(validate_deeplink(url), Err(DesktopError::PermissionDenied)),
+                "{url} should be rejected"
+            );
+        }
     }
 
     #[cfg(unix)]
