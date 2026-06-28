@@ -109,7 +109,6 @@ frontend packages change:
 
 ```bash
 npm install
-npm run build --workspace=@opensymphony/desktop
 ```
 
 Then launch the Tauri shell:
@@ -119,14 +118,13 @@ cd apps/desktop/src-tauri
 cargo run
 ```
 
-The workspace build command is the same as running `npm run build` from
-`apps/desktop`. If you are already in `apps/desktop/src-tauri`, use
-`npm --prefix .. run build`.
+`cargo run` rebuilds the desktop frontend first, so local source changes under
+`apps/desktop` and shared frontend packages are reflected in the Tauri shell.
 
 For frontend hot reload, run `npm run dev --workspace=@opensymphony/desktop`
 in one terminal and `cargo run` from `apps/desktop/src-tauri` in another.
-Plain `cargo run` uses the current `apps/desktop/dist` bundle and does not
-start Vite.
+Plain `cargo run` rebuilds and reads the current `apps/desktop/dist` bundle; it
+does not start Vite.
 
 ## Task Graph Project Groups
 

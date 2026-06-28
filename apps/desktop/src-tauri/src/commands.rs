@@ -282,7 +282,11 @@ pub async fn remove_profile(
         let mut store = load_profile_store_async(path.clone()).await?;
         normalize_profile_store(&mut store);
 
-        if !store.profiles.iter().any(|profile| profile.id == profile_id) {
+        if !store
+            .profiles
+            .iter()
+            .any(|profile| profile.id == profile_id)
+        {
             return Err(DesktopError::NotFound);
         }
         if store.profiles.len() <= 1 {
@@ -1069,10 +1073,7 @@ pub async fn run_events(
     let mut path = format!("/api/v1/runs/{}/events", urlencoding::encode(&run_id));
     let mut params = Vec::new();
     if let Some(page_token) = page_token {
-        params.push(format!(
-            "page_token={}",
-            urlencoding::encode(&page_token)
-        ));
+        params.push(format!("page_token={}", urlencoding::encode(&page_token)));
     }
     if let Some(page_size) = page_size {
         params.push(format!("page_size={page_size}"));
@@ -1161,8 +1162,7 @@ fn profile_is_current_gateway_available(
 use crate::opensymphony_gateway_schema::{
     capability::{
         AuthMode, FeatureCapability as GatewayFeatureCapability, GatewayCapabilities,
-        HarnessCapability,
-        TransportCapability as GatewayTransportCapability,
+        HarnessCapability, TransportCapability as GatewayTransportCapability,
     },
     envelope::GatewayEnvelope,
     version::SchemaVersion,

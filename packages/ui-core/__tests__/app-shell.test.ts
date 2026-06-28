@@ -92,6 +92,18 @@ const dashboard: DashboardSnapshot = {
   ],
   recent_events: [
     {
+      happened_at: "2025-09-01T00:00:05Z",
+      kind: "codex.thread/tokenUsage/updated",
+      issue_identifier: "COE-449",
+      summary: "Codex token usage: 5539770 input, 35185 output, 5271680 cache",
+    },
+    {
+      happened_at: "2025-09-01T00:00:04Z",
+      kind: "codex.turn/diff/updated",
+      issue_identifier: "COE-449",
+      summary: "Codex diff updated",
+    },
+    {
       happened_at: "2025-09-01T00:00:00Z",
       kind: "client_attached",
       issue_identifier: "COE-449",
@@ -289,6 +301,20 @@ const runEvents: RunEventPage = {
       happened_at: "2025-09-01T00:00:08Z",
       kind: "item/completed",
       summary: "event: item/completed",
+    },
+    {
+      sequence: 5,
+      event_id: "evt-token-usage",
+      happened_at: "2025-09-01T00:00:09Z",
+      kind: "codex.thread/tokenUsage/updated",
+      summary: "Codex token usage: 5539770 input, 35185 output, 5271680 cache",
+    },
+    {
+      sequence: 6,
+      event_id: "evt-diff-updated",
+      happened_at: "2025-09-01T00:00:10Z",
+      kind: "codex.turn/diff/updated",
+      summary: "Codex diff updated",
     },
   ],
 };
@@ -658,6 +684,11 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-metrics")).not.toBeNull();
     expect(root.querySelector("[data-project-id='proj-alpha']")).toBeNull();
     expect(root.querySelectorAll(".os-events li")).toHaveLength(3);
+    const compactEvents = root.querySelector(".os-events");
+    expect(compactEvents?.textContent).not.toContain("codex.thread/tokenUsage/updated");
+    expect(compactEvents?.textContent).not.toContain("codex.turn/diff/updated");
+    expect(compactEvents?.textContent).not.toContain("Codex token usage");
+    expect(compactEvents?.textContent).not.toContain("Codex diff updated");
     expect(root.querySelector(".os-event-time")).not.toBeNull();
     expect(root.textContent).not.toContain("should not render in compact status");
     expect(root.textContent).not.toContain("1 running, 2 done, 1 failed");
@@ -712,6 +743,11 @@ describe("OpenSymphonyApp mount", () => {
       "evt-observation",
       "evt-action",
     ]);
+    const activity = root.querySelector("[data-testid='run-activity']");
+    expect(activity?.textContent).not.toContain("codex.thread/tokenUsage/updated");
+    expect(activity?.textContent).not.toContain("codex.turn/diff/updated");
+    expect(activity?.textContent).not.toContain("Codex token usage");
+    expect(activity?.textContent).not.toContain("Codex diff updated");
     expect(root.querySelector(".os-activity-entry-action-event .os-activity-preview")?.textContent).toBe("terminal: npm test -- apps/desktop");
     expect(root.querySelector(".os-activity-entry-action-event .os-activity-detail")).toBeNull();
     expect(root.querySelector(".os-activity-entry-observation-event .os-activity-meta strong")?.textContent).toBe("ObservationEvent");

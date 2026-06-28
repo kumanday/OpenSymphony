@@ -260,15 +260,20 @@ describe("Run detail views", () => {
     const metricText = root.querySelector(".os-run-grid")?.textContent ?? "";
     expect(metricText).toContain("Turns1");
     expect(metricText).not.toContain("1 / 8");
-    expect(metricText).toContain("Branchfeat/coe-414-run-detail");
+    expect(metricText).not.toContain("Branchfeat/coe-414-run-detail");
     expect(metricText).toContain("Input100");
     expect(metricText).toContain("Cache25");
     expect(metricText).toContain("Output50");
     expect(metricText).toContain("Total175");
+    expect(root.querySelector("[data-testid='run-branch']")?.textContent).toContain("feat/coe-414-run-detail");
     const pr = root.querySelector("a[href='https://github.com/kumanday/OpenSymphony/pull/414']") as HTMLAnchorElement;
     expect(pr).not.toBeNull();
     expect(pr.target).toBe("_blank");
+    expect(pr.rel).toContain("noopener");
+    expect(pr.rel).toContain("noreferrer");
     expect(pr.textContent).toBe("kumanday/OpenSymphony#414");
+    expect(root.querySelector("[data-testid='run-pr']")?.textContent).toContain("Pull Request");
+    expect(root.querySelector("[data-testid='run-pr']")?.textContent).toContain("kumanday/OpenSymphony#414");
     expect(root.querySelector(".os-lines-added")?.textContent).toBe("+4");
     expect(root.querySelector(".os-lines-removed")?.textContent).toBe("-1");
 
@@ -300,6 +305,35 @@ describe("Run detail views", () => {
     expect(root.querySelector("style")?.textContent ?? "").toContain(
       ".os-run-detail-panel .os-run-grid { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));",
     );
+    expect(root.querySelector("style")?.textContent ?? "").toContain(
+      ".os-run-meta-row { display: grid; grid-template-columns: 48px minmax(0, 1fr);",
+    );
+
+    await handle.destroy();
+  });
+
+  it("shows pull request as missing when the run only has branch metadata", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const run: RunDetail = {
+      ...runDetail,
+      branch_name: "opensymphony/coe-461-memory-graph-dtos-and-gateway-endpoints",
+      pr_url: undefined,
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(run),
+    });
+
+    await openRun(root);
+
+    expect(root.querySelector("[data-testid='run-branch']")?.textContent).toContain(
+      "opensymphony/coe-461-memory-graph-dtos-and-gateway-endpoints",
+    );
+    expect(root.querySelector("[data-testid='run-pr']")?.textContent).toContain("Pull Request");
+    expect(root.querySelector("[data-testid='run-pr']")?.textContent).toContain("Not found");
+    expect(root.querySelector("[data-testid='run-pr'] a")).toBeNull();
 
     await handle.destroy();
   });

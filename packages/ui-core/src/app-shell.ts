@@ -1719,7 +1719,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!snapshot) {
       return panel("Status", `<div class="os-empty">Loading status</div>`, "os-status-panel");
     }
-    const events = snapshot.recent_events.slice(0, 3).map((event) => `
+    const events = snapshot.recent_events.filter((event) => !isTelemetryEventKind(event.kind)).slice(0, 3).map((event) => `
       <li>
         <time class="os-event-time" datetime="${escapeAttr(event.happened_at)}">${escapeHtml(formatEventTime(event.happened_at))}</time>
         <span>${escapeHtml(event.kind)}</span>
@@ -1875,14 +1875,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       `<div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>`,
       `<div><span>Turns</span><strong>${formatNumber(run.turn_count)}</strong></div>`,
       `<div><span>Runtime</span><strong>${runtime}</strong></div>`,
-      run.branch_name ? `<div><span>Branch</span><strong>${escapeHtml(run.branch_name)}</strong></div>` : "",
-      run.pr_url ? `<div><span>PR</span><strong><a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noreferrer">${escapeHtml(formatPrLinkLabel(run.pr_url))}</a></strong></div>` : "",
       `<div><span>Input</span><strong>${formatNumber(run.input_tokens)}</strong></div>`,
       `<div><span>Cache</span><strong>${formatNumber(run.cache_read_tokens)}</strong></div>`,
       `<div><span>Output</span><strong>${formatNumber(run.output_tokens)}</strong></div>`,
       `<div><span>Total</span><strong>${formatNumber(run.input_tokens + run.cache_read_tokens + run.output_tokens)}</strong></div>`,
       run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : "",
       run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : "",
+    ].filter(Boolean).join("");
+    const runMeta = [
+      run.branch_name ? `<div class="os-run-meta-row" data-testid="run-branch"><span>Branch</span><code>${escapeHtml(run.branch_name)}</code></div>` : "",
+      (run.branch_name || run.pr_url) ? `<div class="os-run-meta-row" data-testid="run-pr"><span>Pull Request</span>${run.pr_url ? `<a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(formatPrLinkLabel(run.pr_url))}</a>` : `<em>Not found</em>`}</div>` : "",
     ].filter(Boolean).join("");
     const receipt = this.state.lastActionReceipt
       ? renderActionReceipt(this.state.lastActionReceipt)
@@ -1908,6 +1910,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-run-grid">
           ${detailRows}
         </div>
+        ${runMeta ? `<div class="os-run-meta-list">${runMeta}</div>` : ""}
         ${actionBar}
         ${receipt}
         <div class="os-run-section">
@@ -3048,7 +3051,12 @@ function renderActivityLifecycleIndicator(events: RunEvent[]): string {
 }
 
 function shouldRenderActivityMessage(event: RunEvent): boolean {
-  return activityLifecycleState(event) === null;
+  if (activityLifecycleState(event) !== null) return false;
+  return !isTelemetryEventKind(event.kind);
+}
+
+function isTelemetryEventKind(kind: string): boolean {
+  return kind === "codex.thread/tokenUsage/updated" || kind === "codex.turn/diff/updated";
 }
 
 function activityLifecycleState(event: RunEvent): "started" | "completed" | null {
@@ -4006,6 +4014,12 @@ function appShellStyles(): string {
     .os-run-detail-panel .os-run-grid div { min-height: 42px; padding: 6px 7px; }
     .os-run-detail-panel .os-run-grid strong { font-size: 13px; line-height: 1.2; white-space: nowrap; }
     .os-run-detail-panel .os-run-grid span { font-size: 10px; line-height: 1.2; margin-top: 0; }
+    .os-run-meta-list { display: grid; gap: 6px; margin-bottom: 8px; }
+    .os-run-meta-row { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 7px 8px; background: #f8fafc; }
+    .os-run-meta-row span { color: #667788; font-size: 10px; line-height: 1.2; text-transform: uppercase; letter-spacing: 0.04em; }
+    .os-run-meta-row code, .os-run-meta-row a, .os-run-meta-row em { min-width: 0; overflow-wrap: anywhere; color: #17202a; font-size: 12px; line-height: 1.3; }
+    .os-run-meta-row a { color: #23566f; font-weight: 700; }
+    .os-run-meta-row em { color: #667788; font-style: normal; }
     .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .os-action-item { display: flex; align-items: center; gap: 8px; }
     .os-action-warning { color: #b45309; font-size: 12px; }
@@ -4182,8 +4196,11 @@ function appShellStyles(): string {
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
-      .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-run-meta-row span, .os-event-time { color: #94a3b3; }
+      .os-status, .os-metrics div, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-run-meta-row code { color: #d9e2ea; }
+      .os-run-meta-row a { color: #8bd0e6; }
+      .os-run-meta-row em { color: #94a3b3; }
       .os-model-error { background: #32180d; border-color: #7c2d12; color: #fed7aa; }
       .os-auth-panel .os-auth-message { color: #d9e2ea; }
       .os-auth-denied .os-auth-message { color: #fca5a5; }
