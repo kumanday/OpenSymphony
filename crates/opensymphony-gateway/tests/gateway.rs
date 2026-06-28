@@ -1749,6 +1749,16 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
     assert_eq!(bundles.bundles[0].id, "local-default");
     assert_eq!(bundles.bundles[0].concept_count, 1);
 
+    let all_bundles = client
+        .get(format!("{base}/bundles"))
+        .send()
+        .await
+        .expect("fetch default bundles")
+        .json::<MemoryBundleList>()
+        .await
+        .expect("decode default bundles");
+    assert_eq!(all_bundles.bundles[0].concept_count, 2);
+
     let graph = client
         .get(format!(
             "{base}/bundles/local-default/graph?visibility=public"
@@ -1770,6 +1780,20 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
             .iter()
             .any(|edge| edge.kind == MemoryGraphEdgeKind::ExternalLink)
     );
+
+    let all_graph = client
+        .get(format!("{base}/bundles/local-default/graph"))
+        .send()
+        .await
+        .expect("fetch default graph")
+        .json::<MemoryGraphSnapshot>()
+        .await
+        .expect("decode default graph");
+    let all_graph_json = serde_json::to_string(&all_graph).expect("default graph serializes");
+    assert!(all_graph_json.contains("COE-200"));
+    assert!(all_graph_json.contains("COE-201"));
+    assert!(!all_graph_json.contains(".opensymphony/memory"));
+    assert!(!all_graph_json.contains(&repo.path().display().to_string()));
 
     let detail = client
         .get(format!(

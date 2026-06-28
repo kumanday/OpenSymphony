@@ -842,17 +842,32 @@ fn resolve_markdown_link_target(
     concept_ids: &BTreeMap<String, String>,
 ) -> Option<(String, bool)> {
     let normalized = normalize_concept_id(target);
-    concept_ids
+    let exact = concept_ids
         .get(&normalized)
-        .cloned()
-        .or_else(|| concept_ids.get(normalized.trim_start_matches('/')).cloned())
-        .or_else(|| {
-            concept_ids
-                .iter()
-                .find(|(concept_id, _)| concept_id.ends_with(&normalized))
-                .map(|(_, node_id)| node_id.clone())
+        .or_else(|| concept_ids.get(normalized.trim_start_matches('/')));
+    if let Some(node_id) = exact {
+        return Some((node_id.clone(), false));
+    }
+
+    let normalized_leaf = normalized.trim_start_matches('/');
+    let mut suffix_matches = concept_ids
+        .iter()
+        .filter(|(concept_id, _)| {
+            concept_id
+                .rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf == normalized_leaf)
+                || concept_id.ends_with(&format!("/{normalized_leaf}"))
         })
-        .map(|node_id| (node_id, false))
+        .map(|(_, node_id)| node_id.clone())
+        .collect::<Vec<_>>();
+    suffix_matches.sort();
+    suffix_matches.dedup();
+    if suffix_matches.len() == 1 {
+        suffix_matches.pop().map(|node_id| (node_id, false))
+    } else {
+        None
+    }
 }
 
 fn insert_same_resource_edges(
