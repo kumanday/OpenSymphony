@@ -754,10 +754,14 @@ pub struct ArchiveIssuePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexedIssue {
     issue_key: String,
+    concept_id: String,
+    concept_type: String,
     title: String,
+    description: Option<String>,
     state: Option<String>,
     milestone: Option<String>,
     labels: Vec<String>,
+    tags: Vec<String>,
     areas: Vec<String>,
     capsule_path: PathBuf,
     visibility: MemoryVisibility,
@@ -767,6 +771,12 @@ struct IndexedIssue {
     completion_time: Option<String>,
     captured_at: String,
     changed_files: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    source_refs: Vec<MemorySourceRef>,
+    links: Vec<OkfLink>,
+    citations: Vec<OkfCitation>,
+    freshness: MemoryFreshness,
+    warnings: Vec<String>,
     body: String,
 }
 
@@ -774,6 +784,7 @@ include!("config.rs");
 include!("okf.rs");
 include!("capture.rs");
 include!("query.rs");
+include!("graph.rs");
 include!("docs_sync.rs");
 include!("archive.rs");
 include!("capture_render.rs");
@@ -1359,6 +1370,327 @@ type: topic-doc
             )
             .expect("doc link count should query");
         assert_eq!(doc_link_count, 1);
+    }
+
+    #[test]
+    fn memory_graph_projection_filters_private_and_redacts_local_paths() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let bundle = repo.path().join(".opensymphony/memory");
+        let issues_dir = bundle.join("issues");
+        copy_dir_recursive(&okf_fixture("okf-reindex"), &bundle);
+        fs::write(
+            issues_dir.join("COE-200.md"),
+            format!(
+                r#"---
+type: topic-doc
+title: "COE-200: Public graph concept"
+description: Public graph DTO fixture.
+resource: https://linear.app/example/issue/COE-123
+tags: [memory, graph]
+timestamp: 2026-06-22T10:00:00Z
+unknown_field: keep-me
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-200
+    - kind: area
+      id: graph-view
+  source_refs:
+    - kind: linear_issue
+      id: COE-200
+      url: https://linear.app/example/issue/COE-200
+  citations:
+    - id: "1"
+      target: https://linear.app/example/issue/COE-200
+      label: COE-200
+---
+
+# COE-200: Public graph concept
+
+Public graph body mentions .opensymphony/memory/issues/COE-999.md and {}.
+Sibling prefix must not be mangled: {}bed.
+
+See [private concept](COE-123.md), [external](https://example.com/reference),
+and [external mirror](https://example.com/reference).
+"#,
+                repo.path().display(),
+                repo.path().display()
+            ),
+        )
+        .expect("public concept should write");
+        fs::write(
+            issues_dir.join("AAA-111.md"),
+            r#"---
+type: issue
+title: "AAA-111: Private ranked search match"
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: AAA-111
+---
+
+# AAA-111: Private ranked search match
+
+public graph
+"#,
+        )
+        .expect("private search concept should write");
+        fs::create_dir_all(bundle.join("backlog")).expect("backlog dir should write");
+        fs::write(
+            bundle.join("backlog/COE-222.md"),
+            r#"---
+type: issue
+title: "Backlog COE-222"
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-222
+---
+
+# Backlog COE-222
+"#,
+        )
+        .expect("backlog concept should write");
+
+        refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should work");
+
+        let public_bundles =
+            memory_graph_bundles(&config, MemoryGraphAccess::Public).expect("bundles");
+        assert_eq!(public_bundles.bundles[0].concept_count, 2);
+        assert_eq!(
+            public_bundles.bundles[0].visibility,
+            MemoryGraphVisibility::Public
+        );
+
+        let all_graph = memory_graph_snapshot(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("graph snapshot");
+        let node_kinds = all_graph
+            .nodes
+            .iter()
+            .map(|node| node.kind)
+            .collect::<BTreeSet<_>>();
+        let edge_kinds = all_graph
+            .edges
+            .iter()
+            .map(|edge| edge.kind)
+            .collect::<BTreeSet<_>>();
+        use crate::opensymphony_gateway_schema::memory_graph::{
+            MemoryGraphEdgeKind as EdgeKind, MemoryGraphNodeKind as NodeKind,
+        };
+        for kind in [
+            NodeKind::Bundle,
+            NodeKind::Directory,
+            NodeKind::Concept,
+            NodeKind::Tag,
+            NodeKind::Resource,
+            NodeKind::Citation,
+            NodeKind::SourceRef,
+            NodeKind::Community,
+        ] {
+            assert!(node_kinds.contains(&kind), "missing node kind {kind:?}");
+        }
+        for kind in [
+            EdgeKind::Contains,
+            EdgeKind::MarkdownLink,
+            EdgeKind::ExternalLink,
+            EdgeKind::Cites,
+            EdgeKind::TaggedWith,
+            EdgeKind::DescribesResource,
+            EdgeKind::ScopedTo,
+            EdgeKind::SourceSupportedBy,
+            EdgeKind::SameResource,
+        ] {
+            assert!(edge_kinds.contains(&kind), "missing edge kind {kind:?}");
+        }
+        let parallel_external_edges = all_graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::ExternalLink
+                    && edge.target_id == "resource:https://example.com/reference"
+            })
+            .count();
+        assert_eq!(parallel_external_edges, 2);
+        let external_edge = all_graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::ExternalLink)
+            .expect("external edge");
+        assert!(external_edge.id.starts_with("external_link:"));
+        assert!(!external_edge.id.starts_with("ExternalLink:"));
+        assert!(
+            all_graph
+                .edges
+                .iter()
+                .any(|edge| edge.id.ends_with(":label:external"))
+        );
+        assert!(
+            all_graph
+                .edges
+                .iter()
+                .any(|edge| edge.id.ends_with(":label:external%20mirror"))
+        );
+
+        let update = memory_graph_updated_event(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("update event payload");
+        assert_eq!(update.bundle_id, DEFAULT_MEMORY_GRAPH_BUNDLE_ID);
+        assert_eq!(
+            update.cursor.partition,
+            "memory-graph:local-default".to_string()
+        );
+        assert!(update.cursor.sequence > 0);
+        let later_update = memory_graph_updated_event(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("later update event payload");
+        assert!(later_update.cursor.sequence > update.cursor.sequence);
+
+        let public_graph = memory_graph_snapshot(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::Public,
+        )
+        .expect("public graph snapshot");
+        let public_json = serde_json::to_string(&public_graph).expect("public graph serializes");
+        assert!(public_json.contains("COE-200"));
+        assert!(!public_json.contains("concept:issues/COE-123"));
+        assert!(!public_json.contains("COE-123: OKF catalog rebuild"));
+        assert!(!public_json.contains(".opensymphony/memory"));
+        assert!(!public_json.contains(&format!("{}/", repo.path().display())));
+        assert!(!public_json.contains(&format!("{}.", repo.path().display())));
+        assert!(!public_json.contains("[redacted-local-path]bed"));
+
+        let detail = memory_concept_detail(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            "issues/COE-200",
+            MemoryGraphAccess::Public,
+        )
+        .expect("concept detail");
+        assert_eq!(
+            detail.frontmatter_view.primary.get("type"),
+            Some(&serde_json::json!("topic-doc"))
+        );
+        assert!(
+            detail
+                .frontmatter_view
+                .opensymphony
+                .contains_key("scope_refs")
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("unknown_field"),
+            Some(&serde_json::json!("keep-me"))
+        );
+        assert!(!detail.links.is_empty());
+        assert!(!detail.citations.is_empty());
+        assert!(!detail.source_refs.is_empty());
+        assert!(!detail.body_markdown.contains(".opensymphony/memory"));
+        assert!(
+            !detail
+                .body_markdown
+                .contains(&format!("{}/", repo.path().display()))
+        );
+        assert!(
+            !detail
+                .body_markdown
+                .contains(&format!("{}.", repo.path().display()))
+        );
+        let bare_issue_detail = memory_concept_detail(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            "COE-222",
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("bare issue key lookup");
+        assert_eq!(bare_issue_detail.concept_id, "backlog/COE-222");
+        let wrong_path_detail = memory_concept_detail(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            "issues/COE-222",
+            MemoryGraphAccess::AllAccessible,
+        );
+        assert!(matches!(
+            wrong_path_detail,
+            Err(MemoryGraphProjectionError::ConceptNotFound(_))
+        ));
+
+        let search = memory_graph_search(&config, "public graph", 1, MemoryGraphAccess::Public)
+            .expect("public graph search");
+        assert_eq!(search.results.len(), 1);
+        assert_eq!(search.results[0].concept_id, "issues/COE-200");
+    }
+
+    #[test]
+    fn memory_graph_path_redaction_respects_token_boundaries() {
+        assert_eq!(
+            replace_path_token("/tmp/repo/file.md", "/tmp/repo", "[redacted]"),
+            "[redacted]/file.md"
+        );
+        assert_eq!(
+            replace_path_token("/foo/tmp/repo/file.md", "/tmp/repo", "[redacted]"),
+            "/foo/tmp/repo/file.md"
+        );
+        assert_eq!(
+            replace_path_token("/tmp/repository/file.md", "/tmp/repo", "[redacted]"),
+            "/tmp/repository/file.md"
+        );
+        assert_eq!(
+            replace_path_token(
+                ".opensymphony/memory/issues/COE-200.md",
+                ".opensymphony/memory",
+                "[redacted-memory-path]",
+            ),
+            "[redacted-memory-path]/issues/COE-200.md"
+        );
+        assert_eq!(
+            replace_path_token(
+                "prefix.opensymphony/memory/issues/COE-200.md",
+                ".opensymphony/memory",
+                "[redacted-memory-path]",
+            ),
+            "prefix.opensymphony/memory/issues/COE-200.md"
+        );
+    }
+
+    #[test]
+    fn memory_graph_resolves_relative_capsules_under_memory_root_first() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        fs::create_dir_all(repo.path().join("issues")).expect("repo issues dir");
+        fs::create_dir_all(config.memory_root.join("issues")).expect("memory issues dir");
+        fs::write(repo.path().join("issues/COE-200.md"), "repo file").expect("repo file");
+        fs::write(config.memory_root.join("issues/COE-200.md"), "memory file")
+            .expect("memory file");
+
+        assert_eq!(
+            resolve_index_path(&config, Path::new("issues/COE-200.md")),
+            config.memory_root.join("issues/COE-200.md")
+        );
+        assert_eq!(
+            resolve_index_path(
+                &config,
+                Path::new(DEFAULT_MEMORY_ROOT)
+                    .join("issues/COE-200.md")
+                    .as_path(),
+            ),
+            repo.path()
+                .join(DEFAULT_MEMORY_ROOT)
+                .join("issues/COE-200.md")
+        );
     }
 
     #[test]

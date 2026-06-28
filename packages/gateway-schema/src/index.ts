@@ -25,6 +25,30 @@ export type {
   TaskGraphMutationResult,
 } from "./task_graph_runtime.js";
 
+// memory graph
+export type {
+  MemoryBundleList,
+  MemoryBundleSummary,
+  MemoryCommunityList,
+  MemoryConceptDetail,
+  MemoryFrontmatterView,
+  MemoryGraphCitation,
+  MemoryGraphCommunity,
+  MemoryGraphEdge,
+  MemoryGraphEdgeKind,
+  MemoryGraphFreshness,
+  MemoryGraphLink,
+  MemoryGraphNode,
+  MemoryGraphNodeKind,
+  MemoryGraphNodeMetrics,
+  MemoryGraphSnapshot,
+  MemoryGraphSourceRef,
+  MemoryGraphUpdatedEvent,
+  MemoryGraphVisibility,
+  MemorySearchResponse,
+  MemorySearchResult,
+} from "./memory_graph.js";
+
 // run
 export type {
   RunStatus,
