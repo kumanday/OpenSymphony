@@ -33,6 +33,8 @@ const RUNNING_STATE_REFRESH_INTERVAL_MS: u64 = 30_000;
 const DISPATCH_DISCOVERY_INTERVAL_MS: u64 = 60_000;
 const TERMINAL_REFRESH_INTERVAL_MS: u64 = 300_000;
 const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
+const HUMAN_REVIEW_STATE: &str = "human review";
+const MERGING_STATE: &str = "merging";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
@@ -1054,13 +1056,8 @@ where
             HarnessInterruptExpectedNextState::CloseoutPending,
             observed_at,
         )?;
-        self.insert_execution(issue_id.clone(), execution);
-
         if queued {
             let result = self.worker.interrupt_worker(command).await;
-            let Some(mut execution) = self.remove_execution(&issue_id) else {
-                return Ok(true);
-            };
             match result {
                 Ok(acknowledgement) => {
                     execution.acknowledge_interrupt(observed_at)?;
@@ -1083,8 +1080,8 @@ where
                     execution.fail_interrupt(observed_at, error.to_string())?;
                 }
             }
-            self.insert_execution(issue_id, execution);
         }
+        self.insert_execution(issue_id, execution);
 
         Ok(true)
     }
@@ -1885,8 +1882,8 @@ fn running_state_key_for_execution(execution: &IssueExecution) -> Option<String>
 }
 
 fn is_human_review_to_merging(previous: &NormalizedIssue, current: &NormalizedIssue) -> bool {
-    normalized_state_name(&previous.state.name) == "human review"
-        && normalized_state_name(&current.state.name) == "merging"
+    normalized_state_name(&previous.state.name) == HUMAN_REVIEW_STATE
+        && normalized_state_name(&current.state.name) == MERGING_STATE
 }
 
 fn normalized_state_name(name: &str) -> String {

@@ -2157,8 +2157,9 @@ mod tests {
     };
 
     use crate::opensymphony_domain::{
-        ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
-        TrackerIssueStateKind, WorkerId, WorkspaceKey,
+        ConversationId, HarnessInterruptCommand, HarnessInterruptExpectedNextState,
+        HarnessInterruptReason, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+        RunAttempt, TrackerIssueStateKind, WorkerId, WorkspaceKey,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
@@ -3442,6 +3443,46 @@ Run the scheduler.
             Ok(Ok(())) | Ok(Err(_)) => {}
             Err(_) => panic!("dropping the backend should abort tracked tasks"),
         }
+    }
+
+    #[tokio::test]
+    async fn codex_scheduler_interrupt_reports_unavailable_stdio_channel() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+
+        let error = backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: "COE-505".to_string(),
+                issue_id: IssueId::new("issue-codex-interrupt").expect("issue id should be valid"),
+                harness_kind: CODEX_APP_SERVER_KIND.to_string(),
+                conversation_id: ConversationId::new("thread-1")
+                    .expect("thread id should be valid"),
+                turn_id: Some("turn-1".to_string()),
+                reason: HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
+            })
+            .await
+            .expect_err("Codex stdio scheduler interrupt should be explicitly unavailable");
+
+        assert!(
+            error.to_string().contains(
+                "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
+            )
+        );
     }
 
     #[tokio::test]
