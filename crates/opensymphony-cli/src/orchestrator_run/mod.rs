@@ -12,7 +12,7 @@ use std::{
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker, TimestampMs};
 use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
-use crate::opensymphony_gateway_schema::event_journal::{EventKind, EventRecord};
+use crate::opensymphony_gateway_schema::event_journal::{EventActor, EventKind, EventRecord};
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::{OpenHandsError, TransportConfig};
 use crate::opensymphony_orchestrator::{
@@ -273,9 +273,23 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         .map_err(RunCommandError::BindListener)?;
     let gateway_journal = InMemoryEventJournal::new(10_000, 256);
     let gateway_broker = StreamBroker::new(gateway_journal.clone());
+    let gateway_memory_config = if runtime.memory.server.is_some() || runtime.memory.auto_capture {
+        Some(crate::opensymphony_memory::MemoryConfig::load(
+            &runtime.target_repo,
+            None,
+        )?)
+    } else {
+        None
+    };
+    let server_memory_config = if runtime.memory.server.is_some() {
+        gateway_memory_config.clone()
+    } else {
+        None
+    };
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
-            .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow));
+            .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
+            .with_memory_config(server_memory_config);
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
     let mut gateway_action_cursor = 0;
 
@@ -408,11 +422,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             publish_auto_capture_event(
                                 auto_capture_result,
                                 &snapshot,
+                                &gateway_journal,
                                 SnapshotPublishContext {
                                     runtime: &runtime,
                                     supervisor: &mut supervisor,
                                     agent_server_base_url: client.base_url(),
                                     memory_server: memory_server.as_ref(),
+                                    memory_config: gateway_memory_config.as_ref(),
                                     recent_events: &mut recent_events,
                                     store: &store,
                                 },
@@ -575,8 +591,27 @@ async fn start_runtime_memory_server(
 async fn publish_auto_capture_event(
     result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
     snapshot: &OrchestratorSnapshot,
+    journal: &InMemoryEventJournal,
     context: SnapshotPublishContext<'_>,
 ) {
+    if should_publish_memory_graph_update(&result)
+        && let Some(config) = context.memory_config
+    {
+        match append_memory_graph_updated_event(journal, config).await {
+            Ok(_) => {}
+            Err(error) => {
+                warn!(%error, "failed to publish memory graph update event");
+                push_recent_event(
+                    context.recent_events,
+                    RecentEventKind::Warning,
+                    None,
+                    format!("memory graph update event publish failed: {error}"),
+                    Utc::now(),
+                );
+            }
+        }
+    }
+
     if record_auto_capture_recent_event(context.recent_events, result) {
         context
             .store
@@ -592,11 +627,55 @@ async fn publish_auto_capture_event(
     }
 }
 
+fn should_publish_memory_graph_update(
+    result: &Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
+) -> bool {
+    result.as_ref().is_ok_and(|report| {
+        report.capture_completed
+            && (!report.captured_issue_keys.is_empty()
+                || !report.archived_issue_keys.is_empty()
+                || !report.docs_written.is_empty())
+    })
+}
+
+async fn append_memory_graph_updated_event(
+    journal: &InMemoryEventJournal,
+    config: &crate::opensymphony_memory::MemoryConfig,
+) -> Result<EventRecord, String> {
+    let update = crate::opensymphony_memory::memory_graph_updated_event(
+        config,
+        crate::opensymphony_memory::DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+        crate::opensymphony_memory::MemoryGraphAccess::AllAccessible,
+    )
+    .map_err(|error| error.to_string())?;
+    let record = memory_graph_updated_record(update)?;
+    journal
+        .append(record)
+        .await
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn memory_graph_updated_record(
+    update: crate::opensymphony_gateway_schema::memory_graph::MemoryGraphUpdatedEvent,
+) -> Result<EventRecord, String> {
+    let bundle_id = update.bundle_id.clone();
+    let payload = serde_json::to_value(&update).map_err(|error| error.to_string())?;
+    Ok(EventRecord::builder()
+        .actor(EventActor::system("memory"))
+        .kind(EventKind::MemoryGraphUpdated {
+            bundle_id: bundle_id.clone(),
+        })
+        .summary(format!("memory graph updated for bundle {bundle_id}"))
+        .payload(payload)
+        .build())
+}
+
 struct SnapshotPublishContext<'a> {
     runtime: &'a RunRuntimeConfig,
     supervisor: &'a mut Option<crate::opensymphony_openhands::LocalServerSupervisor>,
     agent_server_base_url: &'a str,
     memory_server: Option<&'a super::memory::MemoryServerHandle>,
+    memory_config: Option<&'a crate::opensymphony_memory::MemoryConfig>,
     recent_events: &'a mut VecDeque<RecentEvent>,
     store: &'a SnapshotStore,
 }
@@ -831,5 +910,68 @@ mod tests {
         mark_auto_capture_completed(&mut completed, &candidates, &result);
 
         assert_eq!(completed, issue_set(&["COE-1"]));
+    }
+
+    #[test]
+    fn memory_graph_update_publish_requires_completed_capture() {
+        let captured = Ok(super::super::memory::AutoMemoryReport {
+            completed_issue_keys: vec!["COE-2".to_string()],
+            captured_issue_keys: vec!["COE-2".to_string()],
+            archived_issue_keys: Vec::new(),
+            docs_written: Vec::new(),
+            capture_completed: true,
+            docs_sync_completed: true,
+            archive_completed: true,
+            warnings: Vec::new(),
+        });
+        assert!(should_publish_memory_graph_update(&captured));
+
+        let no_write = Ok(super::super::memory::AutoMemoryReport {
+            capture_completed: true,
+            ..super::super::memory::AutoMemoryReport::default()
+        });
+        assert!(!should_publish_memory_graph_update(&no_write));
+
+        let archived = Ok(super::super::memory::AutoMemoryReport {
+            archived_issue_keys: vec!["COE-2".to_string()],
+            capture_completed: true,
+            ..super::super::memory::AutoMemoryReport::default()
+        });
+        assert!(should_publish_memory_graph_update(&archived));
+
+        let docs_synced = Ok(super::super::memory::AutoMemoryReport {
+            docs_written: vec![PathBuf::from("docs/memory.md")],
+            capture_completed: true,
+            ..super::super::memory::AutoMemoryReport::default()
+        });
+        assert!(should_publish_memory_graph_update(&docs_synced));
+
+        let failed = Err(MemoryError::InvalidInput("capture failed".to_string()));
+        assert!(!should_publish_memory_graph_update(&failed));
+    }
+
+    #[test]
+    fn memory_graph_updated_record_carries_payload() {
+        let update = crate::opensymphony_gateway_schema::memory_graph::MemoryGraphUpdatedEvent {
+            schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::v1(),
+            bundle_id: "local-default".to_string(),
+            cursor: crate::opensymphony_gateway_schema::cursor::StreamCursor::new(
+                42,
+                "memory-graph:local-default",
+            ),
+            updated_at: Utc::now(),
+        };
+
+        let record = memory_graph_updated_record(update.clone()).expect("record should build");
+
+        assert_eq!(record.actor, EventActor::system("memory"));
+        assert!(matches!(
+            record.kind,
+            EventKind::MemoryGraphUpdated { ref bundle_id } if bundle_id == "local-default"
+        ));
+        assert_eq!(
+            record.payload,
+            Some(serde_json::to_value(update).expect("payload should serialize"))
+        );
     }
 }

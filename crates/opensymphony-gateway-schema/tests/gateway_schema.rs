@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use opensymphony::opensymphony_gateway_schema::{
     action::{ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget},
@@ -7,6 +9,12 @@ use opensymphony::opensymphony_gateway_schema::{
     },
     cursor::{PageCursor, StreamCursor},
     envelope::{EntityKind, EntityRef, GatewayEnvelope},
+    event_journal::EventKind,
+    memory_graph::{
+        MemoryBundleList, MemoryBundleSummary, MemoryGraphEdge, MemoryGraphEdgeKind,
+        MemoryGraphFreshness, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphNodeMetrics,
+        MemoryGraphSnapshot, MemoryGraphUpdatedEvent, MemoryGraphVisibility,
+    },
     model_settings::{
         CodexCliProbe, CodexLocalReadiness, CredentialReferenceKind, CredentialStatusKind,
         CredentialStatusResponse, CredentialStorageMode, ModelSettingsResponse, ProbeCommandResult,
@@ -87,6 +95,132 @@ fn schema_version_roundtrips() {
 #[test]
 fn gateway_schema_version_constant_matches() {
     assert_eq!(GATEWAY_SCHEMA_VERSION, "1.0.0");
+}
+
+#[test]
+fn memory_graph_dtos_roundtrip_required_kinds_and_update_event() {
+    let node_kinds = [
+        MemoryGraphNodeKind::Bundle,
+        MemoryGraphNodeKind::Directory,
+        MemoryGraphNodeKind::Concept,
+        MemoryGraphNodeKind::Tag,
+        MemoryGraphNodeKind::Resource,
+        MemoryGraphNodeKind::Citation,
+        MemoryGraphNodeKind::SourceRef,
+        MemoryGraphNodeKind::Community,
+    ];
+    let edge_kinds = [
+        MemoryGraphEdgeKind::Contains,
+        MemoryGraphEdgeKind::MarkdownLink,
+        MemoryGraphEdgeKind::ExternalLink,
+        MemoryGraphEdgeKind::Cites,
+        MemoryGraphEdgeKind::TaggedWith,
+        MemoryGraphEdgeKind::DescribesResource,
+        MemoryGraphEdgeKind::ScopedTo,
+        MemoryGraphEdgeKind::SourceSupportedBy,
+        MemoryGraphEdgeKind::SameResource,
+    ];
+
+    assert_eq!(
+        serde_json::to_value(node_kinds).expect("node kinds serialize"),
+        json!([
+            "bundle",
+            "directory",
+            "concept",
+            "tag",
+            "resource",
+            "citation",
+            "source_ref",
+            "community"
+        ])
+    );
+    assert_eq!(
+        serde_json::to_value(edge_kinds).expect("edge kinds serialize"),
+        json!([
+            "contains",
+            "markdown_link",
+            "external_link",
+            "cites",
+            "tagged_with",
+            "describes_resource",
+            "scoped_to",
+            "source_supported_by",
+            "same_resource"
+        ])
+    );
+
+    let snapshot = MemoryGraphSnapshot {
+        schema_version: sample_schema_version(),
+        bundle_id: "local-default".into(),
+        cursor: StreamCursor::new(7, "memory-graph:local-default"),
+        nodes: vec![MemoryGraphNode {
+            id: "concept:issues/COE-123".into(),
+            kind: MemoryGraphNodeKind::Concept,
+            label: "COE-123".into(),
+            bundle_id: Some("local-default".into()),
+            concept_id: Some("issues/COE-123".into()),
+            concept_type: Some("issue-capsule".into()),
+            description: Some("Memory graph fixture".into()),
+            path_display: Some("issues/COE-123.md".into()),
+            resource: None,
+            tags: vec!["memory".into()],
+            timestamp: Some("2026-06-28T00:00:00Z".into()),
+            visibility: Some(MemoryGraphVisibility::Public),
+            freshness: Some(MemoryGraphFreshness::Current),
+            warning_count: 0,
+            frontmatter_summary: BTreeMap::from([("type".into(), json!("issue-capsule"))]),
+            unknown_frontmatter: BTreeMap::new(),
+            body_preview: Some("Fixture".into()),
+            metrics: MemoryGraphNodeMetrics::default(),
+        }],
+        edges: vec![MemoryGraphEdge {
+            id: "contains:bundle:local-default->concept:issues/COE-123".into(),
+            kind: MemoryGraphEdgeKind::Contains,
+            source_id: "bundle:local-default".into(),
+            target_id: "concept:issues/COE-123".into(),
+            label: None,
+            unresolved: false,
+            metadata: BTreeMap::new(),
+        }],
+        communities: Vec::new(),
+        filters_applied: Vec::new(),
+        generated_at: Utc::now(),
+    };
+    let json = must_serialize(&snapshot);
+    let back: MemoryGraphSnapshot = must_deserialize(&json);
+    assert_eq!(back.schema_version, sample_schema_version());
+    assert_eq!(
+        back.nodes[0].visibility,
+        Some(MemoryGraphVisibility::Public)
+    );
+
+    let bundles = MemoryBundleList {
+        schema_version: sample_schema_version(),
+        bundles: vec![MemoryBundleSummary {
+            id: "local-default".into(),
+            title: "OpenSymphony Memory".into(),
+            okf_version: "0.1".into(),
+            visibility: MemoryGraphVisibility::Private,
+            concept_count: 1,
+            updated_at: None,
+        }],
+    };
+    let _: MemoryBundleList = must_deserialize(&must_serialize(&bundles));
+
+    let update = MemoryGraphUpdatedEvent {
+        schema_version: sample_schema_version(),
+        bundle_id: "local-default".into(),
+        cursor: StreamCursor::new(8, "memory-graph:local-default"),
+        updated_at: Utc::now(),
+    };
+    let _: MemoryGraphUpdatedEvent = must_deserialize(&must_serialize(&update));
+    assert_eq!(
+        EventKind::MemoryGraphUpdated {
+            bundle_id: "local-default".into()
+        }
+        .kind_tag(),
+        "memory_graph_updated"
+    );
 }
 
 #[test]

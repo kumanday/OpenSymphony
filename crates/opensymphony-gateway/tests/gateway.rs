@@ -22,12 +22,17 @@ use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
+use opensymphony::opensymphony_gateway_schema::memory_graph::{
+    MemoryBundleList, MemoryCommunityList, MemoryConceptDetail, MemoryGraphEdgeKind,
+    MemoryGraphSnapshot, MemorySearchResponse,
+};
 use opensymphony::opensymphony_gateway_schema::model_settings::{
     CodexCliProbe, CodexLocalReadiness, CredentialStatusKind, CredentialStatusResponse,
     ModelSettingsResponse, ProbeCommandResult,
 };
 use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
+use opensymphony::opensymphony_memory::{MemoryConfig, refresh_memory_index_from_okf};
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -207,6 +212,86 @@ fn tracker_state_kind_from_name(state: &str) -> TrackerIssueStateKind {
         "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
         other => TrackerIssueStateKind::Unknown(other.to_owned()),
     }
+}
+
+fn write_memory_graph_fixture(repo: &std::path::Path) -> MemoryConfig {
+    let config_path = repo.join("opensymphony-memory.yaml");
+    std::fs::write(
+        &config_path,
+        r#"
+areas:
+  graph-view:
+    title: Graph View
+    docs_target: docs/graph-view.md
+    status: stable
+    confidence: 90
+"#,
+    )
+    .expect("memory config should write");
+    let memory_root = repo.join(".opensymphony/memory");
+    let issues_dir = memory_root.join("issues");
+    std::fs::create_dir_all(&issues_dir).expect("memory issues dir should write");
+    std::fs::write(
+        issues_dir.join("COE-200.md"),
+        format!(
+            r#"---
+type: topic-doc
+title: "COE-200: Public graph concept"
+description: Public graph DTO fixture.
+resource: https://linear.app/example/issue/COE-200
+tags: [memory, graph]
+timestamp: 2026-06-22T10:00:00Z
+custom_unknown: keep-me
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-200
+    - kind: area
+      id: graph-view
+  source_refs:
+    - kind: linear_issue
+      id: COE-200
+      url: https://linear.app/example/issue/COE-200
+  citations:
+    - id: "1"
+      target: https://linear.app/example/issue/COE-200
+      label: COE-200
+---
+
+# COE-200: Public graph concept
+
+Public graph body mentions .opensymphony/memory/issues/COE-999.md and {}.
+
+See [external](https://example.com/reference).
+"#,
+            repo.display()
+        ),
+    )
+    .expect("public concept should write");
+    std::fs::write(
+        issues_dir.join("COE-201.md"),
+        r#"---
+type: issue-capsule
+title: "COE-201: Private graph concept"
+description: Private graph DTO fixture.
+tags: [memory, graph]
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-201
+    - kind: area
+      id: graph-view
+---
+
+# COE-201: Private graph concept
+
+Private graph body.
+"#,
+    )
+    .expect("private concept should write");
+    MemoryConfig::load(repo, Some(&config_path)).expect("memory config should load")
 }
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
@@ -1625,6 +1710,169 @@ async fn gateway_serves_project_list() {
     assert_eq!(response.projects[0].project_id, "default");
     assert_eq!(response.projects[0].name, "OpenSymphony");
     assert_eq!(response.projects[0].issue_count, 1);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_memory_graph_contract_endpoints() {
+    let repo = tempfile::tempdir().expect("memory repo");
+    let config = write_memory_graph_fixture(repo.path());
+    refresh_memory_index_from_okf(&config, &repo.path().join(".opensymphony/memory"))
+        .expect("fixture should reindex");
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store).with_memory_config(Some(config));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}/api/v1/memory");
+
+    let bundles = client
+        .get(format!("{base}/bundles?visibility=public"))
+        .send()
+        .await
+        .expect("fetch bundles")
+        .json::<MemoryBundleList>()
+        .await
+        .expect("decode bundles");
+    assert_eq!(bundles.schema_version.major, 1);
+    assert_eq!(bundles.bundles[0].id, "local-default");
+    assert_eq!(bundles.bundles[0].concept_count, 1);
+
+    let all_bundles = client
+        .get(format!("{base}/bundles"))
+        .send()
+        .await
+        .expect("fetch default bundles")
+        .json::<MemoryBundleList>()
+        .await
+        .expect("decode default bundles");
+    assert_eq!(all_bundles.bundles[0].concept_count, 2);
+
+    let graph = client
+        .get(format!(
+            "{base}/bundles/local-default/graph?visibility=public"
+        ))
+        .send()
+        .await
+        .expect("fetch graph")
+        .json::<MemoryGraphSnapshot>()
+        .await
+        .expect("decode graph");
+    let graph_json = serde_json::to_string(&graph).expect("graph serializes");
+    assert!(graph_json.contains("COE-200"));
+    assert!(!graph_json.contains("COE-201"));
+    assert!(!graph_json.contains(".opensymphony/memory"));
+    assert!(!graph_json.contains(&repo.path().display().to_string()));
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|edge| edge.kind == MemoryGraphEdgeKind::ExternalLink)
+    );
+
+    let all_graph = client
+        .get(format!("{base}/bundles/local-default/graph"))
+        .send()
+        .await
+        .expect("fetch default graph")
+        .json::<MemoryGraphSnapshot>()
+        .await
+        .expect("decode default graph");
+    let all_graph_json = serde_json::to_string(&all_graph).expect("default graph serializes");
+    assert!(all_graph_json.contains("COE-200"));
+    assert!(all_graph_json.contains("COE-201"));
+    assert!(!all_graph_json.contains(".opensymphony/memory"));
+    assert!(!all_graph_json.contains(&repo.path().display().to_string()));
+
+    let detail = client
+        .get(format!(
+            "{base}/bundles/local-default/concepts/issues/COE-200?visibility=public"
+        ))
+        .send()
+        .await
+        .expect("fetch concept")
+        .json::<MemoryConceptDetail>()
+        .await
+        .expect("decode concept");
+    assert_eq!(detail.concept_id, "issues/COE-200");
+    assert!(
+        detail
+            .frontmatter_view
+            .opensymphony
+            .contains_key("scope_refs")
+    );
+    assert!(
+        detail
+            .frontmatter_view
+            .unknown
+            .contains_key("custom_unknown")
+    );
+    assert!(!detail.body_markdown.contains(".opensymphony/memory"));
+    assert!(
+        !detail
+            .body_markdown
+            .contains(&repo.path().display().to_string())
+    );
+
+    let communities = client
+        .get(format!(
+            "{base}/bundles/local-default/communities?visibility=public"
+        ))
+        .send()
+        .await
+        .expect("fetch communities")
+        .json::<MemoryCommunityList>()
+        .await
+        .expect("decode communities");
+    assert_eq!(communities.bundle_id, "local-default");
+    assert!(
+        communities
+            .communities
+            .iter()
+            .any(|community| { community.id == "area:graph-view" && community.concept_count == 1 })
+    );
+
+    let search = client
+        .get(format!(
+            "{base}/search?query=public%20graph&visibility=public"
+        ))
+        .send()
+        .await
+        .expect("fetch search")
+        .json::<MemorySearchResponse>()
+        .await
+        .expect("decode search");
+    assert_eq!(search.results.len(), 1);
+    assert_eq!(search.results[0].concept_id, "issues/COE-200");
+
+    let invalid_visibility = client
+        .get(format!("{base}/bundles?visibility=private"))
+        .send()
+        .await
+        .expect("fetch invalid visibility");
+    assert_eq!(
+        invalid_visibility.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let invalid_visibility_body = invalid_visibility
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode invalid visibility response");
+    assert_eq!(
+        invalid_visibility_body.pointer("/error/code"),
+        Some(&serde_json::json!("invalid_visibility"))
+    );
 
     server_task.abort();
 }

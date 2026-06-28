@@ -213,8 +213,46 @@ Recommended gateway endpoints:
 - `GET /api/v1/memory/bundles/{bundle_id}/graph`
 - `GET /api/v1/memory/bundles/{bundle_id}/concepts/{concept_id}`
 - `GET /api/v1/memory/bundles/{bundle_id}/communities`
-- `GET /api/v1/memory/search`
+- `GET /api/v1/memory/search?query=...`
 - event stream kind `memory_graph_updated`
+
+All memory graph responses are versioned with `schema_version`. The initial
+local bundle ID is `local-default`; hosted adapters may expose additional bundle
+IDs later without changing the DTO shape.
+
+Read endpoints accept `visibility=public` to return only public concepts, or
+`visibility=all_accessible` to make the default local-accessible scope explicit.
+The default local loopback mode returns concepts accessible to the local process.
+`visibility=private` is intentionally rejected because it is ambiguous: private
+does not mean "only private concepts" in the local gateway contract. Hosted
+gateway adapters must resolve credentials to an equivalent accessible scope
+before calling the DTO boundary. DTOs must not expose absolute local paths or
+`.opensymphony/memory/` paths; concept path fields are bundle-relative display
+paths only, and body/snippet fields are redacted at the server boundary.
+
+`GET /api/v1/memory/search` is global across the caller's accessible concepts in
+the v1 contract. It accepts `query` or `q`, `limit`, and the same visibility
+filter, but it does not yet accept bundle, community, area, or project scope
+filters. Scoped search can be added compatibly by extending the query object
+without changing the response DTO shape.
+
+`memory_graph_updated` uses the gateway event journal envelope and carries this
+payload:
+
+```json
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "bundle_id": "local-default",
+  "cursor": {"sequence": 1843, "partition": "memory-graph:local-default"},
+  "updated_at": "2026-06-13T17:01:00Z"
+}
+```
+
+Servers publish `memory_graph_updated` after memory capture, OKF import, or
+catalog reindex operations make a new graph snapshot available. The payload
+cursor uses the same strictly monotonic timestamp-derived sequence as graph
+snapshots, including same-tick collision protection, so stream consumers can
+compare `sequence > last_seen` without depending on hash ordering.
 
 The same schemas can be used by a Tauri native adapter, loopback HTTP, or hosted HTTPS.
 

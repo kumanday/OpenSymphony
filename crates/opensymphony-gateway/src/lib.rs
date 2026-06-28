@@ -41,6 +41,11 @@ use crate::opensymphony_gateway_schema::{
         RunLogEntry, RunLogPage, TerminalJumpResult, TerminalSearchMatch, TerminalSearchResult,
     },
 };
+use crate::opensymphony_memory::{
+    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphProjectionError,
+    memory_concept_detail, memory_graph_bundles, memory_graph_communities,
+    memory_graph_search as search_memory_graph, memory_graph_snapshot,
+};
 
 pub mod action_handler;
 pub mod task_graph_mutations;
@@ -77,6 +82,10 @@ pub use crate::opensymphony_gateway_schema::{
     },
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
+    memory_graph::{
+        MemoryBundleList, MemoryCommunityList, MemoryConceptDetail, MemoryGraphSnapshot,
+        MemoryGraphUpdatedEvent, MemorySearchResponse,
+    },
     model_settings::{
         CodexCliProbe, CodexLocalReadiness, CredentialStatusResponse, ModelSettingsResponse,
         ProbeCommandResult,
@@ -254,6 +263,7 @@ pub struct GatewayState {
     pub action_handler: ActionHandler,
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
+    pub memory_config: Option<MemoryConfig>,
     pub codex_readiness_cache: Arc<CodexReadinessCache>,
 }
 
@@ -268,6 +278,7 @@ impl Clone for GatewayState {
             action_handler: self.action_handler.clone(),
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
+            memory_config: self.memory_config.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
         }
     }
@@ -305,6 +316,7 @@ pub struct GatewayServer {
     web_assets_dir: Option<String>,
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
+    memory_config: Option<MemoryConfig>,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -317,6 +329,7 @@ impl Clone for GatewayServer {
             web_assets_dir: self.web_assets_dir.clone(),
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
+            memory_config: self.memory_config.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -340,6 +353,7 @@ impl std::fmt::Debug for GatewayServer {
                 "linear_task_graph",
                 &self.linear_task_graph.as_ref().map(|_| "..."),
             )
+            .field("memory_config", &self.memory_config.as_ref().map(|_| "..."))
             .field("terminal_ingest_handle", &"<handle>")
             .finish()
     }
@@ -369,6 +383,7 @@ impl GatewayServer {
             web_assets_dir: None,
             linear_mutations: None,
             linear_task_graph: None,
+            memory_config: None,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -386,6 +401,7 @@ impl GatewayServer {
             web_assets_dir: None,
             linear_mutations: None,
             linear_task_graph: None,
+            memory_config: None,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -419,6 +435,12 @@ impl GatewayServer {
         self
     }
 
+    /// Install the local memory catalog used by `/api/v1/memory/*` reads.
+    pub fn with_memory_config(mut self, config: Option<MemoryConfig>) -> Self {
+        self.memory_config = config;
+        self
+    }
+
     /// Extract clones of the journal and broker so the caller can keep them for testing.
     pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal.clone(), self.broker.clone())
@@ -435,6 +457,7 @@ impl GatewayServer {
             action_handler: ActionHandler::new(self.journal.clone()),
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
+            memory_config: self.memory_config.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
         };
 
@@ -491,6 +514,20 @@ impl GatewayServer {
             .route("/api/v1/events", get(events))
             .route("/api/v1/event-journal", get(event_journal_query))
             .route("/api/v1/streams/events", get(event_stream_ws))
+            .route("/api/v1/memory/bundles", get(get_memory_bundles))
+            .route(
+                "/api/v1/memory/bundles/{bundle_id}/graph",
+                get(get_memory_graph),
+            )
+            .route(
+                "/api/v1/memory/bundles/{bundle_id}/concepts/{*concept_id}",
+                get(get_memory_concept),
+            )
+            .route(
+                "/api/v1/memory/bundles/{bundle_id}/communities",
+                get(get_memory_communities),
+            )
+            .route("/api/v1/memory/search", get(search_memory))
             .route("/api/v1/projects", get(list_projects))
             .route("/api/v1/projects/{project_id}", get(get_project))
             .route(
@@ -960,6 +997,173 @@ async fn model_credential_statuses(
     Json(CredentialStatusResponse::from_model_settings(
         &build_model_settings(&state).await,
     ))
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct MemoryVisibilityQuery {
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct MemorySearchQuery {
+    q: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+    visibility: Option<String>,
+}
+
+async fn get_memory_bundles(
+    State(state): State<GatewayState>,
+    Query(params): Query<MemoryVisibilityQuery>,
+) -> Result<Json<MemoryBundleList>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_memory(&state)?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
+    memory_graph_bundles(config, access)
+        .map(Json)
+        .map_err(memory_graph_error)
+}
+
+async fn get_memory_graph(
+    State(state): State<GatewayState>,
+    AxumPath(bundle_id): AxumPath<String>,
+    Query(params): Query<MemoryVisibilityQuery>,
+) -> Result<Json<MemoryGraphSnapshot>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_memory(&state)?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
+    memory_graph_snapshot(config, &bundle_id, access)
+        .map(Json)
+        .map_err(memory_graph_error)
+}
+
+async fn get_memory_concept(
+    State(state): State<GatewayState>,
+    AxumPath((bundle_id, concept_id)): AxumPath<(String, String)>,
+    Query(params): Query<MemoryVisibilityQuery>,
+) -> Result<Json<MemoryConceptDetail>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_memory(&state)?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
+    memory_concept_detail(config, &bundle_id, &concept_id, access)
+        .map(Json)
+        .map_err(memory_graph_error)
+}
+
+async fn get_memory_communities(
+    State(state): State<GatewayState>,
+    AxumPath(bundle_id): AxumPath<String>,
+    Query(params): Query<MemoryVisibilityQuery>,
+) -> Result<Json<MemoryCommunityList>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_memory(&state)?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
+    memory_graph_communities(config, &bundle_id, access)
+        .map(Json)
+        .map_err(memory_graph_error)
+}
+
+async fn search_memory(
+    State(state): State<GatewayState>,
+    Query(params): Query<MemorySearchQuery>,
+) -> Result<Json<MemorySearchResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_memory(&state)?;
+    let query = params
+        .query
+        .or(params.q)
+        .and_then(|query| {
+            let query = query.trim().to_string();
+            (!query.is_empty()).then_some(query)
+        })
+        .ok_or_else(|| {
+            memory_graph_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_query",
+                "memory search requires `query` or `q`",
+            )
+        })?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
+    search_memory_graph(config, &query, params.limit.unwrap_or(10), access)
+        .map(Json)
+        .map_err(memory_graph_error)
+}
+
+fn configured_memory(
+    state: &GatewayState,
+) -> Result<&MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
+    state.memory_config.as_ref().ok_or_else(|| {
+        memory_graph_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "memory_not_configured",
+            "memory graph endpoints require a configured memory catalog",
+        )
+    })
+}
+
+fn memory_graph_access(
+    visibility: Option<&str>,
+) -> Result<MemoryGraphAccess, (StatusCode, Json<serde_json::Value>)> {
+    match visibility
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None | Some("all") | Some("all_accessible") => Ok(MemoryGraphAccess::AllAccessible),
+        Some("public") => Ok(MemoryGraphAccess::Public),
+        Some("private") => Err(memory_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_visibility",
+            "`visibility=private` is ambiguous; omit the parameter or use `visibility=all_accessible` for the local accessible catalog",
+        )),
+        Some(other) => Err(memory_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_visibility",
+            &format!("unsupported memory visibility `{other}`"),
+        )),
+    }
+}
+
+fn memory_graph_error(error: MemoryGraphProjectionError) -> (StatusCode, Json<serde_json::Value>) {
+    let message = error.to_string();
+    match error {
+        MemoryGraphProjectionError::BundleNotFound(_) => {
+            memory_graph_response(StatusCode::NOT_FOUND, "bundle_not_found", &message)
+        }
+        MemoryGraphProjectionError::ConceptNotFound(_) => {
+            memory_graph_response(StatusCode::NOT_FOUND, "concept_not_found", &message)
+        }
+        MemoryGraphProjectionError::Memory(source) => {
+            let (status, code) = memory_graph_memory_error_status(&source);
+            memory_graph_response(status, code, memory_graph_memory_error_message(&source))
+        }
+    }
+}
+
+fn memory_graph_memory_error_status(error: &MemoryError) -> (StatusCode, &'static str) {
+    match error {
+        MemoryError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid_memory_request"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "memory_graph_error"),
+    }
+}
+
+fn memory_graph_memory_error_message(error: &MemoryError) -> &'static str {
+    match error {
+        MemoryError::InvalidInput(_) => "invalid memory graph request",
+        _ => "memory graph projection failed",
+    }
+}
+
+fn memory_graph_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "code": code,
+                "message": message
+            }
+        })),
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -3638,6 +3842,28 @@ mod tests {
             )),
             TaskGraphStateCategory::Todo
         );
+    }
+
+    #[test]
+    fn memory_graph_memory_errors_do_not_expose_local_paths() {
+        let local_path = PathBuf::from("/tmp/private/index.duckdb");
+        let (status, Json(body)) = memory_graph_error(MemoryGraphProjectionError::Memory(
+            MemoryError::PathOutsideRepo {
+                path: local_path.clone(),
+                repo_root: PathBuf::from("/tmp/private/repo"),
+            },
+        ));
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "memory graph projection failed");
+        assert!(!body.to_string().contains("/tmp/private"));
+
+        let (status, Json(body)) = memory_graph_error(MemoryGraphProjectionError::Memory(
+            MemoryError::InvalidInput(format!("bad request for {}", local_path.display())),
+        ));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], "invalid memory graph request");
+        assert!(!body.to_string().contains("/tmp/private"));
     }
 
     #[cfg(unix)]

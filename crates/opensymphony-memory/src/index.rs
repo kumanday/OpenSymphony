@@ -385,7 +385,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
 
     let mut statement = connection
         .prepare(
-            "SELECT issue_key, title, state, milestone, labels_json, capsule_path, visibility, source_hash, warning_count, docs_sync_status, completion_time, captured_at, body FROM issues ORDER BY issue_key",
+            "SELECT issue_key, title, state, milestone, labels_json, capsule_path, visibility, source_hash, warning_count, docs_sync_status, completion_time, captured_at, body, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json FROM issues ORDER BY issue_key",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -394,12 +394,22 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
     let rows = statement
         .query_map([], |row| {
             let labels_json: String = row.get(4)?;
+            let tags_json: String = row.get(16)?;
+            let scope_refs_json: String = row.get(17)?;
+            let source_refs_json: String = row.get(18)?;
+            let links_json: String = row.get(19)?;
+            let citations_json: String = row.get(20)?;
+            let warnings_json: String = row.get(22)?;
             Ok(IndexedIssue {
                 issue_key: row.get(0)?,
+                concept_id: row.get(13)?,
+                concept_type: row.get(14)?,
                 title: row.get(1)?,
+                description: row.get(15)?,
                 state: row.get(2)?,
                 milestone: row.get(3)?,
                 labels: serde_json::from_str::<Vec<String>>(&labels_json).unwrap_or_default(),
+                tags: serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default(),
                 areas: Vec::new(),
                 capsule_path: PathBuf::from(row.get::<_, String>(5)?),
                 visibility: match row.get::<_, String>(6)?.as_str() {
@@ -412,6 +422,20 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 completion_time: row.get(10)?,
                 captured_at: row.get(11)?,
                 changed_files: Vec::new(),
+                scope_refs: serde_json::from_str::<Vec<KnowledgeScope>>(&scope_refs_json)
+                    .unwrap_or_default(),
+                source_refs: serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json)
+                    .unwrap_or_default(),
+                links: serde_json::from_str::<Vec<OkfLink>>(&links_json).unwrap_or_default(),
+                citations: serde_json::from_str::<Vec<OkfCitation>>(&citations_json)
+                    .unwrap_or_default(),
+                freshness: match row.get::<_, String>(21)?.as_str() {
+                    "current" => MemoryFreshness::Current,
+                    "stale" => MemoryFreshness::Stale,
+                    _ => MemoryFreshness::Unknown,
+                },
+                warnings: serde_json::from_str::<Vec<String>>(&warnings_json)
+                    .unwrap_or_default(),
                 body: row.get(12)?,
             })
         })
@@ -1310,10 +1334,14 @@ mod index_tests {
     fn issue_log_date_uses_stable_sentinel_for_malformed_timestamps() {
         let issue = IndexedIssue {
             issue_key: "COE-999".to_string(),
+            concept_id: "issues/COE-999".to_string(),
+            concept_type: "issue-capsule".to_string(),
             title: "Malformed timestamps".to_string(),
+            description: None,
             state: None,
             milestone: None,
             labels: Vec::new(),
+            tags: Vec::new(),
             areas: Vec::new(),
             capsule_path: PathBuf::from(".opensymphony/memory/issues/COE-999.md"),
             visibility: MemoryVisibility::Private,
@@ -1323,6 +1351,12 @@ mod index_tests {
             completion_time: Some("not-a-date".to_string()),
             captured_at: "also-not-a-date".to_string(),
             changed_files: Vec::new(),
+            scope_refs: Vec::new(),
+            source_refs: Vec::new(),
+            links: Vec::new(),
+            citations: Vec::new(),
+            freshness: MemoryFreshness::Unknown,
+            warnings: Vec::new(),
             body: String::new(),
         };
 
