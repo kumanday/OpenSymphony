@@ -150,6 +150,35 @@ async fn live_pinned_server_rejects_missing_http_auth_and_wrong_websocket_auth()
 }
 
 #[tokio::test]
+async fn live_pinned_server_handles_interrupt_route() {
+    if env::var(LIVE_GATE_ENV).as_deref() != Ok("1") {
+        eprintln!("skipping live pinned-server test; set {LIVE_GATE_ENV}=1 to enable it");
+        return;
+    }
+
+    let server = PinnedServer::start(SESSION_API_KEY).await;
+    let workspace = TempDir::new().expect("workspace temp dir should be created");
+    let request = doctor_probe_request(workspace.path());
+
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()).with_auth(
+        AuthConfig::header_api_key_with_websocket_query_fallback(
+            SESSION_API_KEY_HEADER,
+            SESSION_API_KEY_QUERY_PARAM,
+            SESSION_API_KEY,
+        ),
+    ));
+
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("create conversation should authenticate");
+    client
+        .interrupt_conversation(conversation.conversation_id)
+        .await
+        .expect("pinned agent-server should handle /interrupt");
+}
+
+#[tokio::test]
 #[ignore = "requires a prepared local machine with live OpenHands credentials"]
 async fn live_pinned_server_condenses_long_history_without_prompt_overflow() {
     if env::var(LIVE_GATE_ENV).as_deref() != Ok("1") {

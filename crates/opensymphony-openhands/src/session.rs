@@ -1247,7 +1247,7 @@ impl IssueSessionRunner {
             if stream
                 .state_mirror()
                 .execution_status()
-                .is_some_and(turn_has_stopped)
+                .is_some_and(interrupt_acknowledgement_observed)
             {
                 return Ok(OpenHandsInterruptAcknowledgement {
                     method,
@@ -3077,11 +3077,15 @@ fn configured_persistence_dir(workflow: &ResolvedWorkflow, workspace: &Workspace
 }
 
 fn turn_is_in_progress(status: &str) -> bool {
-    !matches!(status, "idle" | "finished" | "error" | "stuck" | "paused")
+    !matches!(status, "idle" | "finished" | "error" | "stuck")
 }
 
 fn turn_has_stopped(status: &str) -> bool {
     !turn_is_in_progress(status)
+}
+
+fn interrupt_acknowledgement_observed(status: &str) -> bool {
+    status == "paused" || turn_has_stopped(status)
 }
 
 fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {
