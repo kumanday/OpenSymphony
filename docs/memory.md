@@ -160,7 +160,11 @@ report orphan, broken-link, stale-concept, and warning counts, while node
 metrics report degree, normalized centrality, bridge score, and community ID.
 Community labels prefer concept areas, then tags, directories, and concept type.
 Tags, citations, and source refs are excluded from community membership by
-default and can be included with the memory graph endpoint query flags.
+default and can be included with the memory graph endpoint query flags. Those
+flags also parameterize node community IDs and bridge scores because the
+community membership input set changes with the query. Community IDs are stable
+grouping keys, not graph node IDs; community graph nodes are separately
+namespaced with `community:<id>`.
 
 No graph-library dependency is currently selected for memory graph extraction:
 the shipped backend work only derives deterministic catalog relationships and
