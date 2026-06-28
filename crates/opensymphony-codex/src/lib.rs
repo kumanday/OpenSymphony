@@ -303,14 +303,14 @@ impl CodexAppServerAdapter {
         })
     }
 
-    pub fn cancel_turn_request(
+    pub fn interrupt_turn_request(
         &self,
         session: &mut CodexJsonRpcSession,
         thread_id: impl Into<String>,
         turn_id: impl Into<String>,
     ) -> CodexHarnessRequest {
         CodexHarnessRequest {
-            lifecycle: CodexLifecycleRequest::Cancel,
+            lifecycle: CodexLifecycleRequest::Interrupt,
             request: session.request(
                 "turn/interrupt",
                 json!({ "threadId": thread_id.into(), "turnId": turn_id.into() }),
@@ -355,7 +355,7 @@ impl HarnessAdapter for CodexAppServerAdapter {
 pub enum CodexLifecycleRequest {
     Start,
     Resume,
-    Cancel,
+    Interrupt,
     Approval,
 }
 

@@ -972,11 +972,11 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
         json!({ "type": "dangerFullAccess" })
     );
 
-    let cancel = adapter.cancel_turn_request(&mut session, "thread-1", "turn-1");
-    assert_eq!(cancel.lifecycle, CodexLifecycleRequest::Cancel);
-    assert_eq!(cancel.request.method, "turn/interrupt");
-    assert_eq!(cancel.request.params["threadId"], "thread-1");
-    assert_eq!(cancel.request.params["turnId"], "turn-1");
+    let interrupt = adapter.interrupt_turn_request(&mut session, "thread-1", "turn-1");
+    assert_eq!(interrupt.lifecycle, CodexLifecycleRequest::Interrupt);
+    assert_eq!(interrupt.request.method, "turn/interrupt");
+    assert_eq!(interrupt.request.params["threadId"], "thread-1");
+    assert_eq!(interrupt.request.params["turnId"], "turn-1");
 
     let approve = adapter.approval_response(
         &mut session,
