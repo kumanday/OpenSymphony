@@ -285,29 +285,29 @@ export function applyGraphFilters(
     if (neighborhood && !neighborhood.has(node.id)) return false;
     return matchesNodeFilters(node, normalized);
   });
-  const nodeIds = new Set(nodes.map((node) => node.id));
+  const nodeKindById = new Map(nodes.map((node) => [node.id, node.kind]));
   const edges = snapshot.edges.filter((edge) => {
-    if (!nodeIds.has(edge.source_id) || !nodeIds.has(edge.target_id)) return false;
+    if (!nodeKindById.has(edge.source_id) || !nodeKindById.has(edge.target_id)) return false;
     if (normalized.edgeKinds.length > 0 && !normalized.edgeKinds.includes(edge.kind)) return false;
     return true;
   });
   const communities = snapshot.communities
     .map((community) => ({
       ...community,
-      node_ids: community.node_ids.filter((nodeId) => nodeIds.has(nodeId)).sort(),
-      concept_count: community.node_ids.filter((nodeId) => {
-        const node = snapshot.nodes.find((candidate) => candidate.id === nodeId);
-        return nodeIds.has(nodeId) && node?.kind === "concept";
-      }).length,
+      node_ids: community.node_ids.filter((nodeId) => nodeKindById.has(nodeId)).sort(),
+      concept_count: community.node_ids.filter((nodeId) => nodeKindById.get(nodeId) === "concept").length,
     }))
     .filter((community) => community.node_ids.length > 0)
     .sort((a, b) => a.id.localeCompare(b.id));
+  const neighborhoodTokens = neighborhood
+    ? [`neighborhood:${focusedNodeId}`, `neighborhood-depth:${neighborhoodDepth}`]
+    : [];
   return {
     ...snapshot,
     nodes: [...nodes].sort(compareNodes),
     edges: [...edges].sort(compareEdges),
     communities,
-    filters_applied: filterTokens(normalized),
+    filters_applied: [...filterTokens(normalized), ...neighborhoodTokens].sort(),
   };
 }
 
@@ -370,6 +370,7 @@ export function createHttpGraphAdapter(baseUri: string, fetchFn: typeof fetch = 
       const params = visibilityParams(options);
       params.set("query", query);
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
+      if (options?.bundleId) params.set("bundle_id", options.bundleId);
       return read<MemorySearchResponse>("/api/v1/memory/search", params);
     },
   };
@@ -399,11 +400,19 @@ export function createFixtureGraphAdapter(fixtures: {
     getGraphSnapshot: async () => snapshot,
     getConceptDetail: async () => conceptDetail,
     getCommunities: async () => communities,
-    search: async (query) => ({
-      ...search,
-      query,
-      results: query === search.query ? search.results : searchGraphSnapshot(snapshot, query),
-    }),
+    search: async (query, options) => {
+      const results = options?.bundleId && options.bundleId !== snapshot.bundle_id
+        ? []
+        : query === search.query
+          ? search.results
+          : searchGraphSnapshot(snapshot, query);
+      return {
+        ...search,
+        query,
+        bundle_id: options?.bundleId ?? search.bundle_id,
+        results: results.slice(0, options?.limit ?? results.length),
+      };
+    },
   };
 }
 
@@ -471,15 +480,15 @@ function collectNeighborhood(
   depth: number,
 ): Set<string> {
   const seen = new Set([rootId]);
-  let frontier = [rootId];
+  let frontier = new Set([rootId]);
   for (let step = 0; step < Math.max(0, depth); step++) {
     const next: string[] = [];
     for (const edge of edges) {
-      if (frontier.includes(edge.source_id) && !seen.has(edge.target_id)) next.push(edge.target_id);
-      if (frontier.includes(edge.target_id) && !seen.has(edge.source_id)) next.push(edge.source_id);
+      if (frontier.has(edge.source_id) && !seen.has(edge.target_id)) next.push(edge.target_id);
+      if (frontier.has(edge.target_id) && !seen.has(edge.source_id)) next.push(edge.source_id);
     }
     for (const id of next) seen.add(id);
-    frontier = uniqueSorted(next);
+    frontier = new Set(next);
   }
   return seen;
 }

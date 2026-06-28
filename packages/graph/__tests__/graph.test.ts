@@ -73,6 +73,14 @@ describe("@opensymphony/graph", () => {
     const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock);
     await gateway.listBundles();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/memory/bundles");
+    await gateway.search("graph", {
+      visibility: "public",
+      limit: 5,
+      bundleId: "local-default",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:2468/api/v1/memory/search?visibility=public&query=graph&limit=5&bundle_id=local-default",
+    );
   });
 
   it("keeps filtered community concept counts aligned to concept nodes only", () => {
@@ -104,12 +112,28 @@ describe("@opensymphony/graph", () => {
       "bundle:local-default",
       "source:osym-822",
     ]);
+    expect(filtered.filters_applied).toEqual([
+      "neighborhood-depth:2",
+      "neighborhood:tag:graph-view",
+    ]);
   });
 
   it("passes through native graph adapters without importing Tauri", async () => {
     const native = createTauriNativeGraphAdapter(createFixtureGraphAdapter());
     await expect(native.getCommunities("local-default")).resolves.toMatchObject({
       communities: [{ id: "area:graph-view", concept_count: 1 }],
+    });
+  });
+
+  it("honors fixture search bundle and limit options", async () => {
+    const fixture = createFixtureGraphAdapter();
+    await expect(fixture.search("graph", { bundleId: "other-bundle" })).resolves.toMatchObject({
+      bundle_id: "other-bundle",
+      results: [],
+    });
+    await expect(fixture.search("graph", { bundleId: "local-default", limit: 1 })).resolves.toMatchObject({
+      bundle_id: "local-default",
+      results: [{ concept_id: "issues/COE-465" }],
     });
   });
 
