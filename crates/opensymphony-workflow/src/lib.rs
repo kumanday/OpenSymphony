@@ -2466,6 +2466,41 @@ routing:
     }
 
     #[test]
+    fn codex_routing_does_not_require_openhands_llm_environment() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: codex_app_server
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: ${LLM_MODEL}
+        api_key_env: LLM_API_KEY
+        base_url_env: LLM_BASE_URL
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("codex routing should not resolve OpenHands-only LLM env vars");
+
+        assert_eq!(resolved.config.routing.harness, "codex_app_server");
+        assert!(!resolved.extensions.openhands.local_server.enabled);
+    }
+
+    #[test]
     fn selected_openhands_model_overrides_conversation_model() {
         let workflow = WorkflowDefinition::parse(
             r#"---

@@ -65,6 +65,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -78,6 +79,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -85,6 +87,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -108,6 +111,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -121,6 +125,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -128,6 +133,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       - cli
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -149,6 +155,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -162,6 +169,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -169,6 +177,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -198,6 +207,21 @@ areas:
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
+  codex-runtime:
+    title: Codex Runtime
+    docs_target: docs/codex-runtime.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - codex runtime
+    - codex-runtime
+    source_refs:
+      linear_labels:
+      - area:codex-runtime
+      - area:harness-runtime
+      linear_milestones:
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -234,6 +258,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -247,6 +272,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -254,6 +280,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -290,6 +317,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -303,6 +331,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -310,6 +339,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -332,6 +362,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -345,6 +376,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -352,6 +384,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -407,6 +440,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -420,6 +454,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -427,6 +462,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -448,17 +484,21 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:duckdb
       - area:gateway
+      - area:harness-runtime
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -466,6 +506,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -498,6 +539,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -511,6 +553,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -518,6 +561,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -540,6 +584,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -553,6 +598,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -560,6 +606,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -658,18 +705,21 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:duckdb
       - area:gateway
+      - area:harness-runtime
       - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -677,6 +727,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -697,6 +748,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -710,6 +762,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -717,6 +770,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -753,6 +807,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -766,6 +821,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -773,6 +829,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -799,6 +856,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -812,6 +870,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -819,6 +878,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -857,6 +917,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -870,6 +931,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -877,6 +939,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -897,6 +960,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -910,6 +974,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -917,6 +982,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -952,6 +1018,20 @@ areas:
     source_refs:
       docs:
       - docs/openhands_agent_server_subscription_auth_analysis.md
+  openhands-runtime:
+    title: Openhands Runtime
+    docs_target: docs/openhands-runtime.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - openhands runtime
+    - openhands-runtime
+    source_refs:
+      linear_labels:
+      - area:openhands-runtime
+      linear_milestones:
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
   operations:
     title: Operations
     docs_target: docs/operations.md
@@ -967,6 +1047,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -980,6 +1061,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -987,6 +1069,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       - operations
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1014,18 +1097,21 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:duckdb
       - area:gateway
+      - area:harness-runtime
       - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -1033,6 +1119,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -1085,6 +1172,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -1098,6 +1186,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -1105,6 +1194,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -1126,6 +1216,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -1139,6 +1230,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -1146,6 +1238,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -1197,17 +1290,21 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:duckdb
       - area:gateway
+      - area:harness-runtime
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -1215,6 +1312,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -1262,6 +1360,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -1275,6 +1374,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -1282,6 +1382,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -1302,6 +1403,7 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:codex-runtime
       - area:control
       - area:desktop
       - area:developer-experience
@@ -1315,6 +1417,7 @@ areas:
       - area:memory
       - area:model-configuration
       - area:okf
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:runtime
@@ -1322,6 +1425,7 @@ areas:
       - area:testing
       - area:tui
       - area:ui
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
@@ -1359,6 +1463,19 @@ areas:
       linear_milestones:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+  workflow:
+    title: Workflow
+    docs_target: docs/workflow.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - workflow
+    source_refs:
+      linear_labels:
+      - area:workflow
+      linear_milestones:
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
     docs_target: docs/workspace-and-lifecycle.md

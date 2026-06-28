@@ -42,16 +42,21 @@ pub(crate) fn resolve_workflow<E: Environment>(
     base_dir: &Path,
     env: &E,
 ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
+    let routing = resolve_routing(&workflow.front_matter.routing, env)?;
     let config = WorkflowConfig {
         tracker: resolve_tracker(&workflow.front_matter.tracker, env)?,
         polling: resolve_polling(&workflow.front_matter.polling)?,
         workspace: resolve_workspace(&workflow.front_matter.workspace, base_dir, env)?,
         hooks: resolve_hooks(&workflow.front_matter.hooks)?,
         agent: resolve_agent(&workflow.front_matter.agent)?,
-        routing: resolve_routing(&workflow.front_matter.routing, env)?,
+        routing,
     };
     let mut extensions = WorkflowExtensions {
-        openhands: resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?,
+        openhands: if config.routing.harness == DEFAULT_ROUTING_HARNESS {
+            resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?
+        } else {
+            default_inactive_openhands_config()
+        },
     };
     apply_selected_model_to_openhands(&config.routing, &mut extensions.openhands);
 
@@ -449,6 +454,51 @@ fn resolve_openhands<E: Environment>(
         conversation: resolve_openhands_conversation(&openhands.conversation, env)?,
         websocket,
     })
+}
+
+fn default_inactive_openhands_config() -> OpenHandsConfig {
+    OpenHandsConfig {
+        transport: OpenHandsTransportConfig {
+            base_url: DEFAULT_OPENHANDS_BASE_URL.to_owned(),
+            session_api_key_env: None,
+        },
+        local_server: OpenHandsLocalServerConfig {
+            enabled: false,
+            command: None,
+            startup_timeout_ms: DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
+            readiness_probe_path: DEFAULT_OPENHANDS_READINESS_PROBE_PATH.to_owned(),
+            env: BTreeMap::new(),
+        },
+        conversation: OpenHandsConversationConfig {
+            reuse_policy: "per_issue".to_owned(),
+            persistence_dir_relative: PathBuf::from(DEFAULT_OPENHANDS_PERSISTENCE_DIR),
+            max_iterations: DEFAULT_OPENHANDS_MAX_ITERATIONS,
+            stuck_detection: true,
+            confirmation_policy: OpenHandsConfirmationPolicy {
+                kind: DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND.to_owned(),
+            },
+            agent: OpenHandsConversationAgentConfig {
+                kind: DEFAULT_OPENHANDS_AGENT_KIND.to_owned(),
+                llm: Some(default_openhands_llm_config()),
+                condenser: Some(OpenHandsConversationCondenserConfig {
+                    max_size: DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+                    keep_first: DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
+                }),
+                tools: Some(default_openhands_agent_tools()),
+                include_default_tools: None,
+                log_completions: false,
+                options: BTreeMap::new(),
+            },
+        },
+        websocket: OpenHandsWebSocketConfig {
+            enabled: true,
+            ready_timeout_ms: DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+            reconnect_initial_ms: DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+            reconnect_max_ms: DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+            auth_mode: DEFAULT_OPENHANDS_AUTH_MODE.to_owned(),
+            query_param_name: DEFAULT_OPENHANDS_QUERY_PARAM_NAME.to_owned(),
+        },
+    }
 }
 
 fn reject_removed_legacy_linear_bridge_config(

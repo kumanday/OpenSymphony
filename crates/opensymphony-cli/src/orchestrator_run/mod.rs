@@ -14,11 +14,12 @@ use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker, TimestampMs
 use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_gateway_schema::event_journal::{EventKind, EventRecord};
 use crate::opensymphony_linear::LinearError;
-use crate::opensymphony_openhands::OpenHandsError;
+use crate::opensymphony_openhands::{OpenHandsError, TransportConfig};
 use crate::opensymphony_orchestrator::{
     IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
     TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
+use crate::opensymphony_workflow::ProcessEnvironment;
 use crate::opensymphony_workspace::WorkspaceError;
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -32,9 +33,9 @@ use tracing::{info, warn};
 
 use self::{
     backends::{
-        RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_linear_client,
-        build_runtime_transport, build_tracker_backend, build_workspace_manager_config,
-        prepare_active_conversation_store,
+        ManagedLocalPreparation, RuntimeWorkerBackend, RuntimeWorkspaceBackend,
+        build_linear_client, build_runtime_transport, build_tracker_backend,
+        build_workspace_manager_config, prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{
@@ -159,9 +160,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         build_workspace_manager_config(&runtime.workflow),
     )?);
     let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
-    let managed_local_preparation =
+    let selected_openhands = selected_openhands_harness(&runtime);
+    let managed_local_preparation = if selected_openhands {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
-            .await?;
+            .await?
+    } else {
+        ManagedLocalPreparation::default()
+    };
     let active_store_preparation = &managed_local_preparation.active_conversations;
     let legacy_store_migration = &managed_local_preparation.legacy_conversations;
     if legacy_store_migration.moved_to_archived > 0 {
@@ -202,15 +207,24 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
     }
 
-    let (transport, mut supervisor) = build_runtime_transport(
-        &runtime,
-        managed_local_preparation.tooling,
-        memory_env.as_ref(),
-        &linear_worker_env,
-    )
-    .await?;
+    let (transport, mut supervisor) = if selected_openhands {
+        build_runtime_transport(
+            &runtime,
+            managed_local_preparation.tooling,
+            memory_env.as_ref(),
+            &linear_worker_env,
+        )
+        .await?
+    } else {
+        (
+            TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?,
+            None,
+        )
+    };
     let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
-    client.openapi_probe().await?;
+    if selected_openhands {
+        client.openapi_probe().await?;
+    }
 
     let worker = RuntimeWorkerBackend::new(
         client.clone(),
@@ -438,6 +452,10 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     Ok(())
+}
+
+fn selected_openhands_harness(runtime: &RunRuntimeConfig) -> bool {
+    runtime.workflow.config.routing.harness == "openhands_agent_server"
 }
 
 async fn apply_gateway_action_events<T, W, M>(
