@@ -2317,6 +2317,13 @@ async fn get_task_graph(
     let identifiers = snapshot
         .issues
         .iter()
+        .filter(|issue| {
+            issue.project_slug.is_some()
+                || !matches!(
+                    issue.runtime_state,
+                    ControlPlaneIssueRuntimeState::Completed
+                )
+        })
         .map(|issue| issue.identifier.clone())
         .collect::<Vec<_>>();
 
