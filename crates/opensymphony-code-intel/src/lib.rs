@@ -1,7 +1,7 @@
 use std::{
     fs,
-    io::Read,
-    path::{Path, PathBuf},
+    io::{ErrorKind, Read},
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -164,15 +164,22 @@ impl AstCodeIntelProvider {
         }
 
         for path in paths {
-            let resolved = self.resolve_requested_path(&repo_root, path)?;
+            let Some(resolved) = self.resolve_requested_path(&repo_root, path)? else {
+                let relative_path = self.relative_candidate_path(&repo_root, path)?;
+                let relative_display = relative_path.to_string_lossy().to_string();
+                report.fallback_reasons.push(format!(
+                    "{relative_display} could not be read: file not found"
+                ));
+                report.fallback_paths.push(relative_path);
+                continue;
+            };
             let relative_path = resolved
                 .strip_prefix(&repo_root)
                 .unwrap_or(&resolved)
                 .to_path_buf();
             let relative_display = relative_path.to_string_lossy().to_string();
 
-            let Some(source) =
-                self.read_limited_source(&resolved, &relative_display, &mut report)?
+            let Some(source) = self.read_limited_source(&resolved, &relative_display, &mut report)
             else {
                 continue;
             };
@@ -224,43 +231,63 @@ impl AstCodeIntelProvider {
         resolved: &Path,
         relative_display: &str,
         report: &mut AstCodeIntelReport,
-    ) -> Result<Option<String>, MemoryError> {
-        let file = fs::File::open(resolved).map_err(|source| MemoryError::ReadFile {
-            path: resolved.to_path_buf(),
-            source,
-        })?;
-        let metadata = file.metadata().map_err(|source| MemoryError::ReadFile {
-            path: resolved.to_path_buf(),
-            source,
-        })?;
+    ) -> Option<String> {
+        let file = match fs::File::open(resolved) {
+            Ok(file) => file,
+            Err(source) => {
+                report
+                    .fallback_reasons
+                    .push(format!("{relative_display} could not be opened: {source}"));
+                report.fallback_paths.push(PathBuf::from(relative_display));
+                return None;
+            }
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                report.fallback_reasons.push(format!(
+                    "{relative_display} metadata could not be read: {source}"
+                ));
+                report.fallback_paths.push(PathBuf::from(relative_display));
+                return None;
+            }
+        };
 
         if !metadata.is_file() {
             report
                 .fallback_reasons
                 .push(format!("{relative_display} is not a file"));
             report.fallback_paths.push(PathBuf::from(relative_display));
-            return Ok(None);
+            return None;
         }
 
         let mut bytes = Vec::new();
-        file.take(self.max_file_bytes + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|source| MemoryError::ReadFile {
-                path: resolved.to_path_buf(),
-                source,
-            })?;
+        if let Err(source) = file.take(self.max_file_bytes + 1).read_to_end(&mut bytes) {
+            report
+                .fallback_reasons
+                .push(format!("{relative_display} could not be read: {source}"));
+            report.fallback_paths.push(PathBuf::from(relative_display));
+            return None;
+        }
         if bytes.len() as u64 > self.max_file_bytes {
             report.fallback_reasons.push(format!(
                 "{relative_display} exceeds max AST file size of {} bytes",
                 self.max_file_bytes
             ));
             report.fallback_paths.push(PathBuf::from(relative_display));
-            return Ok(None);
+            return None;
         }
 
-        String::from_utf8(bytes).map(Some).map_err(|error| {
-            MemoryError::InvalidInput(format!("{relative_display} is not UTF-8: {error}"))
-        })
+        match String::from_utf8(bytes) {
+            Ok(source) => Some(source),
+            Err(error) => {
+                report
+                    .fallback_reasons
+                    .push(format!("{relative_display} is not UTF-8: {error}"));
+                report.fallback_paths.push(PathBuf::from(relative_display));
+                None
+            }
+        }
     }
 
     fn canonical_root(&self) -> Result<PathBuf, MemoryError> {
@@ -276,26 +303,75 @@ impl AstCodeIntelProvider {
         &self,
         repo_root: &Path,
         path: &Path,
-    ) -> Result<PathBuf, MemoryError> {
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            repo_root.join(path)
+    ) -> Result<Option<PathBuf>, MemoryError> {
+        let candidate = requested_candidate(repo_root, path);
+        let resolved = match candidate.canonicalize() {
+            Ok(resolved) => resolved,
+            Err(source) if source.kind() == ErrorKind::NotFound => {
+                let normalized = normalize_lexical(&candidate);
+                if !normalized.starts_with(repo_root) {
+                    return Err(MemoryError::PathOutsideRepo {
+                        path: normalized,
+                        repo_root: repo_root.to_path_buf(),
+                    });
+                }
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(MemoryError::ResolvePath {
+                    path: candidate.clone(),
+                    source,
+                });
+            }
         };
-        let resolved = candidate
-            .canonicalize()
-            .map_err(|source| MemoryError::ResolvePath {
-                path: candidate.clone(),
-                source,
-            })?;
         if !resolved.starts_with(repo_root) {
             return Err(MemoryError::PathOutsideRepo {
                 path: resolved,
                 repo_root: repo_root.to_path_buf(),
             });
         }
-        Ok(resolved)
+        Ok(Some(resolved))
     }
+
+    fn relative_candidate_path(
+        &self,
+        repo_root: &Path,
+        path: &Path,
+    ) -> Result<PathBuf, MemoryError> {
+        let candidate = normalize_lexical(&requested_candidate(repo_root, path));
+        if !candidate.starts_with(repo_root) {
+            return Err(MemoryError::PathOutsideRepo {
+                path: candidate.clone(),
+                repo_root: repo_root.to_path_buf(),
+            });
+        }
+        Ok(candidate
+            .strip_prefix(repo_root)
+            .unwrap_or(&candidate)
+            .to_path_buf())
+    }
+}
+
+fn requested_candidate(repo_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    }
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 impl CodeIntelIndex for AstCodeIntelProvider {
@@ -858,6 +934,41 @@ mod tests {
         }));
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace" && artifact.summary.contains("max AST file size")
+        }));
+    }
+
+    #[test]
+    fn composite_falls_back_when_requested_file_is_missing() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/missing.rs")], &[], 20)
+            .expect("code context");
+
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace" && artifact.summary.contains("file not found")
+        }));
+    }
+
+    #[test]
+    fn composite_falls_back_when_requested_file_is_not_utf8() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(repo.path().join("src/lib.rs"), [0xff, 0xfe]).expect("binary file");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/lib.rs")], &[], 20)
+            .expect("code context");
+
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace" && artifact.summary.contains("not UTF-8")
         }));
     }
 
