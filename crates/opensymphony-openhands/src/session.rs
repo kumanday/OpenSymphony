@@ -1258,12 +1258,13 @@ impl IssueSessionRunner {
             }
 
             let wait = timeout_at(deadline, stream.next_event()).await;
-            match wait {
-                Ok(Ok(Some(_))) => {}
+            let reconcile_after_event = match wait {
+                Ok(Ok(Some(_))) => true,
                 Ok(Ok(None)) | Ok(Err(_)) => {
                     reconciled_events += stream
                         .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
                         .await?;
+                    false
                 }
                 Err(_) => {
                     return Ok(OpenHandsInterruptAcknowledgement {
@@ -1285,10 +1286,12 @@ impl IssueSessionRunner {
                         }),
                     });
                 }
+            };
+            if reconcile_after_event {
+                reconciled_events += stream
+                    .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+                    .await?;
             }
-            reconciled_events += stream
-                .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
-                .await?;
         }
     }
 
