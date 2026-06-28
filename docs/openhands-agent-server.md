@@ -7,6 +7,7 @@ OpenSymphony integrates with the OpenHands SDK agent-server surface from Rust.
 In scope:
 
 - conversation create/get/send/run
+- conversation interrupt, with pause as an older-server fallback only
 - event search
 - runtime event streaming over WebSocket
 - workspace-aware conversation launch
@@ -136,6 +137,14 @@ The internal `opensymphony_openhands` module owns:
 - WebSocket attach/reconcile/reconnect behavior
 - ready-state detection
 - issue session launch and reuse
+
+Harness interrupt uses `POST /api/conversations/{id}/interrupt` as the primary
+mid-turn stop request. If an older agent-server returns a missing-route status
+for that endpoint, the adapter falls back to `POST /api/conversations/{id}/pause`
+and records that fallback in acknowledgement diagnostics. The adapter reports
+acknowledgement only after it reattaches/reconciles runtime state and observes a
+stopped conversation status such as `paused`, or after the configured readiness
+timeout path records a timeout diagnostic.
 
 For reused conversations that are already `queued` or `running`, the runtime now
 surfaces launch metadata immediately after a successful attach so the

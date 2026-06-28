@@ -91,6 +91,14 @@ async fn query_param_api_key_authenticates_rest_and_websocket_operations() {
         .await
         .expect("run should carry auth");
     client
+        .interrupt_conversation(conversation.conversation_id)
+        .await
+        .expect("interrupt should carry auth");
+    client
+        .pause_conversation(conversation.conversation_id)
+        .await
+        .expect("pause should carry auth");
+    client
         .search_all_events(conversation.conversation_id)
         .await
         .expect("search should carry auth");
@@ -146,6 +154,10 @@ async fn header_api_key_with_websocket_query_fallback_authenticates_operations()
         .run_conversation(conversation.conversation_id)
         .await
         .expect("run should carry header auth");
+    client
+        .interrupt_conversation(conversation.conversation_id)
+        .await
+        .expect("interrupt should carry header auth");
 }
 
 #[tokio::test]
@@ -192,6 +204,47 @@ async fn path_prefixed_base_urls_preserve_rest_and_websocket_authentication() {
         .run_conversation(conversation.conversation_id)
         .await
         .expect("run should preserve the path prefix");
+    client
+        .interrupt_conversation(conversation.conversation_id)
+        .await
+        .expect("interrupt should preserve the path prefix");
+}
+
+#[tokio::test]
+async fn interrupt_and_pause_use_distinct_agent_server_routes() {
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server = TestServer::start(
+        Router::new()
+            .route(
+                "/api/conversations/{conversation_id}/interrupt",
+                post(record_interrupt),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/pause",
+                post(record_pause),
+            )
+            .with_state(calls.clone()),
+    )
+    .await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let conversation_id = Uuid::new_v4();
+
+    client
+        .interrupt_conversation(conversation_id)
+        .await
+        .expect("interrupt should use /interrupt");
+    client
+        .pause_conversation(conversation_id)
+        .await
+        .expect("pause fallback should use /pause");
+
+    assert_eq!(
+        *calls.lock().await,
+        vec![
+            format!("interrupt:{conversation_id}:{{}}"),
+            format!("pause:{conversation_id}:{{}}")
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1376,6 +1429,14 @@ fn auth_router(expectations: AuthExpectations) -> Router {
             post(run_conversation),
         )
         .route(
+            "/api/conversations/{conversation_id}/interrupt",
+            post(interrupt_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/pause",
+            post(pause_conversation),
+        )
+        .route(
             "/api/conversations/{conversation_id}/events/search",
             get(search_events),
         )
@@ -1445,6 +1506,26 @@ async fn run_conversation(
     Ok(Json(json!({ "success": true })))
 }
 
+async fn interrupt_conversation(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn pause_conversation(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    Ok(Json(json!({ "success": true })))
+}
+
 async fn search_events(
     State(state): State<AuthState>,
     headers: HeaderMap,
@@ -1470,6 +1551,30 @@ async fn search_events(
         events: page,
         next_page_id,
     }))
+}
+
+async fn record_interrupt(
+    State(calls): State<Arc<Mutex<Vec<String>>>>,
+    Path(conversation_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    calls
+        .lock()
+        .await
+        .push(format!("interrupt:{conversation_id}:{body}"));
+    Json(json!({ "success": true }))
+}
+
+async fn record_pause(
+    State(calls): State<Arc<Mutex<Vec<String>>>>,
+    Path(conversation_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    calls
+        .lock()
+        .await
+        .push(format!("pause:{conversation_id}:{body}"));
+    Json(json!({ "success": true }))
 }
 
 async fn authenticated_readiness_socket(
