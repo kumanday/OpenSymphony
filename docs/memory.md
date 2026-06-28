@@ -456,7 +456,7 @@ are covered by the same archive operation.
 
 ## Current model
 
-- COE-491 contributed: PR #160: Wire desktop run detail actions (merge `beab528`)
+- COE-493 contributed: PR #163: Route gateway cancels to harness interrupts (merge `aaba950`)
 
 ## Important invariants
 
@@ -473,10 +473,10 @@ are covered by the same archive operation.
 
 ## Recent changes
 
-- COE-491: Desktop Run Detail Action Wiring And Cleanup
+- COE-493: Desktop Operations Integration Hardening
 
 ## Source refs
 
-- COE-491
+- COE-493
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

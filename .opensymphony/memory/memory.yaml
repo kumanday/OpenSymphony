@@ -460,6 +460,7 @@ areas:
       - area:model-configuration
       - area:okf
       - area:operations
+      - area:orchestrator
       - area:runtime
       - area:security
       - area:testing
@@ -469,6 +470,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M10: Web Client And External Gateway'
       - 'M9.5: Developer Build Acceleration'
@@ -669,6 +671,7 @@ areas:
       - area:model-configuration
       - area:okf
       - area:operations
+      - area:orchestrator
       - area:runtime
       - area:security
       - area:testing
@@ -1206,6 +1209,7 @@ areas:
       - area:model-configuration
       - area:okf
       - area:operations
+      - area:orchestrator
       - area:runtime
       - area:security
       - area:testing
@@ -1215,6 +1219,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M10: Web Client And External Gateway'
       - 'M9.5: Developer Build Acceleration'
