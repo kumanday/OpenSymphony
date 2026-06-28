@@ -46,6 +46,7 @@ export interface MemoryGraphSnapshot {
   nodes: MemoryGraphNode[];
   edges: MemoryGraphEdge[];
   communities: MemoryGraphCommunity[];
+  metrics?: MemoryGraphSnapshotMetrics;
   filters_applied: string[];
   generated_at: string;
 }
@@ -122,6 +123,13 @@ export interface MemoryGraphCommunity {
   concept_count: number;
 }
 
+export interface MemoryGraphSnapshotMetrics {
+  orphan_count: number;
+  broken_link_count: number;
+  stale_concept_count: number;
+  warning_count: number;
+}
+
 export interface MemoryFrontmatterView {
   primary: Record<string, unknown>;
   opensymphony: Record<string, unknown>;
@@ -146,8 +154,11 @@ export interface MemoryGraphSourceRef {
 }
 
 export interface MemoryGraphNodeMetrics {
+  degree?: number;
   indegree: number;
   outdegree: number;
+  centrality?: number;
+  bridge_score?: number;
   pagerank?: number;
   community_id?: string;
 }

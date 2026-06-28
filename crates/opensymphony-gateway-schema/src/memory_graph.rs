@@ -32,6 +32,8 @@ pub struct MemoryGraphSnapshot {
     pub edges: Vec<MemoryGraphEdge>,
     pub communities: Vec<MemoryGraphCommunity>,
     #[serde(default)]
+    pub metrics: MemoryGraphSnapshotMetrics,
+    #[serde(default)]
     pub filters_applied: Vec<String>,
     pub generated_at: DateTime<Utc>,
 }
@@ -140,6 +142,18 @@ pub struct MemoryGraphCommunity {
     pub concept_count: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryGraphSnapshotMetrics {
+    #[serde(default)]
+    pub orphan_count: usize,
+    #[serde(default)]
+    pub broken_link_count: usize,
+    #[serde(default)]
+    pub stale_concept_count: usize,
+    #[serde(default)]
+    pub warning_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryFrontmatterView {
     #[serde(default)]
@@ -176,9 +190,15 @@ pub struct MemoryGraphSourceRef {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryGraphNodeMetrics {
     #[serde(default)]
+    pub degree: usize,
+    #[serde(default)]
     pub indegree: usize,
     #[serde(default)]
     pub outdegree: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centrality: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_score: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pagerank: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
