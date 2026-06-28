@@ -42,9 +42,10 @@ use crate::opensymphony_gateway_schema::{
     },
 };
 use crate::opensymphony_memory::{
-    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphProjectionError,
-    memory_concept_detail, memory_graph_bundles, memory_graph_communities,
-    memory_graph_search as search_memory_graph, memory_graph_snapshot,
+    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
+    MemoryGraphProjectionError, memory_concept_detail, memory_graph_bundles,
+    memory_graph_communities_with_options, memory_graph_search as search_memory_graph,
+    memory_graph_snapshot_with_options,
 };
 
 pub mod action_handler;
@@ -1005,6 +1006,14 @@ struct MemoryVisibilityQuery {
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
+struct MemoryGraphQuery {
+    visibility: Option<String>,
+    include_tags: Option<bool>,
+    include_citations: Option<bool>,
+    include_source_refs: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
 struct MemorySearchQuery {
     q: Option<String>,
     query: Option<String>,
@@ -1026,11 +1035,11 @@ async fn get_memory_bundles(
 async fn get_memory_graph(
     State(state): State<GatewayState>,
     AxumPath(bundle_id): AxumPath<String>,
-    Query(params): Query<MemoryVisibilityQuery>,
+    Query(params): Query<MemoryGraphQuery>,
 ) -> Result<Json<MemoryGraphSnapshot>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_memory(&state)?;
     let access = memory_graph_access(params.visibility.as_deref())?;
-    memory_graph_snapshot(config, &bundle_id, access)
+    memory_graph_snapshot_with_options(config, &bundle_id, access, community_options(&params))
         .map(Json)
         .map_err(memory_graph_error)
 }
@@ -1050,11 +1059,11 @@ async fn get_memory_concept(
 async fn get_memory_communities(
     State(state): State<GatewayState>,
     AxumPath(bundle_id): AxumPath<String>,
-    Query(params): Query<MemoryVisibilityQuery>,
+    Query(params): Query<MemoryGraphQuery>,
 ) -> Result<Json<MemoryCommunityList>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_memory(&state)?;
     let access = memory_graph_access(params.visibility.as_deref())?;
-    memory_graph_communities(config, &bundle_id, access)
+    memory_graph_communities_with_options(config, &bundle_id, access, community_options(&params))
         .map(Json)
         .map_err(memory_graph_error)
 }
@@ -1117,6 +1126,14 @@ fn memory_graph_access(
             "invalid_visibility",
             &format!("unsupported memory visibility `{other}`"),
         )),
+    }
+}
+
+fn community_options(params: &MemoryGraphQuery) -> MemoryGraphCommunityOptions {
+    MemoryGraphCommunityOptions {
+        include_tags: params.include_tags.unwrap_or(false),
+        include_citations: params.include_citations.unwrap_or(false),
+        include_source_refs: params.include_source_refs.unwrap_or(false),
     }
 }
 
