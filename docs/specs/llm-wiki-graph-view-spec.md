@@ -213,8 +213,31 @@ Recommended gateway endpoints:
 - `GET /api/v1/memory/bundles/{bundle_id}/graph`
 - `GET /api/v1/memory/bundles/{bundle_id}/concepts/{concept_id}`
 - `GET /api/v1/memory/bundles/{bundle_id}/communities`
-- `GET /api/v1/memory/search`
+- `GET /api/v1/memory/search?query=...`
 - event stream kind `memory_graph_updated`
+
+All memory graph responses are versioned with `schema_version`. The initial
+local bundle ID is `local-default`; hosted adapters may expose additional bundle
+IDs later without changing the DTO shape.
+
+Read endpoints accept `visibility=public` to return only public concepts. The
+default local loopback mode returns concepts accessible to the local process.
+Hosted gateway adapters must resolve credentials to an equivalent accessible
+scope before calling the DTO boundary. DTOs must not expose absolute local paths
+or `.opensymphony/memory/` paths; concept path fields are bundle-relative display
+paths only, and body/snippet fields are redacted at the server boundary.
+
+`memory_graph_updated` uses the gateway event journal envelope and carries this
+payload:
+
+```json
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "bundle_id": "local-default",
+  "cursor": {"sequence": 1843, "partition": "memory-graph:local-default"},
+  "updated_at": "2026-06-13T17:01:00Z"
+}
+```
 
 The same schemas can be used by a Tauri native adapter, loopback HTTP, or hosted HTTPS.
 

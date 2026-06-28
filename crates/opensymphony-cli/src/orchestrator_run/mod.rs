@@ -259,9 +259,18 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         .map_err(RunCommandError::BindListener)?;
     let gateway_journal = InMemoryEventJournal::new(10_000, 256);
     let gateway_broker = StreamBroker::new(gateway_journal.clone());
+    let gateway_memory_config = if runtime.memory.server.is_some() {
+        Some(crate::opensymphony_memory::MemoryConfig::load(
+            &runtime.target_repo,
+            None,
+        )?)
+    } else {
+        None
+    };
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
-            .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow));
+            .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
+            .with_memory_config(gateway_memory_config);
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
     let mut gateway_action_cursor = 0;
 

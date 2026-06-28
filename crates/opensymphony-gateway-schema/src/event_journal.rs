@@ -175,6 +175,10 @@ pub enum EventKind {
         issue_id: String,
     },
 
+    MemoryGraphUpdated {
+        bundle_id: String,
+    },
+
     // Catch-all for unknown future events
     Unknown {
         raw_kind: String,
@@ -221,6 +225,7 @@ impl EventKind {
             Self::TaskGraphSubIssueUpdated { .. } => "task_graph.sub_issue_updated".into(),
             Self::TaskGraphRelationCreated { .. } => "task_graph.relation_created".into(),
             Self::TaskGraphCommentCreated { .. } => "task_graph.comment_created".into(),
+            Self::MemoryGraphUpdated { .. } => "memory_graph_updated".into(),
             Self::Unknown { raw_kind } => raw_kind.clone(),
         }
     }
