@@ -269,6 +269,7 @@ struct Inner {
     initial_execution_status: String,
     interrupt_supported: bool,
     interrupt_execution_status: String,
+    interrupt_requests: HashMap<Uuid, usize>,
     next_event_index: u64,
 }
 
@@ -308,6 +309,7 @@ impl FakeOpenHandsServer {
                 initial_execution_status: config.initial_execution_status.to_string(),
                 interrupt_supported: config.interrupt_supported,
                 interrupt_execution_status: config.interrupt_execution_status.to_string(),
+                interrupt_requests: HashMap::new(),
                 next_event_index: 1,
             })),
         };
@@ -408,6 +410,15 @@ impl FakeOpenHandsServer {
             .get(&conversation_id)
             .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
         Ok(conversation.events.len())
+    }
+
+    pub async fn interrupt_request_count(&self, conversation_id: Uuid) -> usize {
+        let inner = self.state.inner.lock().await;
+        inner
+            .interrupt_requests
+            .get(&conversation_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub async fn fail_next_conversation_gets(
@@ -688,6 +699,7 @@ async fn interrupt_conversation(
     if !inner.interrupt_supported {
         return Err(StatusCode::NOT_FOUND);
     }
+    *inner.interrupt_requests.entry(conversation_id).or_default() += 1;
     let execution_status = inner.interrupt_execution_status.clone();
     pause_conversation_inner(&mut inner, conversation_id, execution_status)
 }
