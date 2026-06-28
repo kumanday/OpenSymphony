@@ -213,7 +213,10 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Current model
 
-- COE-493 contributed: PR #163: Route gateway cancels to harness interrupts (merge `aaba950`)
+- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
+- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
+- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-473 contributed: No merged PR source was matched during capture.
 
 ## Important invariants
 
@@ -230,10 +233,16 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Recent changes
 
-- COE-493: Desktop Operations Integration Hardening
+- COE-401: Web App Entry And Deployment Modes
+- COE-407: Browser Transport And Remote Stream Protocols
+- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-473: Desktop task graph dependency and run detail parity
 
 ## Source refs
 
-- COE-493
+- COE-401
+- COE-407
+- COE-419
+- COE-473
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
