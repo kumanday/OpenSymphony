@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
     memory_graph::{
@@ -11,6 +13,7 @@ use crate::opensymphony_gateway_schema::{
 };
 
 pub const DEFAULT_MEMORY_GRAPH_BUNDLE_ID: &str = "local-default";
+static MEMORY_GRAPH_SEQUENCE_FLOOR: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryGraphProjectionError {
@@ -505,7 +508,23 @@ fn memory_graph_cursor(bundle_id: &str, timestamp: DateTime<Utc>) -> StreamCurso
 }
 
 fn memory_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
-    timestamp.timestamp_millis().max(0) as u64
+    let candidate = timestamp
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| timestamp.timestamp_millis().saturating_mul(1_000_000))
+        .max(0) as u64;
+    let mut previous = MEMORY_GRAPH_SEQUENCE_FLOOR.load(Ordering::Relaxed);
+    loop {
+        let next = candidate.max(previous.saturating_add(1));
+        match MEMORY_GRAPH_SEQUENCE_FLOOR.compare_exchange_weak(
+            previous,
+            next,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(current) => previous = current,
+        }
+    }
 }
 
 fn concept_node_id(issue: &IndexedIssue) -> String {
@@ -554,7 +573,8 @@ fn insert_edge(
 ) {
     let label_key = label.as_deref().unwrap_or_default();
     let id = format!(
-        "{kind:?}:{source_id}->{target_id}:{}:{:016x}",
+        "{}:{source_id}->{target_id}:{}:{:016x}",
+        edge_kind_key(kind),
         unresolved,
         stable_edge_hash(label_key)
     );
@@ -815,8 +835,22 @@ fn normalize_concept_id(concept_id: &str) -> String {
 
 fn issue_matches_concept(issue: &IndexedIssue, concept_id: &str) -> bool {
     issue.concept_id == concept_id
-        || issue.issue_key == normalize_issue_key(concept_id)
-        || concept_id.ends_with(&issue.issue_key)
+        || issue.concept_id.trim_start_matches('/') == concept_id.trim_start_matches('/')
+        || (!concept_id.contains('/') && issue.issue_key == normalize_issue_key(concept_id))
+}
+
+fn edge_kind_key(kind: MemoryGraphEdgeKind) -> &'static str {
+    match kind {
+        MemoryGraphEdgeKind::Contains => "contains",
+        MemoryGraphEdgeKind::MarkdownLink => "markdown_link",
+        MemoryGraphEdgeKind::ExternalLink => "external_link",
+        MemoryGraphEdgeKind::Cites => "cites",
+        MemoryGraphEdgeKind::TaggedWith => "tagged_with",
+        MemoryGraphEdgeKind::DescribesResource => "describes_resource",
+        MemoryGraphEdgeKind::ScopedTo => "scoped_to",
+        MemoryGraphEdgeKind::SourceSupportedBy => "source_supported_by",
+        MemoryGraphEdgeKind::SameResource => "same_resource",
+    }
 }
 
 fn scope_kind_key(kind: &KnowledgeScopeKind) -> &'static str {

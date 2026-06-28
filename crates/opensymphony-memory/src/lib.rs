@@ -1418,12 +1418,29 @@ and [external mirror](https://example.com/reference).
             ),
         )
         .expect("public concept should write");
+        fs::create_dir_all(bundle.join("backlog")).expect("backlog dir should write");
+        fs::write(
+            bundle.join("backlog/COE-222.md"),
+            r#"---
+type: issue
+title: "Backlog COE-222"
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-222
+---
+
+# Backlog COE-222
+"#,
+        )
+        .expect("backlog concept should write");
 
         refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should work");
 
         let public_bundles =
             memory_graph_bundles(&config, MemoryGraphAccess::Public).expect("bundles");
-        assert_eq!(public_bundles.bundles[0].concept_count, 1);
+        assert_eq!(public_bundles.bundles[0].concept_count, 2);
         assert_eq!(
             public_bundles.bundles[0].visibility,
             MemoryGraphVisibility::Public
@@ -1482,6 +1499,13 @@ and [external mirror](https://example.com/reference).
             })
             .count();
         assert_eq!(parallel_external_edges, 2);
+        let external_edge = all_graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::ExternalLink)
+            .expect("external edge");
+        assert!(external_edge.id.starts_with("external_link:"));
+        assert!(!external_edge.id.starts_with("ExternalLink:"));
 
         let update = memory_graph_updated_event(
             &config,
@@ -1495,6 +1519,13 @@ and [external mirror](https://example.com/reference).
             "memory-graph:local-default".to_string()
         );
         assert!(update.cursor.sequence > 0);
+        let later_update = memory_graph_updated_event(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("later update event payload");
+        assert!(later_update.cursor.sequence > update.cursor.sequence);
 
         let public_graph = memory_graph_snapshot(
             &config,
@@ -1539,6 +1570,24 @@ and [external mirror](https://example.com/reference).
                 .body_markdown
                 .contains(&repo.path().display().to_string())
         );
+        let bare_issue_detail = memory_concept_detail(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            "COE-222",
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("bare issue key lookup");
+        assert_eq!(bare_issue_detail.concept_id, "backlog/COE-222");
+        let wrong_path_detail = memory_concept_detail(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            "issues/COE-222",
+            MemoryGraphAccess::AllAccessible,
+        );
+        assert!(matches!(
+            wrong_path_detail,
+            Err(MemoryGraphProjectionError::ConceptNotFound(_))
+        ));
 
         let search = memory_graph_search(&config, "public graph", 10, MemoryGraphAccess::Public)
             .expect("public graph search");

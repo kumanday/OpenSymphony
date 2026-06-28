@@ -250,8 +250,9 @@ payload:
 
 Servers publish `memory_graph_updated` after memory capture, OKF import, or
 catalog reindex operations make a new graph snapshot available. The payload
-cursor uses the same monotonic timestamp sequence as graph snapshots so stream
-consumers can compare `sequence > last_seen` without depending on hash ordering.
+cursor uses the same strictly monotonic timestamp-derived sequence as graph
+snapshots, including same-tick collision protection, so stream consumers can
+compare `sequence > last_seen` without depending on hash ordering.
 
 The same schemas can be used by a Tauri native adapter, loopback HTTP, or hosted HTTPS.
 
