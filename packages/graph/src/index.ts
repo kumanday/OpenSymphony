@@ -300,7 +300,7 @@ export function applyGraphFilters(
       concept_count: community.node_ids.filter((nodeId) => nodeKindById.get(nodeId) === "concept").length,
     }))
     .filter((community) => community.node_ids.length > 0)
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => compareStrings(a.id, b.id));
   const neighborhoodTokens = neighborhood
     ? [`neighborhood:${focusedNodeId}`, `neighborhood-depth:${neighborhoodDepth}`]
     : [];

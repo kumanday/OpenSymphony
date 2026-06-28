@@ -141,6 +141,31 @@ describe("@opensymphony/graph", () => {
     ]);
   });
 
+  it("sorts communities with code-point ordering", () => {
+    const filtered = applyGraphFilters({
+      ...fixtureGraphSnapshot,
+      communities: [
+        {
+          id: "a-community",
+          label: "lowercase",
+          node_ids: ["concept:coe-465"],
+          concept_count: 1,
+        },
+        {
+          id: "B-community",
+          label: "uppercase",
+          node_ids: ["concept:coe-465"],
+          concept_count: 1,
+        },
+      ],
+    }, initialGraphFilters);
+
+    expect(filtered.communities.map((community) => community.id)).toEqual([
+      "B-community",
+      "a-community",
+    ]);
+  });
+
   it("expands neighborhoods beyond direct neighbors deterministically", () => {
     const filtered = applyGraphFilters(
       fixtureGraphSnapshot,
