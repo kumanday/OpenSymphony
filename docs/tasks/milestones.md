@@ -172,15 +172,15 @@ Tasks:
 
 ## M11.5: LLM Wiki Graph View
 
-Goal: Add a shared web and desktop OKF memory graph view with gateway DTOs, graph extraction, community detection, an accessible inspector, and live privacy-aware memory integration.
+Goal: Add a shared web and desktop OKF Knowledge Graph with gateway DTOs, graph extraction, community detection, an accessible inspector, and live privacy-aware memory integration.
 
 Tasks:
 
 - OSYM-820 Memory Graph DTOs And Gateway Endpoints
 - OSYM-821 Graph Extraction, Metrics, And Community Pipeline
-- OSYM-822 Shared Graph Frontend Package And Reducers
-- OSYM-823 Three.js Graph Renderer And Worker Layouts
-- OSYM-824 Concept Inspector, Search, Filters, And Accessibility Fallback
+- OSYM-822 Shared Knowledge Graph Frontend Package And Reducers
+- OSYM-823 Knowledge Graph Renderer And Worker Layouts
+- OSYM-824 Knowledge Graph Inspector, Search, Filters, And Accessibility Fallback
 - OSYM-825 Live Memory Graph Integration And Privacy Gates
 - OSYM-826 Graph Scale, Visual Regression, And Web/Desktop Hardening
 

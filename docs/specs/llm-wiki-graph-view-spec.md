@@ -1,16 +1,16 @@
-# LLM Wiki Graph View Specification
+# Knowledge Graph Specification
 
 Status: draft
 
 Source basis: [Open Knowledge Format v0.1 draft](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md), the OpenSymphony OKF memory specification, and the current rich client gateway architecture.
 
-Reader: an OpenSymphony engineer designing the shared web and Tauri desktop knowledge visualization experience.
+Reader: an OpenSymphony engineer designing the shared web and Tauri desktop Knowledge Graph experience.
 
-Post-read action: implement a client-side graph view that visualizes OKF memory bundles and LLM wiki concepts through stable gateway data contracts, with Three.js rendering where scale and interaction justify it.
+Post-read action: implement a client-side Knowledge Graph that visualizes OKF memory bundles and LLM wiki concepts through stable gateway data contracts, with Three.js rendering where scale and interaction justify it.
 
 ## 1. Summary
 
-OpenSymphony should provide a first-class LLM Wiki Graph View for OKF bundles. The tool is similar in spirit to Obsidian Graph View, but it is purpose-built for agent memory, work graph context, code intelligence, and hosted/private visibility rules.
+OpenSymphony should provide a first-class Knowledge Graph for OKF bundles. The tool is similar in spirit to Obsidian Graph View, but it is purpose-built for agent memory, work graph context, code intelligence, and hosted/private visibility rules.
 
 The graph view lets users:
 
@@ -71,12 +71,18 @@ The technical lead wants to answer:
 
 The primary view is a dense operational workspace, not a landing page.
 
-Recommended layout:
+Recommended standalone layout:
 
 - Left rail: bundle selector, scope filters, saved views, graph metrics.
 - Center: full-bleed graph canvas.
 - Right inspector: selected concept, frontmatter summary, links, citations, source refs, and body preview.
 - Bottom strip: selection path, active filters, layout status, and community legend.
+
+In the current desktop run workspace, the initial user-facing label is
+`Knowledge Graph` and the first mount point is the left navigation pane as a
+peer toggle with `Task Graph`. Keep the run-detail Inspector scoped to Diff and
+Activity. A modal or expanded presentation can be added later if the docked
+left-pane graph proves too cramped for large neighborhoods.
 
 Primary modes:
 

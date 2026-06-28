@@ -12,7 +12,7 @@ Related specifications:
 
 - [OKF Memory System Specification](specs/okf-memory-spec.md) describes how the
   Markdown memory corpus should evolve into Open Knowledge Format bundles.
-- [LLM Wiki Graph View Specification](specs/llm-wiki-graph-view-spec.md) describes
+- [Knowledge Graph Specification](specs/llm-wiki-graph-view-spec.md) describes
   the client-side graph explorer for those bundles.
 
 ## Rationale and Model
