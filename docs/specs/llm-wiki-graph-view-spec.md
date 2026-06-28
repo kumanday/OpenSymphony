@@ -230,6 +230,12 @@ before calling the DTO boundary. DTOs must not expose absolute local paths or
 `.opensymphony/memory/` paths; concept path fields are bundle-relative display
 paths only, and body/snippet fields are redacted at the server boundary.
 
+`GET /api/v1/memory/search` is global across the caller's accessible concepts in
+the v1 contract. It accepts `query` or `q`, `limit`, and the same visibility
+filter, but it does not yet accept bundle, community, area, or project scope
+filters. Scoped search can be added compatibly by extending the query object
+without changing the response DTO shape.
+
 `memory_graph_updated` uses the gateway event journal envelope and carries this
 payload:
 
