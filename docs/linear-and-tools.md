@@ -32,6 +32,10 @@ Current workflow contract:
 - `tracker.kind` must be `linear`
 - `tracker.project_slug` stores Linear `Project.slugId`
 - `LINEAR_API_KEY` must be available when Linear mode is enabled
+- if `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are both present,
+  `opensymphony run` mints a Linear OAuth client-credentials access token at
+  startup, uses it for the scheduler's Linear tracker client, and exposes it to
+  workers as `LINEAR_API_KEY`
 - the scheduler's Linear tracker client remains mandatory for `opensymphony run`;
   the gateway task graph reader is optional and, when unavailable, causes only
   the task graph endpoint to return `503`
@@ -109,6 +113,10 @@ The agent path is intentionally simple:
 2. choose a checked-in query file
 3. pass variables as JSON
 4. inspect the returned JSON
+
+When `opensymphony run` minted a Linear OAuth client-credentials token, spawned
+workers receive that value as an environment overlay. The target repo's shell
+startup files do not need to be changed for those workers.
 
 Example:
 
@@ -205,12 +213,7 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Current model
 
-- COE-254 contributed: PR #6: COE-254: bootstrap tracker, workspace, and orchestration core
-- COE-263 contributed: PR #35: COE-263: Implement workspace manager and lifecycle hooks (merge `2693eea`)
-- COE-264 contributed: PR #33: COE-264: Linear read adapter and issue normalization (merge `45cca3c`)
-- COE-267 contributed: PR #83: Add memory init and mapped docs sync
-- COE-268 contributed: PR #43: Implement orchestrator scheduler retries and reconciliation (merge `2ad73ad`)
-- COE-270 contributed: PR #39: COE-270: add deterministic workspace context artifacts (merge `3a90eea`)
+- COE-488 contributed: PR #157: feat(cli): add lazy desktop launcher command (merge `7c14ecd`)
 
 ## Important invariants
 
@@ -227,28 +230,10 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Recent changes
 
-- COE-254: Tracker, Workspaces, and Orchestration
-- COE-263: Workspace manager and lifecycle hooks
-- COE-264: Linear read adapter and issue normalization
-- COE-267: Linear MCP write surface
-- COE-268: Orchestrator scheduler, retries, and reconciliation
-- COE-270: Repository harness and generated context artifacts
-- COE-277: Implement hierarchy-aware task selection
-- COE-407: Browser Transport And Remote Stream Protocols
-- COE-419: Hosted Auth Placeholders And Web Parity
-- COE-504: Linear Polling And Rate-Limit Recovery
+- COE-488: Lazy Desktop Launcher Command
 
 ## Source refs
 
-- COE-254
-- COE-263
-- COE-264
-- COE-267
-- COE-268
-- COE-270
-- COE-277
-- COE-407
-- COE-419
-- COE-504
+- COE-488
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

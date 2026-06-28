@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-27T15:38:16.487547+00:00
 
 ## Current model
 
-- COE-494 contributed: PR #150: Expose project metadata in operator snapshots (merge `67f973a`)
+- COE-488 contributed: PR #157: feat(cli): add lazy desktop launcher command (merge `7c14ecd`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-27T15:38:16.487547+00:00
 
 ## Recent changes
 
-- COE-494: Project Metadata For Operator Issue Snapshots
+- COE-488: Lazy Desktop Launcher Command
 
 ## Source refs
 
-- COE-494
+- COE-488
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

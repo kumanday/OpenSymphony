@@ -1,7 +1,7 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -33,7 +33,7 @@ use crate::opensymphony_orchestrator::{
     RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
-use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow};
+use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
     RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
@@ -140,6 +140,7 @@ pub(super) struct RuntimeWorkerBackend {
     workspace_manager: Arc<WorkspaceManager>,
     runner_config: IssueSessionRunnerConfig,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
+    worker_env: BTreeMap<String, String>,
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
     launch_timeout: Duration,
@@ -169,6 +170,20 @@ struct SchedulerObserver {
 
 struct LinearWorkpadCommentSource {
     client: LinearClient,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OverlayEnvironment {
+    overrides: BTreeMap<String, String>,
+}
+
+impl Environment for OverlayEnvironment {
+    fn get(&self, name: &str) -> Option<String> {
+        self.overrides
+            .get(name)
+            .cloned()
+            .or_else(|| env::var_os(name).map(|value| value.to_string_lossy().into_owned()))
+    }
 }
 
 #[async_trait]
@@ -476,6 +491,7 @@ pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
     prepared_tooling: Option<LocalServerTooling>,
     memory_env: Option<&RuntimeMemoryEnv>,
+    worker_env: &BTreeMap<String, String>,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
     let local_server = &runtime.workflow.extensions.openhands.local_server;
@@ -515,6 +531,7 @@ pub(super) async fn build_runtime_transport(
     let mut config = SupervisedServerConfig::new(tooling);
     config.command = local_server.command.clone();
     config.extra_env = local_server.env.clone();
+    config.extra_env.extend(worker_env.clone());
     if let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() {
         conversation_store.ensure_active_and_archived()?;
         config.extra_env.insert(
@@ -677,6 +694,7 @@ impl RuntimeWorkerBackend {
         workflow: Arc<ResolvedWorkflow>,
         workspace_manager: Arc<WorkspaceManager>,
         memory_env: Option<RuntimeMemoryEnv>,
+        worker_env: BTreeMap<String, String>,
     ) -> Self {
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
         let workpad_comment_source = match build_linear_client(&workflow) {
@@ -699,6 +717,7 @@ impl RuntimeWorkerBackend {
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
+            worker_env,
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
@@ -730,7 +749,13 @@ impl RuntimeWorkerBackend {
     }
 
     fn spawn_worker_task(&mut self, request: WorkerStartRequest) -> PendingLaunch {
-        let mut runner = IssueSessionRunner::new(self.client.clone(), self.runner_config.clone());
+        let mut runner = IssueSessionRunner::with_environment(
+            self.client.clone(),
+            self.runner_config.clone(),
+            OverlayEnvironment {
+                overrides: self.worker_env.clone(),
+            },
+        );
         if let Some(source) = self.workpad_comment_source.clone() {
             runner = runner.with_workpad_comment_source(source);
         }
@@ -745,6 +770,7 @@ impl RuntimeWorkerBackend {
         let route = request.route.clone();
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
+        let worker_env = self.worker_env.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
@@ -824,6 +850,7 @@ impl RuntimeWorkerBackend {
                     &codex_schema_validators,
                     &updates_tx,
                     &mut launch_tx,
+                    &worker_env,
                 )
                 .await;
                 let _ = updates_tx.send(WorkerUpdate::Finished {
@@ -1006,10 +1033,7 @@ async fn finish_route_dry_run_workspace_run(
         .await
 }
 
-fn inject_memory_env(
-    env: &mut std::collections::BTreeMap<String, String>,
-    memory: &RuntimeMemoryEnv,
-) {
+fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryEnv) {
     env.insert(
         "OPENSYMPHONY_MEMORY_ENDPOINT".to_string(),
         memory.endpoint.clone(),
@@ -1059,6 +1083,7 @@ async fn run_codex_stdio_issue(
     codex_schema_validators: &CodexSchemaValidatorCache,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    worker_env: &BTreeMap<String, String>,
 ) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
         route,
@@ -1071,6 +1096,7 @@ async fn run_codex_stdio_issue(
         codex_schema_validators,
         updates_tx,
         launch_tx,
+        worker_env,
     )
     .await
     {
@@ -1144,6 +1170,7 @@ async fn try_run_codex_stdio_issue(
     codex_schema_validators: &CodexSchemaValidatorCache,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    worker_env: &BTreeMap<String, String>,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
@@ -1153,6 +1180,7 @@ async fn try_run_codex_stdio_issue(
     let mut child = Command::new(&program)
         .args(args)
         .current_dir(workspace.workspace_path())
+        .envs(worker_env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2561,6 +2589,7 @@ mod tests {
             &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
+            &BTreeMap::new(),
         )
         .await;
 
@@ -2665,6 +2694,7 @@ mod tests {
             &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
+            &BTreeMap::new(),
         )
         .await;
 
@@ -2742,6 +2772,7 @@ mod tests {
             &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
+            &BTreeMap::new(),
         )
         .await;
 
@@ -2818,6 +2849,7 @@ mod tests {
             &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
+            &BTreeMap::new(),
         )
         .await;
 
@@ -2910,6 +2942,7 @@ mod tests {
             workflow,
             Arc::clone(&workspace_manager),
             None,
+            BTreeMap::new(),
         );
         let issue = sample_issue();
         let workspace = sample_workspace(&workspace_root);
@@ -2987,6 +3020,18 @@ mod tests {
     }
 
     #[test]
+    fn overlay_environment_prefers_runtime_overrides() {
+        let env = OverlayEnvironment {
+            overrides: BTreeMap::from([(
+                "LINEAR_API_KEY".to_string(),
+                "Bearer minted".to_string(),
+            )]),
+        };
+
+        assert_eq!(env.get("LINEAR_API_KEY").as_deref(), Some("Bearer minted"));
+    }
+
+    #[test]
     fn memory_env_injection_sets_worker_cli_scope() {
         let memory = RuntimeMemoryEnv {
             endpoint: "http://127.0.0.1:8765/mcp".to_string(),
@@ -3038,6 +3083,7 @@ mod tests {
             workflow,
             workspace_manager,
             None,
+            BTreeMap::new(),
         );
 
         let issue = sample_issue();
@@ -3303,7 +3349,7 @@ Run the scheduler.
             },
         };
 
-        let error = match build_runtime_transport(&runtime, None, None).await {
+        let error = match build_runtime_transport(&runtime, None, None, &BTreeMap::new()).await {
             Ok(_) => panic!("external targets should reject launcher overrides"),
             Err(error) => error,
         };
@@ -3331,6 +3377,7 @@ Run the scheduler.
             workflow,
             workspace_manager,
             None,
+            BTreeMap::new(),
         );
 
         let workspace = sample_workspace(&workspace_root);
@@ -3376,6 +3423,7 @@ Run the scheduler.
             workflow,
             workspace_manager,
             None,
+            BTreeMap::new(),
         );
         let codex_route = codex_test_route(false);
         let openhands_route = crate::opensymphony_orchestrator::HarnessRouteDecision {

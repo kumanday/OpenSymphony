@@ -3,7 +3,7 @@ mod config;
 mod snapshot;
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
     process::ExitCode,
     sync::Arc,
@@ -20,6 +20,7 @@ use crate::opensymphony_orchestrator::{
 use crate::opensymphony_workspace::WorkspaceError;
 use chrono::{DateTime, Utc};
 use clap::Args;
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -122,6 +123,8 @@ enum RunCommandError {
         "OpenHands transport URL `{value}` does not include an explicit port and has no default port"
     )]
     MissingTransportPort { value: String },
+    #[error("failed to mint Linear OAuth token: {0}")]
+    LinearOAuthToken(String),
 }
 
 pub async fn run_command(args: RunArgs) -> ExitCode {
@@ -135,7 +138,8 @@ pub async fn run_command(args: RunArgs) -> ExitCode {
 }
 
 async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
-    let runtime = resolve_runtime_config(&args).await?;
+    let mut runtime = resolve_runtime_config(&args).await?;
+    let linear_worker_env = apply_linear_oauth_client_credentials(&mut runtime).await?;
     info!(
         config = runtime
             .config_path
@@ -200,6 +204,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         &runtime,
         managed_local_preparation.tooling,
         memory_env.as_ref(),
+        &linear_worker_env,
     )
     .await?;
     let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
@@ -210,6 +215,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         Arc::new(runtime.workflow.clone()),
         workspace_manager,
         memory_env.clone(),
+        linear_worker_env,
     );
     let mut scheduler = Scheduler::new(
         tracker,
@@ -417,6 +423,59 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearOAuthTokenResponse {
+    access_token: String,
+}
+
+async fn apply_linear_oauth_client_credentials(
+    runtime: &mut RunRuntimeConfig,
+) -> Result<BTreeMap<String, String>, RunCommandError> {
+    let Some((client_id, client_secret)) = linear_oauth_credentials_from_env() else {
+        return Ok(BTreeMap::new());
+    };
+
+    let response = reqwest::Client::new()
+        .post("https://api.linear.app/oauth/token")
+        .basic_auth(client_id, Some(client_secret))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("scope", "read,write"),
+        ])
+        .send()
+        .await
+        .map_err(|error| RunCommandError::LinearOAuthToken(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| RunCommandError::LinearOAuthToken(error.to_string()))?;
+    if !status.is_success() {
+        return Err(RunCommandError::LinearOAuthToken(format!(
+            "Linear token endpoint returned HTTP {status}"
+        )));
+    }
+    let token: LinearOAuthTokenResponse = serde_json::from_str(&body)
+        .map_err(|error| RunCommandError::LinearOAuthToken(error.to_string()))?;
+    let authorization = format!("Bearer {}", token.access_token.trim());
+    runtime.workflow.config.tracker.api_key = authorization.clone();
+
+    info!("using Linear OAuth client-credentials token for orchestrator and workers");
+    Ok(BTreeMap::from([(
+        "LINEAR_API_KEY".to_string(),
+        authorization,
+    )]))
+}
+
+fn linear_oauth_credentials_from_env() -> Option<(String, String)> {
+    let client_id = std::env::var("LINEAR_CLIENT_ID").ok()?.trim().to_string();
+    let client_secret = std::env::var("LINEAR_CLIENT_SECRET")
+        .ok()?
+        .trim()
+        .to_string();
+    (!client_id.is_empty() && !client_secret.is_empty()).then_some((client_id, client_secret))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
