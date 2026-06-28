@@ -395,12 +395,13 @@ pub fn memory_graph_search(
     access: MemoryGraphAccess,
 ) -> Result<MemorySearchResponse, MemoryGraphProjectionError> {
     let issues = accessible_issues(config, access)?;
+    let limit = limit.max(1);
     let by_issue = issues
         .iter()
         .map(|issue| (issue.issue_key.clone(), issue))
         .collect::<BTreeMap<_, _>>();
     let scope = MemoryScopeFilter::default();
-    let results = search_with_scope(config, query, limit, &scope)?
+    let results = search_with_scope(config, query, usize::MAX, &scope)?
         .into_iter()
         .filter_map(|result| {
             let issue = by_issue.get(&result.issue_key)?;
@@ -413,6 +414,7 @@ pub fn memory_graph_search(
                 areas: result.areas,
             })
         })
+        .take(limit)
         .collect();
 
     Ok(MemorySearchResponse {
@@ -424,12 +426,11 @@ pub fn memory_graph_search(
 }
 
 pub fn memory_graph_updated_event(
-    config: &MemoryConfig,
+    _config: &MemoryConfig,
     bundle_id: &str,
-    access: MemoryGraphAccess,
+    _access: MemoryGraphAccess,
 ) -> Result<MemoryGraphUpdatedEvent, MemoryGraphProjectionError> {
     ensure_default_memory_bundle(bundle_id)?;
-    let _ = accessible_issues(config, access)?;
     let updated_at = Utc::now();
     Ok(MemoryGraphUpdatedEvent {
         schema_version: SchemaVersion::v1(),
@@ -652,10 +653,43 @@ fn resolve_index_path(config: &MemoryConfig, path: &Path) -> PathBuf {
 fn redact_for_dto(config: &MemoryConfig, value: &str) -> String {
     let repo_root = config.repo_root.to_string_lossy();
     let memory_root = config.memory_root.to_string_lossy();
-    value
-        .replace(repo_root.as_ref(), "[redacted-local-path]")
-        .replace(memory_root.as_ref(), "[redacted-memory-path]")
-        .replace(".opensymphony/memory/", "[redacted-memory-path]/")
+    let value = replace_path_token(value, repo_root.as_ref(), "[redacted-local-path]");
+    let value = replace_path_token(&value, memory_root.as_ref(), "[redacted-memory-path]");
+    value.replace(".opensymphony/memory/", "[redacted-memory-path]/")
+}
+
+fn replace_path_token(value: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return value.to_string();
+    }
+    let mut result = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(index) = remaining.find(needle) {
+        result.push_str(&remaining[..index]);
+        let after = &remaining[index + needle.len()..];
+        if is_path_token_boundary(after) {
+            result.push_str(replacement);
+        } else {
+            result.push_str(needle);
+        }
+        remaining = after;
+    }
+    result.push_str(remaining);
+    result
+}
+
+fn is_path_token_boundary(after: &str) -> bool {
+    let mut chars = after.chars();
+    match chars.next() {
+        None => true,
+        Some('/') | Some('\\') => true,
+        Some('.') => chars.next().is_none_or(|next| {
+            next.is_whitespace() || matches!(next, ',' | ';' | ':' | ')' | ']' | '}')
+        }),
+        Some(character) => {
+            !(character.is_ascii_alphanumeric() || character == '-' || character == '_')
+        }
+    }
 }
 
 fn parsed_okf_concept(config: &MemoryConfig, issue: &IndexedIssue) -> Option<OkfConcept> {

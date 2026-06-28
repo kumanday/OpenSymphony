@@ -42,9 +42,9 @@ use crate::opensymphony_gateway_schema::{
     },
 };
 use crate::opensymphony_memory::{
-    MemoryConfig, MemoryGraphAccess, MemoryGraphProjectionError, memory_concept_detail,
-    memory_graph_bundles, memory_graph_communities, memory_graph_search as search_memory_graph,
-    memory_graph_snapshot,
+    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphProjectionError,
+    memory_concept_detail, memory_graph_bundles, memory_graph_communities,
+    memory_graph_search as search_memory_graph, memory_graph_snapshot,
 };
 
 pub mod action_handler;
@@ -1129,11 +1129,17 @@ fn memory_graph_error(error: MemoryGraphProjectionError) -> (StatusCode, Json<se
         MemoryGraphProjectionError::ConceptNotFound(_) => {
             memory_graph_response(StatusCode::NOT_FOUND, "concept_not_found", &message)
         }
-        MemoryGraphProjectionError::Memory(source) => memory_graph_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "memory_graph_error",
-            &source.to_string(),
-        ),
+        MemoryGraphProjectionError::Memory(source) => {
+            let (status, code) = memory_graph_memory_error_status(&source);
+            memory_graph_response(status, code, &source.to_string())
+        }
+    }
+}
+
+fn memory_graph_memory_error_status(error: &MemoryError) -> (StatusCode, &'static str) {
+    match error {
+        MemoryError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid_memory_request"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "memory_graph_error"),
     }
 }
 

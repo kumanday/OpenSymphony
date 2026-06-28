@@ -1410,14 +1410,34 @@ opensymphony:
 # COE-200: Public graph concept
 
 Public graph body mentions .opensymphony/memory/issues/COE-999.md and {}.
+Sibling prefix must not be mangled: {}bed.
 
 See [private concept](COE-123.md), [external](https://example.com/reference),
 and [external mirror](https://example.com/reference).
 "#,
+                repo.path().display(),
                 repo.path().display()
             ),
         )
         .expect("public concept should write");
+        fs::write(
+            issues_dir.join("AAA-111.md"),
+            r#"---
+type: issue
+title: "AAA-111: Private ranked search match"
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: AAA-111
+---
+
+# AAA-111: Private ranked search match
+
+public graph
+"#,
+        )
+        .expect("private search concept should write");
         fs::create_dir_all(bundle.join("backlog")).expect("backlog dir should write");
         fs::write(
             bundle.join("backlog/COE-222.md"),
@@ -1538,7 +1558,9 @@ opensymphony:
         assert!(!public_json.contains("concept:issues/COE-123"));
         assert!(!public_json.contains("COE-123: OKF catalog rebuild"));
         assert!(!public_json.contains(".opensymphony/memory"));
-        assert!(!public_json.contains(&repo.path().display().to_string()));
+        assert!(!public_json.contains(&format!("{}/", repo.path().display())));
+        assert!(!public_json.contains(&format!("{}.", repo.path().display())));
+        assert!(!public_json.contains("[redacted-local-path]bed"));
 
         let detail = memory_concept_detail(
             &config,
@@ -1568,7 +1590,12 @@ opensymphony:
         assert!(
             !detail
                 .body_markdown
-                .contains(&repo.path().display().to_string())
+                .contains(&format!("{}/", repo.path().display()))
+        );
+        assert!(
+            !detail
+                .body_markdown
+                .contains(&format!("{}.", repo.path().display()))
         );
         let bare_issue_detail = memory_concept_detail(
             &config,
@@ -1589,7 +1616,7 @@ opensymphony:
             Err(MemoryGraphProjectionError::ConceptNotFound(_))
         ));
 
-        let search = memory_graph_search(&config, "public graph", 10, MemoryGraphAccess::Public)
+        let search = memory_graph_search(&config, "public graph", 1, MemoryGraphAccess::Public)
             .expect("public graph search");
         assert_eq!(search.results.len(), 1);
         assert_eq!(search.results[0].concept_id, "issues/COE-200");
