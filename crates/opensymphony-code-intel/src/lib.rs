@@ -326,6 +326,7 @@ pub struct AstDiagnostic {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CodeIntelError {
     #[error("unsupported source language for {path}")]
     UnsupportedLanguage { path: String },
@@ -892,8 +893,12 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
     for (line_index, line) in source.split_inclusive('\n').enumerate() {
         let line_number = line_index + 1;
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("```") {
-            if let Some(fence) = open_fence.take() {
+        if let Some((fence_tick_count, rest)) = markdown_backtick_fence(trimmed) {
+            if open_fence
+                .as_ref()
+                .is_some_and(|fence| is_markdown_closing_fence(trimmed, fence.tick_count))
+            {
+                let fence = open_fence.take().expect("checked open fence");
                 let span = SourceSpan {
                     start_byte: fence.content_start_byte,
                     end_byte: byte_offset,
@@ -916,20 +921,26 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
                     rendered_span: fence.language_span.render(),
                     span: fence.language_span,
                 });
-            } else {
+            } else if open_fence.is_none() {
                 let language = rest.trim().to_string();
                 let indent = line.len() - trimmed.len();
                 let language_start_in_rest = rest.find(language.as_str()).unwrap_or(0);
-                let language_start_byte = byte_offset + indent + 3 + language_start_in_rest;
+                let language_start_byte =
+                    byte_offset + indent + fence_tick_count + language_start_in_rest;
                 let language_span = SourceSpan {
                     start_byte: language_start_byte,
                     end_byte: language_start_byte + language.len(),
                     start_line: line_number,
-                    start_column: indent + 4 + language_start_in_rest,
+                    start_column: indent + fence_tick_count + 1 + language_start_in_rest,
                     end_line: line_number,
-                    end_column: indent + 4 + language_start_in_rest + language.len(),
+                    end_column: indent
+                        + fence_tick_count
+                        + 1
+                        + language_start_in_rest
+                        + language.len(),
                 };
                 open_fence = Some(MarkdownFence {
+                    tick_count: fence_tick_count,
                     language,
                     language_span,
                     content_start_byte: byte_offset + line.len(),
@@ -943,7 +954,23 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
     captures
 }
 
+fn markdown_backtick_fence(trimmed_line: &str) -> Option<(usize, &str)> {
+    let tick_count = trimmed_line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b'`')
+        .count();
+    (tick_count >= 3).then(|| (tick_count, &trimmed_line[tick_count..]))
+}
+
+fn is_markdown_closing_fence(trimmed_line: &str, opening_tick_count: usize) -> bool {
+    markdown_backtick_fence(trimmed_line)
+        .map(|(tick_count, rest)| tick_count >= opening_tick_count && rest.trim().is_empty())
+        .unwrap_or(false)
+}
+
 struct MarkdownFence {
+    tick_count: usize,
     language: String,
     language_span: SourceSpan,
     content_start_byte: usize,
@@ -1003,6 +1030,7 @@ mod tests {
     const YAML_CONFIG: &str = include_str!("../fixtures/documents/config.yaml");
     const TOML_CONFIG: &str = include_str!("../fixtures/documents/config.toml");
     const MARKDOWN_NOTES: &str = include_str!("../fixtures/documents/notes.md");
+    const FOUR_BACKTICK_MARKDOWN: &str = "````ts\n```not close\nvalue()\n````\n";
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
@@ -1255,6 +1283,21 @@ mod tests {
         assert_eq!(content.span.start_byte, 19);
         assert_eq!(content.span.end_byte, 34);
         assert_eq!(content.rendered_span, "4:1-5:1");
+
+        let four_tick = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/four_tick.md")),
+            FOUR_BACKTICK_MARKDOWN,
+        )
+        .expect("markdown parses");
+        let language = find_capture(&four_tick, "injection.language", "ts");
+        assert_eq!(language.span.start_byte, 4);
+        assert_eq!(language.span.end_byte, 6);
+        assert_eq!(language.rendered_span, "1:5-1:7");
+        let content = find_capture(&four_tick, "injection.content", "```not close\nvalue()\n");
+        assert_eq!(content.span.start_byte, 7);
+        assert_eq!(content.span.end_byte, 28);
+        assert_eq!(content.rendered_span, "2:1-4:1");
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
