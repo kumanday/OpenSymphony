@@ -636,19 +636,17 @@ fn run_query_pack(
 
                 if let Some(kind) =
                     symbol_kind_for_capture(language, &capture_name, capture.node, source)
-                {
-                    if let Some(name) =
+                    && let Some(name) =
                         symbol_name_for_capture(&capture_name, capture.node, source)?
-                    {
-                        symbols.push(SymbolRecord {
-                            kind,
-                            name,
-                            span: span.clone(),
-                            rendered_span: rendered_span.clone(),
-                            parser_version: TREE_SITTER_VERSION.to_string(),
-                            query_pack_version: compiled.metadata.version.clone(),
-                        });
-                    }
+                {
+                    symbols.push(SymbolRecord {
+                        kind,
+                        name,
+                        span: span.clone(),
+                        rendered_span: rendered_span.clone(),
+                        parser_version: TREE_SITTER_VERSION.to_string(),
+                        query_pack_version: compiled.metadata.version.clone(),
+                    });
                 }
 
                 captures.push(CaptureRecord {
@@ -700,10 +698,10 @@ fn symbol_name_for_capture(
     if let Some(name) = node.child_by_field_name("name") {
         return Ok(Some(name.utf8_text(source)?.to_string()));
     }
-    if matches!(capture_name, "test.case" | "reference.call") {
-        if let Some(function) = node.child_by_field_name("function") {
-            return Ok(Some(function.utf8_text(source)?.to_string()));
-        }
+    if matches!(capture_name, "test.case" | "reference.call")
+        && let Some(function) = node.child_by_field_name("function")
+    {
+        return Ok(Some(function.utf8_text(source)?.to_string()));
     }
     if matches!(
         node.kind(),
