@@ -1240,7 +1240,8 @@ where
                     execution.observe_runtime_event(
                         observed_at,
                         Some(format!(
-                            "tracker-merging-interrupt-acknowledged-{}",
+                            "{}-interrupt-acknowledged-{}",
+                            reason.as_str(),
                             observed_at.as_u64()
                         )),
                         Some("scheduler.interrupt_acknowledged".to_string()),

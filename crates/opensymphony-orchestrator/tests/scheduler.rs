@@ -755,7 +755,13 @@ async fn operator_cancel_interrupts_active_worker_once() {
         ..Default::default()
     };
     let workspace = FakeWorkspace::default();
-    let worker = FakeWorker::default();
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
+            detail: Some("operator cancel acknowledged".to_string()),
+        }));
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
     let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
@@ -793,6 +799,19 @@ async fn operator_cancel_interrupts_active_worker_once() {
             .recent_activity
             .iter()
             .any(|event| event.summary.contains("operator_cancel"))
+    );
+    let activity_ids: Vec<_> = execution
+        .conversation()
+        .expect("conversation should remain attached")
+        .recent_activity
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect();
+    assert!(
+        activity_ids
+            .iter()
+            .any(|event_id| event_id.starts_with("operator_cancel-interrupt-acknowledged-")),
+        "operator cancel acknowledgement should use a reason-specific event id; activity IDs: {activity_ids:?}"
     );
 
     scheduler
