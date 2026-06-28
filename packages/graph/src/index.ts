@@ -223,7 +223,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         mode: action.nodeId ? "neighborhood" : state.mode,
         focusedNodeId: action.nodeId,
         selectedNodeIds: action.nodeId ? uniqueSorted([...state.selectedNodeIds, action.nodeId]) : state.selectedNodeIds,
-        neighborhoodDepth: action.neighborhoodDepth ?? state.neighborhoodDepth,
+        neighborhoodDepth: action.neighborhoodDepth === undefined ? state.neighborhoodDepth : action.neighborhoodDepth,
       };
     case "SELECTION_SET":
       return { ...state, selectedNodeIds: uniqueSorted(action.nodeIds) };
@@ -251,7 +251,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         selectedNodeIds: uniqueSorted(restored.selectedNodeIds === undefined ? state.selectedNodeIds : restored.selectedNodeIds),
         searchQuery: normalizeQuery(restored.searchQuery === undefined ? state.searchQuery : restored.searchQuery),
         filters: normalizeFilters(restored.filters === undefined ? state.filters : restored.filters),
-        neighborhoodDepth: restored.neighborhoodDepth ?? state.neighborhoodDepth,
+        neighborhoodDepth: restored.neighborhoodDepth === undefined ? state.neighborhoodDepth : restored.neighborhoodDepth,
       };
     }
     case "GRAPH_RESET":
@@ -445,7 +445,7 @@ function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boole
   if (filters.freshness.length > 0 && (!node.freshness || !filters.freshness.includes(node.freshness))) return false;
   if (filters.warning === "with_warnings" && node.warning_count <= 0) return false;
   if (filters.warning === "without_warnings" && node.warning_count > 0) return false;
-  if (filters.communities.length > 0 && (!node.metrics.community_id || !filters.communities.includes(node.metrics.community_id))) return false;
+  if (filters.communities.length > 0 && (!node.metrics?.community_id || !filters.communities.includes(node.metrics.community_id))) return false;
   if (filters.areas.length > 0 && !hasAny(node, "area", filters.areas)) return false;
   if (filters.projects.length > 0 && !hasAny(node, "project", filters.projects)) return false;
   if (filters.milestones.length > 0 && !hasAny(node, "milestone", filters.milestones)) return false;

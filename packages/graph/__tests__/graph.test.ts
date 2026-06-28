@@ -79,12 +79,14 @@ describe("@opensymphony/graph", () => {
         bundleId: null,
         focusedNodeId: null,
         selectedNodeIds: [],
+        neighborhoodDepth: 0,
       },
     });
 
     expect(restored.selectedBundleId).toBeNull();
     expect(restored.focusedNodeId).toBeNull();
     expect(restored.selectedNodeIds).toEqual([]);
+    expect(restored.neighborhoodDepth).toBe(0);
     expect(restored.searchQuery).toBe("graph");
     expect(restored.filters.tags).toEqual(["graph-view"]);
   });
@@ -141,6 +143,24 @@ describe("@opensymphony/graph", () => {
     ]);
   });
 
+  it("does not crash when community-filtered DTO nodes omit metrics", () => {
+    const nodeWithoutMetrics = { ...fixtureGraphSnapshot.nodes[0] } as Record<string, unknown>;
+    delete nodeWithoutMetrics.metrics;
+
+    const filtered = applyGraphFilters(
+      {
+        ...fixtureGraphSnapshot,
+        nodes: [nodeWithoutMetrics as never],
+      },
+      {
+        ...initialGraphFilters,
+        communities: ["area:graph-view"],
+      },
+    );
+
+    expect(filtered.nodes).toEqual([]);
+  });
+
   it("sorts communities with code-point ordering", () => {
     const filtered = applyGraphFilters({
       ...fixtureGraphSnapshot,
@@ -164,6 +184,16 @@ describe("@opensymphony/graph", () => {
       "B-community",
       "a-community",
     ]);
+  });
+
+  it("preserves depth zero for focused neighborhoods", () => {
+    const state = graphReducer(initialGraphState, {
+      type: "NODE_FOCUSED",
+      nodeId: "concept:coe-465",
+      neighborhoodDepth: 0,
+    });
+
+    expect(state.neighborhoodDepth).toBe(0);
   });
 
   it("expands neighborhoods beyond direct neighbors deterministically", () => {
