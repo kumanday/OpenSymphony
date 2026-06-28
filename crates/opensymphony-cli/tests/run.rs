@@ -1,6 +1,6 @@
 use std::{process::Stdio, time::Duration};
 
-use crate::opensymphony_testkit::FakeOpenHandsServer;
+use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use crate::{
     opensymphony_domain::{ConversationId, IssueId, IssueIdentifier},
     opensymphony_openhands::IssueConversationManifest,
@@ -181,6 +181,57 @@ async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_me
         "run command should call the OpenHands /interrupt route exactly once"
     );
     println!("fake OpenHands interrupt requests: {interrupt_requests}");
+
+    terminate_child(&mut child).await;
+}
+
+#[tokio::test]
+async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
+    let openhands = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+        run_terminal_status: "running",
+        ..Default::default()
+    })
+    .await
+    .expect("fake OpenHands server should start");
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("temp project should exist");
+    let bind_addr = reserve_socket_addr();
+
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        openhands.base_url(),
+        format!("control_plane:\n  bind: {bind_addr}\nlinear:\n  enabled: false\n"),
+        "polling:\n  interval_ms: 50\n",
+    );
+    write_memory_config(project.path());
+
+    let mut child = spawn_run_child(project.path(), &[]);
+    let gateway_base = format!("http://{bind_addr}");
+    wait_for_running_issue(&format!("{gateway_base}/api/v1/snapshot"), "COE-429")
+        .await
+        .expect("run command should expose a running issue before cancel");
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_base}/api/v1/actions/dispatch"))
+        .json(&json!({
+            "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+            "correlation_id": "corr_cancel_gateway_to_harness",
+            "action_kind": "cancel",
+            "target_entity": {
+                "entity_kind": "run",
+                "entity_id": "COE-429"
+            },
+            "idempotency_key": "cancel-COE-429"
+        }))
+        .send()
+        .await
+        .expect("cancel action should be posted");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    wait_for_openhands_interrupt(&openhands)
+        .await
+        .expect("gateway cancel should reach fake OpenHands interrupt");
 
     terminate_child(&mut child).await;
 }
@@ -486,6 +537,33 @@ async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
     ))
 }
 
+async fn wait_for_running_issue(url: &str, identifier: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(url).send().await
+            && response.status().is_success()
+            && let Ok(snapshot) = response.json::<Value>().await
+            && issue_runtime_state_visible(&snapshot, identifier, "running")
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Err(format!("timed out waiting for running issue at {url}"))
+}
+
+async fn wait_for_openhands_interrupt(openhands: &FakeOpenHandsServer) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if openhands.total_interrupt_request_count().await == 1 {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Err("timed out waiting for fake OpenHands interrupt request".to_string())
+}
+
 async fn wait_for_merging_supersede_event(url: &str) -> Result<Value, String> {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -502,6 +580,17 @@ async fn wait_for_merging_supersede_event(url: &str) -> Result<Value, String> {
     Err(format!(
         "timed out waiting for Merging supersede event at {url}"
     ))
+}
+
+fn issue_runtime_state_visible(envelope: &Value, identifier: &str, state: &str) -> bool {
+    envelope["snapshot"]["issues"]
+        .as_array()
+        .and_then(|issues| {
+            issues
+                .iter()
+                .find(|issue| issue["identifier"] == identifier)
+        })
+        .is_some_and(|issue| issue["runtime_state"] == state)
 }
 
 fn print_merging_supersede_evidence(envelope: &Value) {

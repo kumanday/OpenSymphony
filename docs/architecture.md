@@ -245,6 +245,11 @@ harness interrupt. Harness adapters later translate that command to their
 native protocol, but scheduler state does not depend on desktop-local state or
 adapter-private DTOs.
 
+`opensymphony run` consumes accepted gateway `cancel` actions from the gateway
+event journal and forwards them into the scheduler-owned `operator_cancel`
+interrupt path. The gateway validates and records the operator intent, but it
+does not mutate scheduling state directly.
+
 Run Detail diagnostics surface the orchestrator-owned cancel state as
 requested, acknowledged, failed, timed out, and reason fields. Terminal cancel
 states are sticky: late acknowledgements, failures, or timeouts do not overwrite

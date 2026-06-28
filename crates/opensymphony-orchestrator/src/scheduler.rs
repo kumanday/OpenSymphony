@@ -585,6 +585,53 @@ where
         Ok(self.snapshot(observed_at))
     }
 
+    pub async fn interrupt_operator_cancel(
+        &mut self,
+        target: &str,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let Some((issue_id, mut execution, run, harness_kind)) =
+            self.operator_cancel_candidate(target)
+        else {
+            return Ok(false);
+        };
+
+        let (command, queued) = execution.request_interrupt(
+            harness_kind,
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            observed_at,
+        )?;
+
+        if queued {
+            execution.observe_runtime_event(
+                observed_at,
+                Some(format!(
+                    "operator-cancel-interrupt-{}",
+                    observed_at.as_u64()
+                )),
+                Some("scheduler.interrupt_requested".to_string()),
+                Some("Operator cancel requested: operator_cancel".to_string()),
+                Some(serde_json::json!({
+                    "reason": HarnessInterruptReason::OperatorCancel.as_str(),
+                    "worker_id": run.worker_id.as_str(),
+                    "target": target,
+                })),
+            )?;
+            let result = self.worker.interrupt_worker(command).await;
+            Self::apply_interrupt_result(
+                &mut execution,
+                HarnessInterruptReason::OperatorCancel,
+                observed_at,
+                result,
+            )?;
+        }
+
+        self.insert_execution(issue_id, execution);
+        Ok(true)
+    }
+
     pub async fn run_until_shutdown<F>(&mut self, shutdown: F) -> Result<(), SchedulerError>
     where
         F: Future<Output = ()>,
@@ -1056,7 +1103,12 @@ where
         )?;
         if let Some(command) = command {
             let result = self.worker.interrupt_worker(command).await;
-            Self::apply_merging_interrupt_result(&mut execution, observed_at, result)?;
+            Self::apply_interrupt_result(
+                &mut execution,
+                HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                observed_at,
+                result,
+            )?;
         }
 
         self.insert_execution(issue_id, execution);
@@ -1100,6 +1152,40 @@ where
         Some((issue_id, execution, run, harness_kind))
     }
 
+    fn operator_cancel_candidate(
+        &self,
+        target: &str,
+    ) -> Option<(IssueId, IssueExecution, RunAttempt, String)> {
+        let (issue_id, execution) = self.executions.iter().find(|(_, execution)| {
+            execution
+                .issue()
+                .identifier
+                .as_str()
+                .eq_ignore_ascii_case(target)
+                || execution
+                    .current_run()
+                    .is_some_and(|run| run.issue_identifier.as_str().eq_ignore_ascii_case(target))
+                || execution
+                    .conversation()
+                    .is_some_and(|conversation| conversation.conversation_id.as_str() == target)
+        })?;
+        if !matches!(
+            execution.status(),
+            SchedulerStatus::Claimed | SchedulerStatus::Running
+        ) {
+            return None;
+        }
+
+        let execution = execution.clone();
+        let run = execution.current_run().cloned()?;
+        let harness_kind = self
+            .worker_metadata
+            .get(&run.worker_id)
+            .and_then(|metadata| metadata.harness_kind.clone())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        Some((issue_id.clone(), execution, run, harness_kind))
+    }
+
     fn prepare_merging_interrupt(
         execution: &mut IssueExecution,
         issue: &NormalizedIssue,
@@ -1141,8 +1227,9 @@ where
         Ok(Some(command))
     }
 
-    fn apply_merging_interrupt_result(
+    fn apply_interrupt_result(
         execution: &mut IssueExecution,
+        reason: HarnessInterruptReason,
         observed_at: TimestampMs,
         result: Result<WorkerInterruptAcknowledgement, M::Error>,
     ) -> Result<(), SchedulerError> {
@@ -1159,7 +1246,7 @@ where
                         Some("scheduler.interrupt_acknowledged".to_string()),
                         Some(detail),
                         Some(serde_json::json!({
-                            "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                            "reason": reason.as_str(),
                         })),
                     )?;
                 }

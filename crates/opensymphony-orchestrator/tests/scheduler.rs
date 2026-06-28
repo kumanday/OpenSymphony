@@ -749,6 +749,60 @@ async fn running_state_polling_uses_lightweight_state_refresh_interval() {
 }
 
 #[tokio::test]
+async fn operator_cancel_interrupts_active_worker_once() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-493", "COE-493", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should dispatch active worker");
+
+    assert!(
+        scheduler
+            .interrupt_operator_cancel("COE-493", ts(200))
+            .await
+            .expect("operator cancel should be handled")
+    );
+
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(
+        scheduler.worker().interrupts[0].reason,
+        HarnessInterruptReason::OperatorCancel
+    );
+    let execution = scheduler
+        .execution(&IssueId::new("lin-493").expect("issue id should be valid"))
+        .expect("execution should still be tracked");
+    let interrupt = execution.interrupt().expect("interrupt should be recorded");
+    assert_eq!(interrupt.status, HarnessInterruptStatus::Acknowledged);
+    assert_eq!(
+        interrupt.command.reason,
+        HarnessInterruptReason::OperatorCancel
+    );
+    assert!(
+        execution
+            .conversation()
+            .expect("conversation should remain attached")
+            .recent_activity
+            .iter()
+            .any(|event| event.summary.contains("operator_cancel"))
+    );
+
+    scheduler
+        .interrupt_operator_cancel("COE-493", ts(300))
+        .await
+        .expect("repeated operator cancel should be idempotent");
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+}
+
+#[tokio::test]
 async fn merging_supersedes_human_review_polling_once_and_continues_same_issue() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-492", "COE-492", "Human Review", 0)],

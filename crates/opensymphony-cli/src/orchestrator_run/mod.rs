@@ -10,12 +10,14 @@ use std::{
 };
 
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
-use crate::opensymphony_domain::TimestampMs;
+use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker, TimestampMs};
 use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
+use crate::opensymphony_gateway_schema::event_journal::{EventKind, EventRecord};
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
     IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
+    TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
 use crate::opensymphony_workspace::WorkspaceError;
 use chrono::{DateTime, Utc};
@@ -255,9 +257,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let listener = TcpListener::bind(runtime.bind)
         .await
         .map_err(RunCommandError::BindListener)?;
-    let server = GatewayServer::new(store.clone())
-        .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow));
+    let gateway_journal = InMemoryEventJournal::new(10_000, 256);
+    let gateway_broker = StreamBroker::new(gateway_journal.clone());
+    let server =
+        GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
+            .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
+    let mut gateway_action_cursor = 0;
 
     let bootstrap_snapshot = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
@@ -332,7 +338,16 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             result = async {
                 ticker.tick().await;
                 let observed_at = now_timestamp();
-                (observed_at, scheduler.tick(observed_at).await)
+                let result = match apply_gateway_action_events(
+                    &mut scheduler,
+                    &gateway_journal,
+                    &mut gateway_action_cursor,
+                    observed_at,
+                ).await {
+                    Ok(()) => scheduler.tick(observed_at).await,
+                    Err(error) => Err(error),
+                };
+                (observed_at, result)
             } => {
                 let (observed_at, result) = result;
                 match result {
@@ -423,6 +438,44 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     Ok(())
+}
+
+async fn apply_gateway_action_events<T, W, M>(
+    scheduler: &mut Scheduler<T, W, M>,
+    journal: &InMemoryEventJournal,
+    cursor: &mut u64,
+    observed_at: TimestampMs,
+) -> Result<(), SchedulerError>
+where
+    T: TrackerBackend,
+    W: WorkspaceBackend,
+    M: WorkerBackend,
+{
+    for event in journal.all_events().await {
+        if event.sequence <= *cursor {
+            continue;
+        }
+        *cursor = event.sequence;
+        let Some(target) = gateway_cancel_target(&event) else {
+            continue;
+        };
+        scheduler
+            .interrupt_operator_cancel(target, observed_at)
+            .await?;
+    }
+    Ok(())
+}
+
+fn gateway_cancel_target(event: &EventRecord) -> Option<&str> {
+    match &event.kind {
+        EventKind::GatewayActionDispatched { action } if action == "cancel" => {}
+        _ => return None,
+    }
+    let payload = event.payload.as_ref()?;
+    if payload["status"] != "accepted" {
+        return None;
+    }
+    payload["target_entity"]["id"].as_str()
 }
 
 #[derive(Debug, Deserialize)]
