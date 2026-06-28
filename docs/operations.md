@@ -500,7 +500,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-488 contributed: PR #157: feat(cli): add lazy desktop launcher command (merge `7c14ecd`)
+- COE-491 contributed: PR #160: Wire desktop run detail actions (merge `beab528`)
 
 ## Important invariants
 
@@ -517,10 +517,10 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Recent changes
 
-- COE-488: Lazy Desktop Launcher Command
+- COE-491: Desktop Run Detail Action Wiring And Cleanup
 
 ## Source refs
 
-- COE-488
+- COE-491
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
