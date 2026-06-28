@@ -894,17 +894,21 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
 
     for (line_index, line) in source.split_inclusive('\n').enumerate() {
         let line_number = line_index + 1;
-        let indent = line.len() - line.trim_start().len();
+        let line_body = markdown_line_body(line);
+        let indent = line_body
+            .as_bytes()
+            .iter()
+            .take_while(|byte| **byte == b' ')
+            .count();
         if indent > 3 {
             byte_offset += line.len();
             continue;
         }
-        let trimmed = &line[indent..];
-        if let Some((fence_tick_count, rest)) = markdown_backtick_fence(trimmed) {
-            if open_fence
-                .as_ref()
-                .is_some_and(|fence| is_markdown_closing_fence(trimmed, fence.tick_count))
-            {
+        let trimmed = &line_body[indent..];
+        if let Some((fence_marker, fence_marker_count, rest)) = markdown_fence_marker(trimmed) {
+            if open_fence.as_ref().is_some_and(|fence| {
+                is_markdown_closing_fence(trimmed, fence.marker, fence.marker_count)
+            }) {
                 let fence = open_fence.take().expect("checked open fence");
                 let span = SourceSpan {
                     start_byte: fence.content_start_byte,
@@ -917,7 +921,7 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
                 captures.push(CaptureRecord {
                     query_name: MARKDOWN_FENCE_QUERY_NAME.to_string(),
                     capture_name: "injection.content".to_string(),
-                    text: source[fence.content_start_byte..byte_offset].to_string(),
+                    text: markdown_capture_text(&source[fence.content_start_byte..byte_offset]),
                     rendered_span: span.render(),
                     span,
                 });
@@ -933,19 +937,24 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
             } else if open_fence.is_none() {
                 let language = markdown_fence_language(rest).map(|(language, start_in_rest)| {
                     let language_start_byte =
-                        byte_offset + indent + fence_tick_count + start_in_rest;
+                        byte_offset + indent + fence_marker_count + start_in_rest;
                     let language_span = SourceSpan {
                         start_byte: language_start_byte,
                         end_byte: language_start_byte + language.len(),
                         start_line: line_number,
-                        start_column: indent + fence_tick_count + 1 + start_in_rest,
+                        start_column: indent + fence_marker_count + 1 + start_in_rest,
                         end_line: line_number,
-                        end_column: indent + fence_tick_count + 1 + start_in_rest + language.len(),
+                        end_column: indent
+                            + fence_marker_count
+                            + 1
+                            + start_in_rest
+                            + language.len(),
                     };
                     (language.to_string(), language_span)
                 });
                 open_fence = Some(MarkdownFence {
-                    tick_count: fence_tick_count,
+                    marker: fence_marker,
+                    marker_count: fence_marker_count,
                     language,
                     content_start_byte: byte_offset + line.len(),
                     content_start_line: line_number + 1,
@@ -958,13 +967,27 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
     captures
 }
 
-fn markdown_backtick_fence(trimmed_line: &str) -> Option<(usize, &str)> {
-    let tick_count = trimmed_line
+fn markdown_line_body(line: &str) -> &str {
+    let without_lf = line.strip_suffix('\n').unwrap_or(line);
+    without_lf.strip_suffix('\r').unwrap_or(without_lf)
+}
+
+fn markdown_capture_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn markdown_fence_marker(trimmed_line: &str) -> Option<(u8, usize, &str)> {
+    let marker = match trimmed_line.as_bytes().first().copied()? {
+        b'`' => b'`',
+        b'~' => b'~',
+        _ => return None,
+    };
+    let marker_count = trimmed_line
         .as_bytes()
         .iter()
-        .take_while(|byte| **byte == b'`')
+        .take_while(|byte| **byte == marker)
         .count();
-    (tick_count >= 3).then(|| (tick_count, &trimmed_line[tick_count..]))
+    (marker_count >= 3).then(|| (marker, marker_count, &trimmed_line[marker_count..]))
 }
 
 fn markdown_fence_language(rest: &str) -> Option<(&str, usize)> {
@@ -972,14 +995,23 @@ fn markdown_fence_language(rest: &str) -> Option<(&str, usize)> {
     rest.find(language).map(|start| (language, start))
 }
 
-fn is_markdown_closing_fence(trimmed_line: &str, opening_tick_count: usize) -> bool {
-    markdown_backtick_fence(trimmed_line)
-        .map(|(tick_count, rest)| tick_count >= opening_tick_count && rest.trim().is_empty())
+fn is_markdown_closing_fence(
+    trimmed_line: &str,
+    opening_marker: u8,
+    opening_marker_count: usize,
+) -> bool {
+    markdown_fence_marker(trimmed_line)
+        .map(|(marker, marker_count, rest)| {
+            marker == opening_marker
+                && marker_count >= opening_marker_count
+                && rest.trim().is_empty()
+        })
         .unwrap_or(false)
 }
 
 struct MarkdownFence {
-    tick_count: usize,
+    marker: u8,
+    marker_count: usize,
     language: Option<(String, SourceSpan)>,
     content_start_byte: usize,
     content_start_line: usize,
@@ -1042,6 +1074,8 @@ mod tests {
     const MARKDOWN_INFO_STRING: &str = "```python not-valid\nprint('ok')\n```\n";
     const MARKDOWN_UNLABELED: &str = "```\nraw\n```\n";
     const MARKDOWN_INDENTED: &str = "    ```ignored\nraw\n    ```\n";
+    const MARKDOWN_CRLF: &str = "```python\r\nprint('ok')\r\n```\r\n";
+    const MARKDOWN_TILDE: &str = "~~~python\nprint('tilde')\n~~~\n";
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
@@ -1343,6 +1377,30 @@ mod tests {
         )
         .expect("markdown parses");
         assert!(indented.captures.is_empty());
+
+        let crlf = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/crlf.md")),
+            MARKDOWN_CRLF,
+        )
+        .expect("markdown parses");
+        let language = find_capture(&crlf, "injection.language", "python");
+        assert_eq!(language.span.start_byte, 3);
+        assert_eq!(language.span.end_byte, 9);
+        assert_eq!(language.rendered_span, "1:4-1:10");
+        let content = find_capture(&crlf, "injection.content", "print('ok')\n");
+        assert_eq!(content.span.start_byte, 11);
+        assert_eq!(content.span.end_byte, 24);
+        assert_eq!(content.rendered_span, "2:1-3:1");
+
+        let tilde = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/tilde.md")),
+            MARKDOWN_TILDE,
+        )
+        .expect("markdown parses");
+        assert_capture(&tilde, "injection.language", "python");
+        assert_capture(&tilde, "injection.content", "print('tilde')\n");
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
