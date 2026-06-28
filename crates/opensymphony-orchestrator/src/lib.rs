@@ -15,7 +15,7 @@ pub use crate::opensymphony_domain::{
     WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
 };
 pub use scheduler::{
-    HarnessRouteDecision, RecoveryRecord, Scheduler, SchedulerConfig, SchedulerError,
+    HarnessRouteDecision, RecoveredRun, RecoveryRecord, Scheduler, SchedulerConfig, SchedulerError,
     TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend, decide_issue_route,
 };

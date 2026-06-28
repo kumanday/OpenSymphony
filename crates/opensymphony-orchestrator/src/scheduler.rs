@@ -109,6 +109,13 @@ pub struct RecoveryRecord {
     pub workspace: WorkspaceRecord,
     pub had_in_flight_run: bool,
     pub harness_kind: Option<String>,
+    pub recovered_run: Option<RecoveredRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredRun {
+    pub worker_id: WorkerId,
+    pub conversation: ConversationMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -845,7 +852,12 @@ where
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
                 self.upsert_active_execution(normalized, observed_at, Some(record.workspace))?;
-                self.restore_recovered_harness_kind(&issue_id, recovered_harness_kind);
+                self.restore_recovered_run(
+                    &issue_id,
+                    record.recovered_run,
+                    recovered_harness_kind,
+                    observed_at,
+                )?;
                 continue;
             }
 
@@ -868,7 +880,6 @@ where
             execution.attach_workspace(record.workspace)?;
             let execution = execution.release(observed_at, ReleaseReason::TrackerInactive, None)?;
             self.executions.entry(issue.id.clone()).or_insert(execution);
-            self.restore_recovered_harness_kind(&issue_id, recovered_harness_kind);
         }
 
         self.recovered = true;
@@ -1033,6 +1044,13 @@ where
             .get(&run.worker_id)
             .cloned()
             .unwrap_or_else(|| "<unknown>".to_string());
+        if harness_kind == "<unknown>" {
+            warn!(
+                issue_id = %issue.id,
+                worker_id = %run.worker_id,
+                "missing scheduler harness kind for tracker-merging interrupt"
+            );
+        }
 
         execution.refresh_issue(issue.clone())?;
         let (command, queued) = execution.request_interrupt(
@@ -1090,18 +1108,51 @@ where
         Ok(true)
     }
 
-    fn restore_recovered_harness_kind(&mut self, issue_id: &IssueId, harness_kind: Option<String>) {
-        let Some(harness_kind) = harness_kind.filter(|kind| !kind.trim().is_empty()) else {
-            return;
+    fn restore_recovered_run(
+        &mut self,
+        issue_id: &IssueId,
+        recovered_run: Option<RecoveredRun>,
+        harness_kind: Option<String>,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(recovered_run) = recovered_run else {
+            return Ok(());
         };
-        let Some(execution) = self.executions.get(issue_id) else {
-            return;
+        let Some(mut execution) = self.remove_execution(issue_id) else {
+            return Ok(());
         };
-        let Some(run) = execution.current_run() else {
-            return;
+        if execution.status() != SchedulerStatus::Unclaimed {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        }
+        let Some(workspace) = execution.workspace().cloned() else {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
         };
-        self.worker_harness_kind
-            .insert(run.worker_id.clone(), harness_kind);
+        let run = RunAttempt::new(
+            recovered_run.worker_id.clone(),
+            execution.issue().id.clone(),
+            execution.issue().identifier.clone(),
+            workspace.path.clone(),
+            observed_at,
+            None,
+            self.config.max_turns,
+        );
+        execution = execution.claim(run.clone())?;
+        execution = execution.start_running(
+            observed_at,
+            effective_stall_timeout(self.config.stall_timeout_ms),
+            Some(recovered_run.conversation),
+        )?;
+        execution.record_turn_started(observed_at)?;
+        self.worker_index
+            .insert(run.worker_id.clone(), issue_id.clone());
+        if let Some(harness_kind) = harness_kind.filter(|kind| !kind.trim().is_empty()) {
+            self.worker_harness_kind
+                .insert(run.worker_id.clone(), harness_kind);
+        }
+        self.insert_execution(issue_id.clone(), execution);
+        Ok(())
     }
 
     fn has_running_executions(&self) -> bool {

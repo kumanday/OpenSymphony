@@ -9,7 +9,7 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
-    IssueStateCategory, NormalizedIssue, RecoveryRecord, ReleaseReason, RetryReason,
+    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryReason,
     RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
     TrackerIssue, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
     TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
@@ -873,6 +873,73 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
 }
 
 #[tokio::test]
+async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_interrupt() {
+    let recovered_worker_id =
+        WorkerId::new("worker-recovered-codex").expect("worker id should be valid");
+    let recovered_workspace = workspace_record("COE-492", "/tmp/recovered/COE-492");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-492", "COE-492", "Human Review", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-492", "COE-492", "Human Review"),
+            workspace: recovered_workspace.clone(),
+            had_in_flight_run: true,
+            harness_kind: Some("codex_app_server".to_string()),
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+            }),
+        }],
+        records: HashMap::from([("lin-492".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    config.active_states.push("Human Review".to_string());
+    config.active_states.push("Merging".to_string());
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup recovery should restore active Human Review worker");
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-492").expect("issue id should be valid"))
+            .expect("recovered execution should exist")
+            .status(),
+        SchedulerStatus::Running
+    );
+    assert!(scheduler.worker().launches.is_empty());
+
+    scheduler.tracker_mut().states.insert(
+        "lin-492".to_string(),
+        tracker_state_snapshot("lin-492", "COE-492", "Merging", "started", 30_000),
+    );
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("Merging state refresh should interrupt recovered Human Review polling");
+
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(
+        scheduler.worker().interrupts[0].harness_kind,
+        "codex_app_server"
+    );
+    assert_eq!(
+        scheduler.worker().interrupts[0].reason,
+        HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+    );
+    assert_eq!(
+        scheduler.worker().interrupts[0].conversation_id,
+        conversation(&recovered_worker_id).conversation_id
+    );
+}
+
+#[tokio::test]
 async fn dispatch_discovery_skips_candidates_missing_or_inactive_after_detail_refresh() {
     let tracker = FakeTracker::default();
     let workspace = FakeWorkspace::default();
@@ -1288,6 +1355,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             workspace: recovered_workspace.clone(),
             had_in_flight_run: true,
             harness_kind: Some("openhands_agent_server".to_string()),
+            recovered_run: None,
         }],
         records: HashMap::from([("lin-272".to_string(), recovered_workspace.clone())]),
         ..Default::default()
@@ -1464,6 +1532,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             workspace: recovered_workspace,
             had_in_flight_run: true,
             harness_kind: Some("openhands_agent_server".to_string()),
+            recovered_run: None,
         }],
         ..Default::default()
     };

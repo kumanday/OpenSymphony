@@ -30,7 +30,7 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    RecoveredRun, RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend,
 };
@@ -648,7 +648,13 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
                 )
             });
-            let harness_kind = recovered_harness_kind(&self.manager, &handle).await?;
+            let conversation_manifest =
+                recovered_conversation_manifest(&self.manager, &handle).await?;
+            let harness_kind = conversation_manifest
+                .as_ref()
+                .map(recovered_harness_kind_from_manifest);
+            let recovered_run =
+                recovered_run_from_manifests(run_manifest.as_ref(), conversation_manifest.as_ref());
 
             recoveries.push(RecoveryRecord {
                 issue: normalized_issue_from_manifest(
@@ -668,6 +674,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 },
                 had_in_flight_run,
                 harness_kind,
+                recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
             });
         }
         Ok(recoveries)
@@ -694,10 +701,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     }
 }
 
-async fn recovered_harness_kind(
+async fn recovered_conversation_manifest(
     manager: &WorkspaceManager,
     handle: &WorkspaceHandle,
-) -> Result<Option<String>, WorkspaceError> {
+) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
     let manifest_path = handle.conversation_manifest_path();
     let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? else {
         return Ok(None);
@@ -713,13 +720,71 @@ async fn recovered_harness_kind(
             return Ok(None);
         }
     };
-    if let Some(transport_target) = manifest.transport_target {
-        return Ok(Some(transport_target));
+    Ok(Some(manifest))
+}
+
+fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
+    if let Some(transport_target) = &manifest.transport_target {
+        return transport_target.clone();
     }
-    if conversation_manifest_is_codex(&manifest) {
-        return Ok(Some(CODEX_APP_SERVER_KIND.to_string()));
+    if conversation_manifest_is_codex(manifest) {
+        return CODEX_APP_SERVER_KIND.to_string();
     }
-    Ok(Some(OPENHANDS_AGENT_SERVER_KIND.to_string()))
+    OPENHANDS_AGENT_SERVER_KIND.to_string()
+}
+
+fn recovered_run_from_manifests(
+    run_manifest: Option<&RunManifest>,
+    conversation_manifest: Option<&IssueConversationManifest>,
+) -> Option<RecoveredRun> {
+    let run_manifest = run_manifest?;
+    let conversation_manifest = conversation_manifest?;
+    let worker_id = run_manifest
+        .run_id
+        .strip_prefix("run-")
+        .unwrap_or(run_manifest.run_id.as_str());
+    let worker_id = match crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) {
+        Ok(worker_id) => worker_id,
+        Err(error) => {
+            tracing::warn!(
+                run_id = %run_manifest.run_id,
+                %error,
+                "skipping recovered scheduler run for invalid worker id"
+            );
+            return None;
+        }
+    };
+    Some(RecoveredRun {
+        worker_id,
+        conversation: conversation_metadata_from_manifest(conversation_manifest),
+    })
+}
+
+fn conversation_metadata_from_manifest(
+    manifest: &IssueConversationManifest,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: manifest.conversation_id.clone(),
+        server_base_url: manifest.server_base_url.clone(),
+        transport_target: manifest.transport_target.clone(),
+        http_auth_mode: manifest.http_auth_mode.clone(),
+        websocket_auth_mode: manifest.websocket_auth_mode.clone(),
+        websocket_query_param_name: manifest.websocket_query_param_name.clone(),
+        fresh_conversation: manifest.fresh_conversation,
+        runtime_contract_version: manifest.runtime_contract_version.clone(),
+        stream_state: RuntimeStreamState::Ready,
+        last_event_id: manifest.last_event_id.clone(),
+        last_event_kind: manifest.last_event_kind.clone(),
+        last_event_at: manifest.last_event_at.map(datetime_to_timestamp_ms),
+        last_event_summary: manifest.last_event_summary.clone(),
+        recent_activity: Vec::new(),
+        input_tokens: manifest.input_tokens,
+        output_tokens: manifest.output_tokens,
+        cache_read_tokens: manifest.cache_read_tokens,
+        total_tokens: manifest.input_tokens.saturating_add(manifest.output_tokens),
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
+    }
 }
 
 impl RuntimeWorkerBackend {
@@ -2115,11 +2180,14 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .await
             .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?;
         Ok(WorkerInterruptAcknowledgement {
-            detail: acknowledgement.diagnostic.or_else(|| {
-                acknowledgement
-                    .execution_status
-                    .map(|status| format!("OpenHands interrupt acknowledged with `{status}`"))
-            }),
+            detail: acknowledgement
+                .diagnostic
+                .or_else(|| {
+                    acknowledgement
+                        .execution_status
+                        .map(|status| format!("OpenHands interrupt acknowledged with `{status}`"))
+                })
+                .or_else(|| Some("OpenHands interrupt acknowledged".to_string())),
         })
     }
 }
@@ -3259,6 +3327,15 @@ mod tests {
         assert_eq!(
             recovered.harness_kind.as_deref(),
             Some(CODEX_APP_SERVER_KIND)
+        );
+        let recovered_run = recovered
+            .recovered_run
+            .as_ref()
+            .expect("in-flight run should be recovered");
+        assert_eq!(recovered_run.worker_id.as_str(), "recovery");
+        assert_eq!(
+            recovered_run.conversation.conversation_id.as_str(),
+            "conv-recovery"
         );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
     }

@@ -1,7 +1,16 @@
 use std::{process::Stdio, time::Duration};
 
 use crate::opensymphony_testkit::FakeOpenHandsServer;
+use crate::{
+    opensymphony_domain::{ConversationId, IssueId, IssueIdentifier},
+    opensymphony_openhands::IssueConversationManifest,
+    opensymphony_workspace::{
+        CleanupConfig, HookConfig, IssueDescriptor, RunDescriptor, RunStatus, WorkspaceManager,
+        WorkspaceManagerConfig,
+    },
+};
 use axum::{Json, Router, routing::post};
+use chrono::Utc;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{
@@ -140,6 +149,35 @@ polling:
     terminate_child(&mut child).await;
 }
 
+#[tokio::test]
+async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_merging() {
+    let openhands = FakeOpenHandsServer::start()
+        .await
+        .expect("fake OpenHands server should start");
+    let linear = MockLinearGraphqlServer::start_with_human_review_merging_transition().await;
+    let project = TempDir::new().expect("temp project should exist");
+    let bind_addr = reserve_socket_addr();
+    let conversation_id = uuid::Uuid::new_v4();
+
+    write_merging_supersede_project_files(
+        project.path(),
+        linear.base_url(),
+        openhands.base_url(),
+        bind_addr,
+    );
+    write_memory_config(project.path());
+    seed_recovered_human_review_workspace(project.path(), conversation_id).await;
+    seed_fake_openhands_conversation(&openhands, conversation_id, project.path()).await;
+
+    let mut child = spawn_run_child(project.path(), &[]);
+
+    wait_for_merging_supersede_event(&format!("http://{bind_addr}/api/v1/snapshot"))
+        .await
+        .expect("run command should interrupt recovered Human Review polling after Merging");
+
+    terminate_child(&mut child).await;
+}
+
 #[test]
 fn run_fails_with_install_guidance_when_managed_local_tooling_is_missing() {
     let project = TempDir::new().expect("temp project should exist");
@@ -247,6 +285,146 @@ fn write_project_files_with_workflow_extra(
         .expect("config should be written");
 }
 
+fn write_merging_supersede_project_files(
+    project_root: &std::path::Path,
+    linear_base_url: &str,
+    openhands_base_url: &str,
+    bind_addr: std::net::SocketAddr,
+) {
+    std::fs::write(
+        project_root.join("WORKFLOW.md"),
+        format!(
+            "---\ntracker:\n  kind: linear\n  endpoint: {linear_base_url}\n  project_slug: test-project\n  active_states:\n    - In Progress\n    - Human Review\n    - Merging\n  terminal_states:\n    - Done\nworkspace:\n  root: ./var/workspaces\npolling:\n  interval_ms: 50\nopenhands:\n  transport:\n    base_url: {openhands_base_url}\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n"
+        ),
+    )
+    .expect("workflow should be written");
+    std::fs::write(
+        project_root.join("config.yaml"),
+        format!("control_plane:\n  bind: {bind_addr}\nlinear:\n  enabled: false\n"),
+    )
+    .expect("config should be written");
+}
+
+async fn seed_recovered_human_review_workspace(
+    project_root: &std::path::Path,
+    conversation_id: uuid::Uuid,
+) {
+    let workspace_manager = WorkspaceManager::new(WorkspaceManagerConfig {
+        root: project_root.join("var/workspaces"),
+        hooks: HookConfig::default(),
+        cleanup: CleanupConfig::default(),
+    })
+    .expect("workspace manager should be constructed");
+    let ensured = workspace_manager
+        .ensure(&IssueDescriptor {
+            issue_id: "issue-492".to_string(),
+            identifier: "COE-492".to_string(),
+            title: "Merging Supersedes Human Review Polling".to_string(),
+            current_state: "Human Review".to_string(),
+            last_seen_tracker_refresh_at: None,
+        })
+        .await
+        .expect("workspace should be created");
+    let mut run_manifest = workspace_manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("run-worker-recovered-openhands", 1),
+        )
+        .await
+        .expect("run manifest should be written");
+    run_manifest.status = RunStatus::Running;
+    workspace_manager
+        .write_json_artifact(
+            &ensured.handle,
+            &ensured.handle.run_manifest_path(),
+            &run_manifest,
+        )
+        .await
+        .expect("running run manifest should be persisted");
+
+    let now = Utc::now();
+    let conversation_manifest = IssueConversationManifest {
+        issue_id: IssueId::new("issue-492").expect("issue id should be valid"),
+        identifier: IssueIdentifier::new("COE-492").expect("identifier should be valid"),
+        conversation_id: ConversationId::new(conversation_id.to_string())
+            .expect("conversation id should be valid"),
+        reuse_policy: "per_issue".to_string(),
+        server_base_url: Some("http://127.0.0.1".to_string()),
+        transport_target: Some("openhands_agent_server".to_string()),
+        http_auth_mode: Some("none".to_string()),
+        websocket_auth_mode: Some("none".to_string()),
+        websocket_query_param_name: None,
+        persistence_dir: project_root.join(".openhands"),
+        created_at: now,
+        updated_at: now,
+        last_attached_at: now,
+        launch_profile: None,
+        llm_config_fingerprint: None,
+        fresh_conversation: false,
+        workflow_prompt_seeded: true,
+        reset_reason: None,
+        runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_string()),
+        last_prompt_kind: None,
+        last_prompt_at: None,
+        last_prompt_path: None,
+        last_execution_status: Some("running".to_string()),
+        last_event_id: None,
+        last_event_kind: None,
+        last_event_at: None,
+        last_event_summary: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        last_token_accumulation_at: None,
+    };
+    workspace_manager
+        .write_text_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+            &serde_json::to_string_pretty(&conversation_manifest)
+                .expect("conversation manifest should encode"),
+        )
+        .await
+        .expect("conversation manifest should be written");
+}
+
+async fn seed_fake_openhands_conversation(
+    openhands: &FakeOpenHandsServer,
+    conversation_id: uuid::Uuid,
+    project_root: &std::path::Path,
+) {
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/conversations", openhands.base_url()))
+        .json(&json!({
+            "conversation_id": conversation_id,
+            "workspace": {
+                "working_dir": project_root.join("var/workspaces/COE-492").display().to_string(),
+                "kind": "local"
+            },
+            "persistence_dir": project_root.join(".openhands").display().to_string(),
+            "max_iterations": 4,
+            "stuck_detection": true,
+            "confirmation_policy": {
+                "kind": "NeverConfirm"
+            },
+            "agent": {
+                "kind": "Agent",
+                "llm": {
+                    "model": "fake-model",
+                    "api_key": "test-openhands-key"
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("fake OpenHands conversation create should send");
+    assert!(
+        response.status().is_success(),
+        "fake OpenHands conversation should be seeded: {}",
+        response.status()
+    );
+}
+
 fn write_memory_config(project_root: &std::path::Path) {
     let memory_dir = project_root.join(".opensymphony/memory");
     std::fs::create_dir_all(&memory_dir).expect("memory dir should be written");
@@ -301,6 +479,40 @@ async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
     ))
 }
 
+async fn wait_for_merging_supersede_event(url: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(url).send().await
+            && response.status().is_success()
+            && let Ok(snapshot) = response.json::<Value>().await
+            && merging_supersede_event_visible(&snapshot)
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!(
+        "timed out waiting for Merging supersede event at {url}"
+    ))
+}
+
+fn merging_supersede_event_visible(envelope: &Value) -> bool {
+    envelope["snapshot"]["issues"]
+        .as_array()
+        .and_then(|issues| issues.iter().find(|issue| issue["identifier"] == "COE-492"))
+        .is_some_and(|issue| {
+            issue["tracker_state"] == "Merging"
+                && issue["recent_events"].as_array().is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["kind"] == "scheduler.interrupt_requested"
+                            && event["payload"]["reason"]
+                                == "tracker_merging_supersedes_human_review"
+                    })
+                })
+        })
+}
+
 fn route_decision_visible(envelope: &Value) -> bool {
     envelope["snapshot"]["issues"]
         .as_array()
@@ -345,9 +557,22 @@ impl MockLinearGraphqlServer {
     }
 
     async fn start_with_active_issue_flag(active_issue: bool) -> Self {
+        Self::start_with_mode(if active_issue {
+            MockLinearMode::ActiveInProgress
+        } else {
+            MockLinearMode::Empty
+        })
+        .await
+    }
+
+    async fn start_with_human_review_merging_transition() -> Self {
+        Self::start_with_mode(MockLinearMode::HumanReviewThenMerging).await
+    }
+
+    async fn start_with_mode(mode: MockLinearMode) -> Self {
         let app = Router::new()
             .route("/graphql", post(handle_graphql))
-            .with_state(active_issue);
+            .with_state(mode);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("mock Linear listener should bind");
@@ -371,6 +596,13 @@ impl MockLinearGraphqlServer {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MockLinearMode {
+    Empty,
+    ActiveInProgress,
+    HumanReviewThenMerging,
+}
+
 impl Drop for MockLinearGraphqlServer {
     fn drop(&mut self) {
         self.task.abort();
@@ -378,44 +610,50 @@ impl Drop for MockLinearGraphqlServer {
 }
 
 async fn handle_graphql(
-    axum::extract::State(active_issue): axum::extract::State<bool>,
+    axum::extract::State(mode): axum::extract::State<MockLinearMode>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
+    let query = body["query"].as_str().unwrap_or_default();
+    if query.contains("query IssueStatesByIds") {
+        let nodes = match mode {
+            MockLinearMode::HumanReviewThenMerging => vec![linear_issue_state_node("Merging")],
+            MockLinearMode::Empty | MockLinearMode::ActiveInProgress => Vec::new(),
+        };
+        return Json(json!({
+            "data": {
+                "issues": {
+                    "nodes": nodes,
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }));
+    }
+
     let active_query = body["variables"]["stateNames"]
         .as_array()
         .is_some_and(|states| states.iter().any(|state| state == "In Progress"));
-    let nodes = if active_issue && active_query {
-        vec![json!({
-            "id": "issue-429",
-            "identifier": "COE-429",
-            "url": "https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing",
-            "title": "Codex approvals and cross-harness routing",
-            "description": "Dry-run route proof",
-            "priority": 1.0,
-            "createdAt": "2026-06-21T00:00:00Z",
-            "updatedAt": "2026-06-21T00:00:00Z",
-            "state": {
-                "id": "state-started",
-                "name": "In Progress",
-                "type": "started"
-            },
-            "parent": null,
-            "children": {
-                "nodes": []
-            },
-            "labels": {
-                "nodes": []
-            },
-            "inverseRelations": {
-                "nodes": [],
-                "pageInfo": {
-                    "hasNextPage": false,
-                    "endCursor": null
-                }
-            }
-        })]
-    } else {
-        Vec::new()
+    let human_review_query = body["variables"]["stateNames"]
+        .as_array()
+        .is_some_and(|states| states.iter().any(|state| state == "Human Review"));
+    let nodes = match mode {
+        MockLinearMode::ActiveInProgress if active_query => vec![linear_issue_node(
+            "issue-429",
+            "COE-429",
+            "Codex approvals and cross-harness routing",
+            "In Progress",
+        )],
+        MockLinearMode::HumanReviewThenMerging if human_review_query => vec![linear_issue_node(
+            "issue-492",
+            "COE-492",
+            "Merging Supersedes Human Review Polling",
+            "Human Review",
+        )],
+        MockLinearMode::Empty
+        | MockLinearMode::ActiveInProgress
+        | MockLinearMode::HumanReviewThenMerging => Vec::new(),
     };
     Json(json!({
         "data": {
@@ -428,4 +666,59 @@ async fn handle_graphql(
             }
         }
     }))
+}
+
+fn linear_issue_node(id: &str, identifier: &str, title: &str, state: &str) -> Value {
+    json!({
+        "id": id,
+        "identifier": identifier,
+        "url": format!("https://linear.app/trilogy-ai-coe/issue/{identifier}/test"),
+        "title": title,
+        "description": "Run command proof",
+        "priority": 1.0,
+        "branchName": null,
+        "createdAt": "2026-06-21T00:00:00Z",
+        "updatedAt": "2026-06-21T00:00:00Z",
+        "state": {
+            "id": format!("state-{}", state.to_ascii_lowercase().replace(' ', "-")),
+            "name": state,
+            "type": "started"
+        },
+        "project": null,
+        "parent": null,
+        "projectMilestone": null,
+        "attachments": {
+            "nodes": []
+        },
+        "children": {
+            "nodes": []
+        },
+        "labels": {
+            "nodes": [],
+            "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+            }
+        },
+        "inverseRelations": {
+            "nodes": [],
+            "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+            }
+        }
+    })
+}
+
+fn linear_issue_state_node(state: &str) -> Value {
+    json!({
+        "id": "issue-492",
+        "identifier": "COE-492",
+        "updatedAt": "2026-06-21T00:01:00Z",
+        "state": {
+            "id": format!("state-{}", state.to_ascii_lowercase().replace(' ', "-")),
+            "name": state,
+            "type": "started"
+        }
+    })
 }
