@@ -730,7 +730,7 @@ fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) ->
     if conversation_manifest_is_codex(manifest) {
         return CODEX_APP_SERVER_KIND.to_string();
     }
-    OPENHANDS_AGENT_SERVER_KIND.to_string()
+    "<unknown>".to_string()
 }
 
 fn recovered_run_from_manifests(
@@ -2208,7 +2208,10 @@ fn openhands_error_detail(error: &OpenHandsError) -> String {
             operation,
             status_code,
             body,
-        } => format!("openhands.http_status.{operation}.{status_code}: {body}"),
+        } => format!(
+            "openhands.http_status.{operation}.{status_code}: {}",
+            truncated_diagnostic_body(body)
+        ),
         OpenHandsError::Protocol { operation, detail } => {
             format!("openhands.protocol.{operation}: {detail}")
         }
@@ -2236,6 +2239,18 @@ fn openhands_error_detail(error: &OpenHandsError) -> String {
         } => format!(
             "openhands.websocket.reconnect_exhausted: attempts={attempts}; last_error={last_error}"
         ),
+    }
+}
+
+fn truncated_diagnostic_body(body: &str) -> String {
+    const MAX_CHARS: usize = 240;
+
+    let mut chars = body.chars();
+    let prefix: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
     }
 }
 
@@ -2505,6 +2520,27 @@ mod tests {
         };
 
         assert!(conversation_manifest_is_codex(&manifest));
+    }
+
+    #[test]
+    fn recovered_harness_kind_is_unknown_without_transport_target() {
+        let manifest = sample_conversation_manifest("legacy-openhands");
+
+        assert_eq!(recovered_harness_kind_from_manifest(&manifest), "<unknown>");
+    }
+
+    #[test]
+    fn openhands_http_status_diagnostic_truncates_body() {
+        let error = OpenHandsError::HttpStatus {
+            operation: "interrupt",
+            status_code: 500,
+            body: "x".repeat(300),
+        };
+        let detail = openhands_error_detail(&error);
+
+        assert!(detail.starts_with("openhands.http_status.interrupt.500: "));
+        assert!(detail.ends_with("..."));
+        assert!(detail.len() < 300);
     }
 
     #[test]
