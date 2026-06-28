@@ -276,6 +276,20 @@ const runEvents: RunEventPage = {
       kind: "ObservationEvent",
       summary: "A long observation detail should receive the full activity card width.\nSecond line stays hidden until expanded.",
     },
+    {
+      sequence: 3,
+      event_id: "evt-item-started",
+      happened_at: "2025-09-01T00:00:07Z",
+      kind: "item/started",
+      summary: "event: item/started",
+    },
+    {
+      sequence: 4,
+      event_id: "evt-item-completed",
+      happened_at: "2025-09-01T00:00:08Z",
+      kind: "item/completed",
+      summary: "event: item/completed",
+    },
   ],
 };
 
@@ -634,9 +648,12 @@ describe("OpenSymphonyApp mount", () => {
 
     expect(root.querySelector(".os-status-panel h2")?.textContent).toBe("Status");
     expect(root.querySelector(".os-profile-panel h2")?.textContent).toBe("Connection");
-    expect(root.querySelector(".os-task-graph-panel h2")?.textContent).toBe("Task Graph");
+    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
     expect(root.querySelector(".os-run-detail-panel h2")?.textContent).toBe("Run Detail");
     expect(root.querySelector(".os-run-evidence-panel h2")?.textContent).toBe("Inspector");
+    expect(root.querySelectorAll("[data-pane-resizer]")).toHaveLength(2);
+    (root.querySelector("[data-pane-resizer='task-run']") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect((root.querySelector("[data-testid='workspace-pane-shell']") as HTMLElement).style.getPropertyValue("--os-task-pane")).toBe("50%");
     expect(root.querySelector("[data-profile-label]")).toBeNull();
     expect(root.querySelector(".os-metrics")).not.toBeNull();
     expect(root.querySelector("[data-project-id='proj-alpha']")).toBeNull();
@@ -656,6 +673,8 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-task-graph-link-skip")).not.toBeNull();
     expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \d+ V \d+ H /);
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
+    expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-indent")).toBe("34px");
+    expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-height")).toBe("78px");
     expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-450, COE-452");
     expect(root.querySelector("[data-node-id='app-shell'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-449");
     expect(root.querySelector("[data-node-id='app-shell'] .os-badge-blocker")).toBeNull();
@@ -679,12 +698,15 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-pill")?.textContent).toBe("running");
     expect(root.querySelector("[data-testid='dependency-detail']")?.textContent).toContain("blocks COE-450, COE-452");
     expect(root.querySelector(".os-run-detail-panel [data-testid='changed-file-list']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='graph-view-toggle']")).not.toBeNull();
     expect(root.querySelector(".os-run-evidence-panel [data-testid='evidence-toggle']")).not.toBeNull();
+    expect(root.querySelector(".os-run-evidence-panel [data-evidence-view='knowledge']")).toBeNull();
     expect(root.querySelector(".os-run-evidence-panel [data-testid='file-diff']")).not.toBeNull();
 
     (root.querySelector("[data-evidence-view='activity']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='run-activity']") !== null);
     expect(root.querySelector(".os-run-evidence-panel [data-testid='run-activity']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='activity-lifecycle']")?.textContent).toContain("1 started, 1 completed");
     const activityEntries = Array.from(root.querySelectorAll("[data-testid='run-activity-entry']"));
     expect(activityEntries.map((entry) => entry.getAttribute("data-event-id"))).toEqual([
       "evt-observation",
@@ -694,18 +716,28 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-activity-entry-action-event .os-activity-detail")).toBeNull();
     expect(root.querySelector(".os-activity-entry-observation-event .os-activity-meta strong")?.textContent).toBe("ObservationEvent");
     expect(root.querySelector(".os-activity-entry-observation-event .os-activity-preview")?.textContent).toContain("Second line stays hidden");
-    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-detail")).toBeNull();
+    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-detail")?.textContent).toContain("Second line stays hidden until expanded.");
 
     (root.querySelector(".os-activity-entry-observation-event [data-activity-toggle]") as HTMLButtonElement).click();
     await flushUntil(
-      () => root.querySelector(".os-activity-entry-observation-event .os-activity-detail") !== null,
+      () => root.querySelector(".os-activity-entry-observation-event .os-activity-detail") === null,
     );
-    expect(root.querySelector(".os-activity-entry-observation-event [data-activity-toggle]")?.getAttribute("aria-expanded")).toBe("true");
-    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-detail")?.textContent).toContain("Second line stays hidden until expanded.");
+    expect(root.querySelector(".os-activity-entry-observation-event [data-activity-toggle]")?.getAttribute("aria-expanded")).toBe("false");
 
     (root.querySelector("[data-testid='changed-file-item']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
+
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']") !== null);
+    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+    expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
+    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-449");
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-scaffold']")).toBeNull();
+
+    (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
+    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
 
     await handle.destroy();
   });
@@ -898,10 +930,10 @@ describe("OpenSymphonyApp mount", () => {
     expect(headings[1]).toContain("issues=3 running=0 todo=2 blocked=1");
     expect(headings[2]).toContain("issues=1 running=0 todo=1 blocked=0");
     expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='COE-705']")).not.toBeNull();
-    expect(root.querySelector("[data-node-id='COE-700'] .os-node-line")?.textContent).toContain("blocks COE-701");
-    expect(root.querySelector("[data-node-id='COE-701'] .os-node-line")?.textContent).toContain("blocked by COE-700");
-    expect(root.querySelector("[data-node-id='COE-702'] .os-node-line")?.textContent).toContain("blocked by 1 hidden");
-    expect(root.querySelector("[data-node-id='COE-703'] .os-node-line")?.textContent).not.toContain("blocked by COE-704");
+    expect(root.querySelector("[data-node-id='COE-700'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-701");
+    expect(root.querySelector("[data-node-id='COE-701'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-700");
+    expect(root.querySelector("[data-node-id='COE-702'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by 1 hidden");
+    expect(root.querySelector("[data-node-id='COE-703'] [data-testid='dependency-suffix']")?.textContent ?? "").not.toContain("blocked by COE-704");
 
     (root.querySelector("[data-project-group-toggle='beta-project']") as HTMLButtonElement).click();
     await flushUntil(
@@ -1026,6 +1058,32 @@ describe("OpenSymphonyApp mount", () => {
       warnSpy.mockRestore();
       await handle.destroy();
     }
+  });
+
+  it("keeps the operator-selected task across gateway refreshes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({
+        runDetails: [
+          { ...runDetail, run_id: "COE-450", issue_id: "COE-450", issue_identifier: "COE-450" },
+        ],
+      }),
+    });
+
+    await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "COE-449");
+
+    (root.querySelector("[data-node-id='app-shell']") as HTMLElement).click();
+    await flushUntil(() => root.querySelector(".os-run-head span")?.textContent === "COE-450");
+
+    await handle.refresh();
+    await flushUntil(() => root.querySelector(".os-run-head span")?.textContent === "COE-450");
+
+    expect(root.querySelector("[data-node-id='app-shell']")?.classList.contains("is-selected")).toBe(true);
+
+    await handle.destroy();
   });
 
   it("resumes restarted live subscriptions after the latest processed cursor", async () => {

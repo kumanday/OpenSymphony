@@ -1,6 +1,6 @@
 ---
 id: OSYM-824
-title: Concept Inspector, Search, Filters, And Accessibility Fallback
+title: Knowledge Graph Inspector, Search, Filters, And Accessibility Fallback
 milestone: "M11.5: LLM Wiki Graph View"
 priority: 2
 estimate: 8
@@ -15,13 +15,14 @@ parent: null
 
 ## Summary
 
-Implement the human-readable concept inspector, command/search workflows, filters, keyboard navigation, and accessible list fallback for the graph view.
+Implement the human-readable Knowledge Graph inspector, command/search workflows, filters, keyboard navigation, and accessible list fallback for the graph view.
 
 ## Scope
 
 ### In scope
 
-- Build left rail, right inspector, bottom status strip, mode controls, filters, and command/search flows.
+- Build graph controls, concept inspector, status strip, mode controls, filters, and command/search flows inside the `Knowledge Graph` left-pane surface.
+- Keep the run-detail Inspector scoped to Diff and Activity; graph inspector controls belong to the Knowledge Graph surface or a future expanded graph view.
 - Render frontmatter as primary, relationship, resource, source support, system, advanced, and raw sections.
 - Add keyboard navigation between visible graph nodes and neighbors.
 - Provide semantic HTML list/table summaries for visible nodes and selected graph state.
@@ -40,6 +41,7 @@ Implement the human-readable concept inspector, command/search workflows, filter
 ## Acceptance Criteria
 
 - [ ] Users can select a concept and read human-friendly frontmatter without opening raw YAML.
+- [ ] Switching between `Task Graph` and `Knowledge Graph` preserves selected task context without disrupting run-detail Diff or Activity.
 - [ ] Filters cover bundle, concept type, tag, area, project, milestone, issue, repository, visibility, freshness, warning status, source kind, link kind, and community.
 - [ ] Keyboard navigation and focus order are predictable.
 - [ ] Canvas color is never the only signal for type, status, or community.
@@ -55,6 +57,7 @@ Implement the human-readable concept inspector, command/search workflows, filter
 - Builds on OSYM-821 and OSYM-822.
 - Read `docs/specs/llm-wiki-graph-view-spec.md` sections 10, 11, 12, and 13.
 - UI should remain dense, calm, and operational.
+- User-facing app copy should say `Knowledge Graph`, not `LLM Wiki Graph View`.
 
 ## Definition of Ready
 

@@ -1,6 +1,6 @@
 ---
 id: OSYM-822
-title: Shared Graph Frontend Package And Reducers
+title: Shared Knowledge Graph Frontend Package And Reducers
 milestone: "M11.5: LLM Wiki Graph View"
 priority: 2
 estimate: 8
@@ -14,7 +14,7 @@ parent: null
 
 ## Summary
 
-Create the shared frontend graph package used by both web and Tauri clients, with transport-agnostic state, filters, search, and selection reducers.
+Create the shared Knowledge Graph frontend package used by both web and Tauri clients, with transport-agnostic state, filters, search, and selection reducers.
 
 ## Scope
 
@@ -24,6 +24,7 @@ Create the shared frontend graph package used by both web and Tauri clients, wit
 - Implement graph state reducers for bundle selection, modes, filters, search, selection, layout status, and deep-link state.
 - Provide transport adapter interfaces for gateway, memory server, Tauri native, and fixture data.
 - Add fixture data for local web and desktop development.
+- Expose state that the left navigation pane can consume for its `Task Graph` / `Knowledge Graph` toggle.
 
 ### Out of scope
 
@@ -39,6 +40,7 @@ Create the shared frontend graph package used by both web and Tauri clients, wit
 ## Acceptance Criteria
 
 - [ ] Web and desktop clients can import the same graph package without Tauri-only dependencies leaking into web builds.
+- [ ] User-facing labels and route/pane names use `Knowledge Graph`.
 - [ ] Reducers cover atlas, bundle, community, neighborhood, timeline, and evidence modes.
 - [ ] Search and filters are deterministic and URL or app-history friendly.
 - [ ] Fixture data supports local UI development without bypassing DTO contracts.

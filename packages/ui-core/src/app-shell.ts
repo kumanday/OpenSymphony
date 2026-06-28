@@ -174,13 +174,16 @@ interface AppState {
   taskGraph: TaskGraphSnapshot | null;
   selectedProjectId: string | null;
   selectedNodeId: string | null;
+  graphPaneView: GraphPaneView;
   runDetail: RunDetail | null;
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
-  evidenceView: "diff" | "activity";
+  evidenceView: EvidenceView;
   runEvents: RunEvent[] | null;
   expandedActivityEvents: Set<string>;
+  collapsedActivityEvents: Set<string>;
+  workspacePaneSizes: WorkspacePaneSizes;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
   lastActionReceipt: ActionReceipt | null;
@@ -220,10 +223,22 @@ interface AuditTrailEntry {
   details?: string;
 }
 
+type EvidenceView = "diff" | "activity";
+type GraphPaneView = "task" | "knowledge";
+type WorkspacePaneResizeHandle = "task-run" | "run-evidence";
+
+interface WorkspacePaneSizes {
+  task: number;
+  run: number;
+  evidence: number;
+}
+
 const schemaVersion = { major: 1, minor: 0, patch: 0 };
 // Two consecutive failures avoid noisy transient warnings while still surfacing stale live data.
 const liveRefreshFailureThreshold = 2;
 const liveRefreshPollIntervalMs = 5_000;
+const defaultWorkspacePaneSizes: WorkspacePaneSizes = { task: 48, run: 26, evidence: 26 };
+const minWorkspacePaneSizes: WorkspacePaneSizes = { task: 24, run: 20, evidence: 20 };
 
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
@@ -265,6 +280,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       taskGraph: null,
       selectedProjectId: null,
       selectedNodeId: null,
+      graphPaneView: "task",
       runDetail: null,
       runFiles: null,
       selectedDiffPath: null,
@@ -272,6 +288,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       evidenceView: "diff",
       runEvents: null,
       expandedActivityEvents: new Set(),
+      collapsedActivityEvents: new Set(),
+      workspacePaneSizes: { ...defaultWorkspacePaneSizes },
       runValidation: null,
       runApprovals: null,
       lastActionReceipt: null,
@@ -309,6 +327,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runDiff = null;
     this.state.runEvents = null;
     this.state.expandedActivityEvents = new Set();
+    this.state.collapsedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
@@ -456,14 +475,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.authState = this.resolveAuthState(null);
       this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
       this.liveRefreshFailureCount = 0;
-      this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
-      await this.loadTaskGraph(this.state.selectedProjectId);
+      const previousProjectId = this.state.selectedProjectId;
+      this.state.selectedProjectId = snapshot.projects.some((project) => project.project_id === previousProjectId)
+        ? previousProjectId
+        : snapshot.projects[0]?.project_id ?? "default";
+      const selectedProjectId = this.state.selectedProjectId ?? "default";
+      await this.loadTaskGraph(selectedProjectId, true);
       this.startEventSubscription();
       this.startLiveRefreshTimer();
-      this.loadPlanningWorkspace(this.state.selectedProjectId);
+      this.loadPlanningWorkspace(selectedProjectId);
       this.state.planningWorkspace = {
         ...this.state.planningWorkspace,
-        project_id: this.state.selectedProjectId,
+        project_id: selectedProjectId,
       };
     } catch (error) {
       this.state.capabilities = capabilities;
@@ -494,6 +517,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.evidenceView = "diff";
     this.state.runEvents = null;
     this.state.expandedActivityEvents = new Set();
+    this.state.collapsedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
   }
@@ -536,12 +560,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.planningWorkspace = buildFixturePlanningWorkspaceState(projectId ?? "opensymphony-local");
   }
 
-  private async loadTaskGraph(projectId: string | null): Promise<void> {
+  private async loadTaskGraph(projectId: string | null, preserveSelection = false): Promise<void> {
     if (!projectId) {
       this.state.taskGraph = null;
       this.state.selectedNodeId = null;
       return;
     }
+    const previousNodeId = preserveSelection ? this.state.selectedNodeId : null;
+    const previousRunId = preserveSelection ? this.state.runDetail?.run_id ?? null : null;
     let taskGraph: TaskGraphSnapshot;
     try {
       taskGraph = await this.transport.taskGraph(projectId);
@@ -554,6 +580,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.expandedActivityEvents = new Set();
+      this.state.collapsedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.connectionMessage = `Task graph unavailable: ${errorMessage(error)}`;
@@ -561,7 +588,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
 
     this.state.taskGraph = taskGraph;
-    const initialNode = initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
+    const initialNode = taskGraph.nodes.find((node) => node.node_id === previousNodeId)
+      ?? taskGraph.nodes.find((node) => node.run_id === previousRunId)
+      ?? initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
     this.state.selectedNodeId = initialNode?.node_id ?? null;
     this.state.runDetail = null;
     this.state.runFiles = null;
@@ -569,6 +598,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.evidenceView = "diff";
     this.state.runEvents = null;
     this.state.expandedActivityEvents = new Set();
+    this.state.collapsedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
@@ -792,6 +822,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.expandedActivityEvents = new Set();
+      this.state.collapsedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
@@ -827,14 +858,76 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
   }
 
+  private selectGraphPaneView(view: GraphPaneView): void {
+    this.state.graphPaneView = view;
+    this.render();
+  }
+
   private toggleActivityEvent(eventKey: string): void {
     const expanded = new Set(this.state.expandedActivityEvents);
+    const collapsed = new Set(this.state.collapsedActivityEvents);
+    const currentlyExpanded = this.options.root
+      .querySelector<HTMLElement>(`[data-activity-toggle="${cssEscape(eventKey)}"]`)
+      ?.getAttribute("aria-expanded") === "true";
+    if (currentlyExpanded) {
+      expanded.delete(eventKey);
+      collapsed.add(eventKey);
+      this.state.expandedActivityEvents = expanded;
+      this.state.collapsedActivityEvents = collapsed;
+      this.render();
+      return;
+    }
     if (expanded.has(eventKey)) {
       expanded.delete(eventKey);
     } else {
       expanded.add(eventKey);
     }
+    collapsed.delete(eventKey);
     this.state.expandedActivityEvents = expanded;
+    this.state.collapsedActivityEvents = collapsed;
+    this.render();
+  }
+
+  private startPaneResize(handle: string | undefined, event: PointerEvent): void {
+    if (!isWorkspacePaneResizeHandle(handle)) {
+      return;
+    }
+    const shell = (event.currentTarget as HTMLElement).closest<HTMLElement>(".os-workspace-shell");
+    if (!shell) {
+      return;
+    }
+    const width = shell.getBoundingClientRect().width;
+    if (width <= 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const start = { ...this.state.workspacePaneSizes };
+    const move = (moveEvent: PointerEvent) => {
+      const delta = ((moveEvent.clientX - startX) / width) * 100;
+      this.state.workspacePaneSizes = resizeWorkspacePanes(start, handle, delta);
+      applyWorkspacePaneStyle(shell, this.state.workspacePaneSizes);
+    };
+    const done = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", done);
+      this.render();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", done, { once: true });
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
+
+  private onPaneResizeKey(handle: string | undefined, event: KeyboardEvent): void {
+    if (!isWorkspacePaneResizeHandle(handle)) {
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const delta = event.key === "ArrowRight" ? 2 : -2;
+    this.state.workspacePaneSizes = resizeWorkspacePanes(this.state.workspacePaneSizes, handle, delta);
     this.render();
   }
 
@@ -1257,6 +1350,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (this.destroyed) {
       return;
     }
+    const scrollPositions = captureShellScrollPositions(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
@@ -1280,6 +1374,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       </main>
     `;
     this.bindEvents();
+    restoreShellScrollPositions(this.options.root, scrollPositions);
   }
 
   private renderViewContent(): string {
@@ -1297,9 +1392,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ${this.renderStatus()}
       ${this.renderProfiles()}
       ${this.renderModelProfiles()}
-      ${this.renderTaskGraph()}
-      ${this.renderRunDetail()}
-      ${this.renderRunEvidence()}
+      ${this.renderDashboardWorkspace()}
+    `;
+  }
+
+  private renderDashboardWorkspace(): string {
+    const sizes = this.state.workspacePaneSizes;
+    return `
+      <section class="os-workspace-shell" data-testid="workspace-pane-shell" style="--os-task-pane: ${panePercent(sizes.task)}; --os-run-pane: ${panePercent(sizes.run)}; --os-evidence-pane: ${panePercent(sizes.evidence)};">
+        ${this.renderGraphPane()}
+        ${renderPaneResizer("task-run", "Resize Task Graph and Run Detail panes", sizes.task)}
+        ${this.renderRunDetail()}
+        ${renderPaneResizer("run-evidence", "Resize Run Detail and Inspector panes", sizes.task + sizes.run)}
+        ${this.renderRunEvidence()}
+      </section>
     `;
   }
 
@@ -1641,10 +1747,26 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     );
   }
 
+  private renderGraphPane(): string {
+    const showingTasks = this.state.graphPaneView === "task";
+    const content = showingTasks
+      ? this.renderTaskGraph()
+      : renderKnowledgeGraphScaffold(this.selectedTaskNode());
+    return `
+      <section class="os-panel os-task-graph-panel">
+        <div class="os-segmented" data-testid="graph-view-toggle">
+          <button type="button" class="${showingTasks ? "is-selected" : ""}" data-graph-view="task">Task Graph</button>
+          <button type="button" class="${showingTasks ? "" : "is-selected"}" data-graph-view="knowledge">Knowledge Graph</button>
+        </div>
+        ${content}
+      </section>
+    `;
+  }
+
   private renderTaskGraph(): string {
     const taskGraph = this.state.taskGraph;
     if (!taskGraph) {
-      return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`, "os-task-graph-panel");
+      return `<div class="os-empty">No task graph loaded</div>`;
     }
     const allDependencySignals = buildDependencySignals(taskGraph.nodes, taskGraph.nodes);
     const getOverlay = (node: TaskGraphNode) => {
@@ -1671,11 +1793,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
 
-    return panel(
-      "Task Graph",
-      `${filters}${graph}`,
-      "os-task-graph-panel",
-    );
+    return `${filters}${graph}`;
   }
 
   private renderEditableTaskGraph(
@@ -1821,8 +1939,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return panel("Inspector", `<div class="os-empty">Select an issue to inspect a diff or activity</div>`, "os-run-evidence-panel");
     }
     const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
-    const activity = renderRunActivity(this.state.runEvents, this.state.expandedActivityEvents);
+    const activity = renderRunActivity(
+      this.state.runEvents,
+      this.state.expandedActivityEvents,
+      this.state.collapsedActivityEvents,
+    );
     const showingDiff = this.state.evidenceView === "diff";
+    const showingActivity = this.state.evidenceView === "activity";
     const content = showingDiff
       ? diff || `<div class="os-empty">Select a changed file to view its diff</div>`
       : activity;
@@ -1831,7 +1954,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       `
         <div class="os-segmented" data-testid="evidence-toggle">
           <button type="button" class="${showingDiff ? "is-selected" : ""}" data-evidence-view="diff">Diff</button>
-          <button type="button" class="${!showingDiff ? "is-selected" : ""}" data-evidence-view="activity">Activity</button>
+          <button type="button" class="${showingActivity ? "is-selected" : ""}" data-evidence-view="activity">Activity</button>
         </div>
         <div class="os-run-section">
           <h3>${showingDiff ? "Selected Diff" : "Conversation Activity"}</h3>
@@ -1958,6 +2081,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         if (view === "diff" || view === "activity") {
           this.selectEvidenceView(view);
         }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-graph-view]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const view = button.dataset.graphView;
+        if (view === "task" || view === "knowledge") {
+          this.selectGraphPaneView(view);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach((handle) => {
+      handle.addEventListener("pointerdown", (event) => {
+        this.startPaneResize(handle.dataset.paneResizer, event as PointerEvent);
+      });
+      handle.addEventListener("keydown", (event) => {
+        this.onPaneResizeKey(handle.dataset.paneResizer, event as KeyboardEvent);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-activity-toggle]").forEach((button) => {
@@ -2730,24 +2869,119 @@ function panel(title: string, body: string, className = ""): string {
   `;
 }
 
-function renderRunActivity(events: RunEvent[] | null, expandedActivityEvents: Set<string>): string {
+const shellScrollSelectors = [
+  ".os-task-graph-panel",
+  ".os-run-detail-panel",
+  ".os-run-evidence-panel",
+  ".os-task-graph-stage",
+  ".os-run-activity",
+] as const;
+
+function captureShellScrollPositions(root: HTMLElement): Map<string, { left: number; top: number }> {
+  const positions = new Map<string, { left: number; top: number }>();
+  for (const selector of shellScrollSelectors) {
+    const element = root.querySelector<HTMLElement>(selector);
+    if (element) {
+      positions.set(selector, { left: element.scrollLeft, top: element.scrollTop });
+    }
+  }
+  return positions;
+}
+
+function restoreShellScrollPositions(
+  root: HTMLElement,
+  positions: Map<string, { left: number; top: number }>,
+): void {
+  for (const [selector, position] of positions) {
+    const element = root.querySelector<HTMLElement>(selector);
+    if (element) {
+      element.scrollLeft = position.left;
+      element.scrollTop = position.top;
+    }
+  }
+}
+
+function renderPaneResizer(handle: WorkspacePaneResizeHandle, label: string, value: number): string {
+  return `
+    <div class="os-pane-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="${escapeAttr(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(value)}" data-pane-resizer="${handle}">
+      <span aria-hidden="true"></span>
+    </div>
+  `;
+}
+
+function panePercent(value: number): string {
+  return `${Math.round(value * 100) / 100}%`;
+}
+
+function applyWorkspacePaneStyle(shell: HTMLElement, sizes: WorkspacePaneSizes): void {
+  shell.style.setProperty("--os-task-pane", panePercent(sizes.task));
+  shell.style.setProperty("--os-run-pane", panePercent(sizes.run));
+  shell.style.setProperty("--os-evidence-pane", panePercent(sizes.evidence));
+}
+
+function resizeWorkspacePanes(
+  start: WorkspacePaneSizes,
+  handle: WorkspacePaneResizeHandle,
+  delta: number,
+): WorkspacePaneSizes {
+  if (handle === "task-run") {
+    const [task, run] = resizePair(start.task, start.run, delta, minWorkspacePaneSizes.task, minWorkspacePaneSizes.run);
+    return { task, run, evidence: start.evidence };
+  }
+  const [run, evidence] = resizePair(start.run, start.evidence, delta, minWorkspacePaneSizes.run, minWorkspacePaneSizes.evidence);
+  return { task: start.task, run, evidence };
+}
+
+function resizePair(
+  left: number,
+  right: number,
+  delta: number,
+  minLeft: number,
+  minRight: number,
+): [number, number] {
+  const total = left + right;
+  const nextLeft = clamp(left + delta, minLeft, total - minRight);
+  return [nextLeft, total - nextLeft];
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function isWorkspacePaneResizeHandle(value: string | undefined): value is WorkspacePaneResizeHandle {
+  return value === "task-run" || value === "run-evidence";
+}
+
+function renderRunActivity(
+  events: RunEvent[] | null,
+  expandedActivityEvents: Set<string>,
+  collapsedActivityEvents: Set<string>,
+): string {
   if (events === null) {
     return `<div class="os-run-activity os-empty" data-testid="run-activity">Loading conversation activity</div>`;
   }
   if (events.length === 0) {
     return `<div class="os-run-activity os-empty" data-testid="run-activity">No recent activity</div>`;
   }
-  const items = sortEventsNewestFirst(events)
-    .map((event) => {
+  const sorted = sortEventsNewestFirst(events);
+  const lifecycle = renderActivityLifecycleIndicator(sorted);
+  const visibleEvents = sorted.filter(shouldRenderActivityMessage);
+  if (visibleEvents.length === 0) {
+    return `<div class="os-run-activity" data-testid="run-activity">${lifecycle}<div class="os-empty">No message activity</div></div>`;
+  }
+  const items = visibleEvents
+    .map((event, index) => {
       const eventKey = activityEventKey(event);
+      const expanded = expandedActivityEvents.has(eventKey)
+        || (index === 0 && !collapsedActivityEvents.has(eventKey));
       return `
       <div class="os-activity-entry os-activity-entry-${escapeAttr(activityClassName(event.kind))}" data-testid="run-activity-entry" data-event-kind="${escapeAttr(event.kind)}" data-event-id="${escapeAttr(event.event_id)}">
-        ${renderActivityEvent(event, eventKey, expandedActivityEvents.has(eventKey))}
+        ${renderActivityEvent(event, eventKey, expanded)}
       </div>
     `;
     })
     .join("");
-  return `<div class="os-run-activity" data-testid="run-activity">${items}</div>`;
+  return `<div class="os-run-activity" data-testid="run-activity">${lifecycle}${items}</div>`;
 }
 
 function renderActivityEvent(event: RunEvent, eventKey: string, expanded: boolean): string {
@@ -2768,6 +3002,67 @@ function renderActivityEvent(event: RunEvent, eventKey: string, expanded: boolea
     </div>
     ${body && expanded ? `<pre class="os-activity-detail">${escapeHtml(body)}</pre>` : ""}
   `;
+}
+
+function renderKnowledgeGraphScaffold(node: TaskGraphNode | null): string {
+  const label = node ? nodeLabel(node) : "No issue selected";
+  const title = node?.title ?? "Select a task to anchor graph context";
+  return `
+    <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold">
+      <div class="os-knowledge-map" aria-hidden="true">
+        <span class="os-kg-node os-kg-node-main">KG</span>
+        <span class="os-kg-node os-kg-node-a">Issue</span>
+        <span class="os-kg-node os-kg-node-b">Docs</span>
+        <span class="os-kg-node os-kg-node-c">Refs</span>
+        <span class="os-kg-edge os-kg-edge-a"></span>
+        <span class="os-kg-edge os-kg-edge-b"></span>
+        <span class="os-kg-edge os-kg-edge-c"></span>
+      </div>
+      <div class="os-knowledge-summary">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(title)}</span>
+        <em>Graph data unavailable</em>
+      </div>
+    </div>
+  `;
+}
+
+function renderActivityLifecycleIndicator(events: RunEvent[]): string {
+  const lifecycleEvents = events
+    .map((event) => ({ event, state: activityLifecycleState(event) }))
+    .filter((entry): entry is { event: RunEvent; state: "started" | "completed" } => Boolean(entry.state));
+  if (lifecycleEvents.length === 0) {
+    return "";
+  }
+  const latest = lifecycleEvents[0]!;
+  const started = lifecycleEvents.filter((entry) => entry.state === "started").length;
+  const completed = lifecycleEvents.filter((entry) => entry.state === "completed").length;
+  const latestLabel = latest.state === "started" ? "Working" : "Settled";
+  return `
+    <div class="os-activity-lifecycle" data-testid="activity-lifecycle">
+      <span>${escapeHtml(formatEventTime(latest.event.happened_at))}</span>
+      <strong>${latestLabel}</strong>
+      <em>${started} started, ${completed} completed</em>
+    </div>
+  `;
+}
+
+function shouldRenderActivityMessage(event: RunEvent): boolean {
+  return activityLifecycleState(event) === null;
+}
+
+function activityLifecycleState(event: RunEvent): "started" | "completed" | null {
+  const normalized = `${event.kind} ${event.summary}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  if (/\bitem started\b|\bturn started\b/.test(normalized)) {
+    return "started";
+  }
+  if (/\bitem completed\b|\bturn completed\b/.test(normalized)) {
+    return "completed";
+  }
+  return null;
 }
 
 function sortEventsNewestFirst(events: RunEvent[]): RunEvent[] {
@@ -3080,6 +3375,10 @@ function escapeAttr(value: unknown): string {
   return escapeHtml(value).replace(/"/g, "&quot;");
 }
 
+function cssEscape(value: string): string {
+  return globalThis.CSS?.escape?.(value) ?? value.replace(/["\\]/g, "\\$&");
+}
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value);
 }
@@ -3129,6 +3428,11 @@ interface TaskGraphLink {
   routeLane: number;
   span: number;
 }
+
+const taskGraphRowHeight = 78;
+const taskGraphRowGap = 8;
+const taskGraphLaneWidth = 34;
+const taskGraphRailX = 21;
 
 function buildDependencySignals(
   allNodes: TaskGraphNode[],
@@ -3257,14 +3561,10 @@ function renderTaskGraphVisualization(
   }
   const models = buildTaskGraphRenderModels(nodes, signals);
   const links = buildTaskGraphLinks(models);
-  const rowHeight = 62;
-  const rowGap = 8;
-  const laneWidth = 34;
-  const railX = 20;
-  const graphHeight = models.length * rowHeight + Math.max(0, models.length - 1) * rowGap;
+  const graphHeight = models.length * taskGraphRowHeight + Math.max(0, models.length - 1) * taskGraphRowGap;
   const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
-  const graphWidth = Math.max(620, 360 + maxLane * laneWidth);
-  const svgLinks = links.map((link) => renderTaskGraphLink(link, rowHeight, rowGap, laneWidth, railX)).join("");
+  const graphWidth = Math.max(620, 360 + maxLane * taskGraphLaneWidth);
+  const svgLinks = links.map((link) => renderTaskGraphLink(link)).join("");
   const renderedNodes = models.map((model) => renderReadOnlyTaskGraphNode(
     model,
     selectedNodeId,
@@ -3416,17 +3716,13 @@ function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
 
 function renderTaskGraphLink(
   link: TaskGraphLink,
-  rowHeight: number,
-  rowGap: number,
-  laneWidth: number,
-  railX: number,
 ): string {
-  const x1 = railX + link.from.lane * laneWidth;
-  const x2 = railX + link.to.lane * laneWidth;
-  const y1 = link.from.index * (rowHeight + rowGap) + rowHeight / 2;
-  const y2 = link.to.index * (rowHeight + rowGap) + rowHeight / 2;
+  const x1 = taskGraphRailX + link.from.lane * taskGraphLaneWidth;
+  const x2 = taskGraphRailX + link.to.lane * taskGraphLaneWidth;
+  const y1 = link.from.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
+  const y2 = link.to.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
   if (link.span > 1) {
-    const routeX = Math.max(4, railX - 9 - link.routeLane * 7);
+    const routeX = Math.max(4, taskGraphRailX - 9 - link.routeLane * 7);
     const d = `M ${x1} ${y1} H ${routeX} V ${y2} H ${x2}`;
     return `<path class="os-task-graph-link os-task-graph-link-skip" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
   }
@@ -3489,14 +3785,14 @@ function renderReadOnlyTaskGraphNode(
         : "";
 
   return `
-    <button type="button" class="os-node os-node-readonly ${isSelected ? "is-selected" : ""} ${hasUpstream ? "os-node-has-upstream" : ""} ${hasDownstream ? "os-node-has-downstream" : ""}" data-node-id="${escapeAttr(node.node_id)}" style="--os-lane: ${model.lane};">
+    <button type="button" class="os-node os-node-readonly ${isSelected ? "is-selected" : ""} ${hasUpstream ? "os-node-has-upstream" : ""} ${hasDownstream ? "os-node-has-downstream" : ""}" data-node-id="${escapeAttr(node.node_id)}" style="--os-lane: ${model.lane}; --os-node-indent: ${model.lane * taskGraphLaneWidth}px; --os-node-height: ${taskGraphRowHeight}px;">
       <span class="os-node-gutter" aria-hidden="true">${escapeHtml(dependencyGlyph)}</span>
       <span class="os-node-main">
         <span class="os-node-line">
           <strong>${escapeHtml(node.identifier)}</strong>
           <span>${escapeHtml(node.title)}</span>
-          ${dependencyMeta}
         </span>
+        ${dependencyMeta}
         <span class="os-node-subline">
           <span class="os-node-kind">${escapeHtml(node.kind.replace(/_/g, " "))}</span>
           <em class="os-node-state os-node-state-${escapeAttr(stateTone)}">${escapeHtml(node.state)}</em>
@@ -3599,6 +3895,7 @@ function stateToneForTaskNode(node: TaskGraphNode): string {
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
+    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
     body { margin: 0; background: #f4f6f8; color: #17202a; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .os-app { min-height: 100vh; display: flex; flex-direction: column; }
     .os-topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 22px; background: #ffffff; border-bottom: 1px solid #d8dee4; }
@@ -3613,6 +3910,14 @@ function appShellStyles(): string {
     .os-status-panel, .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
     .os-profile-panel { grid-column: span 3; }
     .os-model-panel { grid-column: 1 / -1; }
+    .os-workspace-shell { grid-column: 1 / -1; display: flex; align-items: stretch; gap: 0; min-height: 640px; }
+    .os-workspace-shell > .os-panel { box-sizing: border-box; max-height: calc(100vh - 224px); overflow: auto; }
+    .os-workspace-shell > .os-task-graph-panel { flex: 0 0 calc(var(--os-task-pane, 48%) - 7px); }
+    .os-workspace-shell > .os-run-detail-panel { flex: 0 0 calc(var(--os-run-pane, 26%) - 7px); }
+    .os-workspace-shell > .os-run-evidence-panel { flex: 0 0 calc(var(--os-evidence-pane, 26%) - 7px); }
+    .os-pane-resizer { flex: 0 0 10px; min-width: 10px; display: grid; place-items: center; cursor: col-resize; touch-action: none; outline: none; }
+    .os-pane-resizer span { width: 2px; height: 100%; min-height: 44px; border-radius: 999px; background: #cad3dd; transition-property: background-color, width; transition-duration: 150ms; transition-timing-function: cubic-bezier(0.2, 0, 0, 1); }
+    .os-pane-resizer:hover span, .os-pane-resizer:focus-visible span { width: 3px; background: #39708f; }
     .os-panel-collapsed { padding-bottom: 12px; }
     .os-section-head > div { min-width: 0; }
     .os-section-head > div span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3646,7 +3951,7 @@ function appShellStyles(): string {
     .os-list, .os-node-list { display: grid; gap: 8px; }
     .os-list-item, .os-node { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px; background: #ffffff; }
     .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
-    .os-task-graph-links { position: absolute; z-index: 3; inset: 0 auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
+    .os-task-graph-links { position: absolute; z-index: 3; inset: 2px auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
     .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); }
     .os-task-graph-link-skip { opacity: 0.78; }
     .os-task-graph-links marker path { fill: #39708f; }
@@ -3656,7 +3961,7 @@ function appShellStyles(): string {
     .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-project-group-header strong { color: #17202a; font-size: 12px; }
     .os-project-group-header em { color: #667788; font-size: 11px; font-style: normal; }
-    .os-node-readonly { grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 62px; margin-left: calc(var(--os-lane, 0) * 34px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
+    .os-node-readonly { box-sizing: border-box; grid-template-columns: 28px minmax(0, 1fr); align-items: center; height: var(--os-node-height, 78px); width: calc(100% - var(--os-node-indent, 0px) - 8px); margin-left: var(--os-node-indent, 0px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; overflow: hidden; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
     .os-node-readonly:active { transform: scale(0.996); }
     .os-node-gutter { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 11px; font-weight: 800; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.28); }
     .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.18); }
@@ -3667,8 +3972,10 @@ function appShellStyles(): string {
     .os-node-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: nowrap; }
     .os-node-line > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-node-line strong { flex: 0 0 auto; font-size: 12px; font-variant-numeric: tabular-nums; }
-    .os-node-dependency { flex: 0 1 auto; color: #92400e; font-size: 11px; white-space: nowrap; }
+    .os-node-dependency { display: block; margin-top: 3px; color: #92400e; font-size: 11px; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+    .os-node-readonly .os-node-dependency { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
     .os-node-subline { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+    .os-node-readonly .os-node-subline { flex-wrap: nowrap; overflow: hidden; }
     .os-list-item span, .os-node span, .os-node em { color: #667788; font-size: 12px; font-style: normal; }
     .os-node .os-node-gutter { color: #39708f; }
     .os-node .os-node-dependency { color: #92400e; }
@@ -3714,6 +4021,10 @@ function appShellStyles(): string {
     .os-segmented button { min-height: 28px; padding: 4px 10px; border-color: transparent; background: transparent; }
     .os-segmented button.is-selected { border-color: #39708f; background: #e7f1f5; font-weight: 600; }
     .os-run-activity { display: grid; gap: 6px; }
+    .os-activity-lifecycle { min-height: 34px; display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px; align-items: center; border-radius: 6px; padding: 7px 9px; background: #eef3f8; color: #536170; font-size: 12px; }
+    .os-activity-lifecycle span { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-variant-numeric: tabular-nums; color: #667788; }
+    .os-activity-lifecycle strong { color: #23566f; }
+    .os-activity-lifecycle em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: normal; }
     .os-activity-entry { display: grid; gap: 7px; align-items: start; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 12px; }
     .os-activity-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
     .os-activity-meta { display: flex; gap: 6px; align-items: baseline; min-width: 0; overflow: hidden; }
@@ -3722,6 +4033,20 @@ function appShellStyles(): string {
     .os-activity-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #27313a; }
     .os-activity-toggle { width: 24px; height: 24px; min-height: 24px; padding: 0; border-radius: 999px; display: inline-grid; place-items: center; font-size: 13px; line-height: 1; }
     .os-activity-detail { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #d8dee4; border-radius: 5px; padding: 8px; background: #ffffff; font-size: 12px; line-height: 1.35; }
+    .os-knowledge-graph { display: grid; gap: 10px; }
+    .os-knowledge-map { position: relative; min-height: 220px; border-radius: 8px; background: #fbfcfd; box-shadow: inset 0 0 0 1px rgba(57, 112, 143, 0.14); overflow: hidden; }
+    .os-kg-node { position: absolute; z-index: 2; display: grid; place-items: center; width: 54px; height: 54px; border-radius: 999px; background: #e7f1f5; color: #23566f; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.24), 0 10px 24px rgba(15, 23, 42, 0.08); font-size: 11px; font-weight: 700; }
+    .os-kg-node-main { left: calc(50% - 27px); top: calc(50% - 27px); background: #dcfce7; color: #166534; }
+    .os-kg-node-a { left: 18%; top: 22%; }
+    .os-kg-node-b { right: 14%; top: 24%; }
+    .os-kg-node-c { left: 34%; bottom: 12%; }
+    .os-kg-edge { position: absolute; z-index: 1; left: 50%; top: 50%; width: clamp(110px, 22%, 190px); height: 2px; transform-origin: left center; background: rgba(57, 112, 143, 0.35); border-radius: 999px; }
+    .os-kg-edge-a { transform: rotate(210deg); }
+    .os-kg-edge-b { transform: rotate(330deg); }
+    .os-kg-edge-c { transform: rotate(108deg); width: 28%; }
+    .os-knowledge-summary { display: grid; gap: 3px; padding: 10px; border-radius: 6px; background: #f8fafc; box-shadow: inset 0 0 0 1px rgba(216, 222, 228, 0.9); }
+    .os-knowledge-summary strong { color: #23566f; }
+    .os-knowledge-summary span, .os-knowledge-summary em { color: #667788; font-size: 12px; font-style: normal; text-wrap: pretty; }
     .os-changed-file-list { display: grid; gap: 6px; }
     .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px 8px; background: #ffffff; font-size: 12px; line-height: 1.2; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
@@ -3761,6 +4086,7 @@ function appShellStyles(): string {
     .os-node-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
     .os-node-actions button { min-height: 26px; padding: 4px 8px; font-size: 11px; }
     .os-node-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .os-node-readonly .os-node-badges { flex: 0 1 auto; flex-wrap: nowrap; min-width: 0; overflow: hidden; }
     .os-badge { border-radius: 999px; background: #e7f1f5; color: #23566f; padding: 3px 7px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
     .os-badge-failed, .os-badge-blocked, .os-badge-blocker { background: #fee2e2; color: #991b1b; }
     .os-badge-running { background: #dcfce7; color: #166534; }
@@ -3847,6 +4173,9 @@ function appShellStyles(): string {
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
       .os-status-panel, .os-profile-panel, .os-model-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
+      .os-workspace-shell { display: grid; grid-template-columns: 1fr; gap: 14px; min-height: 0; }
+      .os-workspace-shell > .os-panel { max-height: none; overflow: visible; }
+      .os-pane-resizer { display: none; }
       .os-inline-fields, .os-model-layout, .os-advanced-grid, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
       .os-topbar { align-items: flex-start; flex-direction: column; }
     }
@@ -3899,10 +4228,22 @@ function appShellStyles(): string {
       .os-node-state-todo, .os-node-state-idle { background: #164e63; color: #a5f3fc; }
       .os-node-state-neutral { background: #111820; color: #cbd5e1; border-color: #2a3440; }
       .os-activity-entry { background: #111820; border-color: #2a3440; }
+      .os-activity-lifecycle { background: #1f2a35; color: #94a3b3; }
+      .os-activity-lifecycle span { color: #94a3b3; }
+      .os-activity-lifecycle strong { color: #8bd0e6; }
       .os-activity-entry span { color: #94a3b3; }
       .os-activity-entry strong { color: #5ca0b8; }
       .os-activity-preview { color: #d9e2ea; }
       .os-activity-detail { background: #0c1116; border-color: #2a3440; color: #d9e2ea; }
+      .os-pane-resizer span { background: #344454; }
+      .os-pane-resizer:hover span, .os-pane-resizer:focus-visible span { background: #5ca0b8; }
+      .os-knowledge-map { background: #111820; box-shadow: inset 0 0 0 1px rgba(92, 160, 184, 0.16); }
+      .os-kg-node { background: #10232c; color: #8bd0e6; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.28), 0 10px 24px rgba(0, 0, 0, 0.18); }
+      .os-kg-node-main { background: #14532d; color: #86efac; }
+      .os-kg-edge { background: rgba(92, 160, 184, 0.34); }
+      .os-knowledge-summary { background: #111820; box-shadow: inset 0 0 0 1px rgba(42, 52, 64, 0.9); }
+      .os-knowledge-summary strong { color: #8bd0e6; }
+      .os-knowledge-summary span, .os-knowledge-summary em { color: #94a3b3; }
       .os-badge-failed, .os-badge-blocked, .os-badge-blocker { background: #451a1a; color: #fca5a5; }
       .os-badge-running { background: #14532d; color: #86efac; }
       .os-badge-complete { background: #1e3a8a; color: #93c5fd; }
