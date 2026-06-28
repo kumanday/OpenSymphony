@@ -11,10 +11,7 @@ last_memory_sync: 2026-06-21T19:11:22.261830+00:00
 
 ## Current model
 
-- COE-460 contributed: PR #148: Add OKF import and export CLI (merge `add8410`)
-- COE-463 contributed: PR #149: Add OKF memory admin MCP parity (merge `f5f4809`)
-- COE-481 contributed: PR #139: Refresh OpenAI model profile defaults (merge `0f2a74f`)
-- COE-494 contributed: PR #150: Expose project metadata in operator snapshots (merge `67f973a`)
+- COE-488 contributed: PR #157: feat(cli): add lazy desktop launcher command (merge `7c14ecd`)
 
 ## Important invariants
 
@@ -31,16 +28,10 @@ last_memory_sync: 2026-06-21T19:11:22.261830+00:00
 
 ## Recent changes
 
-- COE-460: OKF Export, Import, And Visibility Boundaries
-- COE-463: Docs Sync And MCP Admin Parity For OKF
-- COE-481: Model Configuration Codex Subscription Follow-Up
-- COE-494: Project Metadata For Operator Issue Snapshots
+- COE-488: Lazy Desktop Launcher Command
 
 ## Source refs
 
-- COE-460
-- COE-463
-- COE-481
-- COE-494
+- COE-488
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

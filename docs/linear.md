@@ -11,8 +11,7 @@ last_memory_sync: 2026-06-27T15:38:16.493904+00:00
 
 ## Current model
 
-- COE-494 contributed: PR #150: Expose project metadata in operator snapshots (merge `67f973a`)
-- COE-504 contributed: PR #158: COE-504: Reduce Linear polling under rate limits (merge `78780ea`)
+- COE-488 contributed: PR #157: feat(cli): add lazy desktop launcher command (merge `7c14ecd`)
 
 ## Important invariants
 
@@ -29,12 +28,10 @@ last_memory_sync: 2026-06-27T15:38:16.493904+00:00
 
 ## Recent changes
 
-- COE-494: Project Metadata For Operator Issue Snapshots
-- COE-504: Linear Polling And Rate-Limit Recovery
+- COE-488: Lazy Desktop Launcher Command
 
 ## Source refs
 
-- COE-494
-- COE-504
+- COE-488
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

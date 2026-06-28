@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: docs
+area: harness-runtime
 visibility: public
-last_memory_sync: 2026-06-24T03:31:40.851743+00:00
+last_memory_sync: 2026-06-28T00:03:32.411843+00:00
 ---
 
-# Docs
+# Harness Runtime
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

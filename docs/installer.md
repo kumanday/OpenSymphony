@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: docs
+area: installer
 visibility: public
-last_memory_sync: 2026-06-24T03:31:40.851743+00:00
+last_memory_sync: 2026-06-28T00:04:20.497520+00:00
 ---
 
-# Docs
+# Installer
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
