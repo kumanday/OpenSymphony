@@ -1034,7 +1034,9 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
         NormalizedCodexEventKind::ApprovalRequested => EventKind::ApprovalRequested,
         NormalizedCodexEventKind::ApprovalCompleted => approval_completed_kind(event),
         NormalizedCodexEventKind::Error => EventKind::RunFailed,
-        NormalizedCodexEventKind::TurnCompleted if turn_status(event) == Some("interrupted") => {
+        NormalizedCodexEventKind::TurnCompleted
+            if turn_status(event).as_deref() == Some("interrupted") =>
+        {
             EventKind::RunCancelled
         }
         NormalizedCodexEventKind::ThreadStatusChanged => thread_status_kind(event),
@@ -1058,10 +1060,18 @@ pub fn codex_event_summary(event: &NormalizedCodexEvent) -> String {
             format!("Codex turn started{}", id_suffix(event.turn_id.as_deref()))
         }
         NormalizedCodexEventKind::TurnCompleted => {
-            format!(
-                "Codex turn completed{}",
-                id_suffix(event.turn_id.as_deref())
-            )
+            let status = turn_status(event);
+            if status.as_deref() == Some("interrupted") {
+                format!(
+                    "Codex turn interrupted{}",
+                    id_suffix(event.turn_id.as_deref())
+                )
+            } else {
+                format!(
+                    "Codex turn completed{}",
+                    id_suffix(event.turn_id.as_deref())
+                )
+            }
         }
         NormalizedCodexEventKind::TurnCancelled => {
             format!(
@@ -1331,7 +1341,7 @@ fn thread_status_kind(event: &NormalizedCodexEvent) -> EventKind {
     }
 }
 
-pub fn turn_status(event: &NormalizedCodexEvent) -> Option<&str> {
+pub fn turn_status(event: &NormalizedCodexEvent) -> Option<String> {
     event
         .raw
         .get("params")?
@@ -1339,6 +1349,7 @@ pub fn turn_status(event: &NormalizedCodexEvent) -> Option<&str> {
         .as_str()
         .map(str::trim)
         .filter(|status| !status.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1704,7 +1704,7 @@ fn emit_codex_notification(
 fn codex_terminal_outcome(event: &NormalizedCodexEvent) -> Option<CodexTerminalOutcome> {
     let (outcome, status) = match event.kind {
         NormalizedCodexEventKind::TurnCompleted => {
-            if turn_status(event) == Some("interrupted") {
+            if turn_status(event).as_deref() == Some("interrupted") {
                 (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
             } else {
                 (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
@@ -2150,12 +2150,29 @@ mod tests {
             "params": {
                 "threadId": "thread-1",
                 "turnId": "turn-1",
-                "status": "interrupted"
+                "status": "Interrupted"
             }
         }))
         .expect("notification should normalize");
 
         let outcome = codex_terminal_outcome(&event).expect("interrupted turn is terminal");
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(outcome.status, RunStatus::Cancelled);
+    }
+
+    #[test]
+    fn codex_interrupted_thread_status_is_cancelled_terminal_outcome() {
+        let event = normalize_server_notification(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "thread/status/changed",
+            "params": {
+                "threadId": "thread-1",
+                "status": "Interrupted"
+            }
+        }))
+        .expect("notification should normalize");
+
+        let outcome = codex_terminal_outcome(&event).expect("interrupted thread is terminal");
         assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
         assert_eq!(outcome.status, RunStatus::Cancelled);
     }

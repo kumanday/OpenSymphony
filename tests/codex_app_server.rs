@@ -1127,12 +1127,13 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
         "params": {
             "threadId": "thread-1",
             "turnId": "turn-1",
-            "status": "interrupted"
+            "status": "Interrupted"
         }
     }))
     .expect("interrupted turn completion normalizes");
     let interrupted_record = normalized_event_to_journal_record("COE-476", 11, &interrupted);
     assert_eq!(interrupted_record.kind, EventKind::RunCancelled);
+    assert_eq!(interrupted_record.summary, "Codex turn interrupted turn-1");
 }
 
 #[test]
