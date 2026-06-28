@@ -24,28 +24,22 @@ export function buildActionBarItems(run: RunDetail): ActionBarItem[] {
 
   const push = (action: RunAction, label: string, requiresSafe: boolean) => {
     const allowedAction = allowed.has(action);
-    const safeAction = safe[action as keyof SafeActions] ?? true;
-    let enabled = allowedAction && (requiresSafe ? safeAction : true);
-    let warning: string | undefined;
     if (!allowedAction) {
+      return;
+    }
+    const safeAction = safe[action as keyof SafeActions] ?? true;
+    let enabled = requiresSafe ? safeAction : true;
+    let warning: string | undefined;
+    if (action === "cancel" && run.cancel_requested) {
       enabled = false;
+      warning = "Cancel request pending acknowledgement";
     } else if (!safeAction) {
       warning = `Unsafe to ${action} while run is ${phase ?? run.status}`;
-    }
-    // Duplicate-run retry prevention: retry on an active/owned run is unsafe
-    // and should be blocked unless explicitly allowed by the safe_actions gate.
-    if (action === "retry" && allowedAction && !safeAction) {
-      warning = `Prevented duplicate-run retry: run is ${phase ?? run.status}`;
     }
     items.push({ action, label, enabled, warning });
   };
 
-  push("retry", "Retry", true);
   push("cancel", "Cancel", true);
-  push("rehydrate", "Rehydrate", true);
-  push("detach", "Detach", false);
-  push("comment", "Comment", false);
-  push("create_followup", "Follow-up", false);
   push("open_workspace", "Workspace", false);
   push("debug", "Debug", false);
   return items;
