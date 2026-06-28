@@ -59,6 +59,36 @@ describe("@opensymphony/graph", () => {
     expect(graphStateToHistory(state).filters.tags).toEqual(["frontend", "graph-view"]);
   });
 
+  it("restores history clearing values without carrying stale state", () => {
+    const populated = graphReducer(initialGraphState, {
+      type: "HISTORY_RESTORED",
+      state: {
+        mode: "neighborhood",
+        bundleId: "local-default",
+        focusedNodeId: "concept:coe-465",
+        selectedNodeIds: ["concept:coe-465"],
+        searchQuery: "graph",
+        filters: { ...initialGraphFilters, tags: ["graph-view"] },
+        neighborhoodDepth: 2,
+      },
+    });
+
+    const restored = graphReducer(populated, {
+      type: "HISTORY_RESTORED",
+      state: {
+        bundleId: null,
+        focusedNodeId: null,
+        selectedNodeIds: [],
+      },
+    });
+
+    expect(restored.selectedBundleId).toBeNull();
+    expect(restored.focusedNodeId).toBeNull();
+    expect(restored.selectedNodeIds).toEqual([]);
+    expect(restored.searchQuery).toBe("graph");
+    expect(restored.filters.tags).toEqual(["graph-view"]);
+  });
+
   it("provides fixture and HTTP adapters without Tauri imports", async () => {
     const fixture = createFixtureGraphAdapter();
     await expect(fixture.listBundles()).resolves.toMatchObject({
@@ -81,6 +111,19 @@ describe("@opensymphony/graph", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost:2468/api/v1/memory/search?visibility=public&query=graph&limit=5&bundle_id=local-default",
     );
+  });
+
+  it("rejects non-OK HTTP graph responses before parsing JSON", async () => {
+    const json = jest.fn();
+    const fetchMock = jest.fn(async () => ({
+      ok: false,
+      status: 503,
+      json,
+    })) as unknown as typeof fetch;
+    const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock);
+
+    await expect(gateway.listBundles()).rejects.toThrow("Graph request failed: HTTP 503");
+    expect(json).not.toHaveBeenCalled();
   });
 
   it("keeps filtered community concept counts aligned to concept nodes only", () => {
@@ -108,9 +151,9 @@ describe("@opensymphony/graph", () => {
     );
     expect(filtered.nodes.map((node) => node.id)).toEqual([
       "concept:coe-465",
-      "tag:graph-view",
-      "bundle:local-default",
       "source:osym-822",
+      "bundle:local-default",
+      "tag:graph-view",
     ]);
     expect(filtered.filters_applied).toEqual([
       "neighborhood-depth:2",

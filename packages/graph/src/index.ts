@@ -241,17 +241,19 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
       };
     case "LAYOUT_STATUS_SET":
       return { ...state, layoutStatus: action.status, layoutError: action.error ?? null };
-    case "HISTORY_RESTORED":
+    case "HISTORY_RESTORED": {
+      const restored = action.state;
       return {
         ...state,
-        mode: action.state.mode ?? state.mode,
-        selectedBundleId: action.state.bundleId ?? state.selectedBundleId,
-        focusedNodeId: action.state.focusedNodeId ?? state.focusedNodeId,
-        selectedNodeIds: uniqueSorted(action.state.selectedNodeIds ?? state.selectedNodeIds),
-        searchQuery: normalizeQuery(action.state.searchQuery ?? state.searchQuery),
-        filters: normalizeFilters(action.state.filters ?? state.filters),
-        neighborhoodDepth: action.state.neighborhoodDepth ?? state.neighborhoodDepth,
+        mode: restored.mode ?? state.mode,
+        selectedBundleId: restored.bundleId === undefined ? state.selectedBundleId : restored.bundleId,
+        focusedNodeId: restored.focusedNodeId === undefined ? state.focusedNodeId : restored.focusedNodeId,
+        selectedNodeIds: uniqueSorted(restored.selectedNodeIds === undefined ? state.selectedNodeIds : restored.selectedNodeIds),
+        searchQuery: normalizeQuery(restored.searchQuery === undefined ? state.searchQuery : restored.searchQuery),
+        filters: normalizeFilters(restored.filters === undefined ? state.filters : restored.filters),
+        neighborhoodDepth: restored.neighborhoodDepth ?? state.neighborhoodDepth,
       };
+    }
     case "GRAPH_RESET":
       return createInitialGraphState();
     default:
@@ -544,16 +546,20 @@ function normalizeQuery(query: string): string {
   return query.trim().replace(/\s+/g, " ");
 }
 
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function compareNodes(a: MemoryGraphNode, b: MemoryGraphNode): number {
-  return a.label.localeCompare(b.label) || a.id.localeCompare(b.id);
+  return compareStrings(a.label, b.label) || compareStrings(a.id, b.id);
 }
 
 function compareEdges(a: MemoryGraphEdge, b: MemoryGraphEdge): number {
-  return a.kind.localeCompare(b.kind) || a.source_id.localeCompare(b.source_id) || a.target_id.localeCompare(b.target_id) || a.id.localeCompare(b.id);
+  return compareStrings(a.kind, b.kind) || compareStrings(a.source_id, b.source_id) || compareStrings(a.target_id, b.target_id) || compareStrings(a.id, b.id);
 }
 
 function compareSearchResults(a: MemorySearchResult, b: MemorySearchResult): number {
-  return a.title.localeCompare(b.title) || a.bundle_id.localeCompare(b.bundle_id) || a.concept_id.localeCompare(b.concept_id);
+  return compareStrings(a.title, b.title) || compareStrings(a.bundle_id, b.bundle_id) || compareStrings(a.concept_id, b.concept_id);
 }
 
 function uniqueSorted<T extends string>(values: readonly T[]): T[] {
