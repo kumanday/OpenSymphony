@@ -290,11 +290,15 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
 
 async function copyText(text: string): Promise<void> {
   const invoke = getTauriInvoke();
-  if (!invoke) {
-    await navigator.clipboard.writeText(text);
-    return;
+  try {
+    if (!invoke) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    await invoke<NativeCopyResponse>("copy_to_clipboard", { req: { text } });
+  } catch (error) {
+    throw new Error(`clipboard copy failed: ${stringifyError(error)}`);
   }
-  await invoke<NativeCopyResponse>("copy_to_clipboard", { req: { text } });
 }
 
 async function openDeeplink(url: string): Promise<void> {
@@ -323,6 +327,8 @@ function desktopActionReceipt(
 }
 
 function shellQuote(value: string): string {
+  // POSIX shell string for the copied debug command. Keep this as data for the
+  // operator to paste; do not reuse it as a run-in-place command executor.
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 

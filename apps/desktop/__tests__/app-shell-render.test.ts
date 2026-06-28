@@ -405,6 +405,44 @@ describe("desktop app shell render", () => {
     ]);
   });
 
+  it("shell-quotes OpenHands debug commands with shell metacharacters", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          if (command === "run_detail") {
+            return {
+              run_id: args?.runId,
+              issue_identifier: "COE-491;`rm`",
+              harness_type: "openhands_agent_server",
+              workspace_path: "/tmp/work'space\\COE-491\nnext",
+            };
+          }
+          if (command === "copy_to_clipboard") {
+            return { copied: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const transport = createDesktopTransport("http://127.0.0.1:2468");
+    await transport.debugRun("run-1");
+
+    expect(calls).toEqual([
+      { command: "run_detail", args: { runId: "run-1" } },
+      {
+        command: "copy_to_clipboard",
+        args: {
+          req: {
+            text: "cd '/tmp/work'\\''space\\COE-491\nnext' && opensymphony debug 'COE-491;`rm`'",
+          },
+        },
+      },
+    ]);
+  });
+
   it("opens Codex debug deeplinks and copies them when opening fails", async () => {
     const calls: TauriInvokeCall[] = [];
     let rejectOpen = false;
