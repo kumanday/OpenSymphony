@@ -175,6 +175,12 @@ async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_me
         .await
         .expect("run command should interrupt recovered Human Review polling after Merging");
     print_merging_supersede_evidence(&snapshot);
+    let interrupt_requests = openhands.interrupt_request_count(conversation_id).await;
+    assert_eq!(
+        interrupt_requests, 1,
+        "run command should call the OpenHands /interrupt route exactly once"
+    );
+    println!("fake OpenHands interrupt requests: {interrupt_requests}");
 
     terminate_child(&mut child).await;
 }

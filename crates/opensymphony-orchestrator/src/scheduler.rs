@@ -1028,28 +1028,49 @@ where
         issue: &NormalizedIssue,
         observed_at: TimestampMs,
     ) -> Result<bool, SchedulerError> {
-        let Some(existing) = self.executions.get(&issue.id) else {
+        let Some((issue_id, mut execution, run, harness_kind)) =
+            self.merging_interrupt_candidate(issue)
+        else {
             return Ok(false);
         };
+
+        let command = Self::prepare_merging_interrupt(
+            &mut execution,
+            issue,
+            &run,
+            harness_kind,
+            observed_at,
+        )?;
+        if let Some(command) = command {
+            let result = self.worker.interrupt_worker(command).await;
+            Self::apply_merging_interrupt_result(&mut execution, observed_at, result)?;
+        }
+
+        self.insert_execution(issue_id, execution);
+        Ok(true)
+    }
+
+    fn merging_interrupt_candidate(
+        &self,
+        issue: &NormalizedIssue,
+    ) -> Option<(IssueId, IssueExecution, RunAttempt, String)> {
+        let existing = self.executions.get(&issue.id)?;
         if !is_human_review_to_merging(existing.issue(), issue)
             || !matches!(
                 existing.status(),
                 SchedulerStatus::Claimed | SchedulerStatus::Running
             )
         {
-            return Ok(false);
+            return None;
         }
 
         let issue_id = issue.id.clone();
-        let mut execution = self
+        let execution = self
             .executions
             .get(&issue_id)
             .cloned()
             .expect("execution existed before clone");
-        let Some(run) = execution.current_run().cloned() else {
-            self.insert_execution(issue_id, execution);
-            return Ok(false);
-        };
+        let run = execution.current_run().cloned()?;
         let harness_kind = self
             .worker_harness_kind
             .get(&run.worker_id)
@@ -1063,6 +1084,16 @@ where
             );
         }
 
+        Some((issue_id, execution, run, harness_kind))
+    }
+
+    fn prepare_merging_interrupt(
+        execution: &mut IssueExecution,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        harness_kind: String,
+        observed_at: TimestampMs,
+    ) -> Result<Option<HarnessInterruptCommand>, SchedulerError> {
         execution.refresh_issue(issue.clone())?;
         let (command, queued) = execution.request_interrupt(
             harness_kind,
@@ -1071,60 +1102,68 @@ where
             HarnessInterruptExpectedNextState::CloseoutPending,
             observed_at,
         )?;
-        if queued {
-            execution.observe_runtime_event(
-                observed_at,
-                Some(format!(
-                    "tracker-merging-supersedes-human-review-{}",
-                    observed_at.as_u64()
-                )),
-                Some("scheduler.interrupt_requested".to_string()),
-                Some(
-                    "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
-                        .to_string(),
-                ),
-                Some(serde_json::json!({
-                    "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
-                    "from_state": HUMAN_REVIEW_STATE,
-                    "to_state": issue.state.name,
-                    "worker_id": run.worker_id.as_str(),
-                })),
-            )?;
-            let result = self.worker.interrupt_worker(command).await;
-            match result {
-                Ok(acknowledgement) if acknowledgement.accepted => {
-                    execution.acknowledge_interrupt(observed_at)?;
-                    if let Some(detail) = acknowledgement.detail {
-                        execution.observe_runtime_event(
-                            observed_at,
-                            Some(format!(
-                                "tracker-merging-interrupt-acknowledged-{}",
-                                observed_at.as_u64()
-                            )),
-                            Some("scheduler.interrupt_acknowledged".to_string()),
-                            Some(detail),
-                            Some(serde_json::json!({
-                                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
-                            })),
-                        )?;
-                    }
-                }
-                Ok(acknowledgement) => {
-                    execution.fail_interrupt(
+
+        if !queued {
+            return Ok(None);
+        }
+
+        execution.observe_runtime_event(
+            observed_at,
+            Some(format!(
+                "tracker-merging-supersedes-human-review-{}",
+                observed_at.as_u64()
+            )),
+            Some("scheduler.interrupt_requested".to_string()),
+            Some(
+                "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
+                    .to_string(),
+            ),
+            Some(serde_json::json!({
+                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                "from_state": HUMAN_REVIEW_STATE,
+                "to_state": issue.state.name,
+                "worker_id": run.worker_id.as_str(),
+            })),
+        )?;
+        Ok(Some(command))
+    }
+
+    fn apply_merging_interrupt_result(
+        execution: &mut IssueExecution,
+        observed_at: TimestampMs,
+        result: Result<WorkerInterruptAcknowledgement, M::Error>,
+    ) -> Result<(), SchedulerError> {
+        match result {
+            Ok(acknowledgement) if acknowledgement.accepted => {
+                execution.acknowledge_interrupt(observed_at)?;
+                if let Some(detail) = acknowledgement.detail {
+                    execution.observe_runtime_event(
                         observed_at,
-                        acknowledgement.detail.unwrap_or_else(|| {
-                            "worker interrupt request was not accepted".to_string()
-                        }),
+                        Some(format!(
+                            "tracker-merging-interrupt-acknowledged-{}",
+                            observed_at.as_u64()
+                        )),
+                        Some("scheduler.interrupt_acknowledged".to_string()),
+                        Some(detail),
+                        Some(serde_json::json!({
+                            "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                        })),
                     )?;
                 }
-                Err(error) => {
-                    execution.fail_interrupt(observed_at, error.to_string())?;
-                }
+            }
+            Ok(acknowledgement) => {
+                execution.fail_interrupt(
+                    observed_at,
+                    acknowledgement
+                        .detail
+                        .unwrap_or_else(|| "worker interrupt request was not accepted".to_string()),
+                )?;
+            }
+            Err(error) => {
+                execution.fail_interrupt(observed_at, error.to_string())?;
             }
         }
-        self.insert_execution(issue_id, execution);
-
-        Ok(true)
+        Ok(())
     }
 
     fn restore_recovered_run(
