@@ -3586,7 +3586,7 @@ Run the scheduler.
 "#,
         )
         .expect("workflow should parse")
-        .resolve_with_process_env(tempdir.path())
+        .resolve(tempdir.path(), &BTreeMap::new())
         .expect("workflow should resolve");
         let runtime = RunRuntimeConfig {
             config_path: None,

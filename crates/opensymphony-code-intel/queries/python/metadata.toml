@@ -1,0 +1,15 @@
+language = "python"
+version = "python-query-pack-v1"
+grammar_crate = "tree-sitter-python"
+grammar_version = "0.25.0"
+parser_crate = "tree-sitter"
+parser_version = "0.26.9"
+
+[captures]
+"definition.function" = "Function definition"
+"definition.class" = "Class definition"
+"import.source" = "Import module or imported name"
+"reference.call" = "Call expression"
+"doc.comment" = "Comment node"
+"local.definition" = "Assignment target"
+"diagnostic.error" = "Tree-sitter error node"
