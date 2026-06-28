@@ -1526,6 +1526,18 @@ opensymphony:
             .expect("external edge");
         assert!(external_edge.id.starts_with("external_link:"));
         assert!(!external_edge.id.starts_with("ExternalLink:"));
+        assert!(
+            all_graph
+                .edges
+                .iter()
+                .any(|edge| edge.id.ends_with(":label:external"))
+        );
+        assert!(
+            all_graph
+                .edges
+                .iter()
+                .any(|edge| edge.id.ends_with(":label:external%20mirror"))
+        );
 
         let update = memory_graph_updated_event(
             &config,
@@ -1620,6 +1632,38 @@ opensymphony:
             .expect("public graph search");
         assert_eq!(search.results.len(), 1);
         assert_eq!(search.results[0].concept_id, "issues/COE-200");
+    }
+
+    #[test]
+    fn memory_graph_path_redaction_respects_token_boundaries() {
+        assert_eq!(
+            replace_path_token("/tmp/repo/file.md", "/tmp/repo", "[redacted]"),
+            "[redacted]/file.md"
+        );
+        assert_eq!(
+            replace_path_token("/foo/tmp/repo/file.md", "/tmp/repo", "[redacted]"),
+            "/foo/tmp/repo/file.md"
+        );
+        assert_eq!(
+            replace_path_token("/tmp/repository/file.md", "/tmp/repo", "[redacted]"),
+            "/tmp/repository/file.md"
+        );
+        assert_eq!(
+            replace_path_token(
+                ".opensymphony/memory/issues/COE-200.md",
+                ".opensymphony/memory",
+                "[redacted-memory-path]",
+            ),
+            "[redacted-memory-path]/issues/COE-200.md"
+        );
+        assert_eq!(
+            replace_path_token(
+                "prefix.opensymphony/memory/issues/COE-200.md",
+                ".opensymphony/memory",
+                "[redacted-memory-path]",
+            ),
+            "prefix.opensymphony/memory/issues/COE-200.md"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{fmt::Write as _, sync::atomic::{AtomicU64, Ordering}};
 
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
@@ -115,11 +115,17 @@ pub fn memory_graph_snapshot(
         .iter()
         .map(|issue| (issue.concept_id.clone(), concept_node_id(issue)))
         .collect::<BTreeMap<_, _>>();
+    let parsed_concepts = issues
+        .iter()
+        .map(|issue| (issue.concept_id.clone(), parsed_okf_concept(config, issue)))
+        .collect::<BTreeMap<_, _>>();
     for issue in &issues {
         let concept_node_id = concept_node_id(issue);
         insert_directory_nodes(config, issue, &mut nodes, &mut edges);
 
-        let parsed = parsed_okf_concept(config, issue);
+        let parsed = parsed_concepts
+            .get(&issue.concept_id)
+            .and_then(Option::as_ref);
         let frontmatter = parsed.as_ref().map(|concept| frontmatter_view(config, concept));
         let resource = parsed
             .as_ref()
@@ -303,7 +309,7 @@ pub fn memory_graph_snapshot(
         }
     }
 
-    insert_same_resource_edges(&issues, config, &mut edges);
+    insert_same_resource_edges(&issues, &parsed_concepts, &mut edges);
 
     let mut nodes = nodes.into_values().collect::<Vec<_>>();
     let edges = edges.into_values().collect::<Vec<_>>();
@@ -572,12 +578,15 @@ fn insert_edge(
     label: Option<String>,
     unresolved: bool,
 ) {
-    let label_key = label.as_deref().unwrap_or_default();
+    let label_key = label
+        .as_deref()
+        .map(|value| format!("label:{}", edge_id_component(value)))
+        .unwrap_or_else(|| "no_label".to_string());
     let id = format!(
-        "{}:{source_id}->{target_id}:{}:{:016x}",
+        "{}:{source_id}->{target_id}:{}:{}",
         edge_kind_key(kind),
         unresolved,
-        stable_edge_hash(label_key)
+        label_key
     );
     edges.entry(id.clone()).or_insert(MemoryGraphEdge {
         id,
@@ -590,13 +599,16 @@ fn insert_edge(
     });
 }
 
-fn stable_edge_hash(value: &str) -> u64 {
-    let mut hash = 14_695_981_039_346_656_037u64;
+fn edge_id_component(value: &str) -> String {
+    let mut escaped = String::new();
     for byte in value.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(1_099_511_628_211);
+        if matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_') {
+            escaped.push(char::from(byte));
+        } else {
+            write!(&mut escaped, "%{byte:02X}").expect("writing to String cannot fail");
+        }
     }
-    hash
+    escaped
 }
 
 fn insert_directory_nodes(
@@ -655,7 +667,7 @@ fn redact_for_dto(config: &MemoryConfig, value: &str) -> String {
     let memory_root = config.memory_root.to_string_lossy();
     let value = replace_path_token(value, repo_root.as_ref(), "[redacted-local-path]");
     let value = replace_path_token(&value, memory_root.as_ref(), "[redacted-memory-path]");
-    value.replace(".opensymphony/memory/", "[redacted-memory-path]/")
+    replace_path_token(&value, ".opensymphony/memory", "[redacted-memory-path]")
 }
 
 fn replace_path_token(value: &str, needle: &str, replacement: &str) -> String {
@@ -666,8 +678,9 @@ fn replace_path_token(value: &str, needle: &str, replacement: &str) -> String {
     let mut remaining = value;
     while let Some(index) = remaining.find(needle) {
         result.push_str(&remaining[..index]);
+        let before = &remaining[..index];
         let after = &remaining[index + needle.len()..];
-        if is_path_token_boundary(after) {
+        if is_path_token_left_boundary(before) && is_path_token_right_boundary(after) {
             result.push_str(replacement);
         } else {
             result.push_str(needle);
@@ -678,7 +691,18 @@ fn replace_path_token(value: &str, needle: &str, replacement: &str) -> String {
     result
 }
 
-fn is_path_token_boundary(after: &str) -> bool {
+fn is_path_token_left_boundary(before: &str) -> bool {
+    match before.chars().next_back() {
+        None => true,
+        Some('/') | Some('\\') => true,
+        Some(character) => {
+            !(character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_' | '.'))
+        }
+    }
+}
+
+fn is_path_token_right_boundary(after: &str) -> bool {
     let mut chars = after.chars();
     match chars.next() {
         None => true,
@@ -940,15 +964,17 @@ fn resolve_markdown_link_target(
 
 fn insert_same_resource_edges(
     issues: &[IndexedIssue],
-    config: &MemoryConfig,
+    parsed_concepts: &BTreeMap<String, Option<OkfConcept>>,
     edges: &mut BTreeMap<String, MemoryGraphEdge>,
 ) {
     let mut by_resource = BTreeMap::<String, Vec<&IndexedIssue>>::new();
     for issue in issues {
-        if let Some(resource) = parsed_okf_concept(config, issue)
-            .and_then(|concept| concept.frontmatter.resource)
+        if let Some(resource) = parsed_concepts
+            .get(&issue.concept_id)
+            .and_then(Option::as_ref)
+            .and_then(|concept| concept.frontmatter.resource.as_ref())
         {
-            by_resource.entry(resource).or_default().push(issue);
+            by_resource.entry(resource.clone()).or_default().push(issue);
         }
     }
     for issues in by_resource.values() {
