@@ -1,8 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
+
+use crate::{
+    opensymphony_memory::{
+        CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
+    },
+    opensymphony_planning::CodebaseAnalyzer,
+};
 
 pub const PROVIDER_NAME: &str = "tree-sitter";
 // Keep these in sync with Cargo.toml pins and queries/rust/metadata.toml.
@@ -11,6 +22,7 @@ pub const RUST_GRAMMAR_VERSION: &str = "0.24.2";
 pub const RUST_QUERY_PACK_VERSION: &str = "rust-definitions-v1";
 
 const RUST_DEFINITIONS_QUERY: &str = include_str!("../queries/rust/definitions.scm");
+const DEFAULT_MAX_FILE_BYTES: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +125,340 @@ pub enum CodeIntelError {
     Query(#[from] tree_sitter::QueryError),
     #[error("captured symbol name is not utf-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+}
+
+pub struct AstCodeIntelProvider {
+    root: PathBuf,
+    max_file_bytes: u64,
+}
+
+impl AstCodeIntelProvider {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+        }
+    }
+
+    fn code_context_report(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<AstCodeIntelReport, MemoryError> {
+        let repo_root = self.canonical_root()?;
+        let commit_sha = git_commit_sha(&repo_root);
+        let mut report = AstCodeIntelReport::default();
+
+        if paths.is_empty() {
+            report
+                .fallback_reasons
+                .push("no requested paths; repository summary fallback used".to_string());
+            return Ok(report);
+        }
+
+        for path in paths {
+            let resolved = self.resolve_requested_path(&repo_root, path)?;
+            let relative_path = resolved
+                .strip_prefix(&repo_root)
+                .unwrap_or(&resolved)
+                .to_path_buf();
+            let relative_display = relative_path.to_string_lossy().to_string();
+            let metadata = match fs::metadata(&resolved) {
+                Ok(metadata) => metadata,
+                Err(source) => {
+                    return Err(MemoryError::ResolvePath {
+                        path: resolved,
+                        source,
+                    });
+                }
+            };
+
+            if !metadata.is_file() {
+                report
+                    .fallback_reasons
+                    .push(format!("{relative_display} is not a file"));
+                continue;
+            }
+            if metadata.len() > self.max_file_bytes {
+                report.fallback_reasons.push(format!(
+                    "{relative_display} is {} bytes; max AST file size is {} bytes",
+                    metadata.len(),
+                    self.max_file_bytes
+                ));
+                continue;
+            }
+            if detect_language(&relative_path).is_none() {
+                report
+                    .fallback_reasons
+                    .push(format!("{relative_display} has unsupported language"));
+                continue;
+            }
+
+            let source = fs::read_to_string(&resolved).map_err(|source| MemoryError::ReadFile {
+                path: resolved.clone(),
+                source,
+            })?;
+            let summary = match parse_path(&relative_path, &source) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    report
+                        .fallback_reasons
+                        .push(format!("{relative_display} AST parse failed: {error}"));
+                    continue;
+                }
+            };
+
+            report.parsed_files += 1;
+            report.query_runs += 1;
+            if summary.has_errors {
+                report.fallback_reasons.push(format!(
+                    "{relative_display} parsed with Tree-sitter diagnostics"
+                ));
+            }
+            report.artifacts.extend(ast_artifacts_for_summary(
+                summary,
+                &relative_path,
+                &relative_display,
+                scope_refs,
+                commit_sha.clone(),
+                limit,
+            ));
+        }
+
+        Ok(report)
+    }
+
+    fn canonical_root(&self) -> Result<PathBuf, MemoryError> {
+        self.root
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: self.root.clone(),
+                source,
+            })
+    }
+
+    fn resolve_requested_path(
+        &self,
+        repo_root: &Path,
+        path: &Path,
+    ) -> Result<PathBuf, MemoryError> {
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo_root.join(path)
+        };
+        let resolved = candidate
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: candidate.clone(),
+                source,
+            })?;
+        if !resolved.starts_with(repo_root) {
+            return Err(MemoryError::PathOutsideRepo {
+                path: resolved,
+                repo_root: repo_root.to_path_buf(),
+            });
+        }
+        Ok(resolved)
+    }
+}
+
+impl CodeIntelIndex for AstCodeIntelProvider {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        let report = self.code_context_report(paths, scope_refs, limit)?;
+        let trace = report.trace_artifact(scope_refs);
+        let mut artifacts = report.artifacts;
+        artifacts.push(trace);
+        Ok(artifacts)
+    }
+}
+
+pub struct CompositeCodeIntelProvider {
+    ast: AstCodeIntelProvider,
+    fallback: CodebaseAnalyzer,
+}
+
+impl CompositeCodeIntelProvider {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        Self {
+            ast: AstCodeIntelProvider::new(&root),
+            fallback: CodebaseAnalyzer::new(root),
+        }
+    }
+}
+
+impl CodeIntelIndex for CompositeCodeIntelProvider {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        let report = self.ast.code_context_report(paths, scope_refs, limit)?;
+        let use_fallback = !report.fallback_reasons.is_empty();
+        let trace = report.trace_artifact(scope_refs);
+        let mut artifacts = report.artifacts;
+
+        if use_fallback {
+            artifacts.extend(self.fallback.code_context(paths, scope_refs, limit)?);
+        }
+        artifacts.push(trace);
+        Ok(artifacts)
+    }
+}
+
+#[derive(Default)]
+struct AstCodeIntelReport {
+    artifacts: Vec<CodeIntelArtifact>,
+    fallback_reasons: Vec<String>,
+    parsed_files: usize,
+    query_runs: usize,
+}
+
+impl AstCodeIntelReport {
+    fn trace_artifact(&self, scope_refs: &[KnowledgeScope]) -> CodeIntelArtifact {
+        let fallback = if self.fallback_reasons.is_empty() {
+            "fallback: CodebaseAnalyzer not used".to_string()
+        } else {
+            format!(
+                "fallback: CodebaseAnalyzer used ({})",
+                self.fallback_reasons.join("; ")
+            )
+        };
+        CodeIntelArtifact {
+            provider: "composite-code-intel".to_string(),
+            kind: "trace".to_string(),
+            scope_refs: scope_refs.to_vec(),
+            source_refs: Vec::new(),
+            path: None,
+            commit_sha: None,
+            title: "Code-intelligence trace".to_string(),
+            summary: format!(
+                "- parse: parsed {} file(s)\n- query: ran {} Tree-sitter query pack(s)\n- {fallback}",
+                self.parsed_files, self.query_runs
+            ),
+        }
+    }
+}
+
+fn ast_artifacts_for_summary(
+    summary: ParsedDocumentSummary,
+    relative_path: &Path,
+    relative_display: &str,
+    scope_refs: &[KnowledgeScope],
+    commit_sha: Option<String>,
+    limit: usize,
+) -> Vec<CodeIntelArtifact> {
+    let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
+    let mut artifacts = vec![CodeIntelArtifact {
+        provider: PROVIDER_NAME.to_string(),
+        kind: "ast-summary".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: vec![MemorySourceRef {
+            kind: "path".to_string(),
+            id: relative_display.to_string(),
+            url: None,
+        }],
+        path: Some(relative_path.to_path_buf()),
+        commit_sha: commit_sha.clone(),
+        title: relative_display.to_string(),
+        summary: format!(
+            "- Language: {}\n- Content hash: sha256:{}\n- Parser: tree-sitter-rust@{}\n- Query pack: {}\n- Diagnostics: {diagnostic_summary}",
+            source_language_label(summary.source.language),
+            summary.source.sha256,
+            RUST_GRAMMAR_VERSION,
+            summary.versions.query_pack,
+        ),
+    }];
+
+    if !summary.symbols.is_empty() {
+        let max_symbols = limit.max(1);
+        let symbols = summary
+            .symbols
+            .iter()
+            .take(max_symbols)
+            .map(|symbol| {
+                format!(
+                    "- {} `{}` at {}:{}",
+                    symbol_kind_label(&symbol.kind),
+                    symbol.name,
+                    relative_display,
+                    symbol.rendered_span
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        artifacts.push(CodeIntelArtifact {
+            provider: PROVIDER_NAME.to_string(),
+            kind: "ast-symbols".to_string(),
+            scope_refs: scope_refs.to_vec(),
+            source_refs: summary
+                .symbols
+                .iter()
+                .take(max_symbols)
+                .map(|symbol| MemorySourceRef {
+                    kind: "code-symbol".to_string(),
+                    id: format!("{relative_display}:{}", symbol.rendered_span),
+                    url: None,
+                })
+                .collect(),
+            path: Some(relative_path.to_path_buf()),
+            commit_sha,
+            title: format!("Symbols in {relative_display}"),
+            summary: symbols,
+        });
+    }
+
+    artifacts
+}
+
+fn diagnostics_summary(diagnostics: &[AstDiagnostic]) -> String {
+    let errors = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == AstDiagnosticKind::Error)
+        .count();
+    let missing = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == AstDiagnosticKind::Missing)
+        .count();
+    format!("{errors} ERROR, {missing} MISSING")
+}
+
+fn source_language_label(language: SourceLanguage) -> &'static str {
+    match language {
+        SourceLanguage::Rust => "rust",
+    }
+}
+
+fn symbol_kind_label(kind: &SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Method => "method",
+        SymbolKind::Test => "test",
+    }
+}
+
+fn git_commit_sha(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 pub fn detect_language(path: impl AsRef<Path>) -> Option<SourceLanguage> {
@@ -320,6 +666,8 @@ fn one_based_span(node: Node<'_>) -> SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opensymphony_memory::CodeIntelIndex;
+    use tempfile::TempDir;
 
     const COMPLETE: &str = include_str!("../fixtures/rust/complete.rs");
     const MALFORMED_ERROR: &str = include_str!("../fixtures/rust/malformed_error.rs");
@@ -400,5 +748,58 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind == AstDiagnosticKind::Missing)
         );
+    }
+
+    #[test]
+    fn composite_falls_back_when_parser_reports_diagnostics() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(repo.path().join("src/lib.rs"), "pub fn broken( {\n").expect("malformed rust");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/lib.rs")], &[], 20)
+            .expect("code context");
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-summary")
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace"
+                && artifact
+                    .summary
+                    .contains("parsed with Tree-sitter diagnostics")
+        }));
+    }
+
+    #[test]
+    fn composite_falls_back_when_file_exceeds_ast_size_limit() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            format!("pub const LARGE: &str = \"{}\";\n", "x".repeat(1_000_001)),
+        )
+        .expect("large rust");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/lib.rs")], &[], 20)
+            .expect("code context");
+
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-summary")
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace" && artifact.summary.contains("max AST file size")
+        }));
     }
 }
