@@ -69,6 +69,7 @@ export function mountKnowledgeGraphRenderer(
     py: 0,
   };
   let canvasSize = { width: 0, height: 0, cssWidth: 0, cssHeight: 0 };
+  let scheduledDraw: ReturnType<typeof setTimeout> | number | null = null;
   const draw = () => {
     const viewport = canvasViewport(stage);
     canvasSize = resizeCanvasIfNeeded(canvas, viewport, canvasSize);
@@ -78,12 +79,22 @@ export function mountKnowledgeGraphRenderer(
     syncLabels(root, options.layout!, view, viewport);
     canvas.dataset.nonblank = options.layout!.nodes.length > 0 ? "true" : "false";
   };
+  const requestDraw = () => {
+    if (scheduledDraw !== null) return;
+    const run = () => {
+      scheduledDraw = null;
+      if (canvas.isConnected) draw();
+    };
+    scheduledDraw = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame(run)
+      : setTimeout(run, 16);
+  };
   draw();
   canvas.onwheel = (event) => {
     event.preventDefault();
     view.scale = clamp(view.scale * (event.deltaY < 0 ? 1.08 : 0.92), 0.45, 3);
     syncViewState(options.view, view);
-    draw();
+    requestDraw();
   };
   canvas.onpointerdown = (event) => {
     canvas.setPointerCapture(event.pointerId);
@@ -102,7 +113,7 @@ export function mountKnowledgeGraphRenderer(
     view.px = event.clientX;
     view.py = event.clientY;
     syncViewState(options.view, view);
-    draw();
+    requestDraw();
   };
   canvas.onpointerup = (event) => {
     view.dragging = false;

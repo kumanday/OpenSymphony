@@ -9,10 +9,7 @@ const webDist = join(repoRoot, "apps/web/dist");
 describe("Knowledge Graph renderer", () => {
   it("renders a nonblank WebGL canvas in the built web app", async () => {
     const indexPath = join(webDist, "index.html");
-    if (!existsSync(indexPath)) {
-      console.warn("Skipping built-web WebGL proof because apps/web/dist is missing.");
-      return;
-    }
+    expect(existsSync(indexPath)).toBe(true);
     const server = await startStaticServer(webDist);
     const browser = await chromium.launch({ headless: true });
     try {

@@ -926,6 +926,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       },
       onFocus: (nodeId) => {
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
+        this.render();
         if (this.state.knowledgeGraph.mode !== "neighborhood") return;
         this.state.knowledgeGraphLayout = null;
         this.knowledgeGraphLayoutSize = null;
