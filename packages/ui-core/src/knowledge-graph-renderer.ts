@@ -79,6 +79,7 @@ export function mountKnowledgeGraphRenderer(
   };
   let canvasSize = { width: 0, height: 0, cssWidth: 0, cssHeight: 0 };
   let scheduledDraw: ReturnType<typeof setTimeout> | number | null = null;
+  const reducedMotion = prefersReducedMotion();
   const draw = () => {
     const viewport = canvasViewport(stage);
     canvasSize = resizeCanvasIfNeeded(canvas, viewport, canvasSize);
@@ -87,7 +88,7 @@ export function mountKnowledgeGraphRenderer(
     }
     syncLabels(root, options.layout!, view, viewport);
     canvas.dataset.nonblank = options.layout!.nodes.length > 0 ? "true" : "false";
-    canvas.dataset.reducedMotion = prefersReducedMotion() ? "true" : "false";
+    canvas.dataset.reducedMotion = reducedMotion ? "true" : "false";
   };
   const requestDraw = () => {
     if (scheduledDraw !== null) return;
@@ -96,7 +97,7 @@ export function mountKnowledgeGraphRenderer(
       scheduledCanvasDraws.delete(canvas);
       if (canvas.isConnected) draw();
     };
-    if (prefersReducedMotion()) {
+    if (reducedMotion) {
       scheduledDraw = setTimeout(run, 0);
       scheduledCanvasDraws.set(canvas, { handle: scheduledDraw, kind: "timeout" });
     } else if (typeof requestAnimationFrame === "function") {
@@ -265,7 +266,7 @@ function labelNodes(
 }
 
 function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
-  const node = snapshot?.nodes.find((candidate) => selectedNodeIds.includes(candidate.id)) ?? snapshot?.nodes[0] ?? null;
+  const node = snapshot?.nodes.find((candidate) => selectedNodeIds.includes(candidate.id)) ?? null;
   if (!node) {
     return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector" aria-labelledby="kg-inspector-title"><h3 id="kg-inspector-title">Inspector</h3><p>No concept selected</p></section>`;
   }
@@ -276,10 +277,10 @@ function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedN
     <section class="os-kg-inspector" data-testid="knowledge-graph-inspector" aria-labelledby="kg-inspector-title">
       <h3 id="kg-inspector-title">${escapeHtml(node.label)}</h3>
       <dl>
-        <div><dt>Kind</dt><dd>${escapeHtml(node.kind)}</dd></div>
-        <div><dt>Visibility</dt><dd>${escapeHtml(node.visibility ?? "unknown")}</dd></div>
-        <div><dt>Community</dt><dd>${escapeHtml(community)}</dd></div>
-        <div><dt>Tags</dt><dd>${escapeHtml(node.tags.join(", ") || "None")}</dd></div>
+        <dt>Kind</dt><dd>${escapeHtml(node.kind)}</dd>
+        <dt>Visibility</dt><dd>${escapeHtml(node.visibility ?? "unknown")}</dd>
+        <dt>Community</dt><dd>${escapeHtml(community)}</dd>
+        <dt>Tags</dt><dd>${escapeHtml(node.tags.join(", ") || "None")}</dd>
       </dl>
     </section>
   `;
@@ -303,7 +304,12 @@ function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeId
 }
 
 function prefersReducedMotion(): boolean {
-  return globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  if (typeof globalThis.matchMedia !== "function") return false;
+  try {
+    return globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
 }
 
 function graphListNavigationDirection(key: string): -1 | 1 | "first" | "last" | null {

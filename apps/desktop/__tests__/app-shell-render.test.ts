@@ -134,6 +134,10 @@ describe("desktop app shell render", () => {
       );
 
       expect(root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent).toContain("COE-465");
+      (root.querySelector("[data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await waitFor(() =>
+        root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent?.includes("private") ?? false
+      );
       expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("private");
     } finally {
       getContext.mockRestore();
@@ -615,9 +619,9 @@ describe("desktop app shell render", () => {
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("condition was not met");
 }

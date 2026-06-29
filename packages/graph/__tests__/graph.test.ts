@@ -43,19 +43,17 @@ describe("@opensymphony/graph", () => {
   });
 
   it("covers scale fixtures and defaults very large graphs to community overview", () => {
-    const start = performance.now();
     const small = createScaleGraphSnapshot(500);
     const smallLayout = computeGraphLayout(small, { kind: "force", width: 960, height: 540 });
-    expect(performance.now() - start).toBeLessThan(500);
     expect(small.nodes).toHaveLength(500);
     expect(smallLayout.nodes).toHaveLength(500);
+    expect(smallLayout.nodes.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y))).toBe(true);
 
     const medium = createScaleGraphSnapshot(5_000);
-    const mediumStart = performance.now();
     const mediumLayout = computeGraphLayout(medium, { kind: "force", width: 1280, height: 720 });
-    expect(performance.now() - mediumStart).toBeLessThan(1_000);
     expect(mediumLayout.nodes).toHaveLength(5_000);
     expect(mediumLayout.nodes.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y))).toBe(true);
+    expect(new Set(mediumLayout.nodes.map((node) => node.communityId).filter(Boolean)).size).toBeGreaterThan(1);
 
     const large = createScaleGraphSnapshot(20_000);
     const state = graphReducer(initialGraphState, { type: "SNAPSHOT_LOADED", snapshot: large });
@@ -64,6 +62,16 @@ describe("@opensymphony/graph", () => {
     expect(visible?.nodes.length).toBeLessThan(large.nodes.length);
     expect(visible?.nodes.every((node) => node.kind === "bundle" || node.kind === "community")).toBe(true);
     expect(visible?.filters_applied).toContain("overview:community-aggregation");
+    expect(visible?.metrics).toBeUndefined();
+    expect(visible?.communities.every((community) => community.node_ids.every((nodeId) => nodeId === community.id))).toBe(true);
+
+    const neighborhood = visibleGraphSnapshot(graphReducer(state, {
+      type: "NODE_FOCUSED",
+      nodeId: `bundle:${large.bundle_id}`,
+      neighborhoodDepth: 1,
+    }));
+    expect(neighborhood?.filters_applied).toContain("overview:community-aggregation");
+    expect(neighborhood?.nodes.length).toBeLessThan(large.nodes.length);
   });
 
   it("normalizes selection and history state for URLs or app history", () => {

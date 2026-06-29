@@ -369,26 +369,41 @@ export function visibleGraphSnapshot(state: GraphState): MemoryGraphSnapshot | n
   const snapshot = currentGraphSnapshot(state);
   if (!snapshot) return null;
   const visible = applyGraphFilters(snapshot, state.filters, state.mode, state.focusedNodeId, state.neighborhoodDepth);
-  if (state.mode === "neighborhood" || visible.nodes.length < graphOverviewNodeThreshold) return visible;
+  if (visible.nodes.length < graphOverviewNodeThreshold) return visible;
   return createCommunityOverviewSnapshot(visible);
 }
 
 export function createCommunityOverviewSnapshot(snapshot: MemoryGraphSnapshot): MemoryGraphSnapshot {
-  const bundle = snapshot.nodes.find((node) => node.kind === "bundle");
-  const communityNodes: MemoryGraphNode[] = snapshot.communities.map((community) => ({
-    id: community.id,
-    kind: "community",
-    label: community.label,
-    bundle_id: snapshot.bundle_id,
-    tags: [],
-    visibility: "private",
-    freshness: "current",
-    warning_count: 0,
-    frontmatter_summary: { concept_count: community.concept_count },
-    unknown_frontmatter: {},
-    body_preview: `${community.concept_count} concepts`,
-    metrics: { indegree: bundle ? 1 : 0, outdegree: 0, community_id: community.id },
-  }));
+  const bundle = snapshot.nodes.find((node) => node.kind === "bundle" && node.bundle_id === snapshot.bundle_id)
+    ?? snapshot.nodes.find((node) => node.kind === "bundle");
+  const nodesById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const normalizedCommunities = snapshot.communities
+    .map((community) => ({
+      ...community,
+      node_ids: community.node_ids.filter((nodeId) => nodesById.has(nodeId)).sort(),
+      concept_count: community.node_ids.filter((nodeId) => nodesById.get(nodeId)?.kind === "concept").length,
+    }))
+    .filter((community) => community.node_ids.length > 0)
+    .sort((a, b) => compareStrings(a.id, b.id));
+  const communityNodes: MemoryGraphNode[] = normalizedCommunities.map((community) => {
+    const members = community.node_ids.map((nodeId) => nodesById.get(nodeId)).filter((node): node is MemoryGraphNode => Boolean(node));
+    const warningCount = members.reduce((sum, node) => sum + node.warning_count, 0);
+    return {
+      id: community.id,
+      kind: "community",
+      label: community.label,
+      bundle_id: snapshot.bundle_id,
+      tags: uniqueSorted(members.flatMap((node) => node.tags)),
+      visibility: mostCommon(members.map((node) => node.visibility).filter((value): value is MemoryGraphVisibility => Boolean(value)))
+        ?? bundle?.visibility,
+      freshness: members.some((node) => node.freshness === "stale") ? "stale" : bundle?.freshness ?? "current",
+      warning_count: warningCount,
+      frontmatter_summary: { concept_count: community.concept_count },
+      unknown_frontmatter: {},
+      body_preview: `${community.concept_count} concepts`,
+      metrics: { indegree: bundle ? 1 : 0, outdegree: 0, community_id: community.id },
+    };
+  });
   const nodes = [...(bundle ? [bundle] : []), ...communityNodes].sort(compareNodes);
   const edges: MemoryGraphEdge[] = bundle
     ? communityNodes.map((node) => ({
@@ -400,10 +415,12 @@ export function createCommunityOverviewSnapshot(snapshot: MemoryGraphSnapshot): 
       metadata: { aggregation: "community" },
     }))
     : [];
+  const { metrics: _metrics, ...rest } = snapshot;
   return {
-    ...snapshot,
+    ...rest,
     nodes,
     edges,
+    communities: normalizedCommunities.map((community) => ({ ...community, node_ids: [community.id] })),
     filters_applied: uniqueSorted([...snapshot.filters_applied, "overview:community-aggregation"]),
   };
 }
@@ -685,7 +702,7 @@ function forceLayout(
 ): GraphLayoutNode[] {
   if (nodes.length > 400) return progressiveCommunityLayout(nodes, width, height);
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const tickCount = nodes.length > 400 ? 24 : nodes.length > 160 ? 45 : 90;
+  const tickCount = nodes.length > 160 ? 45 : 90;
   const points = nodes.map((node, index) => ({
     id: node.id,
     x: width / 2 + Math.cos(index) * 80,
@@ -742,6 +759,7 @@ function progressiveCommunityLayout(
   width: number,
   height: number,
 ): GraphLayoutNode[] {
+  // ponytail: unknown-community nodes share coarse kind cells until real data shows that needs finer grouping.
   const groups = [...groupBy(nodes, (node) => node.metrics?.community_id ?? `kind:${node.kind}`).entries()]
     .sort(([a], [b]) => compareStrings(a, b));
   const columns = Math.max(1, Math.ceil(Math.sqrt(groups.length)));
@@ -914,6 +932,12 @@ function compareLayoutNodes(a: GraphLayoutNode, b: GraphLayoutNode): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function mostCommon<T extends string>(values: readonly T[]): T | undefined {
+  const counts = new Map<T, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || compareStrings(a[0], b[0]))[0]?.[0];
 }
 
 function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boolean {

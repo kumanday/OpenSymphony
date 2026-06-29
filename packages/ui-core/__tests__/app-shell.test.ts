@@ -997,7 +997,18 @@ describe("OpenSymphonyApp mount", () => {
     const labels = root.querySelectorAll(".os-kg-label");
     expect(labels.length).toBeLessThanOrEqual(80);
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
+    expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl div")).toBeNull();
     expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
+    root.innerHTML = renderKnowledgeGraphSurface({
+      snapshot,
+      layout,
+      state: {
+        ...initialGraphState,
+        selectedNodeIds: [],
+        layoutStatus: "ready",
+      },
+    });
+    expect(root.querySelector("[data-testid='knowledge-graph-inspector']")?.textContent).toContain("No concept selected");
 
     const originalMatchMedia = globalThis.matchMedia;
     const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
@@ -1006,6 +1017,15 @@ describe("OpenSymphonyApp mount", () => {
     globalThis.requestAnimationFrame = requestAnimationFrameMock as unknown as typeof requestAnimationFrame;
     const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
     try {
+      root.innerHTML = renderKnowledgeGraphSurface({
+        snapshot,
+        layout,
+        state: {
+          ...initialGraphState,
+          selectedNodeIds: [selectedNodeId],
+          layoutStatus: "ready",
+        },
+      });
       mountKnowledgeGraphRenderer(root, {
         snapshot,
         layout,
