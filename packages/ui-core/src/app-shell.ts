@@ -349,6 +349,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshQueued = false;
   private liveRefreshFailureCount = 0;
   private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private knowledgeGraphLoadGeneration = 0;
+  private knowledgeDetailLoadGeneration = 0;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -703,14 +705,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadKnowledgeGraph(): Promise<void> {
-    if (!this.graphAdapter || this.state.knowledgeGraph.snapshot || this.state.knowledgeGraph.loading) {
+    const adapter = this.graphAdapter;
+    if (!adapter || (this.state.knowledgeGraph.snapshot && !this.state.knowledgeGraph.loading)) {
       return;
     }
+    const generation = ++this.knowledgeGraphLoadGeneration;
     this.state.knowledgeGraph = { ...this.state.knowledgeGraph, loading: true, error: null };
     this.render();
     try {
-      const bundles = await this.graphAdapter.listBundles();
+      const bundles = await adapter.listBundles();
       const bundleId = this.state.knowledgeGraph.filters.bundle || bundles.bundles[0]?.id;
+      if (generation !== this.knowledgeGraphLoadGeneration || adapter !== this.graphAdapter) return;
       if (!bundleId) {
         this.state.knowledgeGraph = {
           ...this.state.knowledgeGraph,
@@ -721,7 +726,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.render();
         return;
       }
-      const snapshot = await this.graphAdapter.getGraphSnapshot(bundleId);
+      const snapshot = await adapter.getGraphSnapshot(bundleId);
+      if (generation !== this.knowledgeGraphLoadGeneration || adapter !== this.graphAdapter) return;
       const selectedNodeId = this.state.knowledgeGraph.selectedNodeId
         && snapshot.nodes.some((node) => node.id === this.state.knowledgeGraph.selectedNodeId)
         ? this.state.knowledgeGraph.selectedNodeId
@@ -736,6 +742,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       };
       await this.loadKnowledgeConceptDetail(selectedNodeId);
     } catch (error) {
+      if (generation !== this.knowledgeGraphLoadGeneration || adapter !== this.graphAdapter) return;
       this.state.knowledgeGraph = {
         ...this.state.knowledgeGraph,
         loading: false,
@@ -746,8 +753,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadKnowledgeConceptDetail(nodeId: string | null): Promise<void> {
+    const generation = ++this.knowledgeDetailLoadGeneration;
     const snapshot = this.state.knowledgeGraph.snapshot;
-    if (!this.graphAdapter || !snapshot || !nodeId) {
+    const adapter = this.graphAdapter;
+    if (!adapter || !snapshot || !nodeId) {
       this.state.knowledgeGraph = { ...this.state.knowledgeGraph, detail: null, detailKey: null };
       this.render();
       return;
@@ -764,9 +773,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     try {
-      const detail = await this.graphAdapter.getConceptDetail(snapshot.bundle_id, node.concept_id);
+      const detail = await adapter.getConceptDetail(snapshot.bundle_id, node.concept_id);
+      const selectedNode = this.state.knowledgeGraph.snapshot?.nodes.find(
+        (candidate) => candidate.id === this.state.knowledgeGraph.selectedNodeId,
+      );
+      if (
+        generation !== this.knowledgeDetailLoadGeneration
+        || adapter !== this.graphAdapter
+        || selectedNode?.concept_id !== node.concept_id
+      ) {
+        return;
+      }
       this.state.knowledgeGraph = { ...this.state.knowledgeGraph, detail, detailKey };
     } catch (error) {
+      if (generation !== this.knowledgeDetailLoadGeneration || adapter !== this.graphAdapter) return;
       this.state.knowledgeGraph = {
         ...this.state.knowledgeGraph,
         detail: null,
@@ -1060,10 +1080,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       filters: { ...this.state.knowledgeGraph.filters, [key]: value },
     };
     if (key === "bundle") {
-      this.state.knowledgeGraph.snapshot = null;
-      this.state.knowledgeGraph.selectedNodeId = null;
-      this.state.knowledgeGraph.detail = null;
-      this.state.knowledgeGraph.detailKey = null;
+      this.state.knowledgeGraph = {
+        ...this.state.knowledgeGraph,
+        snapshot: null,
+        selectedNodeId: null,
+        detail: null,
+        detailKey: null,
+        loading: false,
+      };
       void this.loadKnowledgeGraph();
       return;
     }
@@ -1103,6 +1127,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private updateGraphAdapterForGateway(gatewayUrl: string): void {
     if (this.options.onGraphGatewayUrlChanged) {
       this.graphAdapter = this.options.onGraphGatewayUrlChanged(gatewayUrl);
+      this.knowledgeGraphLoadGeneration += 1;
+      this.knowledgeDetailLoadGeneration += 1;
       this.clearKnowledgeGraphData();
     }
   }

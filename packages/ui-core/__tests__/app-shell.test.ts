@@ -768,6 +768,16 @@ async function flushUntil(
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 async function expandSettingsPanel(
   root: HTMLElement,
   panel: "connection" | "model",
@@ -1000,6 +1010,115 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
     expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("keeps the latest Knowledge Graph bundle load when older requests finish late", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const slowOtherBundle = deferred<MemoryGraphSnapshot>();
+    const otherGraph: MemoryGraphSnapshot = {
+      ...knowledgeGraph,
+      bundle_id: "other-bundle",
+      nodes: knowledgeGraph.nodes.map((node) => ({
+        ...node,
+        id: node.id.replace("coe-", "other-"),
+        label: node.kind === "concept" ? "Other Bundle Concept" : node.label,
+        bundle_id: "other-bundle",
+      })),
+      edges: [],
+      communities: [],
+    };
+    const adapter = {
+      async listBundles() {
+        return {
+          ...knowledgeBundles,
+          bundles: [
+            ...knowledgeBundles.bundles,
+            { ...knowledgeBundles.bundles[0]!, id: "other-bundle", title: "Other Memory" },
+          ],
+        };
+      },
+      async getGraphSnapshot(bundleId: string) {
+        return bundleId === "other-bundle" ? slowOtherBundle.promise : knowledgeGraph;
+      },
+      async getConceptDetail(_bundleId: string, conceptId: string) {
+        return { ...knowledgeDetail, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: adapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+
+    const selectOther = root.querySelector("[data-kg-filter='bundle']") as HTMLSelectElement;
+    selectOther.value = "other-bundle";
+    selectOther.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("Loading") ?? false);
+
+    const selectLocal = root.querySelector("[data-kg-filter='bundle']") as HTMLSelectElement;
+    selectLocal.value = "local-default";
+    selectLocal.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+
+    slowOtherBundle.resolve(otherGraph);
+    await flushMicrotasks();
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-468 Concept Inspector");
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).not.toContain("Other Bundle Concept");
+
+    await handle.destroy();
+  });
+
+  it("keeps the latest Knowledge Graph detail when older detail requests finish late", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const slowDetail = deferred<MemoryConceptDetail>();
+    const adapter = {
+      async listBundles() {
+        return knowledgeBundles;
+      },
+      async getGraphSnapshot() {
+        return knowledgeGraph;
+      },
+      async getConceptDetail(_bundleId: string, conceptId: string) {
+        if (conceptId === "issues/COE-465") return slowDetail.promise;
+        return { ...knowledgeDetail, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: adapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-468") ?? false);
+
+    (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-465']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-465") ?? false);
+    (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-468']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("Concept Inspector, Search") ?? false);
+
+    slowDetail.resolve({
+      ...knowledgeDetail,
+      concept_id: "issues/COE-465",
+      frontmatter_view: {
+        ...knowledgeDetail.frontmatter_view,
+        primary: { title: "Stale COE-465 Detail" },
+      },
+    });
+    await flushMicrotasks();
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Concept Inspector, Search");
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).not.toContain("Stale COE-465 Detail");
 
     await handle.destroy();
   });
