@@ -1,7 +1,8 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium } from "playwright";
+import { fixtureBundleList, fixtureGraphSnapshot } from "@opensymphony/graph";
 
 const repoRoot = resolve(__dirname, "../../..");
 const webDist = join(repoRoot, "apps/web/dist");
@@ -61,6 +62,14 @@ function startStaticServer(root: string): Promise<Server & { url: string }> {
   const rootPath = resolve(root);
   const server = createServer((request, response) => {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (requestUrl.pathname === "/api/v1/memory/bundles") {
+      writeJson(response, fixtureBundleList);
+      return;
+    }
+    if (requestUrl.pathname === `/api/v1/memory/bundles/${fixtureGraphSnapshot.bundle_id}/graph`) {
+      writeJson(response, fixtureGraphSnapshot);
+      return;
+    }
     const path = requestUrl.pathname === "/app/" || requestUrl.pathname === "/app"
       ? "index.html"
       : requestUrl.pathname.replace(/^\/app\//, "");
@@ -87,6 +96,11 @@ function startStaticServer(root: string): Promise<Server & { url: string }> {
       resolveListen(server);
     });
   });
+}
+
+function writeJson(response: ServerResponse, body: unknown): void {
+  response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(body));
 }
 
 function contentType(filePath: string): string {
