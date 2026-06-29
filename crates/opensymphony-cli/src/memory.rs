@@ -4303,6 +4303,45 @@ mod tests {
         assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 0);
     }
 
+    #[test]
+    fn code_intel_parser_version_drift_keeps_stale_child_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let first_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("same".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        persist_code_intel_documents(&config, first_batch).expect("first persist");
+
+        let mut changed_parser = sample_code_intel_document("hash-a", "pack-a");
+        changed_parser.parser_version = "tree-sitter-rust:0.27.0".to_string();
+        let second_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("same".to_string()),
+            worktree_dirty: false,
+            documents: vec![changed_parser],
+        };
+        let report =
+            persist_code_intel_documents(&config, second_batch).expect("parser drift persist");
+        assert!(
+            report.stale_rows > 0,
+            "parser-version drift should report stale rows"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_documents", "stale"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "stale"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "stale"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 1);
+    }
+
     fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
         CodeIntelDocumentInput {
             path: "src/lib.rs".into(),
