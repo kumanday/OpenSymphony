@@ -629,6 +629,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private async loadKnowledgeGraph(bundleId?: string): Promise<void> {
     if (!this.graphAdapter) {
       this.state.graphError = "Knowledge Graph unavailable for the active transport";
+      this.render();
       return;
     }
     this.state.graphError = null;
@@ -657,8 +658,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private async refreshKnowledgeGraphSnapshot(bundleId: string): Promise<void> {
     if (!this.graphAdapter) return;
     const snapshot = await this.graphAdapter.getGraphSnapshot(bundleId);
-    this.state.graph = graphReducer(this.state.graph, { type: "SNAPSHOT_LOADED", snapshot });
-    this.state.graph = graphReducer(this.state.graph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+    const previousGraph = this.state.graph;
+    this.state.graph = graphReducer(previousGraph, { type: "SNAPSHOT_LOADED", snapshot });
+    const acceptedSnapshot = this.state.graph !== previousGraph;
+    if (acceptedSnapshot || !this.state.graph.staleBundleIds.includes(bundleId)) {
+      this.state.graph = graphReducer(this.state.graph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+    }
     this.render();
   }
 

@@ -1398,6 +1398,8 @@ nested_secret:
 password_policy: rotate-often
 private_key_type: ed25519
 secretariat: public-office
+secret_key_algorithm: ed25519
+session_id: session-fixture
 token_bucket: graph-rate-limit
 opensymphony:
   visibility: public
@@ -1620,7 +1622,9 @@ opensymphony:
         assert!(!public_json.contains("sk-live-public-fixture"));
         assert!(!public_json.contains("client-secret-fixture"));
         assert!(!public_json.contains("nested-token-fixture"));
+        assert!(!public_json.contains("session-fixture"));
         assert!(!public_json.contains("local-secret-fixture"));
+        assert!(public_json.contains("ed25519"));
         assert!(public_json.contains("sk-live-prefix"));
         assert!(public_json.contains("graph-rate-limit"));
         assert!(public_json.contains("[redacted-secret]"));
@@ -1730,6 +1734,14 @@ opensymphony:
         assert_eq!(
             detail.frontmatter_view.unknown.get("secretariat"),
             Some(&serde_json::json!("public-office"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("secret_key_algorithm"),
+            Some(&serde_json::json!("ed25519"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("session_id"),
+            Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(
             detail.frontmatter_view.unknown.get("token_bucket"),

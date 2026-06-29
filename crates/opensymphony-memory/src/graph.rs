@@ -979,7 +979,14 @@ fn is_secret_like_frontmatter_key(key: &str) -> bool {
     if parts.is_empty() || has_non_secret_descriptor(&parts) {
         return false;
     }
-    if has("secret") || has("password") || has("credential") {
+    if has("secret") || has("password") || has("credential") || has("pwd") || has("jwt") {
+        return true;
+    }
+    if has("cookie")
+        && parts
+            .iter()
+            .any(|part| matches!(*part, "auth" | "session" | "access" | "refresh"))
+    {
         return true;
     }
     if has("token")
@@ -993,13 +1000,23 @@ fn is_secret_like_frontmatter_key(key: &str) -> bool {
     has_adjacent_parts(&parts, "api", "key")
         || has_adjacent_parts(&parts, "access", "key")
         || has_adjacent_parts(&parts, "private", "key")
+        || has_adjacent_parts(&parts, "session", "id")
 }
 
 fn has_non_secret_descriptor(parts: &[&str]) -> bool {
     parts.iter().any(|part| {
         matches!(
             *part,
-            "policy" | "policies" | "type" | "types" | "format" | "formats" | "example" | "examples"
+            "algorithm"
+                | "algorithms"
+                | "policy"
+                | "policies"
+                | "type"
+                | "types"
+                | "format"
+                | "formats"
+                | "example"
+                | "examples"
         )
     })
 }

@@ -593,12 +593,35 @@ function effectiveVisibility(
   requested: GraphRequestOptions["visibility"] | undefined,
   policy: GraphAdapterPolicy,
 ): GraphRequestOptions["visibility"] | undefined {
-  if (policy.maxVisibility === "public" && requested !== undefined && requested !== "public") {
-    throw new Error(`Graph visibility "${requested}" exceeds adapter policy "public"`);
+  if (
+    policy.maxVisibility !== undefined
+    && requested !== undefined
+    && visibilityRank(requested) > visibilityRank(policy.maxVisibility)
+  ) {
+    throw new Error(`Graph visibility "${requested}" exceeds adapter policy "${policy.maxVisibility}"`);
   }
   const visibility = requested ?? policy.defaultVisibility;
-  if (policy.maxVisibility === "public" && visibility !== "public") return "public";
+  if (
+    visibility !== undefined
+    && policy.maxVisibility !== undefined
+    && visibilityRank(visibility) > visibilityRank(policy.maxVisibility)
+  ) {
+    return policy.maxVisibility;
+  }
   return visibility;
+}
+
+function visibilityRank(visibility: GraphRequestOptions["visibility"]): number {
+  switch (visibility) {
+    case "public":
+      return 0;
+    case "private":
+      return 1;
+    case "all_accessible":
+      return 2;
+    default:
+      return -1;
+  }
 }
 
 function graphFreshnessStatus(

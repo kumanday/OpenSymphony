@@ -144,6 +144,23 @@ describe("@opensymphony/graph", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("rejects visibility requests above non-public adapter policies", async () => {
+    const fetchMock = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ bundles: [] }),
+    })) as unknown as typeof fetch;
+    const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock, {
+      defaultVisibility: "all_accessible",
+      maxVisibility: "private",
+    });
+
+    await gateway.listBundles();
+    expect(() => gateway.getGraphSnapshot("local-default", { visibility: "all_accessible" }))
+      .toThrow('Graph visibility "all_accessible" exceeds adapter policy "private"');
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/memory/bundles?visibility=private");
+  });
+
   it("marks graph updates stale until the updated snapshot loads", () => {
     const current = graphReducer(initialGraphState, {
       type: "SNAPSHOT_LOADED",
@@ -200,8 +217,19 @@ describe("@opensymphony/graph", () => {
     });
 
     expect(unchanged.freshnessStatus).toBe("stale");
+    expect(unchanged.layoutStatus).toBe("idle");
     expect(unchanged.staleBundleIds).toEqual(["local-default"]);
     expect(unchanged.snapshots["local-default"].cursor.sequence).toBe(1);
+
+    const loading = graphReducer(stale, { type: "LAYOUT_STATUS_SET", status: "loading" });
+    const stillLoading = graphReducer(loading, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 1 },
+      },
+    });
+    expect(stillLoading.layoutStatus).toBe("loading");
   });
 
   it("rejects non-OK HTTP graph responses before parsing JSON", async () => {
