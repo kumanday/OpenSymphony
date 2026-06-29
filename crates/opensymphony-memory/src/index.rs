@@ -508,8 +508,6 @@ pub fn persist_code_intel_documents(
                 content_sha256: &document.content_sha256,
                 parser_version: &document.parser_version,
                 query_pack_version: &document.query_pack_version,
-                commit_sha: batch.commit_sha.as_deref(),
-                worktree_dirty: batch.worktree_dirty,
             },
         )
         .map_err(|source| MemoryError::DuckDb {
@@ -690,8 +688,6 @@ struct CodeFreshnessKey<'a> {
     content_sha256: &'a str,
     parser_version: &'a str,
     query_pack_version: &'a str,
-    commit_sha: Option<&'a str>,
-    worktree_dirty: bool,
 }
 
 fn stale_code_rows(
@@ -700,20 +696,20 @@ fn stale_code_rows(
 ) -> Result<usize, duckdb::Error> {
     let mut stale_rows = 0;
     stale_rows += connection.execute(
-        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
+        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
+        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
+        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
+        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     Ok(stale_rows)
 }

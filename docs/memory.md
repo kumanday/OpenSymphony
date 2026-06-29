@@ -431,7 +431,10 @@ diagnostics. Persisted rows store metadata, hashes, spans, parser/query-pack
 versions, freshness, and snippet hashes only; full parse trees and source
 snippets are rendered from files on demand. Re-ingesting a changed file or a
 different parser/query-pack version marks older derived rows stale before
-writing current rows.
+writing current rows. Commit SHA and dirty-worktree state are stored as
+provenance on the current rows; a clean re-ingest with identical content,
+parser version, and query-pack version updates that provenance without reporting
+phantom stale rows.
 `opensymphony memory reindex --from-okf [bundle-root]` rebuilds the derived
 DuckDB catalog from OKF concept documents, defaulting to the configured memory
 root. Broken links and unknown concept types are indexed as warnings; malformed

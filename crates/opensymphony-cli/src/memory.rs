@@ -4089,6 +4089,43 @@ mod tests {
         assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 0);
     }
 
+    #[test]
+    fn code_intel_clean_commit_only_reingest_does_not_report_stale_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let first_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("old".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        persist_code_intel_documents(&config, first_batch).expect("first persist");
+
+        let second_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("new".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        let report = persist_code_intel_documents(&config, second_batch)
+            .expect("same artifact, new commit persist");
+        assert_eq!(
+            report.stale_rows, 0,
+            "commit-only reingest should replace provenance without reporting phantom stale rows"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_documents", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_symbols", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_edges", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 0);
+    }
+
     fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
         CodeIntelDocumentInput {
             path: "src/lib.rs".into(),
