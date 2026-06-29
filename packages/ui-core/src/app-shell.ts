@@ -1130,6 +1130,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.knowledgeGraphLoadGeneration += 1;
       this.knowledgeDetailLoadGeneration += 1;
       this.clearKnowledgeGraphData();
+      if (this.state.graphPaneView === "knowledge") {
+        void this.loadKnowledgeGraph();
+      }
     }
   }
 
@@ -3423,7 +3426,7 @@ function renderKnowledgeStatus(state: KnowledgeGraphState, visibleCount: number,
 }
 
 function renderKnowledgeMap(nodes: MemoryGraphNode[], selected: MemoryGraphNode | null, selectedEdges: MemoryGraphEdge[]): string {
-  const shown = nodes.slice(0, 8);
+  const shown = nodes;
   const rendered = shown.map((node, index) => {
     const selectedClass = node.id === selected?.id ? " is-selected" : "";
     const community = node.metrics?.community_id ?? "none";
@@ -3439,7 +3442,7 @@ function renderKnowledgeMap(nodes: MemoryGraphNode[], selected: MemoryGraphNode 
     `<span class="os-kg-edge-label">${escapeHtml(edgeKindLabel(edge.kind))}${edge.unresolved ? " unresolved" : ""}</span>`
   ).join("");
   return `
-    <div class="os-knowledge-map" data-testid="knowledge-graph-map" role="listbox" aria-label="Visible Knowledge Graph nodes. Use arrow keys to move through nodes and the table below for full summaries." aria-activedescendant="${selected ? escapeAttr(knowledgeOptionId(selected.id)) : ""}">
+    <div class="os-knowledge-map" data-testid="knowledge-graph-map" role="listbox" aria-label="Visible Knowledge Graph nodes. Use arrow keys to move through nodes and the table below for full summaries.">
       ${rendered || `<span class="os-empty">No visible nodes</span>`}
       <div class="os-kg-edge-list" aria-hidden="true">${edgeLabels}</div>
     </div>
@@ -3567,12 +3570,12 @@ function matchesKnowledgeFilters(
 
 function visibleKnowledgeNeighborIds(snapshot: MemoryGraphSnapshot | null, nodeId: string): string[] {
   if (!snapshot) return [];
-  return snapshot.edges
+  return [...new Set(snapshot.edges
     .flatMap((edge) => {
       if (edge.source_id === nodeId) return [edge.target_id];
       if (edge.target_id === nodeId) return [edge.source_id];
       return [];
-    })
+    }))]
     .sort(compareText);
 }
 

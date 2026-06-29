@@ -981,6 +981,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-449");
     expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-scaffold']")).toBeNull();
     expect(root.querySelector("[data-testid='knowledge-graph-map']")?.getAttribute("role")).toBe("listbox");
+    expect(root.querySelector("[data-testid='knowledge-graph-map']")?.hasAttribute("aria-activedescendant")).toBe(false);
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("role")).toBe("option");
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("aria-selected")).toBe("true");
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.hasAttribute("aria-pressed")).toBe(false);
