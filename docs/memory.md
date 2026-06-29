@@ -417,7 +417,13 @@ require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
 `opensymphony memory serve`. If an admin token is configured without a separate
 read token, the admin token also protects read tools.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
-to include available codebase-analysis artifacts alongside selected memory.
+to include code-intelligence artifacts alongside selected memory. For requested
+Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,
+and a trace section before falling back to repository analysis. Unsupported
+languages, parser diagnostics, oversized files, and calls without requested
+paths use the existing `CodebaseAnalyzer` repository-summary fallback; mixed
+supported and unsupported requests can include both AST artifacts and fallback
+artifacts. The trace section records parse/query counts and the fallback reason.
 `opensymphony memory reindex --from-okf [bundle-root]` rebuilds the derived
 DuckDB catalog from OKF concept documents, defaulting to the configured memory
 root. Broken links and unknown concept types are indexed as warnings; malformed

@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use crate::{
+    opensymphony_code_intel::CompositeCodeIntelProvider,
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
@@ -33,7 +34,6 @@ use crate::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
         OpenHandsConversationStorePaths,
     },
-    opensymphony_planning::CodebaseAnalyzer,
     opensymphony_workflow::WorkflowDefinition,
     opensymphony_workspace::{CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig},
 };
@@ -2215,7 +2215,8 @@ fn append_code_intel_context(
 ) -> Result<(), MemoryError> {
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(scope, paths);
-    let artifacts = CodebaseAnalyzer::new(repo_root).code_context(paths, &scope_refs, limit)?;
+    let artifacts =
+        CompositeCodeIntelProvider::new(repo_root).code_context(paths, &scope_refs, limit)?;
     append_code_intel_artifacts(config, output, artifacts);
     Ok(())
 }
@@ -2241,7 +2242,7 @@ async fn code_intel_artifacts_blocking(
     limit: usize,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
-        CodebaseAnalyzer::new(repo_root).code_context(&paths, &scope_refs, limit)
+        CompositeCodeIntelProvider::new(repo_root).code_context(&paths, &scope_refs, limit)
     })
     .await
     .map_err(|error| {
@@ -3657,6 +3658,41 @@ Public memory concept.
                 .iter()
                 .any(|path| path == "issues/COE-1.md")
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_memory_context_can_include_ast_code_intelligence() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source file");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let response = call_memory_tool(
+            &config,
+            json!({
+                "name": "memory.context",
+                "arguments": {
+                    "issue": "COE-999",
+                    "paths": ["src/lib.rs"],
+                    "includeCodeIntel": true
+                }
+            }),
+        )
+        .await
+        .expect("context tool");
+
+        let text = response["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        assert!(text.contains("## Code Intelligence"));
+        assert!(text.contains("ast-summary: src/lib.rs"));
+        assert!(text.contains("function `answer`"));
+        assert!(text.contains("fallback: CodebaseAnalyzer not used"));
     }
 
     #[test]
