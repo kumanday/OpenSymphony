@@ -618,10 +618,25 @@ describe("desktop app shell render", () => {
   });
 });
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("condition was not met");
+async function waitFor(predicate: () => boolean, root: Node = document.body): Promise<void> {
+  if (predicate()) return;
+  await new Promise<void>((resolve, reject) => {
+    let observer: MutationObserver;
+    const timeout = setTimeout(() => {
+      observer.disconnect();
+      reject(new Error("condition was not met"));
+    }, 1_500);
+    observer = new MutationObserver(() => {
+      if (!predicate()) return;
+      clearTimeout(timeout);
+      observer.disconnect();
+      resolve();
+    });
+    observer.observe(root, { attributes: true, childList: true, subtree: true, characterData: true });
+    if (predicate()) {
+      clearTimeout(timeout);
+      observer.disconnect();
+      resolve();
+    }
+  });
 }

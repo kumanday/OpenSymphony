@@ -98,7 +98,7 @@ export function mountKnowledgeGraphRenderer(
       if (canvas.isConnected) draw();
     };
     if (reducedMotion) {
-      scheduledDraw = setTimeout(run, 0);
+      scheduledDraw = setTimeout(run, 120);
       scheduledCanvasDraws.set(canvas, { handle: scheduledDraw, kind: "timeout" });
     } else if (typeof requestAnimationFrame === "function") {
       scheduledDraw = requestAnimationFrame(run);
@@ -268,14 +268,14 @@ function labelNodes(
 function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
   const node = snapshot?.nodes.find((candidate) => selectedNodeIds.includes(candidate.id)) ?? null;
   if (!node) {
-    return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector" aria-labelledby="kg-inspector-title"><h3 id="kg-inspector-title">Inspector</h3><p>No concept selected</p></section>`;
+    return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector"><h3>Inspector</h3><p>No concept selected</p></section>`;
   }
   const community = node.metrics?.community_id
     ? snapshot?.communities.find((candidate) => candidate.id === node.metrics.community_id)?.label ?? node.metrics.community_id
     : "None";
   return `
-    <section class="os-kg-inspector" data-testid="knowledge-graph-inspector" aria-labelledby="kg-inspector-title">
-      <h3 id="kg-inspector-title">${escapeHtml(node.label)}</h3>
+    <section class="os-kg-inspector" data-testid="knowledge-graph-inspector">
+      <h3>${escapeHtml(node.label)}</h3>
       <dl>
         <dt>Kind</dt><dd>${escapeHtml(node.kind)}</dd>
         <dt>Visibility</dt><dd>${escapeHtml(node.visibility ?? "unknown")}</dd>

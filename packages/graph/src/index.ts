@@ -420,7 +420,7 @@ export function createCommunityOverviewSnapshot(snapshot: MemoryGraphSnapshot): 
     ...rest,
     nodes,
     edges,
-    communities: normalizedCommunities.map((community) => ({ ...community, node_ids: [community.id] })),
+    communities: normalizedCommunities,
     filters_applied: uniqueSorted([...snapshot.filters_applied, "overview:community-aggregation"]),
   };
 }
@@ -759,7 +759,7 @@ function progressiveCommunityLayout(
   width: number,
   height: number,
 ): GraphLayoutNode[] {
-  // ponytail: unknown-community nodes share coarse kind cells until real data shows that needs finer grouping.
+  // ponytail: unknown-community nodes, including bundles, share coarse kind cells until real data needs finer grouping.
   const groups = [...groupBy(nodes, (node) => node.metrics?.community_id ?? `kind:${node.kind}`).entries()]
     .sort(([a], [b]) => compareStrings(a, b));
   const columns = Math.max(1, Math.ceil(Math.sqrt(groups.length)));

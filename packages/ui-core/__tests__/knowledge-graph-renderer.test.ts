@@ -36,7 +36,7 @@ describe("Knowledge Graph renderer", () => {
           return canvas instanceof HTMLCanvasElement && canvas.dataset.nonblank === "true";
         });
         const screenshot = await page.screenshot();
-        expect(screenshot.length).toBeGreaterThan(1_000);
+        expect(screenshot.length).toBeGreaterThan(10_000);
         const stats = await page.$eval(
           "[data-testid='knowledge-graph-canvas']",
           (canvasElement) => {

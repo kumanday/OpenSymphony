@@ -63,7 +63,7 @@ describe("@opensymphony/graph", () => {
     expect(visible?.nodes.every((node) => node.kind === "bundle" || node.kind === "community")).toBe(true);
     expect(visible?.filters_applied).toContain("overview:community-aggregation");
     expect(visible?.metrics).toBeUndefined();
-    expect(visible?.communities.every((community) => community.node_ids.every((nodeId) => nodeId === community.id))).toBe(true);
+    expect(visible?.communities.every((community) => community.node_ids.every((nodeId) => nodeId.startsWith("concept:")))).toBe(true);
 
     const neighborhood = visibleGraphSnapshot(graphReducer(state, {
       type: "NODE_FOCUSED",

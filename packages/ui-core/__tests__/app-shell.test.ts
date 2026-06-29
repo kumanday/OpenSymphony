@@ -1038,6 +1038,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(canvas?.dataset.reducedMotion).toBe("true");
       canvas?.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true, cancelable: true }));
       expect(requestAnimationFrameMock).not.toHaveBeenCalled();
+      disposeKnowledgeGraphRenderer(root);
     } finally {
       getContext.mockRestore();
       globalThis.matchMedia = originalMatchMedia;
