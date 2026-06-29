@@ -428,7 +428,11 @@ CREATE TABLE IF NOT EXISTS code_edges (
   target_hint TEXT,
   confidence TEXT NOT NULL,
   start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
   end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
   content_sha256 TEXT NOT NULL,
   parser_version TEXT NOT NULL,
   query_pack_version TEXT NOT NULL,
@@ -446,7 +450,11 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   severity TEXT NOT NULL,
   message TEXT NOT NULL,
   start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
   end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
   content_sha256 TEXT NOT NULL,
   parser_version TEXT NOT NULL,
   query_pack_version TEXT NOT NULL,
@@ -455,12 +463,32 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
 );
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
 UPDATE code_symbols SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
+UPDATE code_symbols SET parser_version = '' WHERE parser_version IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
 UPDATE code_edges SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
+UPDATE code_edges SET start_col = 0 WHERE start_col IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS end_col BIGINT DEFAULT 0;
+UPDATE code_edges SET end_col = 0 WHERE end_col IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS start_byte BIGINT DEFAULT 0;
+UPDATE code_edges SET start_byte = 0 WHERE start_byte IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
+UPDATE code_edges SET end_byte = 0 WHERE end_byte IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_edges SET parser_version = '' WHERE parser_version IS NULL;
 ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
 UPDATE code_diagnostics SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET start_col = 0 WHERE start_col IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_col BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET end_col = 0 WHERE end_col IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS start_byte BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET start_byte = 0 WHERE start_byte IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET end_byte = 0 WHERE end_byte IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
+UPDATE code_diagnostics SET parser_version = '' WHERE parser_version IS NULL;
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_path ON code_symbols(path);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_kind ON code_symbols(kind);
@@ -601,11 +629,15 @@ pub fn persist_code_intel_documents(
                 &edge.edge_kind,
                 edge.target_hint.as_deref().unwrap_or(""),
                 &edge.start_line.to_string(),
+                &edge.start_col.to_string(),
                 &edge.end_line.to_string(),
+                &edge.end_col.to_string(),
+                &edge.start_byte.to_string(),
+                &edge.end_byte.to_string(),
             ]);
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, target_symbol_id, target_hint, confidence, start_line, end_line, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, target_symbol_id, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         edge_id,
                         batch.repo_id,
@@ -619,7 +651,11 @@ pub fn persist_code_intel_documents(
                         edge.target_hint,
                         edge.confidence,
                         edge.start_line as i64,
+                        edge.start_col as i64,
                         edge.end_line as i64,
+                        edge.end_col as i64,
+                        edge.start_byte as i64,
+                        edge.end_byte as i64,
                         document.content_sha256,
                         document.parser_version,
                         document.query_pack_version,
@@ -644,11 +680,15 @@ pub fn persist_code_intel_documents(
                 &diagnostic.kind,
                 &diagnostic.message,
                 &diagnostic.start_line.to_string(),
+                &diagnostic.start_col.to_string(),
                 &diagnostic.end_line.to_string(),
+                &diagnostic.end_col.to_string(),
+                &diagnostic.start_byte.to_string(),
+                &diagnostic.end_byte.to_string(),
             ]);
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, end_line, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         diagnostic_id,
                         batch.repo_id,
@@ -660,7 +700,11 @@ pub fn persist_code_intel_documents(
                         diagnostic.severity,
                         diagnostic.message,
                         diagnostic.start_line as i64,
+                        diagnostic.start_col as i64,
                         diagnostic.end_line as i64,
+                        diagnostic.end_col as i64,
+                        diagnostic.start_byte as i64,
+                        diagnostic.end_byte as i64,
                         document.content_sha256,
                         document.parser_version,
                         document.query_pack_version,

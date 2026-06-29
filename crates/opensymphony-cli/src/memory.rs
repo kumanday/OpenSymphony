@@ -2347,7 +2347,11 @@ fn code_intel_document_input(
                     severity: severity.to_string(),
                     message: format!("{} parse diagnostic", diagnostic.node_kind),
                     start_line: diagnostic.span.start_line,
+                    start_col: diagnostic.span.start_column,
                     end_line: diagnostic.span.end_line,
+                    end_col: diagnostic.span.end_column,
+                    start_byte: diagnostic.span.start_byte,
+                    end_byte: diagnostic.span.end_byte,
                 }
             })
             .collect(),
@@ -2366,7 +2370,11 @@ fn code_intel_edge_input(capture: &CaptureRecord) -> Option<CodeIntelEdgeInput> 
         target_hint: Some(capture.text.clone()),
         confidence: format!("query_pack:{}", capture.query_name),
         start_line: capture.span.start_line,
+        start_col: capture.span.start_column,
         end_line: capture.span.end_line,
+        end_col: capture.span.end_column,
+        start_byte: capture.span.start_byte,
+        end_byte: capture.span.end_byte,
     })
 }
 
@@ -4347,14 +4355,22 @@ mod tests {
                 severity: "error".to_string(),
                 message: "ERROR parse diagnostic".to_string(),
                 start_line: 1,
+                start_col: 0,
                 end_line: 1,
+                end_col: 5,
+                start_byte: 0,
+                end_byte: 5,
             },
             CodeIntelDiagnosticInput {
                 kind: "missing".to_string(),
                 severity: "warning".to_string(),
                 message: "MISSING parse diagnostic".to_string(),
                 start_line: 2,
+                start_col: 0,
                 end_line: 2,
+                end_col: 5,
+                start_byte: 6,
+                end_byte: 11,
             },
         ];
 
@@ -4389,6 +4405,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn code_intel_same_line_edges_and_diagnostics_keep_distinct_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.edges = vec![
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("answer".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 6,
+                start_byte: 0,
+                end_byte: 6,
+            },
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("answer".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 1,
+                start_col: 8,
+                end_line: 1,
+                end_col: 14,
+                start_byte: 8,
+                end_byte: 14,
+            },
+        ];
+        document.diagnostics = vec![
+            CodeIntelDiagnosticInput {
+                kind: "missing".to_string(),
+                severity: "warning".to_string(),
+                message: "MISSING parse diagnostic".to_string(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 1,
+                start_byte: 0,
+                end_byte: 1,
+            },
+            CodeIntelDiagnosticInput {
+                kind: "missing".to_string(),
+                severity: "warning".to_string(),
+                message: "MISSING parse diagnostic".to_string(),
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 3,
+                start_byte: 2,
+                end_byte: 3,
+            },
+        ];
+
+        let report = persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("same".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist same-line records");
+        assert_eq!(report.persisted_edges, 2);
+        assert_eq!(report.persisted_diagnostics, 2);
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 2);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 2);
+    }
+
     fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
         CodeIntelDocumentInput {
             path: "src/lib.rs".into(),
@@ -4418,14 +4507,22 @@ mod tests {
                 target_hint: Some("answer".to_string()),
                 confidence: "query_pack:calls".to_string(),
                 start_line: 1,
+                start_col: 1,
                 end_line: 1,
+                end_col: 7,
+                start_byte: 0,
+                end_byte: 6,
             }],
             diagnostics: vec![CodeIntelDiagnosticInput {
                 kind: "error".to_string(),
                 severity: "error".to_string(),
                 message: "ERROR parse diagnostic".to_string(),
                 start_line: 1,
+                start_col: 1,
                 end_line: 1,
+                end_col: 7,
+                start_byte: 0,
+                end_byte: 6,
             }],
         }
     }

@@ -286,7 +286,11 @@ pub struct CodeIntelEdgeInput {
     pub target_hint: Option<String>,
     pub confidence: String,
     pub start_line: usize,
+    pub start_col: usize,
     pub end_line: usize,
+    pub end_col: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,7 +299,11 @@ pub struct CodeIntelDiagnosticInput {
     pub severity: String,
     pub message: String,
     pub start_line: usize,
+    pub start_col: usize,
     pub end_line: usize,
+    pub end_col: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
