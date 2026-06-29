@@ -137,6 +137,46 @@ export interface GraphAdapterPolicy {
   maxVisibility?: MemoryGraphVisibility | "all_accessible";
 }
 
+export type GraphLayoutKind = "force" | "hierarchical" | "radial" | "timeline";
+
+export interface GraphLayoutOptions {
+  kind: GraphLayoutKind;
+  width?: number;
+  height?: number;
+  focusedNodeId?: string | null;
+}
+
+export interface GraphLayoutNode {
+  nodeId: string;
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  label: string;
+  kind: MemoryGraphNodeKind;
+  communityId?: string;
+}
+
+export interface GraphLayoutEdge {
+  edgeId: string;
+  sourceId: string;
+  targetId: string;
+}
+
+export interface GraphLayoutResult {
+  kind: GraphLayoutKind;
+  width: number;
+  height: number;
+  nodes: GraphLayoutNode[];
+  edges: GraphLayoutEdge[];
+  generatedAt: string;
+}
+
+export interface GraphLayoutAdapter {
+  layout(snapshot: MemoryGraphSnapshot, options: GraphLayoutOptions): Promise<GraphLayoutResult>;
+  dispose(): void;
+}
+
 /** Tauri/native providers expose the same graph DTO contract without importing Tauri here. */
 export type NativeGraphApi = GraphDataAdapter;
 
@@ -435,6 +475,102 @@ export function createHttpGraphAdapter(
 export const createGatewayGraphAdapter = createHttpGraphAdapter;
 export const createMemoryServerGraphAdapter = createHttpGraphAdapter;
 
+export function graphLayoutKindForMode(mode: GraphMode): GraphLayoutKind {
+  switch (mode) {
+    case "bundle":
+      return "hierarchical";
+    case "neighborhood":
+      return "radial";
+    case "timeline":
+      return "timeline";
+    default:
+      return "force";
+  }
+}
+
+export function computeGraphLayout(
+  snapshot: MemoryGraphSnapshot,
+  options: GraphLayoutOptions,
+): GraphLayoutResult {
+  const width = Math.max(320, options.width ?? 720);
+  const height = Math.max(240, options.height ?? 420);
+  const nodeIds = new Set(snapshot.nodes.map((node) => node.id));
+  const edges = snapshot.edges.filter((edge) => nodeIds.has(edge.source_id) && nodeIds.has(edge.target_id));
+  const nodes = options.kind === "hierarchical"
+    ? hierarchicalLayout(snapshot.nodes, width, height)
+    : options.kind === "radial"
+      ? radialLayout(snapshot.nodes, edges, width, height, options.focusedNodeId)
+      : options.kind === "timeline"
+        ? timelineLayout(snapshot.nodes, width, height)
+        : forceLayout(snapshot.nodes, edges, width, height);
+  return {
+    kind: options.kind,
+    width,
+    height,
+    nodes,
+    edges: edges.map((edge) => ({ edgeId: edge.id, sourceId: edge.source_id, targetId: edge.target_id })),
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export function createGraphLayoutAdapter(
+  workerFactory: () => Worker | null = defaultGraphLayoutWorkerFactory,
+): GraphLayoutAdapter {
+  const worker = workerFactory();
+  if (!worker) {
+    return {
+      layout: async (snapshot, options) => computeGraphLayout(snapshot, options),
+      dispose: () => undefined,
+    };
+  }
+  let nextId = 1;
+  const pending = new Map<number, {
+    resolve: (result: GraphLayoutResult) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+  const workerTimeoutMs = 2_000;
+  worker.onmessage = (event: MessageEvent<{ id: number; result?: GraphLayoutResult; error?: string }>) => {
+    const request = pending.get(event.data.id);
+    if (!request) return;
+    pending.delete(event.data.id);
+    clearTimeout(request.timeout);
+    if (event.data.error) {
+      request.reject(new Error(event.data.error));
+      return;
+    }
+    if (event.data.result) request.resolve(event.data.result);
+  };
+  worker.onerror = (event) => {
+    for (const request of pending.values()) {
+      clearTimeout(request.timeout);
+      request.reject(new Error(event.message || "Graph layout worker failed"));
+    }
+    pending.clear();
+  };
+  return {
+    layout: (snapshot, options) => new Promise((resolve, reject) => {
+      const id = nextId++;
+      const timeout = setTimeout(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        console.warn("Graph layout worker timed out; falling back to synchronous layout computation.");
+        resolve(computeGraphLayout(snapshot, options));
+      }, workerTimeoutMs);
+      pending.set(id, { resolve, reject, timeout });
+      worker.postMessage({ id, snapshot, options });
+    }),
+    dispose: () => {
+      for (const request of pending.values()) {
+        clearTimeout(request.timeout);
+        request.reject(new Error("Graph layout worker disposed before completing layout."));
+      }
+      pending.clear();
+      worker.terminate();
+    },
+  };
+}
+
 export function createTauriNativeGraphAdapter(api: NativeGraphApi): GraphDataAdapter {
   return api;
 }
@@ -489,6 +625,218 @@ function normalizeFilters(filters: GraphFilters): GraphFilters {
     edgeKinds: uniqueSorted(filters.edgeKinds),
     communities: uniqueSorted(filters.communities),
   };
+}
+
+function defaultGraphLayoutWorkerFactory(): Worker | null {
+  return null;
+}
+
+function forceLayout(
+  nodes: readonly MemoryGraphNode[],
+  edges: readonly MemoryGraphEdge[],
+  width: number,
+  height: number,
+): GraphLayoutNode[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const tickCount = nodes.length > 400 ? 24 : nodes.length > 160 ? 45 : 90;
+  const points = nodes.map((node, index) => ({
+    id: node.id,
+    x: width / 2 + Math.cos(index) * 80,
+    y: height / 2 + Math.sin(index) * 80,
+    vx: 0,
+    vy: 0,
+  }));
+  const byId = new Map(points.map((point) => [point.id, point]));
+  for (let tick = 0; tick < tickCount; tick += 1) {
+    for (let i = 0; i < points.length; i += 1) {
+      for (let j = i + 1; j < points.length; j += 1) {
+        const a = points[i];
+        const b = points[j];
+        const dx = a.x - b.x || 0.01;
+        const dy = a.y - b.y || 0.01;
+        const distance = Math.max(24, Math.hypot(dx, dy));
+        const push = 70 / (distance * distance);
+        a.vx += (dx / distance) * push;
+        a.vy += (dy / distance) * push;
+        b.vx -= (dx / distance) * push;
+        b.vy -= (dy / distance) * push;
+      }
+    }
+    for (const edge of edges) {
+      const source = byId.get(edge.source_id);
+      const target = byId.get(edge.target_id);
+      if (!source || !target) continue;
+      const dx = target.x - source.x;
+      const dy = target.y - source.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const pull = (distance - 95) * 0.004;
+      source.vx += (dx / distance) * pull;
+      source.vy += (dy / distance) * pull;
+      target.vx -= (dx / distance) * pull;
+      target.vy -= (dy / distance) * pull;
+    }
+    for (const point of points) {
+      point.vx += (width / 2 - point.x) * 0.002;
+      point.vy += (height / 2 - point.y) * 0.002;
+      point.x = clamp(point.x + point.vx, 28, width - 28);
+      point.y = clamp(point.y + point.vy, 28, height - 28);
+      point.vx *= 0.82;
+      point.vy *= 0.82;
+    }
+  }
+  return points.map((point) => {
+    const node = nodesById.get(point.id)!;
+    return layoutNode(node, point.x, point.y, zFor(node));
+  }).sort(compareLayoutNodes);
+}
+
+function hierarchicalLayout(
+  nodes: readonly MemoryGraphNode[],
+  width: number,
+  height: number,
+): GraphLayoutNode[] {
+  const levels = new Map<string, number>([
+    ["bundle", 0],
+    ["directory", 1],
+    ["concept", 2],
+    ["tag", 3],
+    ["resource", 3],
+    ["citation", 4],
+    ["source_ref", 4],
+  ]);
+  const groups = groupBy(nodes, (node) => String(levels.get(node.kind) ?? 2));
+  const levelKeys = [...groups.keys()].sort((a, b) => Number(a) - Number(b));
+  return levelKeys.flatMap((levelKey, levelIndex) => {
+    const group = [...(groups.get(levelKey) ?? [])].sort(compareNodes);
+    return group.map((node, index) => layoutNode(
+      node,
+      ((levelIndex + 1) / (levelKeys.length + 1)) * width,
+      ((index + 1) / (group.length + 1)) * height,
+      zFor(node),
+    ));
+  }).sort(compareLayoutNodes);
+}
+
+function radialLayout(
+  nodes: readonly MemoryGraphNode[],
+  edges: readonly MemoryGraphEdge[],
+  width: number,
+  height: number,
+  focusedNodeId?: string | null,
+): GraphLayoutNode[] {
+  const focus = focusedNodeId && nodes.some((node) => node.id === focusedNodeId)
+    ? focusedNodeId
+    : nodes[0]?.id ?? null;
+  if (!focus) return [];
+  const distances = graphDistances(edges, focus);
+  const rings = groupBy(nodes, (node) => String(distances.get(node.id) ?? 2));
+  return [...rings.entries()].flatMap(([ringKey, ringNodes]) => {
+    const ring = Number(ringKey);
+    const sorted = [...ringNodes].sort(compareNodes);
+    const radius = ring === 0 ? 0 : Math.min(width, height) * (0.18 + ring * 0.13);
+    return sorted.map((node, index) => {
+      const angle = sorted.length === 1 ? -Math.PI / 2 : (Math.PI * 2 * index) / sorted.length - Math.PI / 2;
+      return layoutNode(
+        node,
+        width / 2 + Math.cos(angle) * radius,
+        height / 2 + Math.sin(angle) * radius,
+        zFor(node),
+      );
+    });
+  }).sort(compareLayoutNodes);
+}
+
+function timelineLayout(
+  nodes: readonly MemoryGraphNode[],
+  width: number,
+  height: number,
+): GraphLayoutNode[] {
+  const sorted = [...nodes].sort((a, b) =>
+    compareTimelineNodes(a, b) || compareNodes(a, b)
+  );
+  const lanes = groupBy(sorted, (node) => node.kind);
+  const laneKeys = [...lanes.keys()].sort(compareStrings);
+  return sorted.map((node, index) => {
+    const lane = Math.max(0, laneKeys.indexOf(node.kind));
+    return layoutNode(
+      node,
+      ((index + 1) / (sorted.length + 1)) * width,
+      ((lane + 1) / (laneKeys.length + 1)) * height,
+      zFor(node),
+    );
+  }).sort(compareLayoutNodes);
+}
+
+function compareTimelineNodes(a: MemoryGraphNode, b: MemoryGraphNode): number {
+  const aTime = timestampMillis(a.timestamp);
+  const bTime = timestampMillis(b.timestamp);
+  if (aTime !== null && bTime !== null && aTime !== bTime) return aTime - bTime;
+  if (aTime !== null && bTime === null) return -1;
+  if (aTime === null && bTime !== null) return 1;
+  return compareStrings(a.timestamp ?? a.label, b.timestamp ?? b.label);
+}
+
+function timestampMillis(timestamp: string | undefined): number | null {
+  if (!timestamp) return null;
+  const value = Date.parse(timestamp);
+  return Number.isFinite(value) ? value : null;
+}
+
+function layoutNode(node: MemoryGraphNode, x: number, y: number, z: number): GraphLayoutNode {
+  return {
+    nodeId: node.id,
+    x,
+    y,
+    z,
+    radius: node.kind === "concept" ? 9 : 7,
+    label: node.label,
+    kind: node.kind,
+    communityId: node.metrics?.community_id,
+  };
+}
+
+function graphDistances(edges: readonly MemoryGraphEdge[], root: string): Map<string, number> {
+  const distances = new Map([[root, 0]]);
+  let frontier = [root];
+  while (frontier.length > 0) {
+    const frontierSet = new Set(frontier);
+    const next: string[] = [];
+    for (const edge of edges) {
+      for (const [from, to] of [[edge.source_id, edge.target_id], [edge.target_id, edge.source_id]] as const) {
+        if (!frontierSet.has(from) || distances.has(to)) continue;
+        distances.set(to, (distances.get(from) ?? 0) + 1);
+        next.push(to);
+      }
+    }
+    frontier = next;
+  }
+  return distances;
+}
+
+function zFor(node: MemoryGraphNode): number {
+  return node.metrics?.community_id ? 12 : 0;
+}
+
+function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const item of items) {
+    const bucket = key(item);
+    const values = grouped.get(bucket);
+    if (values) {
+      values.push(item);
+    } else {
+      grouped.set(bucket, [item]);
+    }
+  }
+  return grouped;
+}
+
+function compareLayoutNodes(a: GraphLayoutNode, b: GraphLayoutNode): number {
+  return compareStrings(a.nodeId, b.nodeId);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boolean {

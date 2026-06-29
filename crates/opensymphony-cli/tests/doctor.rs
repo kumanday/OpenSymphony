@@ -67,7 +67,7 @@ async fn doctor_live_probe_succeeds_against_fake_server() {
 
     let path = fake_uv.path.clone();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        opensymphony_command()
             .arg("doctor")
             .arg("--config")
             .arg(&config_path)
@@ -132,7 +132,7 @@ fn doctor_defaults_target_repo_from_checkout_root_even_outside_the_repo_cwd() {
     .expect("config should serialize");
     std::fs::write(&config_path, config).expect("config should be written");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg(&config_path)
@@ -192,7 +192,7 @@ fn doctor_fails_when_required_env_placeholder_is_unset() {
     .expect("config should serialize");
     std::fs::write(&config_path, config).expect("config should be written");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg(&config_path)
@@ -267,7 +267,7 @@ fn doctor_ignores_unset_optional_live_placeholders_without_live_openhands() {
     .expect("config should serialize");
     std::fs::write(&config_path, config).expect("config should be written");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg(&config_path)
@@ -294,7 +294,7 @@ fn doctor_reports_local_safety_warning_and_repo_root_path() {
     let repo_root = repo_root();
     let fake_uv = fake_command_on_path("uv");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg("examples/configs/local-dev.yaml")
@@ -331,7 +331,7 @@ fn doctor_fails_when_required_prerequisite_is_missing() {
         write_fake_executable(fake_bin_dir.path().join(command));
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg("examples/configs/local-dev.yaml")
@@ -363,7 +363,7 @@ fn doctor_accepts_present_prerequisites_from_path() {
     }
     write_bash_wrapper(fake_bin_dir.path().join("bash"));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg("examples/configs/local-dev.yaml")
@@ -454,7 +454,7 @@ fn doctor_bootstraps_missing_managed_local_tooling_into_explicit_configured_dir(
     }
     write_bash_wrapper(fake_bin_dir.path().join("bash"));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+    let output = opensymphony_command()
         .arg("doctor")
         .arg("--config")
         .arg(&config_path)
@@ -676,6 +676,23 @@ fn real_bash_path() -> PathBuf {
             .expect("bash lookup output should be UTF-8")
             .trim(),
     )
+}
+
+fn opensymphony_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
+    for key in [
+        "CODEX_MANAGED_BY_NPM",
+        "CODEX_MANAGED_PACKAGE_ROOT",
+        "OPENHANDS_API_KEY",
+        "OPENHANDS_BASE_URL",
+        "OPENSYMPHONY_CODEX_BIN",
+        "OPENSYMPHONY_HARNESS",
+        "OPENSYMPHONY_MODEL",
+        "OPENSYMPHONY_MODEL_PROFILE",
+    ] {
+        command.env_remove(key);
+    }
+    command
 }
 
 fn doctor_workflow_source(workspace_root: &std::path::Path, base_url: &str) -> String {

@@ -1,10 +1,13 @@
 import {
   applyGraphFilters,
   createFixtureGraphAdapter,
+  computeGraphLayout,
+  createGraphLayoutAdapter,
   createInitialGraphState,
   createGatewayGraphAdapter,
   createTauriNativeGraphAdapter,
   fixtureGraphSnapshot,
+  graphLayoutKindForMode,
   graphReducer,
   graphStateToHistory,
   initialGraphFilters,
@@ -351,6 +354,82 @@ describe("@opensymphony/graph", () => {
     });
   });
 
+  it("computes deterministic graph layouts for every graph mode", () => {
+    const layouts = ["atlas", "bundle", "neighborhood", "timeline"] as const;
+    const byMode = new Map<(typeof layouts)[number], ReturnType<typeof computeGraphLayout>>();
+    for (const mode of layouts) {
+      const layout = computeGraphLayout(fixtureGraphSnapshot, {
+        kind: graphLayoutKindForMode(mode),
+        focusedNodeId: "concept:coe-465",
+        width: 640,
+        height: 360,
+      });
+      byMode.set(mode, layout);
+      expect(new Set(layout.nodes.map((node) => node.nodeId))).toEqual(new Set([
+        "bundle:local-default",
+        "concept:coe-465",
+        "source:osym-822",
+        "tag:graph-view",
+      ]));
+      expect(layout.edges).toHaveLength(3);
+      expect(layout.nodes.every((node) => node.x >= 0 && node.x <= 640 && node.y >= 0 && node.y <= 360)).toBe(true);
+    }
+    const bundle = nodeById(byMode.get("bundle")!, "bundle:local-default");
+    const concept = nodeById(byMode.get("bundle")!, "concept:coe-465");
+    const tag = nodeById(byMode.get("bundle")!, "tag:graph-view");
+    expect(bundle.x).toBeLessThan(concept.x);
+    expect(concept.x).toBeLessThan(tag.x);
+    const focused = nodeById(byMode.get("neighborhood")!, "concept:coe-465");
+    expect(focused.x).toBeCloseTo(320);
+    expect(focused.y).toBeCloseTo(180);
+    const timeline = byMode.get("timeline")!;
+    expect(new Set(timeline.nodes.map((node) => node.x)).size).toBe(fixtureGraphSnapshot.nodes.length);
+    const timelineConcept = nodeById(timeline, "concept:coe-465");
+    const timelineTag = nodeById(timeline, "tag:graph-view");
+    expect(timelineConcept.y).not.toBe(timelineTag.y);
+    const timestamped = computeGraphLayout({
+      ...fixtureGraphSnapshot,
+      nodes: [
+        { ...fixtureGraphSnapshot.nodes[0], id: "concept:older", kind: "concept", timestamp: "2026-01-01T00:00:00Z" },
+        { ...fixtureGraphSnapshot.nodes[1], id: "concept:newer", kind: "concept", timestamp: "2026-02-01T00:00:00Z" },
+      ],
+      edges: [],
+    }, { kind: "timeline", width: 640, height: 360 });
+    expect(nodeById(timestamped, "concept:older").x).toBeLessThan(nodeById(timestamped, "concept:newer").x);
+    const offsetTimestamped = computeGraphLayout({
+      ...fixtureGraphSnapshot,
+      nodes: [
+        { ...fixtureGraphSnapshot.nodes[0], id: "concept:later-offset", kind: "concept", timestamp: "2026-01-01T01:00:00+02:00" },
+        { ...fixtureGraphSnapshot.nodes[1], id: "concept:earlier-z", kind: "concept", timestamp: "2025-12-31T23:30:00Z" },
+      ],
+      edges: [],
+    }, { kind: "timeline", width: 640, height: 360 });
+    expect(nodeById(offsetTimestamped, "concept:later-offset").x).toBeLessThan(nodeById(offsetTimestamped, "concept:earlier-z").x);
+  });
+
+  it("uses a worker adapter when a worker is available", async () => {
+    class FakeWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      terminated = false;
+
+      postMessage(message: { id: number; snapshot: typeof fixtureGraphSnapshot; options: { kind: "force" } }): void {
+        const result = computeGraphLayout(message.snapshot, message.options);
+        queueMicrotask(() => this.onmessage?.({ data: { id: message.id, result } } as MessageEvent));
+      }
+
+      terminate(): void {
+        this.terminated = true;
+      }
+    }
+    const worker = new FakeWorker();
+    const adapter = createGraphLayoutAdapter(() => worker as unknown as Worker);
+    const layout = await adapter.layout(fixtureGraphSnapshot, { kind: "force" });
+    expect(layout.nodes).toHaveLength(fixtureGraphSnapshot.nodes.length);
+    adapter.dispose();
+    expect(worker.terminated).toBe(true);
+  });
+
   it("returns fresh objects for graph and filter resets", () => {
     const dirty = {
       ...createInitialGraphState(),
@@ -366,3 +445,12 @@ describe("@opensymphony/graph", () => {
     expect(graphReset.filters).not.toBe(initialGraphFilters);
   });
 });
+
+function nodeById(
+  layout: ReturnType<typeof computeGraphLayout>,
+  nodeId: string,
+): ReturnType<typeof computeGraphLayout>["nodes"][number] {
+  const node = layout.nodes.find((candidate) => candidate.nodeId === nodeId);
+  if (!node) throw new Error(`Missing layout node ${nodeId}`);
+  return node;
+}

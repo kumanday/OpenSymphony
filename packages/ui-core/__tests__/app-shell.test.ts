@@ -771,13 +771,52 @@ describe("OpenSymphonyApp mount", () => {
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
 
-    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
-    await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent?.includes("COE-465") ?? false);
-    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
-    expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
-    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-465");
-    expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain("Nodes");
-    expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-scaffold']")).toBeNull();
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    const originalConsoleError = console.error;
+    const consoleError = jest.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      const first = args[0];
+      const message = first instanceof Error ? first.message : String(first);
+      if (message.includes("HTMLCanvasElement.prototype.getContext")) return;
+      originalConsoleError(...args);
+    });
+    const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (
+      this: HTMLCanvasElement,
+      contextId: string,
+      contextOptions?: unknown,
+    ) {
+      if (contextId.startsWith("webgl")) {
+        return originalGetContext.call(this, contextId as "webgl", contextOptions as WebGLContextAttributes);
+      }
+      if (contextId !== "2d") return null;
+      return {
+        setTransform: jest.fn(),
+        fillRect: jest.fn(),
+        beginPath: jest.fn(),
+        moveTo: jest.fn(),
+        lineTo: jest.fn(),
+        stroke: jest.fn(),
+        arc: jest.fn(),
+        fill: jest.fn(),
+        set fillStyle(_value: string) {},
+        set strokeStyle(_value: string) {},
+        set lineWidth(_value: number) {},
+        set globalAlpha(_value: number) {},
+      } as unknown as CanvasRenderingContext2D;
+    });
+    try {
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
+      expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+      expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
+      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
+      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
+      expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
+      expect(root.querySelector(".os-task-graph-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
+    } finally {
+      consoleError.mockRestore();
+      getContext.mockRestore();
+    }
 
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
