@@ -8,7 +8,7 @@ parser_version = "0.26.9"
 [captures]
 "definition.function" = "Function definition"
 "definition.class" = "Class definition"
-"import.source" = "Import module or imported name"
+"import.source" = "Import module name"
 "reference.call" = "Call expression"
 "doc.comment" = "Comment node"
 "local.definition" = "Assignment target"

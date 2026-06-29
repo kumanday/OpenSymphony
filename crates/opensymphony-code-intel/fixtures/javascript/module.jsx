@@ -13,3 +13,7 @@ export function mount() {
 it("mounts", () => {
     mount();
 });
+
+it("escapes\nname", () => {
+    mount();
+});

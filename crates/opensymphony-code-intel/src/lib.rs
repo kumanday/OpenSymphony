@@ -417,11 +417,11 @@ pub fn detect_language(path: impl AsRef<Path>) -> Option<SourceLanguage> {
         .as_deref()
     {
         Some("rs") => Some(SourceLanguage::Rust),
-        Some("ts") => Some(SourceLanguage::TypeScript),
+        Some("ts" | "mts" | "cts") => Some(SourceLanguage::TypeScript),
         Some("tsx") => Some(SourceLanguage::Tsx),
         Some("js" | "mjs" | "cjs") => Some(SourceLanguage::JavaScript),
         Some("jsx") => Some(SourceLanguage::Jsx),
-        Some("py") => Some(SourceLanguage::Python),
+        Some("py" | "pyi" | "pyw") => Some(SourceLanguage::Python),
         Some("json") => Some(SourceLanguage::Json),
         Some("yaml" | "yml") => Some(SourceLanguage::Yaml),
         Some("toml") => Some(SourceLanguage::Toml),
@@ -654,8 +654,11 @@ fn run_query_pack(
             for capture in query_match.captures {
                 let capture_name =
                     compiled.query.capture_names()[capture.index as usize].to_string();
-                let span = one_based_span(capture.node);
                 let text = capture.node.utf8_text(source)?.to_string();
+                if capture_name == "doc.comment" && !is_doc_comment(language, &text) {
+                    continue;
+                }
+                let span = one_based_span(capture.node);
                 let rendered_span = span.render();
 
                 if let Some(kind) =
@@ -701,6 +704,13 @@ fn symbol_kind_for_capture(
         "definition.trait" => Some(SymbolKind::Trait),
         "definition.interface" => Some(SymbolKind::Interface),
         "definition.type" => Some(SymbolKind::Type),
+        "definition.method"
+            if language == SourceLanguage::Rust
+                && node.kind() == "function_signature_item"
+                && !has_ancestor(node, "trait_item") =>
+        {
+            Some(SymbolKind::Function)
+        }
         "definition.method" => Some(SymbolKind::Method),
         "definition.constructor" => Some(SymbolKind::Constructor),
         "definition.field" => Some(SymbolKind::Field),
@@ -768,11 +778,18 @@ fn first_string_fragment(
     string_node: Node<'_>,
     source: &[u8],
 ) -> Result<Option<String>, CodeIntelError> {
+    let mut name = String::new();
     let mut cursor = string_node.walk();
     for child in string_node.named_children(&mut cursor) {
-        if child.kind() == "string_fragment" {
-            return Ok(Some(child.utf8_text(source)?.to_string()));
+        if matches!(
+            child.kind(),
+            "string_fragment" | "escape_sequence" | "template_substitution"
+        ) {
+            name.push_str(child.utf8_text(source)?);
         }
+    }
+    if !name.is_empty() {
+        return Ok(Some(name));
     }
 
     let text = string_node.utf8_text(source)?;
@@ -788,6 +805,19 @@ fn is_method(language: SourceLanguage, node: Node<'_>) -> bool {
         SourceLanguage::Python => is_python_class_body_function(node),
         _ => matches!(node.kind(), "method_definition"),
     }
+}
+
+fn is_doc_comment(language: SourceLanguage, text: &str) -> bool {
+    if language != SourceLanguage::Rust {
+        return true;
+    }
+    matches!(
+        text.trim_start(),
+        comment if comment.starts_with("///")
+            || comment.starts_with("//!")
+            || comment.starts_with("/**")
+            || comment.starts_with("/*!")
+    )
 }
 
 fn is_python_class_body_function(node: Node<'_>) -> bool {
@@ -1066,7 +1096,12 @@ fn markdown_fence_marker(trimmed_line: &str) -> Option<(u8, usize, &str)> {
         .iter()
         .take_while(|byte| **byte == marker)
         .count();
-    (marker_count >= 3).then(|| (marker, marker_count, &trimmed_line[marker_count..]))
+    let rest = &trimmed_line[marker_count..];
+    (marker_count >= 3 && !rest.as_bytes().contains(&marker)).then_some((
+        marker,
+        marker_count,
+        rest,
+    ))
 }
 
 fn markdown_fence_language(rest: &str) -> Option<(&str, usize)> {
@@ -1165,12 +1200,24 @@ mod tests {
     const MARKDOWN_UNCLOSED: &str = "```python\nprint('open')\n";
     const MARKDOWN_TAB_INDENTED: &str = "\t```python\nprint('tab')\n\t```\n";
     const MARKDOWN_CLOSING_INDENT_TOO_SMALL: &str = "  ```rs\nvalue\n```\n";
+    const MARKDOWN_BACKTICK_INFO: &str = "```python `invalid`\nprint('not fenced')\n";
+    const RUST_EXTERN_SIGNATURE: &str = "extern \"C\" {\n    fn puts(message: *const i8) -> i32;\n}\n\ntrait Runnable {\n    fn run(&self);\n}\n";
+    const RUST_DOC_FILTER: &str =
+        "/// Real docs\nfn documented() {}\n// Ordinary comment\nfn plain() {}\n";
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
         assert_eq!(detect_language("src/lib.rs"), Some(SourceLanguage::Rust));
         assert_eq!(
             detect_language("src/app.ts"),
+            Some(SourceLanguage::TypeScript)
+        );
+        assert_eq!(
+            detect_language("src/app.mts"),
+            Some(SourceLanguage::TypeScript)
+        );
+        assert_eq!(
+            detect_language("src/app.cts"),
             Some(SourceLanguage::TypeScript)
         );
         assert_eq!(detect_language("src/app.tsx"), Some(SourceLanguage::Tsx));
@@ -1180,6 +1227,8 @@ mod tests {
         );
         assert_eq!(detect_language("src/app.jsx"), Some(SourceLanguage::Jsx));
         assert_eq!(detect_language("script.py"), Some(SourceLanguage::Python));
+        assert_eq!(detect_language("script.pyi"), Some(SourceLanguage::Python));
+        assert_eq!(detect_language("script.pyw"), Some(SourceLanguage::Python));
         assert_eq!(detect_language("package.json"), Some(SourceLanguage::Json));
         assert_eq!(detect_language("config.yaml"), Some(SourceLanguage::Yaml));
         assert_eq!(detect_language("Cargo.toml"), Some(SourceLanguage::Toml));
@@ -1271,6 +1320,42 @@ mod tests {
     }
 
     #[test]
+    fn rust_extern_signatures_remain_functions() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/extern_signature.rs")),
+            RUST_EXTERN_SIGNATURE,
+        )
+        .expect("rust parses");
+
+        assert_symbol(&summary, SymbolKind::Function, "puts");
+        assert_symbol(&summary, SymbolKind::Method, "run");
+        assert!(
+            !summary
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "puts")
+        );
+    }
+
+    #[test]
+    fn rust_doc_comments_filter_out_plain_comments() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/doc_filter.rs")),
+            RUST_DOC_FILTER,
+        )
+        .expect("rust parses");
+
+        assert_capture(&summary, "doc.comment", "/// Real docs\n");
+        assert!(
+            !summary
+                .captures
+                .iter()
+                .any(|capture| capture.capture_name == "doc.comment"
+                    && capture.text == "// Ordinary comment")
+        );
+    }
+
+    #[test]
     fn typescript_and_tsx_fixtures_extract_symbols_imports_and_calls() {
         let ts = parse_path("fixtures/typescript/imports.ts", TS_IMPORTS).expect("ts parses");
         assert_eq!(ts.source.language, SourceLanguage::TypeScript);
@@ -1299,6 +1384,7 @@ mod tests {
         assert_symbol(&summary, SymbolKind::Class, "Panel");
         assert_symbol(&summary, SymbolKind::Function, "mount");
         assert_symbol(&summary, SymbolKind::Test, "mounts");
+        assert_symbol(&summary, SymbolKind::Test, "escapes\\nname");
         assert_capture(&summary, "import.source", "\"react\"");
         assert_capture(
             &summary,
@@ -1525,6 +1611,14 @@ mod tests {
             MARKDOWN_CLOSING_INDENT_TOO_SMALL.len()
         );
         assert_eq!(content.rendered_span, "2:1-4:1");
+
+        let invalid_info = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/backtick_info.md")),
+            MARKDOWN_BACKTICK_INFO,
+        )
+        .expect("markdown parses");
+        assert!(invalid_info.captures.is_empty());
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
