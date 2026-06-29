@@ -752,7 +752,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         handledMemoryGraphUpdate = true;
         this.state.graph = graphReducer(this.state.graph, { type: "GRAPH_UPDATED", event: envelope.payload });
         this.render();
-        await this.loadKnowledgeGraph(envelope.payload.bundle_id);
       }
     }
     if (!handledMemoryGraphUpdate && !this.eventAffectsCurrentView(envelope)) {

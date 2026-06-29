@@ -844,6 +844,101 @@ describe("OpenSymphonyApp mount", () => {
     resolveRefresh?.();
     await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph warnings") ?? false);
     expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain("2");
+    expect(reads).toBe(2);
+
+    await handle.destroy();
+  });
+
+  it("does not switch selected graph bundles for background memory_graph_updated events", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    const selectedSnapshot = {
+      ...fixtureGraphSnapshot,
+      bundle_id: "selected-bundle",
+      cursor: { sequence: 1, partition: "memory-graph:selected-bundle" },
+      nodes: fixtureGraphSnapshot.nodes.map((node) => ({
+        ...node,
+        bundle_id: "selected-bundle",
+        label: node.id === "concept:coe-465" ? "Selected Bundle Concept" : node.label,
+      })),
+    };
+    const backgroundSnapshot = {
+      ...fixtureGraphSnapshot,
+      bundle_id: "background-bundle",
+      cursor: { sequence: 2, partition: "memory-graph:background-bundle" },
+      nodes: fixtureGraphSnapshot.nodes.map((node) => ({
+        ...node,
+        bundle_id: "background-bundle",
+        label: node.id === "concept:coe-465" ? "Background Bundle Concept" : node.label,
+      })),
+    };
+    const reads: string[] = [];
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async listBundles() {
+        return {
+          schema_version: schemaVersionV1(),
+          bundles: [
+            {
+              id: "selected-bundle",
+              title: "Selected Bundle",
+              okf_version: "0.1",
+              visibility: "private",
+              concept_count: 1,
+              updated_at: "2026-06-28T00:00:00Z",
+            },
+            {
+              id: "background-bundle",
+              title: "Background Bundle",
+              okf_version: "0.1",
+              visibility: "private",
+              concept_count: 1,
+              updated_at: "2026-06-28T00:00:00Z",
+            },
+          ],
+        };
+      },
+      async getGraphSnapshot(bundleId) {
+        reads.push(bundleId);
+        return bundleId === "background-bundle" ? backgroundSnapshot : selectedSnapshot;
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent?.includes("Selected Bundle Concept") ?? false);
+
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 21, partition: "events" },
+      entity_ref: { kind: "unknown", id: "memory-graph:background-bundle" },
+      event_kind: "memory_graph_updated",
+      emitted_at: "2026-06-28T00:02:00Z",
+      payload: {
+        schema_version: schemaVersionV1(),
+        bundle_id: "background-bundle",
+        cursor: { sequence: 2, partition: "memory-graph:background-bundle" },
+        updated_at: "2026-06-28T00:02:00Z",
+      },
+    });
+
+    await flushUntil(() => reads.length >= 2);
+    expect(reads).toEqual(["selected-bundle", "selected-bundle"]);
+    expect(root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent).toContain("Selected Bundle Concept");
+    expect(root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent).not.toContain("Background Bundle Concept");
 
     await handle.destroy();
   });

@@ -151,7 +151,6 @@ describe("@opensymphony/graph", () => {
       json: async () => ({ bundles: [] }),
     })) as unknown as typeof fetch;
     const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock, {
-      defaultVisibility: "all_accessible",
       maxVisibility: "private",
     });
 

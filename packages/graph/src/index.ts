@@ -600,7 +600,7 @@ function effectiveVisibility(
   ) {
     throw new Error(`Graph visibility "${requested}" exceeds adapter policy "${policy.maxVisibility}"`);
   }
-  const visibility = requested ?? policy.defaultVisibility;
+  const visibility = requested ?? policy.defaultVisibility ?? policy.maxVisibility;
   if (
     visibility !== undefined
     && policy.maxVisibility !== undefined
