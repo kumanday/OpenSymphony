@@ -234,6 +234,40 @@ describe("@opensymphony/graph", () => {
     expect(stillLoading.layoutStatus).toBe("loading");
   });
 
+  it("compares stale graph cursors within their partitions", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+    const repartitioned = graphReducer(current, {
+      type: "GRAPH_UPDATED",
+      event: {
+        schema_version: fixtureGraphSnapshot.schema_version,
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: 0, partition: "memory-graph:local-default:v2" },
+        updated_at: "2026-06-28T00:03:00Z",
+      },
+    });
+
+    expect(repartitioned.freshnessStatus).toBe("stale");
+    expect(repartitioned.staleBundleIds).toEqual(["local-default"]);
+
+    const refreshed = graphReducer(repartitioned, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { sequence: 0, partition: "memory-graph:local-default:v2" },
+      },
+    });
+
+    expect(refreshed.freshnessStatus).toBe("current");
+    expect(refreshed.staleBundleIds).toEqual([]);
+    expect(refreshed.snapshots["local-default"].cursor).toEqual({
+      sequence: 0,
+      partition: "memory-graph:local-default:v2",
+    });
+  });
+
   it("rejects non-OK HTTP graph responses before parsing JSON", async () => {
     const json = jest.fn();
     const fetchMock = jest.fn(async () => ({

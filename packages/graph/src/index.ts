@@ -92,7 +92,7 @@ export interface GraphState {
   lastUpdatedAt: string | null;
   freshnessStatus: GraphFreshnessStatus;
   staleBundleIds: string[];
-  staleCursorSequences: Record<string, number>;
+  staleCursors: Record<string, MemoryGraphSnapshot["cursor"]>;
   warningBundleIds: string[];
 }
 
@@ -230,7 +230,7 @@ export function createInitialGraphState(): GraphState {
     lastUpdatedAt: null,
     freshnessStatus: "current",
     staleBundleIds: [],
-    staleCursorSequences: {},
+    staleCursors: {},
     warningBundleIds: [],
   };
 }
@@ -246,14 +246,14 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
       };
     case "SNAPSHOT_LOADED":
       {
-        const staleSequence = state.staleCursorSequences[action.snapshot.bundle_id];
-        const isStaleSnapshot = staleSequence !== undefined && action.snapshot.cursor.sequence < staleSequence;
+        const staleCursor = state.staleCursors[action.snapshot.bundle_id];
+        const isStaleSnapshot = staleCursor !== undefined && isCursorBefore(action.snapshot.cursor, staleCursor);
         if (isStaleSnapshot) {
           return state;
         }
         const staleBundleIds = state.staleBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
-        const staleCursorSequences = { ...state.staleCursorSequences };
-        delete staleCursorSequences[action.snapshot.bundle_id];
+        const staleCursors = { ...state.staleCursors };
+        delete staleCursors[action.snapshot.bundle_id];
         const warningBundleIds = action.snapshot.metrics && action.snapshot.metrics.warning_count > 0
           ? uniqueSorted([...state.warningBundleIds, action.snapshot.bundle_id])
           : state.warningBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
@@ -263,7 +263,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
           selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
           lastUpdatedAt: action.snapshot.generated_at,
           staleBundleIds,
-          staleCursorSequences,
+          staleCursors,
           warningBundleIds,
           freshnessStatus: graphFreshnessStatus(staleBundleIds, warningBundleIds),
         };
@@ -316,7 +316,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
       return { ...state, layoutStatus: action.status, layoutError: action.error ?? null };
     case "GRAPH_UPDATED": {
       const current = state.snapshots[action.event.bundle_id];
-      if (current && action.event.cursor.sequence <= current.cursor.sequence) {
+      if (current && !isCursorAfter(action.event.cursor, current.cursor)) {
         return state;
       }
       const staleBundleIds = uniqueSorted([...state.staleBundleIds, action.event.bundle_id]);
@@ -324,9 +324,9 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         ...state,
         lastUpdatedAt: action.event.updated_at,
         staleBundleIds,
-        staleCursorSequences: {
-          ...state.staleCursorSequences,
-          [action.event.bundle_id]: action.event.cursor.sequence,
+        staleCursors: {
+          ...state.staleCursors,
+          [action.event.bundle_id]: action.event.cursor,
         },
         freshnessStatus: graphFreshnessStatus(staleBundleIds, state.warningBundleIds),
       };
@@ -970,6 +970,20 @@ function visibilityRank(visibility: GraphRequestOptions["visibility"]): number {
     default:
       return -1;
   }
+}
+
+function isCursorBefore(
+  candidate: MemoryGraphSnapshot["cursor"],
+  marker: MemoryGraphSnapshot["cursor"],
+): boolean {
+  return candidate.partition === marker.partition && candidate.sequence < marker.sequence;
+}
+
+function isCursorAfter(
+  candidate: MemoryGraphSnapshot["cursor"],
+  current: MemoryGraphSnapshot["cursor"],
+): boolean {
+  return candidate.partition !== current.partition || candidate.sequence > current.sequence;
 }
 
 function graphFreshnessStatus(
