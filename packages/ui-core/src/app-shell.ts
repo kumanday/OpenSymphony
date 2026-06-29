@@ -283,6 +283,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshFailureCount = 0;
   private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private graphLayoutAdapter: GraphLayoutAdapter = createGraphLayoutAdapter(() => null);
+  private pendingGraphLayoutAdapter: GraphLayoutAdapter | null = null;
   private graphLayoutRun = 0;
   private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
@@ -423,6 +424,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
     this.graphLayoutAdapter.dispose();
+    this.pendingGraphLayoutAdapter?.dispose();
+    this.pendingGraphLayoutAdapter = null;
     disposeKnowledgeGraphRenderer(this.options.root);
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
@@ -923,6 +926,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       },
       onFocus: (nodeId) => {
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
+        if (this.state.knowledgeGraph.mode !== "neighborhood") return;
         this.state.knowledgeGraphLayout = null;
         this.knowledgeGraphLayoutSize = null;
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
@@ -935,12 +939,29 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const processEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
     if (typeof Worker === "undefined" || processEnv?.JEST_WORKER_ID) return;
     void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
-      if (this.destroyed || this.state.knowledgeGraph.layoutStatus === "loading") return;
-      this.graphLayoutAdapter.dispose();
-      this.graphLayoutAdapter = createBrowserGraphLayoutAdapter();
+      if (this.destroyed) return;
+      this.replaceGraphLayoutAdapter(createBrowserGraphLayoutAdapter());
     }).catch(() => {
       this.graphLayoutAdapter = createGraphLayoutAdapter(() => null);
     });
+  }
+
+  private replaceGraphLayoutAdapter(adapter: GraphLayoutAdapter): void {
+    if (this.state.knowledgeGraph.layoutStatus === "loading") {
+      this.pendingGraphLayoutAdapter?.dispose();
+      this.pendingGraphLayoutAdapter = adapter;
+      return;
+    }
+    this.graphLayoutAdapter.dispose();
+    this.graphLayoutAdapter = adapter;
+  }
+
+  private applyPendingGraphLayoutAdapter(): void {
+    if (!this.pendingGraphLayoutAdapter || this.state.knowledgeGraph.layoutStatus === "loading") return;
+    const adapter = this.pendingGraphLayoutAdapter;
+    this.pendingGraphLayoutAdapter = null;
+    this.graphLayoutAdapter.dispose();
+    this.graphLayoutAdapter = adapter;
   }
 
   private scheduleKnowledgeGraphLayout(size = measureKnowledgeGraphStage(this.options.root)): void {
@@ -959,6 +980,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.knowledgeGraphLayout = layout;
       this.knowledgeGraphLayoutSize = { width, height };
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+      this.applyPendingGraphLayoutAdapter();
       this.render();
     }).catch((error) => {
       if (this.destroyed || run !== this.graphLayoutRun) return;
@@ -967,6 +989,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         status: "failed",
         error: errorMessage(error),
       });
+      this.applyPendingGraphLayoutAdapter();
       this.render();
     });
   }

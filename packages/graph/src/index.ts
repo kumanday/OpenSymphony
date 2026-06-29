@@ -475,7 +475,6 @@ export function createGraphLayoutAdapter(
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  let didWarnWorkerFallback = false;
   const workerTimeoutMs = 2_000;
   worker.onmessage = (event: MessageEvent<{ id: number; result?: GraphLayoutResult; error?: string }>) => {
     const request = pending.get(event.data.id);
@@ -501,10 +500,7 @@ export function createGraphLayoutAdapter(
       const timeout = setTimeout(() => {
         if (!pending.has(id)) return;
         pending.delete(id);
-        if (!didWarnWorkerFallback) {
-          didWarnWorkerFallback = true;
-          console.warn("Graph layout worker timed out; falling back to synchronous layout computation.");
-        }
+        console.warn("Graph layout worker timed out; falling back to synchronous layout computation.");
         resolve(computeGraphLayout(snapshot, options));
       }, workerTimeoutMs);
       pending.set(id, { resolve, reject, timeout });

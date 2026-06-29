@@ -271,6 +271,15 @@ describe("@opensymphony/graph", () => {
     const timelineConcept = nodeById(timeline, "concept:coe-465");
     const timelineTag = nodeById(timeline, "tag:graph-view");
     expect(timelineConcept.y).not.toBe(timelineTag.y);
+    const timestamped = computeGraphLayout({
+      ...fixtureGraphSnapshot,
+      nodes: [
+        { ...fixtureGraphSnapshot.nodes[0], id: "concept:older", kind: "concept", timestamp: "2026-01-01T00:00:00Z" },
+        { ...fixtureGraphSnapshot.nodes[1], id: "concept:newer", kind: "concept", timestamp: "2026-02-01T00:00:00Z" },
+      ],
+      edges: [],
+    }, { kind: "timeline", width: 640, height: 360 });
+    expect(nodeById(timestamped, "concept:older").x).toBeLessThan(nodeById(timestamped, "concept:newer").x);
   });
 
   it("uses a worker adapter when a worker is available", async () => {

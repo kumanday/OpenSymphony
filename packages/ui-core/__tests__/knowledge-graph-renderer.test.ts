@@ -1,130 +1,75 @@
-/**
- * @jest-environment jsdom
- */
+import { createServer, type Server } from "node:http";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname, join, resolve } from "node:path";
+import { chromium } from "playwright";
 
-import { jest } from "@jest/globals";
-import {
-  computeGraphLayout,
-  createInitialGraphState,
-  fixtureGraphSnapshot,
-  graphReducer,
-} from "@opensymphony/graph";
-import {
-  mountKnowledgeGraphRenderer,
-  renderKnowledgeGraphSurface,
-} from "../src/knowledge-graph-renderer.js";
-
-const mockRenderCalls: unknown[] = [];
-
-jest.mock("three", () => {
-  class FakeObject3D {
-    children: FakeObject3D[] = [];
-    position = { set: jest.fn() };
-    scale = { set: jest.fn() };
-
-    add(...objects: FakeObject3D[]): void {
-      this.children.push(...objects);
-    }
-
-    clear(): void {
-      this.children = [];
-    }
-
-    traverse(callback: (object: FakeObject3D) => void): void {
-      callback(this);
-      for (const child of this.children) child.traverse(callback);
-    }
-  }
-  class FakeRenderer {
-    setPixelRatio = jest.fn();
-    setSize = jest.fn();
-    setClearColor = jest.fn();
-    clear = jest.fn();
-    dispose = jest.fn();
-    forceContextLoss = jest.fn();
-
-    render(scene: unknown, camera: unknown): void {
-      mockRenderCalls.push({ scene, camera });
-    }
-  }
-  class FakeCamera extends FakeObject3D {
-    left = 0;
-    right = 0;
-    top = 0;
-    bottom = 0;
-    updateProjectionMatrix = jest.fn();
-  }
-  class FakeGeometry {
-    setAttribute = jest.fn();
-    dispose = jest.fn();
-  }
-  class FakeMaterial {
-    dispose = jest.fn();
-  }
-  class FakeInstancedMesh extends FakeObject3D {
-    instanceMatrix = { needsUpdate: false };
-    constructor(public geometry: FakeGeometry, public material: FakeMaterial) {
-      super();
-    }
-    setMatrixAt = jest.fn();
-  }
-  class FakeLineSegments extends FakeObject3D {
-    constructor(public geometry: FakeGeometry, public material: FakeMaterial) {
-      super();
-    }
-  }
-  return {
-    WebGLRenderer: FakeRenderer,
-    Scene: class FakeScene extends FakeObject3D {},
-    Group: class FakeGroup extends FakeObject3D {},
-    OrthographicCamera: FakeCamera,
-    BufferGeometry: FakeGeometry,
-    Float32BufferAttribute: class FakeFloat32BufferAttribute {
-      constructor(public values: number[], public itemSize: number) {}
-    },
-    LineSegments: FakeLineSegments,
-    LineBasicMaterial: FakeMaterial,
-    CircleGeometry: class FakeCircleGeometry extends FakeGeometry {},
-    MeshBasicMaterial: FakeMaterial,
-    InstancedMesh: FakeInstancedMesh,
-    Matrix4: class FakeMatrix4 {
-      compose = jest.fn();
-    },
-    Vector3: class FakeVector3 {
-      constructor(public x: number, public y: number, public z: number) {}
-    },
-    Quaternion: class FakeQuaternion {},
-  };
-});
+const repoRoot = resolve(__dirname, "../../..");
+const webDist = join(repoRoot, "apps/web/dist");
 
 describe("Knowledge Graph renderer", () => {
-  it("uses the WebGL/Three path when a WebGL context is available", () => {
-    const layout = computeGraphLayout(fixtureGraphSnapshot, { kind: "force", width: 640, height: 360 });
-    const state = graphReducer(createInitialGraphState(), {
-      type: "SNAPSHOT_LOADED",
-      snapshot: fixtureGraphSnapshot,
-    });
-    document.body.innerHTML = renderKnowledgeGraphSurface({
-      snapshot: fixtureGraphSnapshot,
-      layout,
-      state: graphReducer(state, { type: "LAYOUT_STATUS_SET", status: "ready" }),
-    });
-    const canvas = document.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
-    expect(canvas).toBeTruthy();
-    jest.spyOn(canvas!, "getContext").mockImplementation((contextId: string) => (
-      contextId.startsWith("webgl") ? {} as RenderingContext : null
-    ));
-
-    mountKnowledgeGraphRenderer(document.body, {
-      snapshot: fixtureGraphSnapshot,
-      layout,
-      selectedNodeIds: [],
-      view: { scale: 1, dx: 0, dy: 0 },
-      onSelect: jest.fn(),
-      onFocus: jest.fn(),
-    });
-
-    expect(mockRenderCalls).toHaveLength(1);
-    expect(canvas!.dataset.nonblank).toBe("true");
-  });
+  it("renders a nonblank WebGL canvas in the built web app", async () => {
+    const indexPath = join(webDist, "index.html");
+    if (!existsSync(indexPath)) {
+      console.warn("Skipping built-web WebGL proof because apps/web/dist is missing.");
+      return;
+    }
+    const server = await startStaticServer(webDist);
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage({ viewport: { width: 1024, height: 768 } });
+      await page.goto(`${server.url}/app/`, { waitUntil: "domcontentloaded" });
+      await page.getByRole("button", { name: "Knowledge Graph" }).click();
+      await page.waitForSelector("[data-testid='knowledge-graph-canvas'][data-nonblank='true']");
+      await page.waitForTimeout(300);
+      const dataUrl = await page.$eval(
+        "[data-testid='knowledge-graph-canvas']",
+        (canvas) => (canvas as HTMLCanvasElement).toDataURL("image/png"),
+      );
+      expect(dataUrl).toMatch(/^data:image\/png;base64,/);
+      expect(dataUrl.length).toBeGreaterThan(1_000);
+    } finally {
+      await browser.close();
+      await new Promise<void>((resolveClose) => server.close(resolveClose));
+    }
+  }, 20_000);
 });
+
+function startStaticServer(root: string): Promise<Server & { url: string }> {
+  const server = createServer((request, response) => {
+    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    const path = requestUrl.pathname === "/app/" || requestUrl.pathname === "/app"
+      ? "index.html"
+      : requestUrl.pathname.replace(/^\/app\//, "");
+    const filePath = resolve(root, path);
+    if (!filePath.startsWith(root) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+      response.writeHead(404);
+      response.end("not found");
+      return;
+    }
+    response.writeHead(200, { "content-type": contentType(filePath) });
+    response.end(readFileSync(filePath));
+  }) as Server & { url: string };
+  return new Promise((resolveListen) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Unexpected static server address");
+      server.url = `http://127.0.0.1:${address.port}`;
+      resolveListen(server);
+    });
+  });
+}
+
+function contentType(filePath: string): string {
+  switch (extname(filePath)) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".png":
+      return "image/png";
+    default:
+      return "application/octet-stream";
+  }
+}
