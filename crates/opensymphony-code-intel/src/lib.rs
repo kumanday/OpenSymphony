@@ -719,6 +719,11 @@ fn symbol_name_for_capture(
     node: Node<'_>,
     source: &[u8],
 ) -> Result<Option<String>, CodeIntelError> {
+    if capture_name == "test.case"
+        && let Some(name) = test_case_name_from_call(node, source)?
+    {
+        return Ok(Some(name));
+    }
     if let Some(name) = node.child_by_field_name("name") {
         return Ok(Some(name.utf8_text(source)?.to_string()));
     }
@@ -734,6 +739,47 @@ fn symbol_name_for_capture(
         return Ok(Some(node.utf8_text(source)?.to_string()));
     }
     Ok(None)
+}
+
+fn test_case_name_from_call(
+    node: Node<'_>,
+    source: &[u8],
+) -> Result<Option<String>, CodeIntelError> {
+    let Some(call) = node
+        .parent()
+        .filter(|parent| parent.kind() == "call_expression")
+    else {
+        return Ok(None);
+    };
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return Ok(None);
+    };
+
+    let mut cursor = arguments.walk();
+    for argument in arguments.named_children(&mut cursor) {
+        if matches!(argument.kind(), "string" | "template_string") {
+            return first_string_fragment(argument, source);
+        }
+    }
+    Ok(None)
+}
+
+fn first_string_fragment(
+    string_node: Node<'_>,
+    source: &[u8],
+) -> Result<Option<String>, CodeIntelError> {
+    let mut cursor = string_node.walk();
+    for child in string_node.named_children(&mut cursor) {
+        if child.kind() == "string_fragment" {
+            return Ok(Some(child.utf8_text(source)?.to_string()));
+        }
+    }
+
+    let text = string_node.utf8_text(source)?;
+    Ok(Some(
+        text.trim_matches(|character| matches!(character, '"' | '\'' | '`'))
+            .to_string(),
+    ))
 }
 
 fn is_method(language: SourceLanguage, node: Node<'_>) -> bool {
@@ -905,7 +951,13 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
         let trimmed = &line_body[indent..];
         if let Some((fence_marker, fence_marker_count, rest)) = markdown_fence_marker(trimmed) {
             if open_fence.as_ref().is_some_and(|fence| {
-                is_markdown_closing_fence(trimmed, fence.marker, fence.marker_count)
+                is_markdown_closing_fence(
+                    trimmed,
+                    indent,
+                    fence.indent,
+                    fence.marker,
+                    fence.marker_count,
+                )
             }) {
                 let fence = open_fence.take().expect("checked open fence");
                 let span = SourceSpan {
@@ -953,6 +1005,7 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
                 open_fence = Some(MarkdownFence {
                     marker: fence_marker,
                     marker_count: fence_marker_count,
+                    indent,
                     language,
                     content_start_byte: byte_offset + line.len(),
                     content_start_line: line_number + 1,
@@ -1023,9 +1076,15 @@ fn markdown_fence_language(rest: &str) -> Option<(&str, usize)> {
 
 fn is_markdown_closing_fence(
     trimmed_line: &str,
+    closing_indent: usize,
+    opening_indent: usize,
     opening_marker: u8,
     opening_marker_count: usize,
 ) -> bool {
+    if closing_indent < opening_indent {
+        return false;
+    }
+
     markdown_fence_marker(trimmed_line)
         .map(|(marker, marker_count, rest)| {
             marker == opening_marker
@@ -1038,6 +1097,7 @@ fn is_markdown_closing_fence(
 struct MarkdownFence {
     marker: u8,
     marker_count: usize,
+    indent: usize,
     language: Option<(String, SourceSpan)>,
     content_start_byte: usize,
     content_start_line: usize,
@@ -1104,6 +1164,7 @@ mod tests {
     const MARKDOWN_TILDE: &str = "~~~python\nprint('tilde')\n~~~\n";
     const MARKDOWN_UNCLOSED: &str = "```python\nprint('open')\n";
     const MARKDOWN_TAB_INDENTED: &str = "\t```python\nprint('tab')\n\t```\n";
+    const MARKDOWN_CLOSING_INDENT_TOO_SMALL: &str = "  ```rs\nvalue\n```\n";
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
@@ -1223,7 +1284,7 @@ mod tests {
         assert_symbols_are_one_based(&tsx);
         assert_symbol(&tsx, SymbolKind::Interface, "ButtonProps");
         assert_symbol(&tsx, SymbolKind::Function, "Button");
-        assert_symbol(&tsx, SymbolKind::Test, "test");
+        assert_symbol(&tsx, SymbolKind::Test, "renders button");
         assert_capture(&tsx, "import.source", "\"react\"");
         assert_capture(&tsx, "reference.call", "label.toUpperCase()");
         assert_capture(&tsx, "reference.call", "helper()");
@@ -1237,6 +1298,7 @@ mod tests {
         assert_symbols_are_one_based(&summary);
         assert_symbol(&summary, SymbolKind::Class, "Panel");
         assert_symbol(&summary, SymbolKind::Function, "mount");
+        assert_symbol(&summary, SymbolKind::Test, "mounts");
         assert_capture(&summary, "import.source", "\"react\"");
         assert_capture(
             &summary,
@@ -1449,6 +1511,20 @@ mod tests {
         .expect("markdown parses");
         assert_capture(&tab_indented, "injection.language", "python");
         assert_capture(&tab_indented, "injection.content", "print('tab')\n");
+
+        let closing_indent = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/closing_indent.md")),
+            MARKDOWN_CLOSING_INDENT_TOO_SMALL,
+        )
+        .expect("markdown parses");
+        let content = find_capture(&closing_indent, "injection.content", "value\n```\n");
+        assert_eq!(content.span.start_byte, 8);
+        assert_eq!(
+            content.span.end_byte,
+            MARKDOWN_CLOSING_INDENT_TOO_SMALL.len()
+        );
+        assert_eq!(content.rendered_span, "2:1-4:1");
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
