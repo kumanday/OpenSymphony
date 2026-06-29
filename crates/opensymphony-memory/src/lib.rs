@@ -1391,7 +1391,10 @@ tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
 api_key: sk-live-public-fixture
+apiKey: sk-live-camel-fixture
 api_key_format: sk-live-prefix
+accessToken: access-token-camel-fixture
+clientSecret: client-secret-camel-fixture
 client_secret_64: client-secret-fixture
 nested_secret:
   token: nested-token-fixture
@@ -1715,6 +1718,18 @@ opensymphony:
         );
         assert_eq!(
             detail.frontmatter_view.unknown.get("api_key"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("apiKey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("accessToken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("clientSecret"),
             Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(

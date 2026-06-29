@@ -701,7 +701,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.render();
         return;
       }
-      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "BUNDLE_SELECTED", bundleId: selectedBundleId });
+      if (this.state.knowledgeGraph.selectedBundleId !== selectedBundleId) {
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "BUNDLE_SELECTED", bundleId: selectedBundleId });
+      }
       await this.refreshKnowledgeGraphSnapshot(selectedBundleId);
     } catch (error) {
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "failed", error: errorMessage(error) });

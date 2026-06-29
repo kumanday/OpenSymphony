@@ -970,15 +970,12 @@ fn redact_secret_value_shape(value: serde_json::Value) -> serde_json::Value {
 }
 
 fn is_secret_like_frontmatter_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    let parts = key
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() || has_non_secret_descriptor(&parts) {
+    let parts = frontmatter_key_parts(key);
+    let part_refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    if part_refs.is_empty() || has_non_secret_descriptor(&part_refs) {
         return false;
     }
-    if has_any(&parts, &[
+    if has_any(&part_refs, &[
         "secret",
         "secrets",
         "password",
@@ -992,25 +989,54 @@ fn is_secret_like_frontmatter_key(key: &str) -> bool {
     ]) {
         return true;
     }
-    if has_any(&parts, &["cookie", "cookies"])
-        && parts
+    if has_any(&part_refs, &["cookie", "cookies"])
+        && part_refs
             .iter()
             .any(|part| matches!(*part, "auth" | "oauth" | "session" | "access" | "refresh"))
     {
         return true;
     }
-    if has_any(&parts, &["token", "tokens"])
-        && (parts.len() == 1
-            || parts
+    if has_any(&part_refs, &["token", "tokens"])
+        && (part_refs.len() == 1
+            || part_refs
                 .iter()
                 .any(|part| matches!(*part, "auth" | "oauth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api")))
     {
         return true;
     }
-    has_adjacent_parts(&parts, "api", "key")
-        || has_adjacent_parts(&parts, "access", "key")
-        || has_adjacent_parts(&parts, "private", "key")
-        || has_adjacent_parts(&parts, "session", "id")
+    has_adjacent_parts(&part_refs, "api", "key")
+        || has_adjacent_parts(&part_refs, "access", "key")
+        || has_adjacent_parts(&part_refs, "private", "key")
+        || has_adjacent_parts(&part_refs, "session", "id")
+}
+
+fn frontmatter_key_parts(key: &str) -> Vec<String> {
+    let characters = key.chars().collect::<Vec<_>>();
+    let mut segmented = String::with_capacity(key.len());
+    for (index, character) in characters.iter().copied().enumerate() {
+        if index > 0 {
+            let previous = characters[index - 1];
+            let next = characters.get(index + 1).copied();
+            let camel_boundary = character.is_ascii_uppercase()
+                && (previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && next.is_some_and(|next| next.is_ascii_lowercase())));
+            let digit_boundary =
+                character.is_ascii_digit() && previous.is_ascii_alphabetic();
+            let alpha_after_digit =
+                character.is_ascii_alphabetic() && previous.is_ascii_digit();
+            if camel_boundary || digit_boundary || alpha_after_digit {
+                segmented.push('_');
+            }
+        }
+        segmented.push(character.to_ascii_lowercase());
+    }
+    segmented
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn has_non_secret_descriptor(parts: &[&str]) -> bool {

@@ -983,6 +983,62 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("preserves selected graph nodes during same-bundle memory_graph_updated refreshes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    let reads = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getGraphSnapshot() {
+        reads += 1;
+        return {
+          ...fixtureGraphSnapshot,
+          cursor: { ...fixtureGraphSnapshot.cursor, sequence: reads },
+        };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent?.includes("COE-465") ?? false);
+
+    const nodeButton = root.querySelector("[data-kg-node-id='concept:coe-465']") as HTMLButtonElement;
+    nodeButton.click();
+    await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
+
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 22, partition: "events" },
+      entity_ref: { kind: "unknown", id: `memory-graph:${fixtureGraphSnapshot.bundle_id}` },
+      event_kind: "memory_graph_updated",
+      emitted_at: "2026-06-28T00:03:00Z",
+      payload: {
+        schema_version: schemaVersionV1(),
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: 2, partition: fixtureGraphSnapshot.cursor.partition },
+        updated_at: "2026-06-28T00:03:00Z",
+      },
+    });
+
+    await flushUntil(() => reads >= 2);
+    expect(root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
   it("serializes overlapping Knowledge Graph loads from pane switches and events", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
