@@ -1,0 +1,28 @@
+{
+  "name": "@opensymphony/graph",
+  "version": "2.0.0",
+  "description": "Transport-agnostic memory graph state and adapters for OpenSymphony clients",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "type-check": "tsc --build tsconfig.json --pretty false",
+    "test": "jest --config ../../jest.config.js --runTestsByPath __tests__/graph.test.ts"
+  },
+  "dependencies": {
+    "@opensymphony/gateway-schema": "*"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "jest": "^29.7.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -4,6 +4,7 @@
     { "path": "packages/gateway-schema" },
     { "path": "packages/api-client" },
     { "path": "packages/ui-core" },
+    { "path": "packages/graph" },
     { "path": "packages/state" },
     { "path": "packages/state/tsconfig.test.json" },
     { "path": "apps/desktop" },
