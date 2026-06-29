@@ -568,66 +568,20 @@ function normalizeFilters(filters: GraphFilters): GraphFilters {
 }
 
 function defaultGraphLayoutWorkerFactory(): Worker | null {
-  if (typeof Worker === "undefined" || typeof Blob === "undefined" || typeof URL === "undefined") return null;
+  if (typeof Worker === "undefined" || typeof URL === "undefined") return null;
   try {
-    const source = `
-      self.onmessage = (event) => {
-        const { id, snapshot, options } = event.data;
-        try {
-          const width = Math.max(320, options.width || 720);
-          const height = Math.max(240, options.height || 420);
-          const ids = new Set(snapshot.nodes.map((node) => node.id));
-          const edges = snapshot.edges.filter((edge) => ids.has(edge.source_id) && ids.has(edge.target_id));
-          const order = [...snapshot.nodes].sort((a, b) => a.id.localeCompare(b.id));
-          const nodes = order.map((node, index) => {
-            let x = width / 2;
-            let y = height / 2;
-            if (options.kind === "hierarchical") {
-              const levels = { bundle: 0, directory: 1, concept: 2, tag: 3, resource: 3, citation: 4, source_ref: 4 };
-              const level = levels[node.kind] ?? 2;
-              const same = order.filter((candidate) => (levels[candidate.kind] ?? 2) === level);
-              x = ((level + 1) / 6) * width;
-              y = ((same.findIndex((candidate) => candidate.id === node.id) + 1) / (same.length + 1)) * height;
-            } else if (options.kind === "timeline") {
-              x = ((index + 1) / (order.length + 1)) * width;
-              y = ((["bundle", "concept", "tag", "source_ref"].indexOf(node.kind) + 2) / 6) * height;
-            } else {
-              const angle = (Math.PI * 2 * index) / Math.max(1, order.length) - Math.PI / 2;
-              const radius = node.id === options.focusedNodeId ? 0 : Math.min(width, height) * (options.kind === "radial" ? 0.3 : 0.24);
-              x = width / 2 + Math.cos(angle) * radius;
-              y = height / 2 + Math.sin(angle) * radius;
-            }
-            return {
-              nodeId: node.id,
-              x,
-              y,
-              z: node.metrics && node.metrics.community_id ? 12 : 0,
-              radius: node.kind === "concept" ? 9 : 7,
-              label: node.label,
-              kind: node.kind,
-              communityId: node.metrics && node.metrics.community_id,
-            };
-          });
-          self.postMessage({
-            id,
-            result: {
-              kind: options.kind,
-              width,
-              height,
-              nodes,
-              edges: edges.map((edge) => ({ edgeId: edge.id, sourceId: edge.source_id, targetId: edge.target_id })),
-              generatedAt: new Date().toISOString(),
-            },
-          });
-        } catch (error) {
-          self.postMessage({ id, error: error && error.message ? error.message : String(error) });
-        }
-      };
-    `;
-    return new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+    return new Worker(new URL("./layout-worker.js", graphWorkerBaseUrl()).href, { type: "module" });
   } catch {
     return null;
   }
+}
+
+function graphWorkerBaseUrl(): string {
+  if (typeof document !== "undefined") {
+    const currentScript = document.currentScript;
+    if (currentScript instanceof HTMLScriptElement && currentScript.src) return currentScript.src;
+  }
+  return globalThis.location?.href ?? "http://localhost/";
 }
 
 function forceLayout(

@@ -67,11 +67,10 @@ export function mountKnowledgeGraphRenderer(
     canvas.height = Math.floor(viewport.height * viewport.ratio);
     canvas.style.width = `${viewport.width}px`;
     canvas.style.height = `${viewport.height}px`;
-    const threeCanvas = document.createElement("canvas");
-    threeCanvas.width = canvas.width;
-    threeCanvas.height = canvas.height;
-    void drawThree(threeCanvas, options.layout!, options.selectedNodeIds, view);
-    drawCanvas2d(canvas, options.layout!, options.selectedNodeIds, view);
+    if (!drawThree(canvas, viewport, options.layout!, options.selectedNodeIds, view)) {
+      drawCanvas2d(canvas, options.layout!, options.selectedNodeIds, view);
+    }
+    syncLabels(root, options.layout!, view, viewport);
     canvas.dataset.nonblank = options.layout!.nodes.length > 0 ? "true" : "false";
   };
   draw();
@@ -161,31 +160,74 @@ function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeId
   `;
 }
 
+interface ThreeCanvasState {
+  renderer: THREE.WebGLRenderer;
+  scene: THREE.Scene;
+  camera: THREE.OrthographicCamera;
+}
+
+const threeCanvasState = new WeakMap<HTMLCanvasElement, ThreeCanvasState>();
+
 function drawThree(
   canvas: HTMLCanvasElement,
+  viewport: { width: number; height: number; ratio: number },
   layout: GraphLayoutResult,
   selectedNodeIds: readonly string[],
   view: { scale: number; dx: number; dy: number },
 ): boolean {
-  const context = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
-  if (!context) return false;
   try {
-    const renderer = new THREE.WebGLRenderer({ canvas, context, antialias: true, preserveDrawingBuffer: true });
-    const width = canvas.width;
-    const height = canvas.height;
-    renderer.setSize(width, height, false);
-    renderer.setClearColor(0xf8fafc, 1);
-    const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-width / 2, width / 2, height / 2, -height / 2, 1, 2000);
-    camera.position.set(0, 0, 800);
-    scene.add(edgeSegments(layout, view));
-    scene.add(nodeInstances(layout, selectedNodeIds, view));
-    renderer.render(scene, camera);
-    renderer.dispose();
+    const state = threeStateFor(canvas);
+    disposeScene(state.scene);
+    state.renderer.setPixelRatio(viewport.ratio);
+    state.renderer.setSize(viewport.width, viewport.height, false);
+    state.renderer.setClearColor(0xf8fafc, 1);
+    state.renderer.clear(true, true, true);
+    state.camera.left = -viewport.width / 2;
+    state.camera.right = viewport.width / 2;
+    state.camera.top = viewport.height / 2;
+    state.camera.bottom = -viewport.height / 2;
+    state.camera.updateProjectionMatrix();
+    state.scene.clear();
+    state.scene.add(edgeSegments(layout, view));
+    state.scene.add(nodeInstances(layout, selectedNodeIds, view));
+    state.renderer.render(state.scene, state.camera);
     return true;
   } catch {
     return false;
   }
+}
+
+function threeStateFor(canvas: HTMLCanvasElement): ThreeCanvasState {
+  const existing = threeCanvasState.get(canvas);
+  if (existing) return existing;
+  const contextAttributes = { alpha: false, antialias: true, preserveDrawingBuffer: true };
+  const context = (canvas.getContext("webgl2", contextAttributes) as WebGL2RenderingContext | null)
+    ?? (canvas.getContext("webgl", contextAttributes) as WebGLRenderingContext | null);
+  if (!context) throw new Error("WebGL is unavailable");
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    context,
+    alpha: false,
+    antialias: true,
+    preserveDrawingBuffer: true,
+  });
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2000);
+  camera.position.set(0, 0, 800);
+  const state = { renderer, scene, camera };
+  threeCanvasState.set(canvas, state);
+  return state;
+}
+
+function disposeScene(scene: THREE.Scene): void {
+  scene.traverse((object) => {
+    const mesh = object as THREE.Mesh | THREE.LineSegments;
+    if ("geometry" in mesh) mesh.geometry.dispose();
+    const materials = "material" in mesh
+      ? Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      : [];
+    for (const material of materials) material.dispose();
+  });
 }
 
 function edgeSegments(layout: GraphLayoutResult, view: { scale: number; dx: number; dy: number }): THREE.LineSegments {
@@ -207,20 +249,29 @@ function nodeInstances(
   layout: GraphLayoutResult,
   selectedNodeIds: readonly string[],
   view: { scale: number; dx: number; dy: number },
-): THREE.InstancedMesh {
+): THREE.Group {
   const selected = new Set(selectedNodeIds);
-  const geometry = new THREE.CircleGeometry(1, 24);
-  const material = new THREE.MeshBasicMaterial({ color: 0x1f6f8b });
-  const mesh = new THREE.InstancedMesh(geometry, material, layout.nodes.length);
-  const matrix = new THREE.Matrix4();
-  layout.nodes.forEach((node, index) => {
-    const [x, y, z] = projectPoint(node.x, node.y, node.z, layout, view);
-    const scale = (selected.has(node.nodeId) ? node.radius + 4 : node.radius) * view.scale;
-    matrix.compose(new THREE.Vector3(x, y, z), new THREE.Quaternion(), new THREE.Vector3(scale, scale, 1));
-    mesh.setMatrixAt(index, matrix);
-  });
-  mesh.instanceMatrix.needsUpdate = true;
-  return mesh;
+  const grouped = new Map<string, GraphLayoutResult["nodes"]>();
+  for (const node of layout.nodes) {
+    const color = selected.has(node.nodeId) ? "#c2410c" : colorForKind(node.kind);
+    grouped.set(color, [...(grouped.get(color) ?? []), node]);
+  }
+  const group = new THREE.Group();
+  for (const [color, nodes] of grouped) {
+    const geometry = new THREE.CircleGeometry(1, 24);
+    const material = new THREE.MeshBasicMaterial({ color });
+    const mesh = new THREE.InstancedMesh(geometry, material, nodes.length);
+    const matrix = new THREE.Matrix4();
+    nodes.forEach((node, index) => {
+      const [x, y, z] = projectPoint(node.x, node.y, node.z, layout, view);
+      const scale = (selected.has(node.nodeId) ? node.radius + 4 : node.radius) * view.scale;
+      matrix.compose(new THREE.Vector3(x, y, z), new THREE.Quaternion(), new THREE.Vector3(scale, scale, 1));
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    group.add(mesh);
+  }
+  return group;
 }
 
 function drawCanvas2d(
@@ -278,6 +329,22 @@ function nearestNode(
     if (distance <= 24 && (!best || distance < best.distance)) best = { id: node.nodeId, distance };
   }
   return best?.id ?? null;
+}
+
+function syncLabels(
+  root: HTMLElement,
+  layout: GraphLayoutResult,
+  view: { scale: number; dx: number; dy: number },
+  viewport: { width: number; height: number },
+): void {
+  root.querySelectorAll<HTMLElement>(".os-kg-label[data-kg-node-id]").forEach((label) => {
+    const nodeId = label.dataset.kgNodeId;
+    const node = layout.nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) return;
+    const point = canvasPoint(node.x, node.y, layout, view, viewport);
+    label.style.left = `${point.x}px`;
+    label.style.top = `${point.y}px`;
+  });
 }
 
 function canvasViewport(stage: HTMLElement | null): { width: number; height: number; ratio: number } {

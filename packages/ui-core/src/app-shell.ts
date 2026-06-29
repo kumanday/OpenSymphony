@@ -286,6 +286,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
     this.transport = options.transport;
+    this.installBrowserGraphLayoutAdapter();
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
     const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
@@ -906,6 +907,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       onFocus: (nodeId) => {
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
       },
+    });
+  }
+
+  private installBrowserGraphLayoutAdapter(): void {
+    const processEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+    if (typeof Worker === "undefined" || processEnv?.JEST_WORKER_ID) return;
+    void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
+      if (this.destroyed) return;
+      this.graphLayoutAdapter.dispose();
+      this.graphLayoutAdapter = createBrowserGraphLayoutAdapter();
+    }).catch(() => {
+      this.graphLayoutAdapter = createGraphLayoutAdapter(() => null);
     });
   }
 
