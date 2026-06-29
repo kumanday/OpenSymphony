@@ -393,6 +393,7 @@ CREATE TABLE IF NOT EXISTS code_symbols (
   symbol_id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
   commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
   path TEXT NOT NULL,
   language TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -418,6 +419,7 @@ CREATE TABLE IF NOT EXISTS code_edges (
   edge_id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
   commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
   path TEXT NOT NULL,
   language TEXT NOT NULL,
   edge_kind TEXT NOT NULL,
@@ -428,6 +430,7 @@ CREATE TABLE IF NOT EXISTS code_edges (
   start_line BIGINT NOT NULL,
   end_line BIGINT NOT NULL,
   content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
   query_pack_version TEXT NOT NULL,
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
@@ -436,6 +439,7 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   diagnostic_id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
   commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
   path TEXT NOT NULL,
   language TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -449,6 +453,14 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
 );
+ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
+UPDATE code_symbols SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
+UPDATE code_edges SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
+UPDATE code_edges SET parser_version = '' WHERE parser_version IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
+UPDATE code_diagnostics SET worktree_dirty = false WHERE worktree_dirty IS NULL;
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_path ON code_symbols(path);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_kind ON code_symbols(kind);
@@ -496,6 +508,7 @@ pub fn persist_code_intel_documents(
             &document.parser_version,
             &document.query_pack_version,
             batch.commit_sha.as_deref(),
+            batch.worktree_dirty,
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -542,11 +555,12 @@ pub fn persist_code_intel_documents(
             ]);
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_symbols (symbol_id, repo_id, commit_sha, path, language, kind, name, container_symbol_id, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_symbols (symbol_id, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         symbol_id,
                         batch.repo_id,
                         batch.commit_sha,
+                        batch.worktree_dirty,
                         path,
                         document.language,
                         symbol.kind,
@@ -589,11 +603,12 @@ pub fn persist_code_intel_documents(
             ]);
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, path, language, edge_kind, source_symbol_id, target_symbol_id, target_hint, confidence, start_line, end_line, content_sha256, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, target_symbol_id, target_hint, confidence, start_line, end_line, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         edge_id,
                         batch.repo_id,
                         batch.commit_sha,
+                        batch.worktree_dirty,
                         path,
                         document.language,
                         edge.edge_kind,
@@ -604,6 +619,7 @@ pub fn persist_code_intel_documents(
                         edge.start_line as i64,
                         edge.end_line as i64,
                         document.content_sha256,
+                        document.parser_version,
                         document.query_pack_version,
                         indexed_at,
                         MemoryFreshness::Current.as_str(),
@@ -629,11 +645,12 @@ pub fn persist_code_intel_documents(
             ]);
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, path, language, kind, severity, message, start_line, end_line, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, end_line, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         diagnostic_id,
                         batch.repo_id,
                         batch.commit_sha,
+                        batch.worktree_dirty,
                         path,
                         document.language,
                         diagnostic.kind,
@@ -673,23 +690,24 @@ fn stale_code_rows(
     parser_version: &str,
     query_pack_version: &str,
     commit_sha: Option<&str>,
+    worktree_dirty: bool,
 ) -> Result<usize, duckdb::Error> {
     let mut stale_rows = 0;
     stale_rows += connection.execute(
-        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR worktree_dirty = true))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha],
+        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
+        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND COALESCE(commit_sha, '') = COALESCE(?, ''))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha],
+        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
+        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND query_pack_version = ? AND COALESCE(commit_sha, '') = COALESCE(?, ''))",
-        params![repo_id, path, content_sha256, query_pack_version, commit_sha],
+        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
+        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND COALESCE(commit_sha, '') = COALESCE(?, ''))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha],
+        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
+        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
     )?;
     Ok(stale_rows)
 }
@@ -1288,7 +1306,7 @@ fn okf_index_freshness(concept: &OkfConcept) -> MemoryFreshness {
     }
 }
 
-fn sha256_hex(contents: &str) -> String {
+pub fn sha256_hex(contents: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(contents.as_bytes());
     let digest = hasher.finalize();

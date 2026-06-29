@@ -11,7 +11,6 @@ use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -33,7 +32,7 @@ use crate::{
         plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
         refresh_memory_index_from_okf, related_by_area_with_scope, related_by_issue_with_scope,
         related_by_paths_with_scope, render_archive_plan, render_capture_dry_run,
-        search_with_scope, status_with_scope, write_capture_plan, write_docs_sync_plan,
+        search_with_scope, sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
         write_memory_init_plan,
     },
     opensymphony_openhands::{
@@ -2074,7 +2073,10 @@ fn code_intel_documents_for_persistence(
         let resolved = repo_existing_path_from_path(config, path)?;
         let relative = resolved
             .strip_prefix(&repo_root)
-            .unwrap_or(&resolved)
+            .map_err(|_| MemoryError::PathOutsideRepo {
+                path: resolved.clone(),
+                repo_root: repo_root.clone(),
+            })?
             .to_path_buf();
         let relative_display = relative.to_string_lossy().to_string();
         let Some(language) = crate::opensymphony_code_intel::detect_language(&relative) else {
@@ -2158,7 +2160,7 @@ fn code_intel_document_input(
                     end_byte: symbol.span.end_byte,
                     selection_start_line: symbol.span.start_line,
                     selection_end_line: symbol.span.end_line,
-                    snippet_sha256: sha256_hex_local(snippet),
+                    snippet_sha256: sha256_hex(snippet),
                 }
             })
             .collect(),
@@ -2275,16 +2277,6 @@ fn symbol_kind_id(kind: &SymbolKind) -> &'static str {
         SymbolKind::Test => "test",
         SymbolKind::Document => "document",
     }
-}
-
-fn sha256_hex_local(contents: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(contents.as_bytes());
-    let digest = hasher.finalize();
-    digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
 }
 
 fn mcp_text(text: String) -> Value {
@@ -3830,7 +3822,8 @@ mod tests {
         resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
-        CodeIntelDocumentInput, CodeIntelPersistBatch, MemoryConfig, MemoryError,
+        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
+        CodeIntelPersistBatch, CodeIntelSymbolInput, MemoryConfig, MemoryError,
         persist_code_intel_documents,
     };
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -4058,6 +4051,83 @@ mod tests {
             .expect("index opens");
         assert!(count_rows(&connection, "code_documents", "stale") >= 2);
         assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+    }
+
+    #[test]
+    fn code_intel_dirty_worktree_freshness_is_consistent_for_child_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let clean_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("old".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        persist_code_intel_documents(&config, clean_batch).expect("clean persist");
+
+        let dirty_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("new".to_string()),
+            worktree_dirty: true,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        let report =
+            persist_code_intel_documents(&config, dirty_batch).expect("dirty same-content persist");
+        assert_eq!(
+            report.stale_rows, 0,
+            "dirty reingest carve-out should apply to parent and child rows"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_edges", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 0);
+    }
+
+    fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
+        CodeIntelDocumentInput {
+            path: "src/lib.rs".into(),
+            language: "rust".to_string(),
+            content_sha256: hash.to_string(),
+            parser_id: "tree-sitter".to_string(),
+            parser_version: "tree-sitter-rust:0.26.9".to_string(),
+            query_pack_version: query_pack.to_string(),
+            byte_len: 24,
+            line_count: 1,
+            symbols: vec![CodeIntelSymbolInput {
+                kind: "function".to_string(),
+                name: "answer".to_string(),
+                signature: None,
+                start_line: 1,
+                start_col: 1,
+                end_line: 1,
+                end_col: 12,
+                start_byte: 0,
+                end_byte: 12,
+                selection_start_line: 1,
+                selection_end_line: 1,
+                snippet_sha256: "snippet".to_string(),
+            }],
+            edges: vec![CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("answer".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 1,
+                end_line: 1,
+            }],
+            diagnostics: vec![CodeIntelDiagnosticInput {
+                kind: "error".to_string(),
+                severity: "error".to_string(),
+                message: "ERROR parse diagnostic".to_string(),
+                start_line: 1,
+                end_line: 1,
+            }],
+        }
     }
 
     fn count_rows(connection: &Connection, table: &str, freshness: &str) -> i64 {
