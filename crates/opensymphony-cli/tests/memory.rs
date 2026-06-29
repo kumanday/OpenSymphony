@@ -791,7 +791,7 @@ fn memory_context_can_include_code_intelligence_without_a_separate_cli_command()
 #[test]
 fn memory_context_code_intelligence_falls_back_for_unsupported_files() {
     let repo = TempDir::new().expect("temp repo should exist");
-    fs::write(repo.path().join("README.md"), "# Example\n").expect("readme should write");
+    fs::write(repo.path().join("notes.txt"), "Example\n").expect("notes should write");
 
     let output = run(
         repo.path(),
@@ -801,7 +801,7 @@ fn memory_context_code_intelligence_falls_back_for_unsupported_files() {
             "--issue",
             "COE-999",
             "--paths",
-            "README.md",
+            "notes.txt",
             "--include-code-intel",
         ],
     );
@@ -810,7 +810,7 @@ fn memory_context_code_intelligence_falls_back_for_unsupported_files() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Repository summary"));
     assert!(stdout.contains("fallback: CodebaseAnalyzer used"));
-    assert!(stdout.contains("README.md has unsupported language"));
+    assert!(stdout.contains("notes.txt has unsupported language"));
 }
 
 #[test]
@@ -849,7 +849,7 @@ fn memory_context_code_intelligence_mixes_ast_and_fallback_paths() {
         "pub fn answer() -> u8 { 42 }\n",
     )
     .expect("source file should write");
-    fs::write(repo.path().join("README.md"), "# Example\n").expect("readme should write");
+    fs::write(repo.path().join("notes.txt"), "Example\n").expect("notes should write");
 
     let output = run(
         repo.path(),
@@ -859,7 +859,7 @@ fn memory_context_code_intelligence_mixes_ast_and_fallback_paths() {
             "--issue",
             "COE-999",
             "--paths",
-            "src/lib.rs,README.md",
+            "src/lib.rs,notes.txt",
             "--include-code-intel",
         ],
     );
@@ -869,7 +869,7 @@ fn memory_context_code_intelligence_mixes_ast_and_fallback_paths() {
     assert!(stdout.contains("ast-summary: src/lib.rs"));
     assert!(stdout.contains("function `answer`"));
     assert!(stdout.contains("Repository summary"));
-    assert!(stdout.contains("README.md has unsupported language"));
+    assert!(stdout.contains("notes.txt has unsupported language"));
 }
 
 #[test]
