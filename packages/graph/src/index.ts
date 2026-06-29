@@ -247,7 +247,12 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
     case "SNAPSHOT_LOADED":
       {
         const staleCursor = state.staleCursors[action.snapshot.bundle_id];
-        const isStaleSnapshot = staleCursor !== undefined && isCursorBefore(action.snapshot.cursor, staleCursor);
+        const existingSnapshot = state.snapshots[action.snapshot.bundle_id];
+        const isOlderSamePartitionSnapshot = existingSnapshot !== undefined
+          && existingSnapshot.cursor.partition === action.snapshot.cursor.partition
+          && action.snapshot.cursor.sequence < existingSnapshot.cursor.sequence;
+        const isStaleSnapshot = (staleCursor !== undefined && isCursorBefore(action.snapshot.cursor, staleCursor))
+          || isOlderSamePartitionSnapshot;
         if (isStaleSnapshot) {
           return state;
         }

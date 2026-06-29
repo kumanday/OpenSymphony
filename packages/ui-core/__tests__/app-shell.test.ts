@@ -7,11 +7,18 @@
 import { renderOpenSymphonyApp } from "../src/app-shell.js";
 import { MockGatewayTransport } from "@opensymphony/api-client";
 import {
+  computeGraphLayout,
   createFixtureGraphAdapter,
   fixtureGraphSnapshot,
+  initialGraphState,
   type GraphDataAdapter,
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
+import {
+  disposeKnowledgeGraphRenderer,
+  mountKnowledgeGraphRenderer,
+  renderKnowledgeGraphSurface,
+} from "../src/knowledge-graph-renderer.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -902,6 +909,73 @@ describe("OpenSymphonyApp mount", () => {
     expect(reads).toBe(2);
 
     await handle.destroy();
+  });
+
+  it("cancels scheduled Knowledge Graph draws when disposed", () => {
+    const root = document.createElement("div");
+    const layout = computeGraphLayout(fixtureGraphSnapshot, { mode: "atlas" });
+    root.innerHTML = renderKnowledgeGraphSurface({
+      snapshot: fixtureGraphSnapshot,
+      layout,
+      state: { ...initialGraphState, layoutStatus: "ready" },
+    });
+    document.body.appendChild(root);
+
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    const requestAnimationFrameMock = jest.fn((_callback: FrameRequestCallback) => 123);
+    const cancelAnimationFrameMock = jest.fn();
+    globalThis.requestAnimationFrame = requestAnimationFrameMock;
+    globalThis.cancelAnimationFrame = cancelAnimationFrameMock;
+
+    const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation((
+      contextId: string,
+    ) => {
+      if (contextId !== "2d") return null;
+      return {
+        setTransform: jest.fn(),
+        fillRect: jest.fn(),
+        beginPath: jest.fn(),
+        moveTo: jest.fn(),
+        lineTo: jest.fn(),
+        stroke: jest.fn(),
+        arc: jest.fn(),
+        fill: jest.fn(),
+        set fillStyle(_value: string) {},
+        set strokeStyle(_value: string) {},
+        set lineWidth(_value: number) {},
+        set globalAlpha(_value: number) {},
+      } as unknown as CanvasRenderingContext2D;
+    });
+    try {
+      mountKnowledgeGraphRenderer(root, {
+        snapshot: fixtureGraphSnapshot,
+        layout,
+        selectedNodeIds: [],
+        view: { scale: 1, dx: 0, dy: 0 },
+        onSelect: jest.fn(),
+        onFocus: jest.fn(),
+      });
+      const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
+      canvas?.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true, cancelable: true }));
+
+      expect(requestAnimationFrameMock).toHaveBeenCalledTimes(1);
+      disposeKnowledgeGraphRenderer(root);
+      expect(cancelAnimationFrameMock).toHaveBeenCalledWith(123);
+    } finally {
+      getContext.mockRestore();
+      if (originalRequestAnimationFrame) {
+        globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      } else {
+        delete (globalThis as { requestAnimationFrame?: typeof requestAnimationFrame }).requestAnimationFrame;
+      }
+      if (originalCancelAnimationFrame) {
+        globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+      } else {
+        delete (globalThis as { cancelAnimationFrame?: typeof cancelAnimationFrame }).cancelAnimationFrame;
+      }
+      root.remove();
+    }
   });
 
   it("does not switch selected graph bundles for background memory_graph_updated events", async () => {

@@ -277,6 +277,28 @@ describe("@opensymphony/graph", () => {
     });
   });
 
+  it("rejects out-of-order same-partition snapshots without a stale cursor marker", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: 5 },
+      },
+    });
+
+    const unchanged = graphReducer(current, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: 4 },
+      },
+    });
+
+    expect(unchanged.snapshots["local-default"].cursor.sequence).toBe(5);
+    expect(unchanged.freshnessStatus).toBe("current");
+    expect(unchanged.staleBundleIds).toEqual([]);
+  });
+
   it("rejects non-OK HTTP graph responses before parsing JSON", async () => {
     const json = jest.fn();
     const fetchMock = jest.fn(async () => ({

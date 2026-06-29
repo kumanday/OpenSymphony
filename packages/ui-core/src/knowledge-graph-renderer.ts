@@ -6,6 +6,13 @@ import type {
 import * as THREE from "three";
 import { escapeAttr, escapeHtml } from "./html.js";
 
+type ScheduledDraw = {
+  handle: ReturnType<typeof setTimeout> | number;
+  kind: "animation-frame" | "timeout";
+};
+
+const scheduledCanvasDraws = new WeakMap<HTMLCanvasElement, ScheduledDraw>();
+
 export interface KnowledgeGraphSurface {
   snapshot: MemoryGraphSnapshot | null;
   layout: GraphLayoutResult | null;
@@ -83,11 +90,16 @@ export function mountKnowledgeGraphRenderer(
     if (scheduledDraw !== null) return;
     const run = () => {
       scheduledDraw = null;
+      scheduledCanvasDraws.delete(canvas);
       if (canvas.isConnected) draw();
     };
-    scheduledDraw = typeof requestAnimationFrame === "function"
-      ? requestAnimationFrame(run)
-      : setTimeout(run, 16);
+    if (typeof requestAnimationFrame === "function") {
+      scheduledDraw = requestAnimationFrame(run);
+      scheduledCanvasDraws.set(canvas, { handle: scheduledDraw, kind: "animation-frame" });
+    } else {
+      scheduledDraw = setTimeout(run, 16);
+      scheduledCanvasDraws.set(canvas, { handle: scheduledDraw, kind: "timeout" });
+    }
   };
   draw();
   canvas.onwheel = (event) => {
@@ -156,6 +168,15 @@ export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
 }
 
 export function disposeKnowledgeGraphCanvas(canvas: HTMLCanvasElement): void {
+  const scheduledDraw = scheduledCanvasDraws.get(canvas);
+  if (scheduledDraw) {
+    if (scheduledDraw.kind === "animation-frame" && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(scheduledDraw.handle as number);
+    } else {
+      clearTimeout(scheduledDraw.handle as ReturnType<typeof setTimeout>);
+    }
+    scheduledCanvasDraws.delete(canvas);
+  }
   resetThreeCanvasState(canvas);
 }
 

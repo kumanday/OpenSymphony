@@ -1,3 +1,4 @@
+import { createConnection } from "node:net";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -67,13 +68,35 @@ describe("Knowledge Graph renderer", () => {
   it("keeps the static test server contained to the web dist root", async () => {
     const server = await startStaticServer(webDist);
     try {
-      const response = await fetch(`${server.url}/app//../../../etc/passwd`);
-      expect(response.status).toBe(404);
+      const response = await rawHttpGet(server, "/app//../../../etc/passwd");
+      expect(response.statusLine).toContain("404");
     } finally {
       await new Promise<void>((resolveClose) => server.close(resolveClose));
     }
   });
 });
+
+function rawHttpGet(server: Server & { url: string }, path: string): Promise<{ statusLine: string; body: string }> {
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Unexpected static server address");
+  return new Promise((resolveRequest, rejectRequest) => {
+    const socket = createConnection(address.port, "127.0.0.1");
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+    });
+    socket.on("data", (chunk) => {
+      response += chunk;
+    });
+    socket.on("error", rejectRequest);
+    socket.on("end", () => {
+      const [head, body = ""] = response.split("\r\n\r\n");
+      const [statusLine = ""] = head.split("\r\n");
+      resolveRequest({ statusLine, body });
+    });
+  });
+}
 
 function startStaticServer(root: string): Promise<Server & { url: string }> {
   const rootPath = resolve(root);
