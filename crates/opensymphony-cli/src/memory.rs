@@ -2121,8 +2121,14 @@ fn code_intel_documents_for_persistence(
             path: resolved.clone(),
             source,
         })?;
-        let summary = parse_path(&relative, &source)
-            .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+        let summary = match parse_path(&relative, &source) {
+            Ok(summary) => summary,
+            Err(error) => {
+                skipped_files.push(format!("{relative_display}: parse failed"));
+                diagnostics.push(format!("{relative_display}: {error}"));
+                continue;
+            }
+        };
         if !request.query_packs.is_empty()
             && !request.query_packs.contains(&summary.versions.query_pack)
         {
@@ -2146,6 +2152,7 @@ fn code_intel_documents_for_persistence(
             &relative_display,
             &request.scope_refs,
             commit_sha.clone(),
+            &request.symbols,
             remaining_symbols,
         );
         remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
@@ -2155,6 +2162,7 @@ fn code_intel_documents_for_persistence(
             source,
             summary,
             &request.symbols,
+            used_symbols,
         ));
     }
     artifacts.push(code_intel_trace_artifact(
@@ -2177,6 +2185,7 @@ fn code_intel_artifacts_for_summary(
     relative_display: &str,
     scope_refs: &[KnowledgeScope],
     commit_sha: Option<String>,
+    symbols: &BTreeSet<String>,
     symbol_limit: usize,
 ) -> (Vec<CodeIntelArtifact>, usize) {
     let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
@@ -2203,15 +2212,20 @@ fn code_intel_artifacts_for_summary(
         ),
     }];
 
-    if summary.symbols.is_empty() || symbol_limit == 0 {
+    let selected_symbols = summary
+        .symbols
+        .iter()
+        .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
+        .take(symbol_limit)
+        .collect::<Vec<_>>();
+
+    if selected_symbols.is_empty() {
         return (artifacts, 0);
     }
 
-    let used_symbols = summary.symbols.len().min(symbol_limit);
-    let symbols = summary
-        .symbols
+    let used_symbols = selected_symbols.len();
+    let rendered_symbols = selected_symbols
         .iter()
-        .take(symbol_limit)
         .map(|symbol| {
             format!(
                 "- {} `{}` at {}:{}",
@@ -2227,10 +2241,8 @@ fn code_intel_artifacts_for_summary(
         provider: PROVIDER_NAME.to_string(),
         kind: "ast-symbols".to_string(),
         scope_refs: scope_refs.to_vec(),
-        source_refs: summary
-            .symbols
+        source_refs: selected_symbols
             .iter()
-            .take(symbol_limit)
             .map(|symbol| MemorySourceRef {
                 kind: "code-symbol".to_string(),
                 id: format!("{relative_display}:{}", symbol.rendered_span),
@@ -2240,7 +2252,7 @@ fn code_intel_artifacts_for_summary(
         path: Some(relative_path.to_path_buf()),
         commit_sha,
         title: format!("Symbols in {relative_display}"),
-        summary: symbols,
+        summary: rendered_symbols,
     });
     (artifacts, used_symbols)
 }
@@ -2290,6 +2302,7 @@ fn code_intel_document_input(
     source: String,
     summary: ParsedDocumentSummary,
     symbols: &BTreeSet<String>,
+    symbol_limit: usize,
 ) -> CodeIntelDocumentInput {
     let language = source_language_id(summary.source.language).to_string();
     let parser_version = format!(
@@ -2309,6 +2322,7 @@ fn code_intel_document_input(
             .symbols
             .iter()
             .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
+            .take(symbol_limit)
             .map(|symbol| {
                 let snippet = source
                     .get(symbol.span.start_byte..symbol.span.end_byte)
@@ -4152,6 +4166,34 @@ mod tests {
                 .exists(),
             "non-persistent ingest should not create the DuckDB index"
         );
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_limit_caps_persisted_symbols() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn one() -> u8 { 1 }\npub fn two() -> u8 { 2 }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src/lib.rs"],
+                "persist": true,
+                "limit": 1
+            }),
+        )
+        .await
+        .expect("ingest succeeds");
+
+        assert_eq!(result["persisted"], true);
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
     }
 
     #[tokio::test]
