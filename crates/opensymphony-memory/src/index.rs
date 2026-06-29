@@ -387,7 +387,7 @@ CREATE TABLE IF NOT EXISTS code_documents (
   line_count BIGINT NOT NULL,
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL,
-  PRIMARY KEY (repo_id, path, content_sha256, query_pack_version)
+  PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
 );
 CREATE TABLE IF NOT EXISTS code_symbols (
   symbol_id TEXT PRIMARY KEY,

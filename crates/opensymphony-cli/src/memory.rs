@@ -15,8 +15,8 @@ use tokio::task::JoinHandle;
 
 use crate::{
     opensymphony_code_intel::{
-        AstDiagnosticKind, CaptureRecord, CompositeCodeIntelProvider, ParsedDocumentSummary,
-        SourceLanguage, SymbolKind, parse_path,
+        AstDiagnosticKind, CaptureRecord, CompositeCodeIntelProvider, PROVIDER_NAME,
+        ParsedDocumentSummary, SourceLanguage, SymbolKind, parse_path,
     },
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
@@ -25,8 +25,8 @@ use crate::{
         CodeIntelEdgeInput, CodeIntelIndex, CodeIntelPersistBatch, CodeIntelSymbolInput,
         CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence, IssueSelection,
         KnowledgeScope, KnowledgeScopeKind, LintSeverity, MemoryConfig, MemoryContextOptions,
-        MemoryError, MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
-        archive_blocking_warning_count, brief, context_for_issue_with_options,
+        MemoryError, MemoryReindexReport, MemoryScopeFilter, MemorySourceRef, MemoryVisibility,
+        SourceFile, archive_blocking_warning_count, brief, context_for_issue_with_options,
         docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
         lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
         plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
@@ -1969,43 +1969,31 @@ async fn call_memory_ingest_code_intel_tool(
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let limit = usize_arg(arguments, "limit", 10);
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
     let persist = bool_arg(arguments, "persist");
-    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
-    let persist_report = if persist {
-        let languages = string_set_args(arguments, &["languages"]);
-        let symbols = string_set_args(arguments, &["symbols"]);
+    let (artifacts, persist_report) = if persist {
+        let languages = normalized_string_set_args(arguments, &["languages"]);
+        let symbols = normalized_string_set_args(arguments, &["symbols"]);
         let query_packs = string_set_args(
             arguments,
             &["queryPack", "queryPacks", "query_pack", "query_packs"],
         );
-        let plan = code_intel_documents_for_persistence(
-            config,
-            &scope,
-            &string_list_arg(arguments, "paths")
-                .into_iter()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>(),
-            &languages,
-            &symbols,
-            &query_packs,
-        )?;
-        let persist_repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
-        let mut report = persist_code_intel_documents(
-            config,
-            CodeIntelPersistBatch {
-                repo_id: repo_id_for_code_intel(config, &scope),
-                commit_sha: git_commit_sha_for_repo(&persist_repo_root),
-                worktree_dirty: git_worktree_dirty(&persist_repo_root),
-                documents: plan.documents,
-            },
-        )?;
-        report.skipped_files = plan.skipped_files;
-        report.diagnostics = plan.diagnostics;
-        Some(report)
+        let (artifacts, report) = code_intel_persist_artifacts_blocking(CodeIntelPersistRequest {
+            config: config.clone(),
+            scope: scope.clone(),
+            paths,
+            scope_refs,
+            limit,
+            languages,
+            symbols,
+            query_packs,
+        })
+        .await?;
+        (artifacts, Some(report))
     } else {
-        None
+        let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+        let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+        (artifacts, None)
     };
     let (parsed_files, persisted_rows, stale_rows, skipped_files, diagnostics) =
         if let Some(report) = persist_report {
@@ -2046,31 +2034,76 @@ async fn call_memory_ingest_code_intel_tool(
 }
 
 struct CodeIntelPersistencePlan {
+    artifacts: Vec<CodeIntelArtifact>,
     documents: Vec<CodeIntelDocumentInput>,
     skipped_files: Vec<String>,
     diagnostics: Vec<String>,
 }
 
+struct CodeIntelPersistRequest {
+    config: MemoryConfig,
+    scope: MemoryScopeFilter,
+    paths: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    limit: usize,
+    languages: BTreeSet<String>,
+    symbols: BTreeSet<String>,
+    query_packs: BTreeSet<String>,
+}
+
+async fn code_intel_persist_artifacts_blocking(
+    request: CodeIntelPersistRequest,
+) -> Result<
+    (
+        Vec<CodeIntelArtifact>,
+        crate::opensymphony_memory::CodeIntelPersistReport,
+    ),
+    MemoryError,
+> {
+    tokio::task::spawn_blocking(move || {
+        let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+        let plan = code_intel_documents_for_persistence(&request)?;
+        let mut report = persist_code_intel_documents(
+            &request.config,
+            CodeIntelPersistBatch {
+                repo_id: repo_id_for_code_intel(&request.config, &request.scope),
+                commit_sha: git_commit_sha_for_repo(&repo_root),
+                worktree_dirty: git_worktree_dirty(&repo_root),
+                documents: plan.documents,
+            },
+        )?;
+        report.skipped_files = plan.skipped_files;
+        report.diagnostics = plan.diagnostics;
+        Ok((plan.artifacts, report))
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "code-intelligence persistence task failed: {error}"
+        ))
+    })?
+}
+
 fn code_intel_documents_for_persistence(
-    config: &MemoryConfig,
-    scope: &MemoryScopeFilter,
-    paths: &[PathBuf],
-    languages: &BTreeSet<String>,
-    symbols: &BTreeSet<String>,
-    query_packs: &BTreeSet<String>,
+    request: &CodeIntelPersistRequest,
 ) -> Result<CodeIntelPersistencePlan, MemoryError> {
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
     let repo_root = repo_root
         .canonicalize()
         .map_err(|source| MemoryError::ResolvePath {
             path: repo_root.clone(),
             source,
         })?;
+    let mut artifacts = Vec::new();
     let mut documents = Vec::new();
     let mut skipped_files = Vec::new();
     let mut diagnostics = Vec::new();
-    for path in paths {
-        let resolved = repo_existing_path_from_path(config, path)?;
+    let mut parsed_files = 0usize;
+    let mut query_runs = 0usize;
+    let mut remaining_symbols = request.limit;
+    let commit_sha = git_commit_sha_for_repo(&repo_root);
+    for path in &request.paths {
+        let resolved = repo_existing_path_from_path(&request.config, path)?;
         let relative = resolved
             .strip_prefix(&repo_root)
             .map_err(|_| MemoryError::PathOutsideRepo {
@@ -2084,7 +2117,7 @@ fn code_intel_documents_for_persistence(
             continue;
         };
         let language_id = source_language_id(language);
-        if !languages.is_empty() && !languages.contains(language_id) {
+        if !request.languages.is_empty() && !request.languages.contains(language_id) {
             skipped_files.push(format!(
                 "{relative_display}: language `{language_id}` not selected"
             ));
@@ -2096,7 +2129,9 @@ fn code_intel_documents_for_persistence(
         })?;
         let summary = parse_path(&relative, &source)
             .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
-        if !query_packs.is_empty() && !query_packs.contains(&summary.versions.query_pack) {
+        if !request.query_packs.is_empty()
+            && !request.query_packs.contains(&summary.versions.query_pack)
+        {
             skipped_files.push(format!(
                 "{relative_display}: query pack `{}` not selected",
                 summary.versions.query_pack
@@ -2109,15 +2144,151 @@ fn code_intel_documents_for_persistence(
                 diagnostic.node_kind, diagnostic.rendered_span
             ));
         }
+        parsed_files += 1;
+        query_runs += 1;
+        let (summary_artifacts, used_symbols) = code_intel_artifacts_for_summary(
+            &summary,
+            &relative,
+            &relative_display,
+            &request.scope_refs,
+            commit_sha.clone(),
+            remaining_symbols,
+        );
+        remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
+        artifacts.extend(summary_artifacts);
         documents.push(code_intel_document_input(
-            relative, source, summary, symbols,
+            relative,
+            source,
+            summary,
+            &request.symbols,
         ));
     }
+    artifacts.push(code_intel_trace_artifact(
+        &request.scope_refs,
+        parsed_files,
+        query_runs,
+        &skipped_files,
+    ));
     Ok(CodeIntelPersistencePlan {
+        artifacts,
         documents,
         skipped_files,
         diagnostics,
     })
+}
+
+fn code_intel_artifacts_for_summary(
+    summary: &ParsedDocumentSummary,
+    relative_path: &Path,
+    relative_display: &str,
+    scope_refs: &[KnowledgeScope],
+    commit_sha: Option<String>,
+    symbol_limit: usize,
+) -> (Vec<CodeIntelArtifact>, usize) {
+    let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
+    let mut artifacts = vec![CodeIntelArtifact {
+        provider: summary.versions.provider.clone(),
+        kind: "ast-summary".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: vec![MemorySourceRef {
+            kind: "path".to_string(),
+            id: relative_display.to_string(),
+            url: None,
+        }],
+        path: Some(relative_path.to_path_buf()),
+        commit_sha: commit_sha.clone(),
+        title: relative_display.to_string(),
+        summary: format!(
+            "- Language: {}\n- Content hash: sha256:{}\n- Parser: {} ({}, {})\n- Query pack: {}\n- Diagnostics: {diagnostic_summary}",
+            source_language_id(summary.source.language),
+            summary.source.sha256,
+            summary.versions.provider,
+            summary.versions.grammar,
+            summary.versions.tree_sitter,
+            summary.versions.query_pack,
+        ),
+    }];
+
+    if summary.symbols.is_empty() || symbol_limit == 0 {
+        return (artifacts, 0);
+    }
+
+    let used_symbols = summary.symbols.len().min(symbol_limit);
+    let symbols = summary
+        .symbols
+        .iter()
+        .take(symbol_limit)
+        .map(|symbol| {
+            format!(
+                "- {} `{}` at {}:{}",
+                symbol_kind_id(&symbol.kind),
+                symbol.name,
+                relative_display,
+                symbol.rendered_span
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    artifacts.push(CodeIntelArtifact {
+        provider: PROVIDER_NAME.to_string(),
+        kind: "ast-symbols".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: summary
+            .symbols
+            .iter()
+            .take(symbol_limit)
+            .map(|symbol| MemorySourceRef {
+                kind: "code-symbol".to_string(),
+                id: format!("{relative_display}:{}", symbol.rendered_span),
+                url: None,
+            })
+            .collect(),
+        path: Some(relative_path.to_path_buf()),
+        commit_sha,
+        title: format!("Symbols in {relative_display}"),
+        summary: symbols,
+    });
+    (artifacts, used_symbols)
+}
+
+fn diagnostics_summary(diagnostics: &[crate::opensymphony_code_intel::AstDiagnostic]) -> String {
+    let errors = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == AstDiagnosticKind::Error)
+        .count();
+    let missing = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == AstDiagnosticKind::Missing)
+        .count();
+    format!("{errors} ERROR, {missing} MISSING")
+}
+
+fn code_intel_trace_artifact(
+    scope_refs: &[KnowledgeScope],
+    parsed_files: usize,
+    query_runs: usize,
+    skipped_files: &[String],
+) -> CodeIntelArtifact {
+    let fallback = if skipped_files.is_empty() {
+        "fallback: CodebaseAnalyzer not used".to_string()
+    } else {
+        format!(
+            "fallback: CodebaseAnalyzer not used in persistent ingest ({})",
+            skipped_files.join("; ")
+        )
+    };
+    CodeIntelArtifact {
+        provider: "composite-code-intel".to_string(),
+        kind: "trace".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: Vec::new(),
+        path: None,
+        commit_sha: None,
+        title: "Code-intelligence trace".to_string(),
+        summary: format!(
+            "- parse: parsed {parsed_files} file(s)\n- query: ran {query_runs} Tree-sitter query pack(s)\n- {fallback}"
+        ),
+    }
 }
 
 fn code_intel_document_input(
@@ -2208,6 +2379,12 @@ fn code_intel_edge_input(capture: &CaptureRecord) -> Option<CodeIntelEdgeInput> 
 fn string_set_args(arguments: &Value, keys: &[&str]) -> BTreeSet<String> {
     keys.iter()
         .flat_map(|key| string_list_arg(arguments, key))
+        .collect()
+}
+
+fn normalized_string_set_args(arguments: &Value, keys: &[&str]) -> BTreeSet<String> {
+    keys.iter()
+        .flat_map(|key| string_list_arg(arguments, key))
         .map(|value| value.to_ascii_lowercase())
         .collect()
 }
@@ -2237,7 +2414,7 @@ fn git_commit_sha_for_repo(repo_root: &Path) -> Option<String> {
 
 fn git_worktree_dirty(repo_root: &Path) -> bool {
     process::Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(repo_root)
         .output()
         .map(|output| output.status.success() && !output.stdout.is_empty())
