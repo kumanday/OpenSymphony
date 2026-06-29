@@ -502,13 +502,15 @@ pub fn persist_code_intel_documents(
         let path = document.path.to_string_lossy().to_string();
         report.stale_rows += stale_code_rows(
             &transaction,
-            &batch.repo_id,
-            &path,
-            &document.content_sha256,
-            &document.parser_version,
-            &document.query_pack_version,
-            batch.commit_sha.as_deref(),
-            batch.worktree_dirty,
+            &CodeFreshnessKey {
+                repo_id: &batch.repo_id,
+                path: &path,
+                content_sha256: &document.content_sha256,
+                parser_version: &document.parser_version,
+                query_pack_version: &document.query_pack_version,
+                commit_sha: batch.commit_sha.as_deref(),
+                worktree_dirty: batch.worktree_dirty,
+            },
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -682,32 +684,36 @@ pub fn persist_code_intel_documents(
     Ok(report)
 }
 
+struct CodeFreshnessKey<'a> {
+    repo_id: &'a str,
+    path: &'a str,
+    content_sha256: &'a str,
+    parser_version: &'a str,
+    query_pack_version: &'a str,
+    commit_sha: Option<&'a str>,
+    worktree_dirty: bool,
+}
+
 fn stale_code_rows(
     connection: &Connection,
-    repo_id: &str,
-    path: &str,
-    content_sha256: &str,
-    parser_version: &str,
-    query_pack_version: &str,
-    commit_sha: Option<&str>,
-    worktree_dirty: bool,
+    key: &CodeFreshnessKey<'_>,
 ) -> Result<usize, duckdb::Error> {
     let mut stale_rows = 0;
     stale_rows += connection.execute(
         "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
     )?;
     stale_rows += connection.execute(
         "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
     )?;
     stale_rows += connection.execute(
         "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
     )?;
     stale_rows += connection.execute(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND (COALESCE(commit_sha, '') = COALESCE(?, '') OR COALESCE(worktree_dirty, false) = true OR ? = true))",
-        params![repo_id, path, content_sha256, parser_version, query_pack_version, commit_sha, worktree_dirty],
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version, key.commit_sha, key.worktree_dirty],
     )?;
     Ok(stale_rows)
 }
