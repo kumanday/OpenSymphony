@@ -1390,10 +1390,13 @@ resource: https://linear.app/example/issue/COE-123
 tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
+apikey: sk-live-compact-fixture
 api_key: sk-live-public-fixture
 apiKey: sk-live-camel-fixture
 api_key_format: sk-live-prefix
+accesstoken: access-token-compact-fixture
 accessToken: access-token-camel-fixture
+clientsecret: client-secret-compact-fixture
 clientSecret: client-secret-camel-fixture
 client_secret_64: client-secret-fixture
 nested_secret:
@@ -1402,11 +1405,13 @@ oauth_token: oauth-token-fixture
 password_policy: rotate-often
 passwords:
   - plural-password-fixture
+privatekey: private-key-compact-fixture
 private_key_type: ed25519
 secretariat: public-office
 secret_key_algorithm: ed25519
 session_cookies:
   - session-cookie-fixture
+sessionid: session-compact-fixture
 session_id: session-fixture
 token_bucket: graph-rate-limit
 opensymphony:
@@ -1721,11 +1726,23 @@ opensymphony:
             Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(
+            detail.frontmatter_view.unknown.get("apikey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
             detail.frontmatter_view.unknown.get("apiKey"),
             Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(
+            detail.frontmatter_view.unknown.get("accesstoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
             detail.frontmatter_view.unknown.get("accessToken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("clientsecret"),
             Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(
@@ -1755,6 +1772,10 @@ opensymphony:
             Some(&serde_json::json!(["[redacted-secret]"]))
         );
         assert_eq!(
+            detail.frontmatter_view.unknown.get("privatekey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
             detail.frontmatter_view.unknown.get("oauth_token"),
             Some(&serde_json::json!("[redacted-secret]"))
         );
@@ -1772,6 +1793,10 @@ opensymphony:
         );
         assert_eq!(
             detail.frontmatter_view.unknown.get("session_id"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("sessionid"),
             Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(

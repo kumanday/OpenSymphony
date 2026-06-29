@@ -142,12 +142,7 @@ export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
 }
 
 export function disposeKnowledgeGraphCanvas(canvas: HTMLCanvasElement): void {
-  const state = threeCanvasState.get(canvas);
-  if (!state) return;
-  disposeObject3D(state.graph);
-  state.renderer.dispose();
-  state.renderer.forceContextLoss();
-  threeCanvasState.delete(canvas);
+  resetThreeCanvasState(canvas);
 }
 
 function syncViewState(
@@ -243,6 +238,19 @@ interface ThreeCanvasState {
 
 const threeCanvasState = new WeakMap<HTMLCanvasElement, ThreeCanvasState>();
 
+function resetThreeCanvasState(canvas: HTMLCanvasElement): void {
+  const state = threeCanvasState.get(canvas);
+  if (!state) return;
+  try {
+    disposeObject3D(state.graph);
+    state.renderer.dispose();
+    state.renderer.forceContextLoss();
+  } catch {
+    // Fall back to 2D drawing; the next WebGL attempt starts from a fresh state.
+  }
+  threeCanvasState.delete(canvas);
+}
+
 function drawThree(
   canvas: HTMLCanvasElement,
   viewport: { width: number; height: number; ratio: number },
@@ -271,6 +279,7 @@ function drawThree(
     state.renderer.render(state.scene, state.camera);
     return true;
   } catch {
+    resetThreeCanvasState(canvas);
     return false;
   }
 }

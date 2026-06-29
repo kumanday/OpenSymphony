@@ -1008,6 +1008,7 @@ fn is_secret_like_frontmatter_key(key: &str) -> bool {
         || has_adjacent_parts(&part_refs, "access", "key")
         || has_adjacent_parts(&part_refs, "private", "key")
         || has_adjacent_parts(&part_refs, "session", "id")
+        || has_compound_secret_key(&part_refs)
 }
 
 fn frontmatter_key_parts(key: &str) -> Vec<String> {
@@ -1065,6 +1066,14 @@ fn has_adjacent_parts(parts: &[&str], left: &str, right: &str) -> bool {
 
 fn has_any(parts: &[&str], candidates: &[&str]) -> bool {
     parts.iter().any(|part| candidates.contains(part))
+}
+
+fn has_compound_secret_key(parts: &[&str]) -> bool {
+    let compact = parts.join("");
+    matches!(
+        compact.as_str(),
+        "apikey" | "clientsecret" | "accesstoken" | "sessionid" | "privatekey"
+    )
 }
 
 fn json_string(value: &str) -> serde_json::Value {
