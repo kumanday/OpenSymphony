@@ -858,7 +858,10 @@ fn frontmatter_view(config: &MemoryConfig, concept: &OkfConcept) -> MemoryFrontm
                     serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
                 )
             })
-            .map(|(key, value)| (key, redact_value_for_dto(config, value)))
+            .map(|(key, value)| {
+                let value = redact_value_for_dto_key(config, &key, value);
+                (key, value)
+            })
             .collect(),
     }
 }
@@ -912,30 +915,179 @@ fn redact_map_for_dto(
     map: BTreeMap<String, serde_json::Value>,
 ) -> BTreeMap<String, serde_json::Value> {
     map.into_iter()
-        .map(|(key, value)| (key, redact_value_for_dto(config, value)))
+        .map(|(key, value)| {
+            let value = redact_value_for_dto_key(config, &key, value);
+            (key, value)
+        })
         .collect()
 }
 
-fn redact_value_for_dto(
+fn redact_value_for_dto_key(
     config: &MemoryConfig,
+    key: &str,
     value: serde_json::Value,
 ) -> serde_json::Value {
+    if is_secret_like_frontmatter_key(key) {
+        return redact_secret_value_shape(value);
+    }
     match value {
         serde_json::Value::String(value) => serde_json::Value::String(redact_for_dto(config, &value)),
         serde_json::Value::Array(values) => serde_json::Value::Array(
             values
                 .into_iter()
-                .map(|value| redact_value_for_dto(config, value))
+                .map(|value| redact_value_for_dto_key(config, key, value))
                 .collect(),
         ),
         serde_json::Value::Object(values) => serde_json::Value::Object(
             values
                 .into_iter()
-                .map(|(key, value)| (key, redact_value_for_dto(config, value)))
+                .map(|(key, value)| {
+                    let value = redact_value_for_dto_key(config, &key, value);
+                    (key, value)
+                })
                 .collect(),
         ),
         value => value,
     }
+}
+
+fn redact_secret_value_shape(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(redact_secret_value_shape)
+                .collect(),
+        ),
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, redact_secret_value_shape(value)))
+                .collect(),
+        ),
+        _ => serde_json::Value::String("[redacted-secret]".to_string()),
+    }
+}
+
+fn is_secret_like_frontmatter_key(key: &str) -> bool {
+    let parts = frontmatter_key_parts(key);
+    let part_refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    if part_refs.is_empty() || has_non_secret_descriptor(&part_refs) {
+        return false;
+    }
+    if has_any(&part_refs, &[
+        "secret",
+        "secrets",
+        "password",
+        "passwords",
+        "credential",
+        "credentials",
+        "pwd",
+        "pwds",
+        "jwt",
+        "jwts",
+    ]) {
+        return true;
+    }
+    if has_any(&part_refs, &["cookie", "cookies"])
+        && part_refs
+            .iter()
+            .any(|part| matches!(*part, "auth" | "oauth" | "session" | "access" | "refresh"))
+    {
+        return true;
+    }
+    if has_any(&part_refs, &["token", "tokens"])
+        && (part_refs.len() == 1
+            || part_refs
+                .iter()
+                .any(|part| matches!(*part, "auth" | "oauth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api" | "xsrf" | "csrf")))
+    {
+        return true;
+    }
+    has_adjacent_parts(&part_refs, "api", "key")
+        || has_adjacent_parts(&part_refs, "access", "key")
+        || has_adjacent_parts(&part_refs, "private", "key")
+        || has_adjacent_parts(&part_refs, "signing", "key")
+        || has_adjacent_parts(&part_refs, "encryption", "key")
+        || has_adjacent_parts(&part_refs, "session", "id")
+        || has_compound_secret_key(&part_refs)
+}
+
+fn frontmatter_key_parts(key: &str) -> Vec<String> {
+    let characters = key.chars().collect::<Vec<_>>();
+    let mut segmented = String::with_capacity(key.len());
+    for (index, character) in characters.iter().copied().enumerate() {
+        if index > 0 {
+            let previous = characters[index - 1];
+            let next = characters.get(index + 1).copied();
+            let camel_boundary = character.is_ascii_uppercase()
+                && (previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && next.is_some_and(|next| next.is_ascii_lowercase())));
+            let digit_boundary =
+                character.is_ascii_digit() && previous.is_ascii_alphabetic();
+            let alpha_after_digit =
+                character.is_ascii_alphabetic() && previous.is_ascii_digit();
+            if camel_boundary || digit_boundary || alpha_after_digit {
+                segmented.push('_');
+            }
+        }
+        segmented.push(character.to_ascii_lowercase());
+    }
+    segmented
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn has_non_secret_descriptor(parts: &[&str]) -> bool {
+    parts.iter().any(|part| {
+        matches!(
+            *part,
+            "algorithm"
+                | "algorithms"
+                | "policy"
+                | "policies"
+                | "type"
+                | "types"
+                | "format"
+                | "formats"
+                | "example"
+                | "examples"
+        )
+    })
+}
+
+fn has_adjacent_parts(parts: &[&str], left: &str, right: &str) -> bool {
+    parts
+        .windows(2)
+        .any(|window| window == [left, right])
+}
+
+fn has_any(parts: &[&str], candidates: &[&str]) -> bool {
+    parts.iter().any(|part| candidates.contains(part))
+}
+
+fn has_compound_secret_key(parts: &[&str]) -> bool {
+    if parts.len() != 1 {
+        return false;
+    }
+    let compact = parts[0];
+    (compact.ends_with("token")
+        && matches!(
+            compact.trim_end_matches("token"),
+            "api" | "auth" | "oauth" | "refresh" | "id" | "xsrf" | "csrf" | "bearer" | "access" | "client" | "session"
+        ))
+        || (compact.ends_with("key")
+            && matches!(
+                compact.trim_end_matches("key"),
+                "api" | "private" | "signing" | "encryption" | "access"
+            ))
+        || (compact.ends_with("secret")
+            && matches!(compact.trim_end_matches("secret"), "api" | "client"))
+        || (compact.ends_with("id") && compact.trim_end_matches("id") == "session")
 }
 
 fn json_string(value: &str) -> serde_json::Value {

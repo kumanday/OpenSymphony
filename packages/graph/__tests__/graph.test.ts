@@ -118,6 +118,187 @@ describe("@opensymphony/graph", () => {
     );
   });
 
+  it("rejects scoped HTTP graph adapter requests that exceed public visibility", async () => {
+    const fetchMock = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ bundles: [] }),
+    })) as unknown as typeof fetch;
+    const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock, {
+      defaultVisibility: "public",
+      maxVisibility: "public",
+    });
+
+    await gateway.listBundles();
+    await gateway.getGraphSnapshot("local-default", { visibility: "public" });
+    expect(() => gateway.getGraphSnapshot("local-default", { visibility: "all_accessible" }))
+      .toThrow('Graph visibility "all_accessible" exceeds adapter policy "public"');
+    expect(() => gateway.search("graph", { visibility: "private", limit: 5 }))
+      .toThrow('Graph visibility "private" exceeds adapter policy "public"');
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:2468/api/v1/memory/bundles?visibility=public",
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:2468/api/v1/memory/bundles/local-default/graph?visibility=public",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects visibility requests above non-public adapter policies", async () => {
+    const fetchMock = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ bundles: [] }),
+    })) as unknown as typeof fetch;
+    const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock, {
+      maxVisibility: "private",
+    });
+
+    await gateway.listBundles();
+    expect(() => gateway.getGraphSnapshot("local-default", { visibility: "all_accessible" }))
+      .toThrow('Graph visibility "all_accessible" exceeds adapter policy "private"');
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/memory/bundles?visibility=private");
+  });
+
+  it("marks graph updates stale until the updated snapshot loads", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+
+    const stale = graphReducer(current, {
+      type: "GRAPH_UPDATED",
+      event: {
+        schema_version: fixtureGraphSnapshot.schema_version,
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: fixtureGraphSnapshot.cursor.sequence + 1, partition: fixtureGraphSnapshot.cursor.partition },
+        updated_at: "2026-06-28T00:01:00Z",
+      },
+    });
+
+    expect(stale.freshnessStatus).toBe("stale");
+    expect(stale.staleBundleIds).toEqual(["local-default"]);
+
+    const refreshed = graphReducer(stale, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 1 },
+        metrics: { orphan_count: 0, broken_link_count: 0, stale_concept_count: 1, warning_count: 1 },
+      },
+    });
+    expect(refreshed.freshnessStatus).toBe("warning");
+    expect(refreshed.staleBundleIds).toEqual([]);
+    expect(refreshed.warningBundleIds).toEqual(["local-default"]);
+  });
+
+  it("does not let an older snapshot clear a newer graph update", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+    const stale = graphReducer(current, {
+      type: "GRAPH_UPDATED",
+      event: {
+        schema_version: fixtureGraphSnapshot.schema_version,
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: fixtureGraphSnapshot.cursor.sequence + 2, partition: fixtureGraphSnapshot.cursor.partition },
+        updated_at: "2026-06-28T00:02:00Z",
+      },
+    });
+
+    const unchanged = graphReducer(stale, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 1 },
+      },
+    });
+
+    expect(unchanged.freshnessStatus).toBe("stale");
+    expect(unchanged.layoutStatus).toBe("idle");
+    expect(unchanged.staleBundleIds).toEqual(["local-default"]);
+    expect(unchanged.snapshots["local-default"].cursor.sequence).toBe(1);
+
+    const loading = graphReducer(stale, { type: "LAYOUT_STATUS_SET", status: "loading" });
+    const stillLoading = graphReducer(loading, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 1 },
+      },
+    });
+    expect(stillLoading.layoutStatus).toBe("loading");
+  });
+
+  it("compares stale graph cursors within their partitions", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+    const repartitioned = graphReducer(current, {
+      type: "GRAPH_UPDATED",
+      event: {
+        schema_version: fixtureGraphSnapshot.schema_version,
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: 0, partition: "memory-graph:local-default:v2" },
+        updated_at: "2026-06-28T00:03:00Z",
+      },
+    });
+
+    expect(repartitioned.freshnessStatus).toBe("stale");
+    expect(repartitioned.staleBundleIds).toEqual(["local-default"]);
+
+    const oldPartitionSnapshot = graphReducer(repartitioned, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+
+    expect(oldPartitionSnapshot.freshnessStatus).toBe("stale");
+    expect(oldPartitionSnapshot.staleBundleIds).toEqual(["local-default"]);
+    expect(oldPartitionSnapshot.snapshots["local-default"].cursor).toEqual(fixtureGraphSnapshot.cursor);
+
+    const refreshed = graphReducer(repartitioned, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { sequence: 0, partition: "memory-graph:local-default:v2" },
+      },
+    });
+
+    expect(refreshed.freshnessStatus).toBe("current");
+    expect(refreshed.staleBundleIds).toEqual([]);
+    expect(refreshed.snapshots["local-default"].cursor).toEqual({
+      sequence: 0,
+      partition: "memory-graph:local-default:v2",
+    });
+  });
+
+  it("rejects out-of-order same-partition snapshots without a stale cursor marker", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: 5 },
+      },
+    });
+
+    const unchanged = graphReducer(current, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: 4 },
+      },
+    });
+
+    expect(unchanged.snapshots["local-default"].cursor.sequence).toBe(5);
+    expect(unchanged.freshnessStatus).toBe("current");
+    expect(unchanged.staleBundleIds).toEqual([]);
+  });
+
   it("rejects non-OK HTTP graph responses before parsing JSON", async () => {
     const json = jest.fn();
     const fetchMock = jest.fn(async () => ({

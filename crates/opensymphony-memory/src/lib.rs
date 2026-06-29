@@ -1390,8 +1390,43 @@ resource: https://linear.app/example/issue/COE-123
 tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
+apisecret: api-secret-compact-fixture
+apitoken: api-token-compact-fixture
+authtoken: auth-token-compact-fixture
+bearertoken: bearer-token-compact-fixture
+csrf_token: csrf-token-fixture
+encryptionkey: encryption-key-compact-fixture
+idtoken: id-token-compact-fixture
+refreshtoken: refresh-token-compact-fixture
+signingkey: signing-key-compact-fixture
+xsrf_token: xsrf-token-fixture
+apikey: sk-live-compact-fixture
+api_key: sk-live-public-fixture
+apiKey: sk-live-camel-fixture
+api_key_format: sk-live-prefix
+accesstoken: access-token-compact-fixture
+accessToken: access-token-camel-fixture
+clientsecret: client-secret-compact-fixture
+clientSecret: client-secret-camel-fixture
+client_secret_64: client-secret-fixture
+nested_secret:
+  token: nested-token-fixture
+oauth_token: oauth-token-fixture
+password_policy: rotate-often
+passwords:
+  - plural-password-fixture
+privatekey: private-key-compact-fixture
+private_key_type: ed25519
+secretariat: public-office
+secret_key_algorithm: ed25519
+session_cookies:
+  - session-cookie-fixture
+sessionid: session-compact-fixture
+session_id: session-fixture
+token_bucket: graph-rate-limit
 opensymphony:
   visibility: public
+  credential_ref: local-secret-fixture
   scope_refs:
     - kind: work_item
       id: COE-200
@@ -1607,6 +1642,20 @@ opensymphony:
         assert!(public_json.contains("COE-200"));
         assert!(!public_json.contains("concept:issues/COE-123"));
         assert!(!public_json.contains("COE-123: OKF catalog rebuild"));
+        assert!(!public_json.contains("sk-live-public-fixture"));
+        assert!(!public_json.contains("api-secret-compact-fixture"));
+        assert!(!public_json.contains("api-token-compact-fixture"));
+        assert!(!public_json.contains("client-secret-fixture"));
+        assert!(!public_json.contains("nested-token-fixture"));
+        assert!(!public_json.contains("oauth-token-fixture"));
+        assert!(!public_json.contains("plural-password-fixture"));
+        assert!(!public_json.contains("session-cookie-fixture"));
+        assert!(!public_json.contains("session-fixture"));
+        assert!(!public_json.contains("local-secret-fixture"));
+        assert!(public_json.contains("ed25519"));
+        assert!(public_json.contains("sk-live-prefix"));
+        assert!(public_json.contains("graph-rate-limit"));
+        assert!(public_json.contains("[redacted-secret]"));
         assert!(!public_json.contains(".opensymphony/memory"));
         assert!(!public_json.contains(&format!("{}/", repo.path().display())));
         assert!(!public_json.contains(&format!("{}.", repo.path().display())));
@@ -1683,6 +1732,128 @@ opensymphony:
         assert_eq!(
             detail.frontmatter_view.unknown.get("unknown_field"),
             Some(&serde_json::json!("keep-me"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("api_key"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("authtoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("bearertoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("csrf_token"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("encryptionkey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("idtoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("refreshtoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("signingkey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("xsrf_token"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("apikey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("apiKey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("accesstoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("accessToken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("clientsecret"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("clientSecret"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("nested_secret"),
+            Some(&serde_json::json!({
+                "token": "[redacted-secret]"
+            }))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("client_secret_64"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("api_key_format"),
+            Some(&serde_json::json!("sk-live-prefix"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("password_policy"),
+            Some(&serde_json::json!("rotate-often"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("passwords"),
+            Some(&serde_json::json!(["[redacted-secret]"]))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("privatekey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("oauth_token"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("private_key_type"),
+            Some(&serde_json::json!("ed25519"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("secretariat"),
+            Some(&serde_json::json!("public-office"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("secret_key_algorithm"),
+            Some(&serde_json::json!("ed25519"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("session_id"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("sessionid"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("session_cookies"),
+            Some(&serde_json::json!(["[redacted-secret]"]))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("token_bucket"),
+            Some(&serde_json::json!("graph-rate-limit"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.opensymphony.get("credential_ref"),
+            Some(&serde_json::json!("[redacted-secret]"))
         );
         assert!(!detail.links.is_empty());
         assert!(!detail.citations.is_empty());

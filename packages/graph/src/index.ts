@@ -8,6 +8,7 @@ import type {
   MemoryGraphNode,
   MemoryGraphNodeKind,
   MemoryGraphSnapshot,
+  MemoryGraphUpdatedEvent,
   MemoryGraphVisibility,
   MemorySearchResponse,
   MemorySearchResult,
@@ -44,6 +45,7 @@ export type GraphMode =
   | "evidence";
 
 export type LayoutStatus = "idle" | "loading" | "stabilizing" | "ready" | "failed";
+export type GraphFreshnessStatus = "current" | "stale" | "warning";
 
 export interface GraphFilters {
   bundleIds: string[];
@@ -88,6 +90,10 @@ export interface GraphState {
   layoutError: string | null;
   neighborhoodDepth: number;
   lastUpdatedAt: string | null;
+  freshnessStatus: GraphFreshnessStatus;
+  staleBundleIds: string[];
+  staleCursors: Record<string, MemoryGraphSnapshot["cursor"]>;
+  warningBundleIds: string[];
 }
 
 export type GraphAction =
@@ -105,6 +111,7 @@ export type GraphAction =
   | { type: "SEARCH_SET"; query: string }
   | { type: "SEARCH_RESULTS_LOADED"; response: MemorySearchResponse }
   | { type: "LAYOUT_STATUS_SET"; status: LayoutStatus; error?: string | null }
+  | { type: "GRAPH_UPDATED"; event: MemoryGraphUpdatedEvent }
   | { type: "HISTORY_RESTORED"; state: Partial<GraphDeepLinkState> }
   | { type: "GRAPH_RESET" };
 
@@ -123,6 +130,11 @@ export interface GraphRequestOptions {
 export interface GraphSearchOptions extends GraphRequestOptions {
   limit?: number;
   bundleId?: string;
+}
+
+export interface GraphAdapterPolicy {
+  defaultVisibility?: MemoryGraphVisibility | "all_accessible";
+  maxVisibility?: MemoryGraphVisibility | "all_accessible";
 }
 
 export type GraphLayoutKind = "force" | "hierarchical" | "radial" | "timeline";
@@ -216,6 +228,10 @@ export function createInitialGraphState(): GraphState {
     layoutError: null,
     neighborhoodDepth: 1,
     lastUpdatedAt: null,
+    freshnessStatus: "current",
+    staleBundleIds: [],
+    staleCursors: {},
+    warningBundleIds: [],
   };
 }
 
@@ -229,12 +245,34 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         lastUpdatedAt: latestBundleTimestamp(action.bundles),
       };
     case "SNAPSHOT_LOADED":
-      return {
-        ...state,
-        snapshots: { ...state.snapshots, [action.snapshot.bundle_id]: action.snapshot },
-        selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
-        lastUpdatedAt: action.snapshot.generated_at,
-      };
+      {
+        const staleCursor = state.staleCursors[action.snapshot.bundle_id];
+        const existingSnapshot = state.snapshots[action.snapshot.bundle_id];
+        const isOlderSamePartitionSnapshot = existingSnapshot !== undefined
+          && existingSnapshot.cursor.partition === action.snapshot.cursor.partition
+          && action.snapshot.cursor.sequence < existingSnapshot.cursor.sequence;
+        const isStaleSnapshot = (staleCursor !== undefined && isCursorBefore(action.snapshot.cursor, staleCursor))
+          || isOlderSamePartitionSnapshot;
+        if (isStaleSnapshot) {
+          return state;
+        }
+        const staleBundleIds = state.staleBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
+        const staleCursors = { ...state.staleCursors };
+        delete staleCursors[action.snapshot.bundle_id];
+        const warningBundleIds = action.snapshot.metrics && action.snapshot.metrics.warning_count > 0
+          ? uniqueSorted([...state.warningBundleIds, action.snapshot.bundle_id])
+          : state.warningBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
+        return {
+          ...state,
+          snapshots: { ...state.snapshots, [action.snapshot.bundle_id]: action.snapshot },
+          selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
+          lastUpdatedAt: action.snapshot.generated_at,
+          staleBundleIds,
+          staleCursors,
+          warningBundleIds,
+          freshnessStatus: graphFreshnessStatus(staleBundleIds, warningBundleIds),
+        };
+      }
     case "CONCEPT_DETAIL_LOADED":
       return {
         ...state,
@@ -281,6 +319,23 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
       };
     case "LAYOUT_STATUS_SET":
       return { ...state, layoutStatus: action.status, layoutError: action.error ?? null };
+    case "GRAPH_UPDATED": {
+      const current = state.snapshots[action.event.bundle_id];
+      if (current && !isCursorAfter(action.event.cursor, current.cursor)) {
+        return state;
+      }
+      const staleBundleIds = uniqueSorted([...state.staleBundleIds, action.event.bundle_id]);
+      return {
+        ...state,
+        lastUpdatedAt: action.event.updated_at,
+        staleBundleIds,
+        staleCursors: {
+          ...state.staleCursors,
+          [action.event.bundle_id]: action.event.cursor,
+        },
+        freshnessStatus: graphFreshnessStatus(staleBundleIds, state.warningBundleIds),
+      };
+    }
     case "HISTORY_RESTORED": {
       const restored = action.state;
       return {
@@ -386,7 +441,11 @@ export function graphStateToHistory(state: GraphState): GraphDeepLinkState {
   };
 }
 
-export function createHttpGraphAdapter(baseUri: string, fetchFn: typeof fetch = globalThis.fetch): GraphDataAdapter {
+export function createHttpGraphAdapter(
+  baseUri: string,
+  fetchFn: typeof fetch = globalThis.fetch,
+  policy: GraphAdapterPolicy = {},
+): GraphDataAdapter {
   const base = baseUri.replace(/\/+$/, "");
   async function read<T>(path: string, params: URLSearchParams = new URLSearchParams()): Promise<T> {
     const query = params.toString();
@@ -395,21 +454,21 @@ export function createHttpGraphAdapter(baseUri: string, fetchFn: typeof fetch = 
     return await response.json() as T;
   }
   return {
-    listBundles: () => read<MemoryBundleList>("/api/v1/memory/bundles"),
+    listBundles: () => read<MemoryBundleList>("/api/v1/memory/bundles", visibilityParams(undefined, policy)),
     getGraphSnapshot: (bundleId, options) =>
-      read<MemoryGraphSnapshot>(`/api/v1/memory/bundles/${encodeURIComponent(bundleId)}/graph`, visibilityParams(options)),
+      read<MemoryGraphSnapshot>(`/api/v1/memory/bundles/${encodeURIComponent(bundleId)}/graph`, visibilityParams(options, policy)),
     getConceptDetail: (bundleId, conceptId, options) =>
       read<MemoryConceptDetail>(
         `/api/v1/memory/bundles/${encodeURIComponent(bundleId)}/concepts/${encodeURIComponent(conceptId)}`,
-        visibilityParams(options),
+        visibilityParams(options, policy),
       ),
     getCommunities: (bundleId, options) =>
       read<MemoryCommunityList>(
         `/api/v1/memory/bundles/${encodeURIComponent(bundleId)}/communities`,
-        visibilityParams(options),
+        visibilityParams(options, policy),
       ),
     search: (query, options) => {
-      const params = visibilityParams(options);
+      const params = visibilityParams(options, policy);
       params.set("query", query);
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
       if (options?.bundleId) params.set("bundle_id", options.bundleId);
@@ -876,10 +935,69 @@ function scoreNode(node: MemoryGraphNode, needle: string): number {
   return score;
 }
 
-function visibilityParams(options?: GraphRequestOptions): URLSearchParams {
+function visibilityParams(options?: GraphRequestOptions, policy: GraphAdapterPolicy = {}): URLSearchParams {
   const params = new URLSearchParams();
-  if (options?.visibility) params.set("visibility", options.visibility);
+  const visibility = effectiveVisibility(options?.visibility, policy);
+  if (visibility) params.set("visibility", visibility);
   return params;
+}
+
+function effectiveVisibility(
+  requested: GraphRequestOptions["visibility"] | undefined,
+  policy: GraphAdapterPolicy,
+): GraphRequestOptions["visibility"] | undefined {
+  if (
+    policy.maxVisibility !== undefined
+    && requested !== undefined
+    && visibilityRank(requested) > visibilityRank(policy.maxVisibility)
+  ) {
+    throw new Error(`Graph visibility "${requested}" exceeds adapter policy "${policy.maxVisibility}"`);
+  }
+  const visibility = requested ?? policy.defaultVisibility ?? policy.maxVisibility;
+  if (
+    visibility !== undefined
+    && policy.maxVisibility !== undefined
+    && visibilityRank(visibility) > visibilityRank(policy.maxVisibility)
+  ) {
+    return policy.maxVisibility;
+  }
+  return visibility;
+}
+
+function visibilityRank(visibility: GraphRequestOptions["visibility"]): number {
+  switch (visibility) {
+    case "public":
+      return 0;
+    case "private":
+      return 1;
+    case "all_accessible":
+      return 2;
+    default:
+      return -1;
+  }
+}
+
+function isCursorBefore(
+  candidate: MemoryGraphSnapshot["cursor"],
+  marker: MemoryGraphSnapshot["cursor"],
+): boolean {
+  return candidate.partition !== marker.partition || candidate.sequence < marker.sequence;
+}
+
+function isCursorAfter(
+  candidate: MemoryGraphSnapshot["cursor"],
+  current: MemoryGraphSnapshot["cursor"],
+): boolean {
+  return candidate.partition !== current.partition || candidate.sequence > current.sequence;
+}
+
+function graphFreshnessStatus(
+  staleBundleIds: readonly string[],
+  warningBundleIds: readonly string[],
+): GraphFreshnessStatus {
+  if (staleBundleIds.length > 0) return "stale";
+  if (warningBundleIds.length > 0) return "warning";
+  return "current";
 }
 
 function conceptDetailKey(bundleId: string, conceptId: string): string {
