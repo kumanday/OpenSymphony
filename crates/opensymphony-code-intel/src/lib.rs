@@ -972,7 +972,7 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
         let indent = line_body
             .as_bytes()
             .iter()
-            .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+            .take_while(|byte| **byte == b' ')
             .count();
         if indent > 3 {
             byte_offset += line.len();
@@ -1595,8 +1595,7 @@ mod tests {
             MARKDOWN_TAB_INDENTED,
         )
         .expect("markdown parses");
-        assert_capture(&tab_indented, "injection.language", "python");
-        assert_capture(&tab_indented, "injection.content", "print('tab')\n");
+        assert!(tab_indented.captures.is_empty());
 
         let closing_indent = parse_source(
             SourceLanguage::Markdown,
