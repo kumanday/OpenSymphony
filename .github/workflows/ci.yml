@@ -34,5 +34,7 @@ jobs:
         run: npm run build --workspace=@opensymphony/gateway-schema
       - name: typecheck
         run: npm run type-check
+      - name: build-web
+        run: npm run build --workspace=@opensymphony/web
       - name: jest
         run: npx jest --config jest.config.js --testPathIgnorePatterns="apps"
