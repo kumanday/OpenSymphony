@@ -111,6 +111,8 @@ import {
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
 import {
+  disposeKnowledgeGraphRenderer,
+  type KnowledgeGraphViewState,
   mountKnowledgeGraphRenderer,
   renderKnowledgeGraphSurface,
 } from "./knowledge-graph-renderer.js";
@@ -282,6 +284,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private graphLayoutAdapter: GraphLayoutAdapter = createGraphLayoutAdapter(() => null);
   private graphLayoutRun = 0;
+  private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -419,6 +422,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
     this.graphLayoutAdapter.dispose();
+    disposeKnowledgeGraphRenderer(this.options.root);
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
   }
@@ -883,9 +887,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private selectGraphPaneView(view: GraphPaneView): void {
     this.state.graphPaneView = view;
-    if (view === "knowledge") {
-      this.scheduleKnowledgeGraphLayout();
-    }
     this.render();
   }
 
@@ -900,6 +901,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       snapshot,
       layout: this.state.knowledgeGraphLayout,
       selectedNodeIds: this.state.knowledgeGraph.selectedNodeIds,
+      view: this.knowledgeGraphView,
       onSelect: (nodeId) => {
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [nodeId] });
         this.render();
@@ -914,7 +916,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const processEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
     if (typeof Worker === "undefined" || processEnv?.JEST_WORKER_ID) return;
     void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
-      if (this.destroyed) return;
+      if (this.destroyed || this.state.knowledgeGraph.layoutStatus === "loading") return;
       this.graphLayoutAdapter.dispose();
       this.graphLayoutAdapter = createBrowserGraphLayoutAdapter();
     }).catch(() => {
@@ -1441,6 +1443,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
+    disposeKnowledgeGraphRenderer(this.options.root);
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}" data-auth-state="${this.state.authState}">

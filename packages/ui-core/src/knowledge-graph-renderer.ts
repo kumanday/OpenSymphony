@@ -17,8 +17,15 @@ export interface KnowledgeGraphMountOptions {
   snapshot: MemoryGraphSnapshot | null;
   layout: GraphLayoutResult | null;
   selectedNodeIds: readonly string[];
+  view: KnowledgeGraphViewState;
   onSelect(nodeId: string): void;
   onFocus(nodeId: string): void;
+}
+
+export interface KnowledgeGraphViewState {
+  scale: number;
+  dx: number;
+  dy: number;
 }
 
 export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): string {
@@ -52,17 +59,17 @@ export function mountKnowledgeGraphRenderer(
   const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
   if (!canvas || !options.snapshot || !options.layout) return;
   const stage = canvas.closest<HTMLElement>("[data-kg-stage]");
-  const viewport = canvasViewport(stage);
   const view = {
-    scale: 1,
-    dx: 0,
-    dy: 0,
+    scale: options.view.scale,
+    dx: options.view.dx,
+    dy: options.view.dy,
     dragging: false,
     moved: false,
     px: 0,
     py: 0,
   };
   const draw = () => {
+    const viewport = canvasViewport(stage);
     canvas.width = Math.floor(viewport.width * viewport.ratio);
     canvas.height = Math.floor(viewport.height * viewport.ratio);
     canvas.style.width = `${viewport.width}px`;
@@ -77,6 +84,7 @@ export function mountKnowledgeGraphRenderer(
   canvas.onwheel = (event) => {
     event.preventDefault();
     view.scale = clamp(view.scale * (event.deltaY < 0 ? 1.08 : 0.92), 0.45, 3);
+    syncViewState(options.view, view);
     draw();
   };
   canvas.onpointerdown = (event) => {
@@ -95,13 +103,14 @@ export function mountKnowledgeGraphRenderer(
     view.dy += dy;
     view.px = event.clientX;
     view.py = event.clientY;
+    syncViewState(options.view, view);
     draw();
   };
   canvas.onpointerup = (event) => {
     view.dragging = false;
     canvas.releasePointerCapture(event.pointerId);
     if (!view.moved) {
-      const nodeId = nearestNode(options.layout!, event.offsetX, event.offsetY, viewport, view);
+      const nodeId = nearestNode(options.layout!, event.offsetX, event.offsetY, canvasViewport(stage), view);
       if (nodeId) options.onSelect(nodeId);
     }
   };
@@ -115,6 +124,26 @@ export function mountKnowledgeGraphRenderer(
       if (nodeId) options.onFocus(nodeId);
     });
   });
+}
+
+export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
+  root.querySelectorAll<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']").forEach((canvas) => {
+    const state = threeCanvasState.get(canvas);
+    if (!state) return;
+    disposeScene(state.scene);
+    state.renderer.dispose();
+    state.renderer.forceContextLoss();
+    threeCanvasState.delete(canvas);
+  });
+}
+
+function syncViewState(
+  target: KnowledgeGraphViewState,
+  view: KnowledgeGraphViewState,
+): void {
+  target.scale = view.scale;
+  target.dx = view.dx;
+  target.dy = view.dy;
 }
 
 function renderStatus(status: LayoutStatus, error: string | null): string {
