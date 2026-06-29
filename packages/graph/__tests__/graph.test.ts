@@ -252,6 +252,15 @@ describe("@opensymphony/graph", () => {
     expect(repartitioned.freshnessStatus).toBe("stale");
     expect(repartitioned.staleBundleIds).toEqual(["local-default"]);
 
+    const oldPartitionSnapshot = graphReducer(repartitioned, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+
+    expect(oldPartitionSnapshot.freshnessStatus).toBe("stale");
+    expect(oldPartitionSnapshot.staleBundleIds).toEqual(["local-default"]);
+    expect(oldPartitionSnapshot.snapshots["local-default"].cursor).toEqual(fixtureGraphSnapshot.cursor);
+
     const refreshed = graphReducer(repartitioned, {
       type: "SNAPSHOT_LOADED",
       snapshot: {

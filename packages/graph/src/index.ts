@@ -976,7 +976,7 @@ function isCursorBefore(
   candidate: MemoryGraphSnapshot["cursor"],
   marker: MemoryGraphSnapshot["cursor"],
 ): boolean {
-  return candidate.partition === marker.partition && candidate.sequence < marker.sequence;
+  return candidate.partition !== marker.partition || candidate.sequence < marker.sequence;
 }
 
 function isCursorAfter(
