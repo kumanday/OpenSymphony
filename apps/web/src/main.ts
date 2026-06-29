@@ -25,7 +25,10 @@ export function createWebTransport(gatewayUrl = defaultGatewayUrl) {
 }
 
 export function createWebGraphAdapter(gatewayUrl = defaultGatewayUrl) {
-  return createGatewayGraphAdapter(gatewayUrl);
+  return createGatewayGraphAdapter(gatewayUrl, globalThis.fetch, {
+    defaultVisibility: "public",
+    maxVisibility: "public",
+  });
 }
 
 if (root) {
@@ -42,7 +45,7 @@ if (root) {
         baseUri: gatewayUrl,
         transport: "loopback_http",
       }),
-    onGraphGatewayUrlChanged: (gatewayUrl) => createWebGraphAdapter(gatewayUrl),
+    onGraphGatewayUrlChanged: createWebGraphAdapter,
   });
 }
 

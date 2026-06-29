@@ -242,6 +242,7 @@ resource: https://linear.app/example/issue/COE-200
 tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 custom_unknown: keep-me
+auth_token: gateway-secret-fixture
 opensymphony:
   visibility: public
   scope_refs:
@@ -1772,6 +1773,8 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
     let graph_json = serde_json::to_string(&graph).expect("graph serializes");
     assert!(graph_json.contains("COE-200"));
     assert!(!graph_json.contains("COE-201"));
+    assert!(!graph_json.contains("gateway-secret-fixture"));
+    assert!(graph_json.contains("[redacted-secret]"));
     assert!(!graph_json.contains(".opensymphony/memory"));
     assert!(!graph_json.contains(&repo.path().display().to_string()));
     assert!(
@@ -1840,6 +1843,10 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
             .frontmatter_view
             .unknown
             .contains_key("custom_unknown")
+    );
+    assert_eq!(
+        detail.frontmatter_view.unknown.get("auth_token"),
+        Some(&serde_json::json!("[redacted-secret]"))
     );
     assert!(!detail.body_markdown.contains(".opensymphony/memory"));
     assert!(
