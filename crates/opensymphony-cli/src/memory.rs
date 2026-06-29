@@ -2088,12 +2088,6 @@ fn code_intel_documents_for_persistence(
     request: &CodeIntelPersistRequest,
 ) -> Result<CodeIntelPersistencePlan, MemoryError> {
     let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
-    let repo_root = repo_root
-        .canonicalize()
-        .map_err(|source| MemoryError::ResolvePath {
-            path: repo_root.clone(),
-            source,
-        })?;
     let mut artifacts = Vec::new();
     let mut documents = Vec::new();
     let mut skipped_files = Vec::new();
@@ -2344,13 +2338,13 @@ fn code_intel_document_input(
             .diagnostics
             .iter()
             .map(|diagnostic| {
-                let kind = match diagnostic.kind {
-                    AstDiagnosticKind::Error => "error",
-                    AstDiagnosticKind::Missing => "missing",
+                let (kind, severity) = match diagnostic.kind {
+                    AstDiagnosticKind::Error => ("error", "error"),
+                    AstDiagnosticKind::Missing => ("missing", "warning"),
                 };
                 CodeIntelDiagnosticInput {
                     kind: kind.to_string(),
-                    severity: "error".to_string(),
+                    severity: severity.to_string(),
                     message: format!("{} parse diagnostic", diagnostic.node_kind),
                     start_line: diagnostic.span.start_line,
                     end_line: diagnostic.span.end_line,
@@ -2760,7 +2754,7 @@ fn resolve_code_intel_repo(
     repo: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let Some(repo) = repo.and_then(non_empty) else {
-        return Ok(config.repo_root.clone());
+        return repo_existing_path(config, ".");
     };
     let resolved = repo_existing_path(config, &repo)?;
     if !resolved.is_dir() {
@@ -4340,6 +4334,59 @@ mod tests {
         assert_eq!(count_rows(&connection, "code_symbols", "stale"), 1);
         assert_eq!(count_rows(&connection, "code_edges", "stale"), 1);
         assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 1);
+    }
+
+    #[test]
+    fn code_intel_diagnostic_severity_tracks_diagnostic_kind() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.diagnostics = vec![
+            CodeIntelDiagnosticInput {
+                kind: "error".to_string(),
+                severity: "error".to_string(),
+                message: "ERROR parse diagnostic".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            CodeIntelDiagnosticInput {
+                kind: "missing".to_string(),
+                severity: "warning".to_string(),
+                message: "MISSING parse diagnostic".to_string(),
+                start_line: 2,
+                end_line: 2,
+            },
+        ];
+
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("same".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist diagnostics");
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        let severities = connection
+            .prepare("SELECT kind, severity FROM code_diagnostics ORDER BY kind")
+            .expect("prepare diagnostics")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query diagnostics")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("diagnostics rows");
+        assert_eq!(
+            severities,
+            vec![
+                ("error".to_string(), "error".to_string()),
+                ("missing".to_string(), "warning".to_string())
+            ]
+        );
     }
 
     fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
