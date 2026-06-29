@@ -1031,8 +1031,10 @@ describe("OpenSymphonyApp mount", () => {
     );
 
     const reset = root.querySelector("[data-kg-filter-reset]") as HTMLButtonElement;
+    reset.focus();
     reset.click();
     await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+    expect(document.activeElement).toBe(root.querySelector("[data-kg-filter-reset]"));
     const selectedButton = root.querySelector("[data-kg-node='concept:coe-468']") as HTMLButtonElement;
     selectedButton.focus();
     selectedButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
@@ -1045,8 +1047,10 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-468']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-468") ?? false);
     const rawToggle = root.querySelector("[data-kg-raw-toggle]") as HTMLButtonElement;
+    rawToggle.focus();
     rawToggle.click();
     await flushUntil(() => root.querySelector(".os-knowledge-raw") !== null);
+    expect(document.activeElement).toBe(root.querySelector("[data-kg-raw-toggle]"));
     expect(root.querySelector(".os-knowledge-raw")?.textContent).toContain("custom_owner");
 
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();

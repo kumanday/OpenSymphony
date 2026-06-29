@@ -3306,6 +3306,10 @@ function captureKnowledgeControlFocus(root: HTMLElement): KnowledgeControlFocus 
         selectionEnd: null,
       };
     }
+  } else if (active.matches("[data-kg-filter-reset]")) {
+    selector = "[data-kg-filter-reset]";
+  } else if (active.matches("[data-kg-raw-toggle]")) {
+    selector = "[data-kg-raw-toggle]";
   }
   if (!selector) {
     return null;
