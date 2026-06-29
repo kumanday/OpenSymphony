@@ -975,25 +975,35 @@ fn is_secret_like_frontmatter_key(key: &str) -> bool {
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    let has = |part: &str| parts.contains(&part);
     if parts.is_empty() || has_non_secret_descriptor(&parts) {
         return false;
     }
-    if has("secret") || has("password") || has("credential") || has("pwd") || has("jwt") {
+    if has_any(&parts, &[
+        "secret",
+        "secrets",
+        "password",
+        "passwords",
+        "credential",
+        "credentials",
+        "pwd",
+        "pwds",
+        "jwt",
+        "jwts",
+    ]) {
         return true;
     }
-    if has("cookie")
+    if has_any(&parts, &["cookie", "cookies"])
         && parts
             .iter()
-            .any(|part| matches!(*part, "auth" | "session" | "access" | "refresh"))
+            .any(|part| matches!(*part, "auth" | "oauth" | "session" | "access" | "refresh"))
     {
         return true;
     }
-    if has("token")
+    if has_any(&parts, &["token", "tokens"])
         && (parts.len() == 1
             || parts
                 .iter()
-                .any(|part| matches!(*part, "auth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api")))
+                .any(|part| matches!(*part, "auth" | "oauth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api")))
     {
         return true;
     }
@@ -1025,6 +1035,10 @@ fn has_adjacent_parts(parts: &[&str], left: &str, right: &str) -> bool {
     parts
         .windows(2)
         .any(|window| window == [left, right])
+}
+
+fn has_any(parts: &[&str], candidates: &[&str]) -> bool {
+    parts.iter().any(|part| candidates.contains(part))
 }
 
 fn json_string(value: &str) -> serde_json::Value {

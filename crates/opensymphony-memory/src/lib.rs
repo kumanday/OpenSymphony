@@ -1395,10 +1395,15 @@ api_key_format: sk-live-prefix
 client_secret_64: client-secret-fixture
 nested_secret:
   token: nested-token-fixture
+oauth_token: oauth-token-fixture
 password_policy: rotate-often
+passwords:
+  - plural-password-fixture
 private_key_type: ed25519
 secretariat: public-office
 secret_key_algorithm: ed25519
+session_cookies:
+  - session-cookie-fixture
 session_id: session-fixture
 token_bucket: graph-rate-limit
 opensymphony:
@@ -1622,6 +1627,9 @@ opensymphony:
         assert!(!public_json.contains("sk-live-public-fixture"));
         assert!(!public_json.contains("client-secret-fixture"));
         assert!(!public_json.contains("nested-token-fixture"));
+        assert!(!public_json.contains("oauth-token-fixture"));
+        assert!(!public_json.contains("plural-password-fixture"));
+        assert!(!public_json.contains("session-cookie-fixture"));
         assert!(!public_json.contains("session-fixture"));
         assert!(!public_json.contains("local-secret-fixture"));
         assert!(public_json.contains("ed25519"));
@@ -1728,6 +1736,14 @@ opensymphony:
             Some(&serde_json::json!("rotate-often"))
         );
         assert_eq!(
+            detail.frontmatter_view.unknown.get("passwords"),
+            Some(&serde_json::json!(["[redacted-secret]"]))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("oauth_token"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
             detail.frontmatter_view.unknown.get("private_key_type"),
             Some(&serde_json::json!("ed25519"))
         );
@@ -1742,6 +1758,10 @@ opensymphony:
         assert_eq!(
             detail.frontmatter_view.unknown.get("session_id"),
             Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("session_cookies"),
+            Some(&serde_json::json!(["[redacted-secret]"]))
         );
         assert_eq!(
             detail.frontmatter_view.unknown.get("token_bucket"),
