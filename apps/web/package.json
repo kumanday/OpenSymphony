@@ -13,6 +13,7 @@
   "dependencies": {
     "@opensymphony/gateway-schema": "*",
     "@opensymphony/api-client": "*",
+    "@opensymphony/graph": "*",
     "@opensymphony/ui-core": "*",
     "@opensymphony/state": "*"
   },
