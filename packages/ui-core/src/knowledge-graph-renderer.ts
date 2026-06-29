@@ -401,7 +401,7 @@ function drawCanvas2d(
   const selected = new Set(selectedNodeIds);
   const byId = new Map(layout.nodes.map((node) => [node.nodeId, node]));
   ctx.strokeStyle = "#8aa4b8";
-  ctx.lineWidth = Math.max(1, 4 * view.scale);
+  ctx.lineWidth = 1;
   ctx.globalAlpha = 0.72;
   for (const edge of layout.edges) {
     const source = byId.get(edge.sourceId);
@@ -419,7 +419,7 @@ function drawCanvas2d(
     const p = canvasPoint(node.x, node.y, layout, view, viewport);
     ctx.beginPath();
     ctx.fillStyle = selected.has(node.nodeId) ? "#c2410c" : colorForKind(node.kind);
-    ctx.arc(p.x, p.y, (selected.has(node.nodeId) ? node.radius + 12 : node.radius + 9) * view.scale, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, (selected.has(node.nodeId) ? node.radius + 12 : node.radius) * view.scale, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;

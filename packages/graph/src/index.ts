@@ -583,6 +583,8 @@ function forceLayout(
   width: number,
   height: number,
 ): GraphLayoutNode[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const tickCount = nodes.length > 400 ? 24 : nodes.length > 160 ? 45 : 90;
   const points = nodes.map((node, index) => ({
     id: node.id,
     x: width / 2 + Math.cos(index) * 80,
@@ -591,7 +593,7 @@ function forceLayout(
     vy: 0,
   }));
   const byId = new Map(points.map((point) => [point.id, point]));
-  for (let tick = 0; tick < 90; tick += 1) {
+  for (let tick = 0; tick < tickCount; tick += 1) {
     for (let i = 0; i < points.length; i += 1) {
       for (let j = i + 1; j < points.length; j += 1) {
         const a = points[i];
@@ -629,7 +631,7 @@ function forceLayout(
     }
   }
   return points.map((point) => {
-    const node = nodes.find((candidate) => candidate.id === point.id)!;
+    const node = nodesById.get(point.id)!;
     return layoutNode(node, point.x, point.y, zFor(node));
   }).sort(compareLayoutNodes);
 }
