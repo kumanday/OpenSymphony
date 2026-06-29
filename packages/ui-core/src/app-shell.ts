@@ -622,6 +622,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private clearKnowledgeGraphData(): void {
+    this.knowledgeGraphLoadGeneration += 1;
+    this.knowledgeDetailLoadGeneration += 1;
     this.state.knowledgeGraph = createEmptyKnowledgeGraphState();
   }
 
@@ -3499,7 +3501,7 @@ function renderKnowledgeGraphSurface(state: KnowledgeGraphState, taskNode: TaskG
     <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold" data-layout-motion="${mode}">
       <div class="os-knowledge-toolbar" aria-label="Knowledge Graph controls">
         <label>Bundle
-          <select data-kg-filter="bundle">${renderKnowledgeOptions(state.filters.bundle || snapshot?.bundle_id || "", bundleOptions)}</select>
+          <select data-kg-filter="bundle">${renderBundleOptions(state.filters.bundle || snapshot?.bundle_id || "", bundleOptions)}</select>
         </label>
         <label>Search
           <input data-kg-search type="search" value="${escapeAttr(state.searchQuery)}" placeholder="Search concepts, tags, resources, and source refs" />
@@ -3768,6 +3770,15 @@ function renderKnowledgeOptions(
       `<option value="${escapeAttr(option.value)}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>`
     ),
   ].join("");
+}
+
+function renderBundleOptions(
+  selected: string,
+  options: Array<{ value: string; label: string }>,
+): string {
+  return options.map((option) =>
+    `<option value="${escapeAttr(option.value)}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+  ).join("");
 }
 
 function renderInspectorSection(title: string, rows: string[][]): string {

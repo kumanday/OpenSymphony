@@ -985,6 +985,9 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("role")).toBe("option");
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("aria-selected")).toBe("true");
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.hasAttribute("aria-pressed")).toBe(false);
+    expect(Array.from((root.querySelector("[data-kg-filter='bundle']") as HTMLSelectElement).options).map((option) => option.textContent)).toEqual([
+      "OpenSymphony Memory (2)",
+    ]);
     expect((root.querySelector("[data-kg-search]") as HTMLInputElement).placeholder).toBe("Search concepts, tags, resources, and source refs");
     expect(Array.from(root.querySelectorAll("[data-testid='knowledge-graph-map'] [data-kg-node]")).map((node) =>
       (node as HTMLElement).dataset.kgNode
@@ -1158,6 +1161,74 @@ describe("OpenSymphonyApp mount", () => {
     await flushMicrotasks();
     expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Concept Inspector, Search");
     expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).not.toContain("Stale COE-465 Detail");
+
+    await handle.destroy();
+  });
+
+  it("invalidates in-flight Knowledge Graph loads when gateway state resets", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    class ResettableTransport extends MockGatewayTransport {
+      failSnapshot = false;
+
+      override async snapshot(): Promise<DashboardSnapshot> {
+        if (this.failSnapshot) {
+          throw new Error("simulated gateway reset");
+        }
+        return super.snapshot();
+      }
+    }
+    const transport = new ResettableTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    const staleGraph: MemoryGraphSnapshot = {
+      ...knowledgeGraph,
+      nodes: knowledgeGraph.nodes.map((node) => ({
+        ...node,
+        label: node.id === "concept:coe-468" ? "Stale After Reset" : node.label,
+      })),
+    };
+    const slowGraph = deferred<MemoryGraphSnapshot>();
+    let graphReads = 0;
+    const adapter = {
+      async listBundles() {
+        return knowledgeBundles;
+      },
+      async getGraphSnapshot() {
+        graphReads += 1;
+        return graphReads === 1 ? slowGraph.promise : knowledgeGraph;
+      },
+      async getConceptDetail(_bundleId: string, conceptId: string) {
+        return { ...knowledgeDetail, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter: adapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("Loading") ?? false);
+    transport.failSnapshot = true;
+    await handle.refresh();
+    slowGraph.resolve(staleGraph);
+    await flushMicrotasks();
+
+    transport.failSnapshot = false;
+    await handle.refresh();
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+
+    expect(graphReads).toBe(2);
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-468 Concept Inspector");
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).not.toContain("Stale After Reset");
 
     await handle.destroy();
   });
