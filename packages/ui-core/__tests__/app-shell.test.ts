@@ -985,6 +985,10 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("role")).toBe("option");
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("aria-selected")).toBe("true");
     expect(root.querySelector("[data-kg-node='concept:coe-468']")?.hasAttribute("aria-pressed")).toBe(false);
+    expect((root.querySelector("[data-kg-search]") as HTMLInputElement).placeholder).toBe("Search concepts, tags, resources, and source refs");
+    expect(Array.from(root.querySelectorAll("[data-testid='knowledge-graph-map'] [data-kg-node]")).map((node) =>
+      (node as HTMLElement).dataset.kgNode
+    )).toEqual(["concept:coe-468", "concept:coe-465", "tag:graph-view", "source:osym-824"]);
     expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Concept Inspector, Search, Filters, And Accessibility Fallback");
     expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Relationships");
     expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Source Support");
@@ -1016,13 +1020,24 @@ describe("OpenSymphonyApp mount", () => {
       root.querySelector("[data-kg-node='source:osym-824']")?.getAttribute("aria-selected") === "true"
     );
     expect(root.querySelector("[data-testid='knowledge-graph-map'] [data-kg-node='concept:coe-468']")).toBeNull();
+    const singleVisibleNode = root.querySelector("[data-testid='knowledge-graph-map'] [data-kg-node='source:osym-824']") as HTMLButtonElement;
+    singleVisibleNode.focus();
+    singleVisibleNode.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await flushUntil(() =>
+      root.querySelector("[data-kg-node='source:osym-824']")?.getAttribute("aria-selected") === "true"
+    );
 
     const reset = root.querySelector("[data-kg-filter-reset]") as HTMLButtonElement;
     reset.click();
     await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
     const selectedButton = root.querySelector("[data-kg-node='concept:coe-468']") as HTMLButtonElement;
+    selectedButton.focus();
     selectedButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("graph-view") ?? false);
+    await flushUntil(() => {
+      const activeNode = document.activeElement as HTMLElement | null;
+      return Boolean(activeNode?.dataset.kgNode && activeNode.getAttribute("aria-selected") === "true");
+    });
 
     (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-468']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-468") ?? false);

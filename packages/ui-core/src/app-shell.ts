@@ -215,7 +215,8 @@ interface KnowledgeGraphState {
 }
 
 interface KnowledgeControlFocus {
-  selector: string;
+  selector?: string;
+  nodeId?: string;
   selectionStart: number | null;
   selectionEnd: number | null;
 }
@@ -1061,9 +1062,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  private selectKnowledgeNode(nodeId: string): void {
+  private selectKnowledgeNode(nodeId: string, focusNode = false): void {
     this.state.knowledgeGraph = { ...this.state.knowledgeGraph, selectedNodeId: nodeId };
     this.render();
+    if (focusNode) {
+      this.focusKnowledgeNode(nodeId);
+    }
     void this.loadKnowledgeConceptDetail(nodeId);
   }
 
@@ -1132,14 +1136,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (direction === "previous" || direction === "next") {
       const offset = direction === "previous" ? -1 : 1;
       const nextId = ids[(currentIndex + offset + ids.length) % ids.length];
-      if (nextId) this.selectKnowledgeNode(nextId);
+      if (nextId) this.selectKnowledgeNode(nextId, true);
       return;
     }
     const neighbors = visibleKnowledgeNeighborIds(this.state.knowledgeGraph.snapshot, fromNodeId)
       .filter((nodeId) => ids.includes(nodeId));
     if (neighbors.length === 0) return;
     const sorted = direction === "neighbor-previous" ? [...neighbors].reverse() : neighbors;
-    this.selectKnowledgeNode(sorted[0]!);
+    this.selectKnowledgeNode(sorted[0]!, true);
+  }
+
+  private focusKnowledgeNode(nodeId: string): void {
+    Array.from(this.options.root.querySelectorAll<HTMLElement>("[data-kg-node]"))
+      .find((node) => node.dataset.kgNode === nodeId)
+      ?.focus();
   }
 
   private clampKnowledgeSelectionToVisible(): string | null {
@@ -2419,8 +2429,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.onKnowledgeSearch((event.currentTarget as HTMLInputElement).value);
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-kg-filter]").forEach((control) => {
-      control.addEventListener("change", () => this.onKnowledgeFilterChange(control));
-      control.addEventListener("input", () => this.onKnowledgeFilterChange(control));
+      if (control instanceof HTMLInputElement) {
+        control.addEventListener("input", () => this.onKnowledgeFilterChange(control));
+      } else {
+        control.addEventListener("change", () => this.onKnowledgeFilterChange(control));
+      }
     });
     this.options.root.querySelector("[data-kg-filter-reset]")?.addEventListener("click", () => {
       this.resetKnowledgeFilters();
@@ -3282,6 +3295,15 @@ function captureKnowledgeControlFocus(root: HTMLElement): KnowledgeControlFocus 
     if (key) {
       selector = `[data-kg-filter="${cssEscape(key)}"]`;
     }
+  } else if (active.matches("[data-kg-node]")) {
+    const nodeId = active.dataset.kgNode;
+    if (nodeId) {
+      return {
+        nodeId,
+        selectionStart: null,
+        selectionEnd: null,
+      };
+    }
   }
   if (!selector) {
     return null;
@@ -3297,7 +3319,10 @@ function restoreKnowledgeControlFocus(root: HTMLElement, focus: KnowledgeControl
   if (!focus) {
     return;
   }
-  const next = root.querySelector<HTMLElement>(focus.selector);
+  const next = focus.nodeId
+    ? Array.from(root.querySelectorAll<HTMLElement>("[data-kg-node]"))
+      .find((node) => node.dataset.kgNode === focus.nodeId) ?? null
+    : root.querySelector<HTMLElement>(focus.selector ?? "");
   if (!next) {
     return;
   }
@@ -3477,7 +3502,7 @@ function renderKnowledgeGraphSurface(state: KnowledgeGraphState, taskNode: TaskG
           <select data-kg-filter="bundle">${renderKnowledgeOptions(state.filters.bundle || snapshot?.bundle_id || "", bundleOptions)}</select>
         </label>
         <label>Search
-          <input data-kg-search type="search" value="${escapeAttr(state.searchQuery)}" placeholder="Search bundles, concepts, tags, resources, citations, source refs" />
+          <input data-kg-search type="search" value="${escapeAttr(state.searchQuery)}" placeholder="Search concepts, tags, resources, and source refs" />
         </label>
         <button type="button" data-kg-filter-reset>Reset</button>
       </div>
@@ -3521,7 +3546,7 @@ function renderKnowledgeMap(nodes: MemoryGraphNode[], selected: MemoryGraphNode 
     const selectedClass = node.id === selected?.id ? " is-selected" : "";
     const community = node.metrics?.community_id ?? "none";
     return `
-      <button type="button" id="${escapeAttr(knowledgeOptionId(node.id))}" role="option" class="os-kg-node os-kg-node-${escapeAttr(node.kind)}${selectedClass}" data-kg-node="${escapeAttr(node.id)}" style="--os-kg-index:${index}" aria-selected="${node.id === selected?.id ? "true" : "false"}">
+      <button type="button" id="${escapeAttr(knowledgeOptionId(node.id))}" role="option" class="os-kg-node os-kg-node-${escapeAttr(node.kind)}${selectedClass}" data-kg-node="${escapeAttr(node.id)}" style="--os-kg-index:${index}" aria-selected="${node.id === selected?.id ? "true" : "false"}" tabindex="${node.id === selected?.id ? "0" : "-1"}">
         <span>${escapeHtml(nodeKindLabel(node.kind))}</span>
         <strong>${escapeHtml(compactLabel(node.label, 28))}</strong>
         <em>${escapeHtml(community)}</em>
@@ -3627,8 +3652,7 @@ function visibleKnowledgeNodes(state: KnowledgeGraphState): MemoryGraphNode[] {
   const query = state.searchQuery.toLowerCase();
   return snapshot.nodes
     .filter((node) => matchesKnowledgeFilters(node, snapshot.edges, state.filters))
-    .filter((node) => !query || knowledgeSearchText(node).includes(query))
-    .sort((a, b) => compareText(a.label, b.label) || compareText(a.id, b.id));
+    .filter((node) => !query || knowledgeSearchText(node).includes(query));
 }
 
 function matchesKnowledgeFilters(
