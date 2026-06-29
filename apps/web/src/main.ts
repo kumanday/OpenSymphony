@@ -25,7 +25,10 @@ export function createWebTransport(gatewayUrl = defaultGatewayUrl) {
 }
 
 export function createWebGraphAdapter(gatewayUrl = defaultGatewayUrl) {
-  return createGatewayGraphAdapter(gatewayUrl);
+  return createGatewayGraphAdapter(gatewayUrl, globalThis.fetch, {
+    defaultVisibility: "public",
+    maxVisibility: "public",
+  });
 }
 
 if (root) {
@@ -34,6 +37,7 @@ if (root) {
     mode: "web",
     title: "OpenSymphony Web",
     transport: createWebTransport(),
+    graphAdapter: createWebGraphAdapter(),
     profileController: createWebProfileController({ defaultGatewayUrl }),
     modelProfileController: createWebModelProfileController(),
     onGatewayUrlChanged: async (gatewayUrl) =>
@@ -41,6 +45,7 @@ if (root) {
         baseUri: gatewayUrl,
         transport: "loopback_http",
       }),
+    onGraphGatewayUrlChanged: createWebGraphAdapter,
   });
 }
 

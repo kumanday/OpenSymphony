@@ -21,7 +21,15 @@ import type {
   AuthState,
   ModelConfigurationProfile,
   ModelCredentialMode,
+  MemoryGraphUpdatedEvent,
 } from "@opensymphony/gateway-schema";
+import {
+  createInitialGraphState,
+  graphReducer,
+  visibleGraphSnapshot,
+  type GraphDataAdapter,
+  type GraphState,
+} from "@opensymphony/graph";
 import {
   authStateFromError,
   createModelProfile,
@@ -156,6 +164,8 @@ export interface OpenSymphonyAppOptions {
   initialProfiles?: ConnectionProfile[];
   initialModelProfiles?: ModelConfigurationProfile[];
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
+  graphAdapter?: GraphDataAdapter;
+  onGraphGatewayUrlChanged?: (gatewayUrl: string) => GraphDataAdapter;
 }
 
 export interface OpenSymphonyAppHandle {
@@ -212,6 +222,8 @@ interface AppState {
   // Planning workspace state
   planningWorkspace: PlanningWorkspaceState;
   planningEdit: PlanningEditState;
+  graph: GraphState;
+  graphError: string | null;
 }
 
 interface AuditTrailEntry {
@@ -251,6 +263,7 @@ export function renderOpenSymphonyApp(
 class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private options: OpenSymphonyAppOptions;
   private transport: GatewayReader;
+  private graphAdapter: GraphDataAdapter | null;
   private state: AppState;
   private destroyed = false;
   private eventSubscription: {
@@ -267,6 +280,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
     this.transport = options.transport;
+    this.graphAdapter = options.graphAdapter ?? null;
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
     const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
@@ -316,6 +330,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       pendingSnapshots: new Map(),
       planningWorkspace: emptyPlanningWorkspaceState(),
       planningEdit: { ...emptyPlanningEditState },
+      graph: createInitialGraphState(),
+      graphError: null,
     };
     this.loadPlanningWorkspace("opensymphony-local");
   }
@@ -418,6 +434,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
+        this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(active.gatewayUrl) ?? this.graphAdapter;
+        this.state.graph = createInitialGraphState();
       }
     } catch (error) {
       this.state.connectionMessage = `Profiles unavailable: ${errorMessage(error)}`;
@@ -608,6 +626,42 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
+  private async loadKnowledgeGraph(bundleId?: string): Promise<void> {
+    if (!this.graphAdapter) {
+      this.state.graphError = "Knowledge Graph unavailable for the active transport";
+      return;
+    }
+    this.state.graphError = null;
+    this.state.graph = graphReducer(this.state.graph, { type: "LAYOUT_STATUS_SET", status: "loading" });
+    this.render();
+    try {
+      if (!this.state.graph.bundles) {
+        const bundles = await this.graphAdapter.listBundles();
+        this.state.graph = graphReducer(this.state.graph, { type: "BUNDLES_LOADED", bundles });
+      }
+      const selectedBundleId = bundleId ?? this.state.graph.selectedBundleId ?? this.state.graph.bundles?.bundles[0]?.id ?? null;
+      if (!selectedBundleId) {
+        this.state.graph = graphReducer(this.state.graph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+        this.render();
+        return;
+      }
+      this.state.graph = graphReducer(this.state.graph, { type: "BUNDLE_SELECTED", bundleId: selectedBundleId });
+      await this.refreshKnowledgeGraphSnapshot(selectedBundleId);
+    } catch (error) {
+      this.state.graphError = errorMessage(error);
+      this.state.graph = graphReducer(this.state.graph, { type: "LAYOUT_STATUS_SET", status: "failed", error: this.state.graphError });
+      this.render();
+    }
+  }
+
+  private async refreshKnowledgeGraphSnapshot(bundleId: string): Promise<void> {
+    if (!this.graphAdapter) return;
+    const snapshot = await this.graphAdapter.getGraphSnapshot(bundleId);
+    this.state.graph = graphReducer(this.state.graph, { type: "SNAPSHOT_LOADED", snapshot });
+    this.state.graph = graphReducer(this.state.graph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+    this.render();
+  }
+
   private startEventSubscription(): void {
     if (this.eventSubscription?.transport === this.transport || typeof this.transport.events !== "function") {
       return;
@@ -687,6 +741,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async onGatewayEvent(envelope: GatewayEnvelope): Promise<void> {
+    if (envelope.event_kind === "memory_graph_updated") {
+      if (isMemoryGraphUpdatedEvent(envelope.payload)) {
+        this.state.graph = graphReducer(this.state.graph, { type: "GRAPH_UPDATED", event: envelope.payload });
+        this.render();
+        await this.loadKnowledgeGraph(envelope.payload.bundle_id);
+      }
+      return;
+    }
     if (!this.eventAffectsCurrentView(envelope)) {
       return;
     }
@@ -772,6 +834,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     await this.loadRunOverlays(taskGraph);
     if (selectedNode) {
       await this.refreshSelectedRun(selectedNode);
+    }
+    if (this.state.graphPaneView === "knowledge") {
+      await this.loadKnowledgeGraph();
     }
     this.render();
   }
@@ -861,6 +926,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private selectGraphPaneView(view: GraphPaneView): void {
     this.state.graphPaneView = view;
     this.render();
+    if (view === "knowledge") {
+      void this.loadKnowledgeGraph();
+    }
   }
 
   private toggleActivityEvent(eventKey: string): void {
@@ -1046,6 +1114,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.stopEventSubscription();
       await this.transport.close().catch(() => undefined);
       this.transport = await this.options.onGatewayUrlChanged(profile.gatewayUrl);
+      this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(profile.gatewayUrl) ?? this.graphAdapter;
+      this.state.graph = createInitialGraphState();
     }
     await this.refresh();
   }
@@ -1083,6 +1153,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(saved.gatewayUrl);
+        this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(saved.gatewayUrl) ?? this.graphAdapter;
+        this.state.graph = createInitialGraphState();
       }
       await this.refresh();
     } catch (error) {
@@ -1147,6 +1219,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
+        this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(active.gatewayUrl) ?? this.graphAdapter;
+        this.state.graph = createInitialGraphState();
       }
       this.render();
     } catch (error) {
@@ -1751,7 +1825,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const showingTasks = this.state.graphPaneView === "task";
     const content = showingTasks
       ? this.renderTaskGraph()
-      : renderKnowledgeGraphScaffold(this.selectedTaskNode());
+      : renderKnowledgeGraphScaffold(this.state.graph, this.state.graphError);
     return `
       <section class="os-panel os-task-graph-panel">
         <div class="os-segmented" data-testid="graph-view-toggle">
@@ -2955,6 +3029,17 @@ function isWorkspacePaneResizeHandle(value: string | undefined): value is Worksp
   return value === "task-run" || value === "run-evidence";
 }
 
+function isMemoryGraphUpdatedEvent(value: unknown): value is MemoryGraphUpdatedEvent {
+  if (!value || typeof value !== "object") return false;
+  const event = value as { bundle_id?: unknown; cursor?: unknown; updated_at?: unknown };
+  const cursor = event.cursor as { sequence?: unknown; partition?: unknown } | undefined;
+  return typeof event.bundle_id === "string"
+    && typeof event.updated_at === "string"
+    && !!cursor
+    && typeof cursor.sequence === "number"
+    && typeof cursor.partition === "string";
+}
+
 function renderRunActivity(
   events: RunEvent[] | null,
   expandedActivityEvents: Set<string>,
@@ -3007,27 +3092,66 @@ function renderActivityEvent(event: RunEvent, eventKey: string, expanded: boolea
   `;
 }
 
-function renderKnowledgeGraphScaffold(node: TaskGraphNode | null): string {
-  const label = node ? nodeLabel(node) : "No issue selected";
-  const title = node?.title ?? "Select a task to anchor graph context";
+function renderKnowledgeGraphScaffold(graph: GraphState, error: string | null): string {
+  const snapshot = visibleGraphSnapshot(graph);
+  const status = error
+    ? "failed"
+    : graph.freshnessStatus === "stale"
+      ? "stale"
+      : graph.layoutStatus === "loading"
+        ? "loading"
+        : graph.freshnessStatus;
+  const metrics = snapshot?.metrics ?? { orphan_count: 0, broken_link_count: 0, stale_concept_count: 0, warning_count: 0 };
+  const rows = (snapshot?.nodes ?? []).slice(0, 12).map((node) => `
+    <li>
+      <strong>${escapeHtml(node.label)}</strong>
+      <span>${escapeHtml(node.kind)}${node.freshness ? ` / ${escapeHtml(node.freshness)}` : ""}${node.warning_count > 0 ? ` / ${node.warning_count} warnings` : ""}</span>
+    </li>
+  `).join("");
   return `
-    <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold">
-      <div class="os-knowledge-map" aria-hidden="true">
-        <span class="os-kg-node os-kg-node-main">KG</span>
-        <span class="os-kg-node os-kg-node-a">Issue</span>
-        <span class="os-kg-node os-kg-node-b">Docs</span>
-        <span class="os-kg-node os-kg-node-c">Refs</span>
-        <span class="os-kg-edge os-kg-edge-a"></span>
-        <span class="os-kg-edge os-kg-edge-b"></span>
-        <span class="os-kg-edge os-kg-edge-c"></span>
+    <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold" data-graph-freshness="${escapeAttr(status)}">
+      <div class="os-knowledge-status os-knowledge-status-${escapeAttr(status)}" data-testid="knowledge-graph-status">
+        <strong>${escapeHtml(knowledgeGraphStatusLabel(status))}</strong>
+        <span>${escapeHtml(knowledgeGraphStatusDetail(graph, error))}</span>
       </div>
-      <div class="os-knowledge-summary">
-        <strong>${escapeHtml(label)}</strong>
-        <span>${escapeHtml(title)}</span>
-        <em>Graph data unavailable</em>
+      <div class="os-knowledge-metrics" data-testid="knowledge-graph-metrics">
+        <div><strong>${snapshot?.nodes.length ?? 0}</strong><span>Nodes</span></div>
+        <div><strong>${snapshot?.edges.length ?? 0}</strong><span>Edges</span></div>
+        <div><strong>${metrics.stale_concept_count}</strong><span>Stale</span></div>
+        <div><strong>${metrics.warning_count}</strong><span>Warnings</span></div>
       </div>
+      <ul class="os-knowledge-list" data-testid="knowledge-graph-node-list">
+        ${rows || `<li><strong>No graph loaded</strong><span>Open Knowledge Graph after memory is configured.</span></li>`}
+      </ul>
     </div>
   `;
+}
+
+function knowledgeGraphStatusLabel(status: string): string {
+  switch (status) {
+    case "loading":
+      return "Loading graph";
+    case "stale":
+      return "Graph stale";
+    case "warning":
+      return "Graph warnings";
+    case "failed":
+      return "Graph unavailable";
+    case "current":
+    default:
+      return "Graph current";
+  }
+}
+
+function knowledgeGraphStatusDetail(graph: GraphState, error: string | null): string {
+  if (error) return error;
+  if (graph.staleBundleIds.length > 0) {
+    return `Pending refresh for ${graph.staleBundleIds.join(", ")}`;
+  }
+  if (graph.warningBundleIds.length > 0) {
+    return `Warnings in ${graph.warningBundleIds.join(", ")}`;
+  }
+  return graph.lastUpdatedAt ? `Updated ${graph.lastUpdatedAt}` : "Waiting for memory graph data";
 }
 
 function renderActivityLifecycleIndicator(events: RunEvent[]): string {
@@ -4048,6 +4172,20 @@ function appShellStyles(): string {
     .os-activity-toggle { width: 24px; height: 24px; min-height: 24px; padding: 0; border-radius: 999px; display: inline-grid; place-items: center; font-size: 13px; line-height: 1; }
     .os-activity-detail { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #d8dee4; border-radius: 5px; padding: 8px; background: #ffffff; font-size: 12px; line-height: 1.35; }
     .os-knowledge-graph { display: grid; gap: 10px; }
+    .os-knowledge-status { display: grid; gap: 3px; border: 1px solid #d8dee4; border-radius: 6px; padding: 9px 10px; background: #f8fafc; }
+    .os-knowledge-status strong { color: #23566f; }
+    .os-knowledge-status span { color: #667788; font-size: 12px; overflow-wrap: anywhere; }
+    .os-knowledge-status-stale { border-color: #f59e0b; background: #fffbeb; }
+    .os-knowledge-status-warning { border-color: #d97706; background: #fff7ed; }
+    .os-knowledge-status-failed { border-color: #ef4444; background: #fef2f2; }
+    .os-knowledge-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+    .os-knowledge-metrics div { min-height: 42px; display: grid; align-content: center; gap: 2px; border: 1px solid #d8dee4; border-radius: 6px; padding: 7px 8px; background: #fbfcfd; }
+    .os-knowledge-metrics strong { color: #17202a; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .os-knowledge-metrics span { color: #667788; font-size: 10px; line-height: 1.2; }
+    .os-knowledge-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .os-knowledge-list li { display: grid; gap: 2px; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 9px; background: #ffffff; min-width: 0; }
+    .os-knowledge-list strong { color: #17202a; overflow-wrap: anywhere; font-size: 12px; }
+    .os-knowledge-list span { color: #667788; font-size: 11px; }
     .os-knowledge-map { position: relative; min-height: 220px; border-radius: 8px; background: #fbfcfd; box-shadow: inset 0 0 0 1px rgba(57, 112, 143, 0.14); overflow: hidden; }
     .os-kg-node { position: absolute; z-index: 2; display: grid; place-items: center; width: 54px; height: 54px; border-radius: 999px; background: #e7f1f5; color: #23566f; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.24), 0 10px 24px rgba(15, 23, 42, 0.08); font-size: 11px; font-weight: 700; }
     .os-kg-node-main { left: calc(50% - 27px); top: calc(50% - 27px); background: #dcfce7; color: #166534; }

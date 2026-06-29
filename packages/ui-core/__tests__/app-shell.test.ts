@@ -6,6 +6,11 @@
 
 import { renderOpenSymphonyApp } from "../src/app-shell.js";
 import { MockGatewayTransport } from "@opensymphony/api-client";
+import {
+  createFixtureGraphAdapter,
+  fixtureGraphSnapshot,
+  type GraphDataAdapter,
+} from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -615,6 +620,7 @@ describe("OpenSymphonyApp mount", () => {
       mode: "desktop",
       title: "OpenSymphony Desktop",
       transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
     });
     await flushUntil(
       () =>
@@ -666,6 +672,7 @@ describe("OpenSymphonyApp mount", () => {
       root,
       mode: "desktop",
       transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
     });
 
     await flushUntil(
@@ -765,15 +772,78 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
 
     (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
-    await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']") !== null);
+    await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent?.includes("COE-465") ?? false);
     expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
     expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
-    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-449");
+    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-465");
+    expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain("Nodes");
     expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-scaffold']")).toBeNull();
 
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
     expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("refreshes the Knowledge Graph on memory_graph_updated events", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    let resolveRefresh: (() => void) | null = null;
+    const refreshGate = new Promise<void>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    let reads = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getGraphSnapshot() {
+        reads += 1;
+        if (reads > 1) await refreshGate;
+        return reads > 1
+          ? {
+              ...fixtureGraphSnapshot,
+              cursor: { ...fixtureGraphSnapshot.cursor, sequence: 2 },
+              metrics: { orphan_count: 0, broken_link_count: 0, stale_concept_count: 1, warning_count: 2 },
+            }
+          : fixtureGraphSnapshot;
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent?.includes("COE-465") ?? false);
+
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 20, partition: "events" },
+      entity_ref: { kind: "unknown", id: "memory-graph:local-default" },
+      event_kind: "memory_graph_updated",
+      emitted_at: "2026-06-28T00:01:00Z",
+      payload: {
+        schema_version: schemaVersionV1(),
+        bundle_id: "local-default",
+        cursor: { sequence: 2, partition: "memory-graph:local-default" },
+        updated_at: "2026-06-28T00:01:00Z",
+      },
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph stale") ?? false);
+    resolveRefresh?.();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph warnings") ?? false);
+    expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain("2");
 
     await handle.destroy();
   });

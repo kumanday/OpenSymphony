@@ -115,6 +115,67 @@ describe("@opensymphony/graph", () => {
     );
   });
 
+  it("clamps scoped HTTP graph adapters to public visibility", async () => {
+    const fetchMock = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ bundles: [] }),
+    })) as unknown as typeof fetch;
+    const gateway = createGatewayGraphAdapter("http://localhost:2468", fetchMock, {
+      defaultVisibility: "public",
+      maxVisibility: "public",
+    });
+
+    await gateway.listBundles();
+    await gateway.getGraphSnapshot("local-default", { visibility: "all_accessible" });
+    await gateway.search("graph", { visibility: "private", limit: 5 });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:2468/api/v1/memory/bundles?visibility=public",
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:2468/api/v1/memory/bundles/local-default/graph?visibility=public",
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "http://localhost:2468/api/v1/memory/search?visibility=public&query=graph&limit=5",
+    );
+  });
+
+  it("marks graph updates stale until the updated snapshot loads", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+
+    const stale = graphReducer(current, {
+      type: "GRAPH_UPDATED",
+      event: {
+        schema_version: fixtureGraphSnapshot.schema_version,
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: fixtureGraphSnapshot.cursor.sequence + 1, partition: fixtureGraphSnapshot.cursor.partition },
+        updated_at: "2026-06-28T00:01:00Z",
+      },
+    });
+
+    expect(stale.freshnessStatus).toBe("stale");
+    expect(stale.staleBundleIds).toEqual(["local-default"]);
+
+    const refreshed = graphReducer(stale, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 1 },
+        metrics: { orphan_count: 0, broken_link_count: 0, stale_concept_count: 1, warning_count: 1 },
+      },
+    });
+    expect(refreshed.freshnessStatus).toBe("warning");
+    expect(refreshed.staleBundleIds).toEqual([]);
+    expect(refreshed.warningBundleIds).toEqual(["local-default"]);
+  });
+
   it("rejects non-OK HTTP graph responses before parsing JSON", async () => {
     const json = jest.fn();
     const fetchMock = jest.fn(async () => ({

@@ -858,7 +858,10 @@ fn frontmatter_view(config: &MemoryConfig, concept: &OkfConcept) -> MemoryFrontm
                     serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
                 )
             })
-            .map(|(key, value)| (key, redact_value_for_dto(config, value)))
+            .map(|(key, value)| {
+                let value = redact_value_for_dto_key(config, &key, value);
+                (key, value)
+            })
             .collect(),
     }
 }
@@ -912,30 +915,51 @@ fn redact_map_for_dto(
     map: BTreeMap<String, serde_json::Value>,
 ) -> BTreeMap<String, serde_json::Value> {
     map.into_iter()
-        .map(|(key, value)| (key, redact_value_for_dto(config, value)))
+        .map(|(key, value)| {
+            let value = redact_value_for_dto_key(config, &key, value);
+            (key, value)
+        })
         .collect()
 }
 
-fn redact_value_for_dto(
+fn redact_value_for_dto_key(
     config: &MemoryConfig,
+    key: &str,
     value: serde_json::Value,
 ) -> serde_json::Value {
+    if is_secret_like_frontmatter_key(key) {
+        return serde_json::Value::String("[redacted-secret]".to_string());
+    }
     match value {
         serde_json::Value::String(value) => serde_json::Value::String(redact_for_dto(config, &value)),
         serde_json::Value::Array(values) => serde_json::Value::Array(
             values
                 .into_iter()
-                .map(|value| redact_value_for_dto(config, value))
+                .map(|value| redact_value_for_dto_key(config, key, value))
                 .collect(),
         ),
         serde_json::Value::Object(values) => serde_json::Value::Object(
             values
                 .into_iter()
-                .map(|(key, value)| (key, redact_value_for_dto(config, value)))
+                .map(|(key, value)| {
+                    let value = redact_value_for_dto_key(config, &key, value);
+                    (key, value)
+                })
                 .collect(),
         ),
         value => value,
     }
+}
+
+fn is_secret_like_frontmatter_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("secret")
+        || key.contains("password")
+        || key.contains("token")
+        || key.contains("api_key")
+        || key.contains("access_key")
+        || key.contains("private_key")
+        || key.contains("credential")
 }
 
 fn json_string(value: &str) -> serde_json::Value {

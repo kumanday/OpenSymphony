@@ -1390,8 +1390,12 @@ resource: https://linear.app/example/issue/COE-123
 tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
+api_key: sk-live-public-fixture
+nested_secret:
+  token: nested-token-fixture
 opensymphony:
   visibility: public
+  credential_ref: local-secret-fixture
   scope_refs:
     - kind: work_item
       id: COE-200
@@ -1607,6 +1611,10 @@ opensymphony:
         assert!(public_json.contains("COE-200"));
         assert!(!public_json.contains("concept:issues/COE-123"));
         assert!(!public_json.contains("COE-123: OKF catalog rebuild"));
+        assert!(!public_json.contains("sk-live-public-fixture"));
+        assert!(!public_json.contains("nested-token-fixture"));
+        assert!(!public_json.contains("local-secret-fixture"));
+        assert!(public_json.contains("[redacted-secret]"));
         assert!(!public_json.contains(".opensymphony/memory"));
         assert!(!public_json.contains(&format!("{}/", repo.path().display())));
         assert!(!public_json.contains(&format!("{}.", repo.path().display())));
@@ -1683,6 +1691,18 @@ opensymphony:
         assert_eq!(
             detail.frontmatter_view.unknown.get("unknown_field"),
             Some(&serde_json::json!("keep-me"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("api_key"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("nested_secret"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.opensymphony.get("credential_ref"),
+            Some(&serde_json::json!("[redacted-secret]"))
         );
         assert!(!detail.links.is_empty());
         assert!(!detail.citations.is_empty());
