@@ -167,10 +167,8 @@ const PYTHON_QUERIES: &[QueryAsset] = &[
 #[non_exhaustive]
 pub enum SourceLanguage {
     Rust,
-    #[serde(rename = "typescript")]
     TypeScript,
     Tsx,
-    #[serde(rename = "javascript")]
     JavaScript,
     Jsx,
     Python,
@@ -898,7 +896,7 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
         let indent = line_body
             .as_bytes()
             .iter()
-            .take_while(|byte| **byte == b' ')
+            .take_while(|byte| matches!(**byte, b' ' | b'\t'))
             .count();
         if indent > 3 {
             byte_offset += line.len();
@@ -962,6 +960,34 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
             }
         }
         byte_offset += line.len();
+    }
+
+    if let Some(fence) = open_fence.take() {
+        let source_span = source_span_for_text(source);
+        let span = SourceSpan {
+            start_byte: fence.content_start_byte,
+            end_byte: source.len(),
+            start_line: fence.content_start_line,
+            start_column: 1,
+            end_line: source_span.end_line,
+            end_column: source_span.end_column,
+        };
+        captures.push(CaptureRecord {
+            query_name: MARKDOWN_FENCE_QUERY_NAME.to_string(),
+            capture_name: "injection.content".to_string(),
+            text: markdown_capture_text(&source[fence.content_start_byte..]),
+            rendered_span: span.render(),
+            span,
+        });
+        if let Some((language, language_span)) = fence.language {
+            captures.push(CaptureRecord {
+                query_name: MARKDOWN_FENCE_QUERY_NAME.to_string(),
+                capture_name: "injection.language".to_string(),
+                text: language,
+                rendered_span: language_span.render(),
+                span: language_span,
+            });
+        }
     }
 
     captures
@@ -1076,6 +1102,8 @@ mod tests {
     const MARKDOWN_INDENTED: &str = "    ```ignored\nraw\n    ```\n";
     const MARKDOWN_CRLF: &str = "```python\r\nprint('ok')\r\n```\r\n";
     const MARKDOWN_TILDE: &str = "~~~python\nprint('tilde')\n~~~\n";
+    const MARKDOWN_UNCLOSED: &str = "```python\nprint('open')\n";
+    const MARKDOWN_TAB_INDENTED: &str = "\t```python\nprint('tab')\n\t```\n";
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
@@ -1401,6 +1429,26 @@ mod tests {
         .expect("markdown parses");
         assert_capture(&tilde, "injection.language", "python");
         assert_capture(&tilde, "injection.content", "print('tilde')\n");
+
+        let unclosed = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/unclosed.md")),
+            MARKDOWN_UNCLOSED,
+        )
+        .expect("markdown parses");
+        let content = find_capture(&unclosed, "injection.content", "print('open')\n");
+        assert_eq!(content.span.start_byte, 10);
+        assert_eq!(content.span.end_byte, MARKDOWN_UNCLOSED.len());
+        assert_eq!(content.rendered_span, "2:1-3:1");
+
+        let tab_indented = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/tab_indented.md")),
+            MARKDOWN_TAB_INDENTED,
+        )
+        .expect("markdown parses");
+        assert_capture(&tab_indented, "injection.language", "python");
+        assert_capture(&tab_indented, "injection.content", "print('tab')\n");
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
