@@ -2,7 +2,10 @@ import { createConnection } from "node:net";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import { fixtureBundleList, fixtureGraphSnapshot } from "@opensymphony/graph";
+import {
+  fixtureBundleList,
+  fixtureGraphSnapshot,
+} from "@opensymphony/graph";
 
 const repoRoot = resolve(__dirname, "../../..");
 const webDist = join(repoRoot, "apps/web/dist");
@@ -24,42 +27,47 @@ describe("Knowledge Graph renderer", () => {
         if (String(error).includes("Executable doesn't exist")) return;
         throw error;
       }
-      const page = await browser.newPage({ viewport: { width: 1024, height: 768 } });
-      await page.goto(`${server.url}/app/`, { waitUntil: "domcontentloaded" });
-      await page.getByRole("button", { name: "Knowledge Graph" }).click();
-      await page.waitForFunction(() => {
-        const canvas = document.querySelector("[data-testid='knowledge-graph-canvas']");
-        return canvas instanceof HTMLCanvasElement && canvas.dataset.nonblank === "true";
-      });
-      const stats = await page.$eval(
-        "[data-testid='knowledge-graph-canvas']",
-        (canvasElement) => {
-          const canvas = canvasElement as HTMLCanvasElement;
-          const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
-          if (!gl) return { changed: 0, total: 0, width: canvas.width, height: canvas.height };
-          const width = canvas.width;
-          const height = canvas.height;
-          const pixels = new Uint8Array(width * height * 4);
-          gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-          const stride = Math.max(1, Math.floor((width * height) / 5_000));
-          let changed = 0;
-          let total = 0;
-          for (let pixel = 0; pixel < width * height; pixel += stride) {
-            const index = pixel * 4;
-            if (pixels[index + 3] === 0) continue;
-            total += 1;
-            const delta = Math.abs(pixels[index] - 248)
-              + Math.abs(pixels[index + 1] - 250)
-              + Math.abs(pixels[index + 2] - 252);
-            if (delta > 30) changed += 1;
-          }
-          return { changed, total, width, height };
-        },
-      );
-      expect(stats.width).toBeGreaterThan(0);
-      expect(stats.height).toBeGreaterThan(0);
-      expect(stats.total).toBeGreaterThan(100);
-      expect(stats.changed).toBeGreaterThan(20);
+      for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+        const page = await browser.newPage({ viewport });
+        await page.goto(`${server.url}/app/`, { waitUntil: "domcontentloaded" });
+        await page.getByRole("button", { name: "Knowledge Graph" }).click();
+        await page.waitForFunction(() => {
+          const canvas = document.querySelector("[data-testid='knowledge-graph-canvas']");
+          return canvas instanceof HTMLCanvasElement && canvas.dataset.nonblank === "true";
+        });
+        const screenshot = await page.screenshot();
+        expect(screenshot.length).toBeGreaterThan(10_000);
+        const stats = await page.$eval(
+          "[data-testid='knowledge-graph-canvas']",
+          (canvasElement) => {
+            const canvas = canvasElement as HTMLCanvasElement;
+            const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+            if (!gl) return { changed: 0, total: 0, width: canvas.width, height: canvas.height };
+            const width = canvas.width;
+            const height = canvas.height;
+            const pixels = new Uint8Array(width * height * 4);
+            gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            const stride = Math.max(1, Math.floor((width * height) / 5_000));
+            let changed = 0;
+            let total = 0;
+            for (let pixel = 0; pixel < width * height; pixel += stride) {
+              const index = pixel * 4;
+              if (pixels[index + 3] === 0) continue;
+              total += 1;
+              const delta = Math.abs(pixels[index] - 248)
+                + Math.abs(pixels[index + 1] - 250)
+                + Math.abs(pixels[index + 2] - 252);
+              if (delta > 30) changed += 1;
+            }
+            return { changed, total, width, height };
+          },
+        );
+        expect(stats.width).toBeGreaterThan(0);
+        expect(stats.height).toBeGreaterThan(0);
+        expect(stats.total).toBeGreaterThan(100);
+        expect(stats.changed).toBeGreaterThan(20);
+        await page.close();
+      }
     } finally {
       await browser?.close();
       await new Promise<void>((resolveClose) => server.close(resolveClose));

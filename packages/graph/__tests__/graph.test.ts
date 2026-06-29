@@ -1,6 +1,8 @@
 import {
   applyGraphFilters,
   createFixtureGraphAdapter,
+  createCommunityOverviewSnapshot,
+  createScaleGraphSnapshot,
   computeGraphLayout,
   createGraphLayoutAdapter,
   createInitialGraphState,
@@ -13,6 +15,7 @@ import {
   initialGraphFilters,
   initialGraphState,
   searchGraphSnapshot,
+  visibleGraphSnapshot,
 } from "@opensymphony/graph";
 
 describe("@opensymphony/graph", () => {
@@ -38,6 +41,61 @@ describe("@opensymphony/graph", () => {
 
     const results = searchGraphSnapshot(fixtureGraphSnapshot, "graph", initialGraphFilters);
     expect(results.map((result) => result.concept_id)).toEqual(["issues/COE-465", "tag:graph-view"]);
+  });
+
+  it("covers scale fixtures and defaults very large graphs to community overview", () => {
+    const small = createScaleGraphSnapshot(500);
+    const smallLayout = computeGraphLayout(small, { kind: "force", width: 960, height: 540 });
+    expect(small.nodes).toHaveLength(500);
+    expect(smallLayout.nodes).toHaveLength(500);
+    expect(smallLayout.nodes.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y))).toBe(true);
+
+    const medium = createScaleGraphSnapshot(5_000);
+    const mediumLayout = computeGraphLayout(medium, { kind: "force", width: 1280, height: 720 });
+    expect(mediumLayout.nodes).toHaveLength(5_000);
+    expect(mediumLayout.nodes.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y))).toBe(true);
+    expect(new Set(mediumLayout.nodes.map((node) => node.communityId).filter(Boolean)).size).toBeGreaterThan(1);
+
+    const large = createScaleGraphSnapshot(20_000);
+    const state = graphReducer(initialGraphState, { type: "SNAPSHOT_LOADED", snapshot: large });
+    const visible = visibleGraphSnapshot(state);
+    expect(large.nodes).toHaveLength(20_000);
+    expect(visible?.nodes.length).toBeLessThan(large.nodes.length);
+    expect(visible?.nodes.every((node) => node.kind === "bundle" || node.kind === "community")).toBe(true);
+    expect(visible?.filters_applied).toContain("overview:community-aggregation");
+    expect(visible?.metrics).toBeUndefined();
+    expect(visible?.communities.every((community) => community.node_ids.every((nodeId) => nodeId.startsWith("concept:")))).toBe(true);
+    const staleCommunity = large.communities[0];
+    const staleOverview = createCommunityOverviewSnapshot({
+      ...large,
+      communities: [
+        { ...staleCommunity, node_ids: [...staleCommunity.node_ids, "concept:missing"], concept_count: staleCommunity.concept_count + 1 },
+        ...large.communities.slice(1),
+      ],
+    });
+    const normalizedCommunity = staleOverview.communities.find((community) => community.id === staleCommunity.id);
+    expect(normalizedCommunity?.node_ids).not.toContain("concept:missing");
+    expect(normalizedCommunity?.concept_count).toBe(normalizedCommunity?.node_ids.length);
+    expect(() => createCommunityOverviewSnapshot({
+      ...large,
+      nodes: [
+        ...large.nodes,
+        {
+          ...large.nodes[0],
+          id: "bundle:other",
+          bundle_id: "other",
+          label: "Other bundle",
+        },
+      ],
+    })).toThrow("single bundle node");
+
+    const neighborhood = visibleGraphSnapshot(graphReducer(state, {
+      type: "NODE_FOCUSED",
+      nodeId: `bundle:${large.bundle_id}`,
+      neighborhoodDepth: 1,
+    }));
+    expect(neighborhood?.filters_applied).toContain("overview:community-aggregation");
+    expect(neighborhood?.nodes.length).toBeLessThan(large.nodes.length);
   });
 
   it("normalizes selection and history state for URLs or app history", () => {

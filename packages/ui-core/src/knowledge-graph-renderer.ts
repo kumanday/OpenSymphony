@@ -12,6 +12,7 @@ type ScheduledDraw = {
 };
 
 const scheduledCanvasDraws = new WeakMap<HTMLCanvasElement, ScheduledDraw>();
+const maxVisibleGraphLabels = 80;
 
 export interface KnowledgeGraphSurface {
   snapshot: MemoryGraphSnapshot | null;
@@ -54,6 +55,7 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
         <canvas class="os-knowledge-canvas" data-testid="knowledge-graph-canvas" aria-label="Knowledge Graph canvas"></canvas>
         <div class="os-knowledge-labels" data-kg-labels>${renderLabels(layout, state.selectedNodeIds)}</div>
       </div>
+      ${renderSelectedInspector(snapshot, state.selectedNodeIds)}
       ${renderFallbackList(snapshot, state.selectedNodeIds)}
     </div>
   `;
@@ -77,6 +79,7 @@ export function mountKnowledgeGraphRenderer(
   };
   let canvasSize = { width: 0, height: 0, cssWidth: 0, cssHeight: 0 };
   let scheduledDraw: ReturnType<typeof setTimeout> | number | null = null;
+  const reducedMotion = prefersReducedMotion();
   const draw = () => {
     const viewport = canvasViewport(stage);
     canvasSize = resizeCanvasIfNeeded(canvas, viewport, canvasSize);
@@ -85,6 +88,7 @@ export function mountKnowledgeGraphRenderer(
     }
     syncLabels(root, options.layout!, view, viewport);
     canvas.dataset.nonblank = options.layout!.nodes.length > 0 ? "true" : "false";
+    canvas.dataset.reducedMotion = reducedMotion ? "true" : "false";
   };
   const requestDraw = () => {
     if (scheduledDraw !== null) return;
@@ -93,7 +97,10 @@ export function mountKnowledgeGraphRenderer(
       scheduledCanvasDraws.delete(canvas);
       if (canvas.isConnected) draw();
     };
-    if (typeof requestAnimationFrame === "function") {
+    if (reducedMotion) {
+      scheduledDraw = setTimeout(run, 120);
+      scheduledCanvasDraws.set(canvas, { handle: scheduledDraw, kind: "timeout" });
+    } else if (typeof requestAnimationFrame === "function") {
       scheduledDraw = requestAnimationFrame(run);
       scheduledCanvasDraws.set(canvas, { handle: scheduledDraw, kind: "animation-frame" });
     } else {
@@ -232,9 +239,8 @@ function renderStatus(state: GraphState): string {
 function renderLabels(layout: GraphLayoutResult | null, selectedNodeIds: readonly string[]): string {
   if (!layout) return "";
   const selected = new Set(selectedNodeIds);
-  const showAll = layout.nodes.length <= 80;
-  return layout.nodes
-    .filter((node) => showAll || selected.has(node.nodeId) || node.kind === "concept")
+  const visible = labelNodes(layout.nodes, selected);
+  return visible
     .map((node) => {
       const left = (node.x / layout.width) * 100;
       const top = (node.y / layout.height) * 100;
@@ -242,6 +248,56 @@ function renderLabels(layout: GraphLayoutResult | null, selectedNodeIds: readonl
       return `<button type="button" class="os-kg-label${picked}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%;visibility:hidden" data-kg-node-id="${escapeAttr(node.nodeId)}">${escapeHtml(shortLabel(node.label))}</button>`;
     })
     .join("");
+}
+
+function labelNodes(
+  nodes: readonly GraphLayoutResult["nodes"][number][],
+  selected: ReadonlySet<string>,
+): GraphLayoutResult["nodes"][number][] {
+  if (nodes.length <= maxVisibleGraphLabels) return [...nodes];
+  const selectedNodes = nodes.filter((node) => selected.has(node.nodeId));
+  const bundleNodes = nodes.filter((node) => node.kind === "bundle");
+  const priorityNodes = uniqueLayoutNodes([...bundleNodes, ...selectedNodes]).slice(0, maxVisibleGraphLabels);
+  const priorityIds = new Set(priorityNodes.map((node) => node.nodeId));
+  return [
+    ...priorityNodes,
+    ...nodes
+      .filter((node) => !priorityIds.has(node.nodeId) && (node.kind === "community" || node.kind === "concept"))
+      .slice(0, Math.max(0, maxVisibleGraphLabels - priorityNodes.length)),
+  ];
+}
+
+function uniqueLayoutNodes(
+  nodes: readonly GraphLayoutResult["nodes"][number][],
+): GraphLayoutResult["nodes"][number][] {
+  const seen = new Set<string>();
+  return nodes.filter((node) => {
+    if (seen.has(node.nodeId)) return false;
+    seen.add(node.nodeId);
+    return true;
+  });
+}
+
+function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
+  const selected = new Set(selectedNodeIds);
+  const node = snapshot?.nodes.find((candidate) => selected.has(candidate.id)) ?? null;
+  if (!node) {
+    return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector"><h3>Inspector</h3><p>No node selected</p></section>`;
+  }
+  const community = node.metrics?.community_id
+    ? snapshot?.communities.find((candidate) => candidate.id === node.metrics.community_id)?.label ?? node.metrics.community_id
+    : "None";
+  return `
+    <section class="os-kg-inspector" data-testid="knowledge-graph-inspector">
+      <h3>${escapeHtml(node.label)}</h3>
+      <dl>
+        <dt>Kind</dt><dd>${escapeHtml(node.kind)}</dd>
+        <dt>Visibility</dt><dd>${escapeHtml(node.visibility ?? "unknown")}</dd>
+        <dt>Community</dt><dd>${escapeHtml(community)}</dd>
+        <dt>Tags</dt><dd>${escapeHtml(node.tags.join(", ") || "None")}</dd>
+      </dl>
+    </section>
+  `;
 }
 
 function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
@@ -253,12 +309,21 @@ function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeId
     <ul class="os-kg-list" data-testid="knowledge-graph-node-list" aria-label="Visible graph nodes">
       ${snapshot.nodes.map((node) => `
         <li class="${selected.has(node.id) ? "is-selected" : ""}">
-          <button type="button" data-kg-node-id="${escapeAttr(node.id)}">${escapeHtml(node.label)}</button>
+          <button type="button" data-kg-node-id="${escapeAttr(node.id)}" ${selected.has(node.id) ? `aria-current="true"` : ""}>${escapeHtml(node.label)}</button>
           <span>${escapeHtml(node.kind)}</span>
         </li>
       `).join("")}
     </ul>
   `;
+}
+
+function prefersReducedMotion(): boolean {
+  if (typeof globalThis.matchMedia !== "function") return false;
+  try {
+    return globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
 }
 
 function graphListNavigationDirection(key: string): -1 | 1 | "first" | "last" | null {
