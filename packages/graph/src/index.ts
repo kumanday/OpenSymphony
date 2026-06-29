@@ -381,11 +381,14 @@ export function createCommunityOverviewSnapshot(snapshot: MemoryGraphSnapshot): 
   const bundle = bundleNodes[0];
   const nodesById = new Map(snapshot.nodes.map((node) => [node.id, node]));
   const normalizedCommunities = snapshot.communities
-    .map((community) => ({
-      ...community,
-      node_ids: community.node_ids.filter((nodeId) => nodesById.has(nodeId)).sort(),
-      concept_count: community.node_ids.filter((nodeId) => nodesById.get(nodeId)?.kind === "concept").length,
-    }))
+    .map((community) => {
+      const nodeIds = community.node_ids.filter((nodeId) => nodesById.has(nodeId)).sort();
+      return {
+        ...community,
+        node_ids: nodeIds,
+        concept_count: nodeIds.filter((nodeId) => nodesById.get(nodeId)?.kind === "concept").length,
+      };
+    })
     .filter((community) => community.node_ids.length > 0)
     .sort((a, b) => compareStrings(a.id, b.id));
   const communityNodes: MemoryGraphNode[] = normalizedCommunities.map((community) => {

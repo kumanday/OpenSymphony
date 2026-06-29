@@ -65,6 +65,17 @@ describe("@opensymphony/graph", () => {
     expect(visible?.filters_applied).toContain("overview:community-aggregation");
     expect(visible?.metrics).toBeUndefined();
     expect(visible?.communities.every((community) => community.node_ids.every((nodeId) => nodeId.startsWith("concept:")))).toBe(true);
+    const staleCommunity = large.communities[0];
+    const staleOverview = createCommunityOverviewSnapshot({
+      ...large,
+      communities: [
+        { ...staleCommunity, node_ids: [...staleCommunity.node_ids, "concept:missing"], concept_count: staleCommunity.concept_count + 1 },
+        ...large.communities.slice(1),
+      ],
+    });
+    const normalizedCommunity = staleOverview.communities.find((community) => community.id === staleCommunity.id);
+    expect(normalizedCommunity?.node_ids).not.toContain("concept:missing");
+    expect(normalizedCommunity?.concept_count).toBe(normalizedCommunity?.node_ids.length);
     expect(() => createCommunityOverviewSnapshot({
       ...large,
       nodes: [

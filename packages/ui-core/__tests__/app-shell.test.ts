@@ -1009,7 +1009,7 @@ describe("OpenSymphonyApp mount", () => {
         layoutStatus: "ready",
       },
     });
-    expect(root.querySelector("[data-testid='knowledge-graph-inspector']")?.textContent).toContain("No concept selected");
+    expect(root.querySelector("[data-testid='knowledge-graph-inspector']")?.textContent).toContain("No node selected");
 
     const originalMatchMedia = globalThis.matchMedia;
     const originalRequestAnimationFrame = globalThis.requestAnimationFrame;

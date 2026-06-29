@@ -279,9 +279,10 @@ function uniqueLayoutNodes(
 }
 
 function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
-  const node = snapshot?.nodes.find((candidate) => selectedNodeIds.includes(candidate.id)) ?? null;
+  const selected = new Set(selectedNodeIds);
+  const node = snapshot?.nodes.find((candidate) => selected.has(candidate.id)) ?? null;
   if (!node) {
-    return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector"><h3>Inspector</h3><p>No concept selected</p></section>`;
+    return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector"><h3>Inspector</h3><p>No node selected</p></section>`;
   }
   const community = node.metrics?.community_id
     ? snapshot?.communities.find((candidate) => candidate.id === node.metrics.community_id)?.label ?? node.metrics.community_id
