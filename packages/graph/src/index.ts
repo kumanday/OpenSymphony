@@ -653,7 +653,7 @@ function hierarchicalLayout(
     ["source_ref", 4],
   ]);
   const groups = groupBy(nodes, (node) => String(levels.get(node.kind) ?? 2));
-  const levelKeys = [...groups.keys()].sort(compareStrings);
+  const levelKeys = [...groups.keys()].sort((a, b) => Number(a) - Number(b));
   return levelKeys.flatMap((levelKey, levelIndex) => {
     const group = [...(groups.get(levelKey) ?? [])].sort(compareNodes);
     return group.map((node, index) => layoutNode(
@@ -732,10 +732,11 @@ function graphDistances(edges: readonly MemoryGraphEdge[], root: string): Map<st
   const distances = new Map([[root, 0]]);
   let frontier = [root];
   while (frontier.length > 0) {
+    const frontierSet = new Set(frontier);
     const next: string[] = [];
     for (const edge of edges) {
       for (const [from, to] of [[edge.source_id, edge.target_id], [edge.target_id, edge.source_id]] as const) {
-        if (!frontier.includes(from) || distances.has(to)) continue;
+        if (!frontierSet.has(from) || distances.has(to)) continue;
         distances.set(to, (distances.get(from) ?? 0) + 1);
         next.push(to);
       }

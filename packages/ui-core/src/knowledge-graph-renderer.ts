@@ -305,7 +305,13 @@ function disposeRenderable(object: THREE.Object3D): void {
 }
 
 function graphLayoutKey(layout: GraphLayoutResult): string {
-  return `${layout.kind}:${layout.width}:${layout.height}:${layout.generatedAt}:${layout.nodes.length}:${layout.edges.length}`;
+  const nodes = layout.nodes
+    .map((node) => `${node.nodeId}:${node.x.toFixed(2)}:${node.y.toFixed(2)}:${node.z.toFixed(2)}:${node.radius}`)
+    .join("|");
+  const edges = layout.edges
+    .map((edge) => `${edge.edgeId}:${edge.sourceId}:${edge.targetId}`)
+    .join("|");
+  return `${layout.kind}:${layout.width}:${layout.height}:${nodes}:${edges}`;
 }
 
 function edgeSegments(layout: GraphLayoutResult): THREE.LineSegments {
@@ -315,8 +321,8 @@ function edgeSegments(layout: GraphLayoutResult): THREE.LineSegments {
     const source = byId.get(edge.sourceId);
     const target = byId.get(edge.targetId);
     if (!source || !target) continue;
-    positions.push(...projectPoint(source.x, source.y, source.z, layout, { scale: 1, dx: 0, dy: 0 }));
-    positions.push(...projectPoint(target.x, target.y, target.z, layout, { scale: 1, dx: 0, dy: 0 }));
+    positions.push(...projectPoint(source.x, source.y, 0, layout, { scale: 1, dx: 0, dy: 0 }));
+    positions.push(...projectPoint(target.x, target.y, 0, layout, { scale: 1, dx: 0, dy: 0 }));
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));

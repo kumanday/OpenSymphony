@@ -923,6 +923,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       },
       onFocus: (nodeId) => {
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
+        this.state.knowledgeGraphLayout = null;
+        this.knowledgeGraphLayoutSize = null;
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+        this.scheduleKnowledgeGraphLayout();
       },
     });
   }
