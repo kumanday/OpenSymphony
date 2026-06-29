@@ -1078,14 +1078,15 @@ fn has_compound_secret_key(parts: &[&str]) -> bool {
     (compact.ends_with("token")
         && matches!(
             compact.trim_end_matches("token"),
-            "auth" | "refresh" | "id" | "xsrf" | "csrf" | "bearer" | "access" | "client" | "session"
+            "api" | "auth" | "oauth" | "refresh" | "id" | "xsrf" | "csrf" | "bearer" | "access" | "client" | "session"
         ))
         || (compact.ends_with("key")
             && matches!(
                 compact.trim_end_matches("key"),
                 "api" | "private" | "signing" | "encryption" | "access"
             ))
-        || (compact.ends_with("secret") && compact.trim_end_matches("secret") == "client")
+        || (compact.ends_with("secret")
+            && matches!(compact.trim_end_matches("secret"), "api" | "client"))
         || (compact.ends_with("id") && compact.trim_end_matches("id") == "session")
 }
 

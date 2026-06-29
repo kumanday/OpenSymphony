@@ -2,7 +2,6 @@ import { createConnection } from "node:net";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import { chromium } from "playwright";
 import { fixtureBundleList, fixtureGraphSnapshot } from "@opensymphony/graph";
 
 const repoRoot = resolve(__dirname, "../../..");
@@ -14,11 +13,13 @@ describe("Knowledge Graph renderer", () => {
   it("renders a nonblank WebGL canvas in the built web app", async () => {
     const indexPath = join(webDist, "index.html");
     if (!existsSync(indexPath)) return;
+    const playwright = await loadPlaywright();
+    if (!playwright) return;
     const server = await startStaticServer(webDist);
-    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    let browser: Awaited<ReturnType<typeof playwright.chromium.launch>> | null = null;
     try {
       try {
-        browser = await chromium.launch({ headless: true });
+        browser = await playwright.chromium.launch({ headless: true });
       } catch (error) {
         if (String(error).includes("Executable doesn't exist")) return;
         throw error;
@@ -68,15 +69,30 @@ describe("Knowledge Graph renderer", () => {
   it("keeps the static test server contained to the web dist root", async () => {
     const server = await startStaticServer(webDist);
     try {
-      const response = await rawHttpGet(server, "/app//../../../etc/passwd");
+      const response = await rawHttpGet(server, "/app/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc/passwd");
       expect(response.statusLine).toContain("404");
+      expect(response.headers["x-static-containment"]).toBe("blocked");
     } finally {
       await new Promise<void>((resolveClose) => server.close(resolveClose));
     }
   });
 });
 
-function rawHttpGet(server: Server & { url: string }, path: string): Promise<{ statusLine: string; body: string }> {
+async function loadPlaywright(): Promise<typeof import("playwright") | null> {
+  try {
+    return await import("playwright");
+  } catch (error) {
+    if (String(error).includes("Cannot find package") || String(error).includes("Cannot find module")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function rawHttpGet(
+  server: Server & { url: string },
+  path: string,
+): Promise<{ statusLine: string; headers: Record<string, string>; body: string }> {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Unexpected static server address");
   return new Promise((resolveRequest, rejectRequest) => {
@@ -92,8 +108,14 @@ function rawHttpGet(server: Server & { url: string }, path: string): Promise<{ s
     socket.on("error", rejectRequest);
     socket.on("end", () => {
       const [head, body = ""] = response.split("\r\n\r\n");
-      const [statusLine = ""] = head.split("\r\n");
-      resolveRequest({ statusLine, body });
+      const [statusLine = "", ...headerLines] = head.split("\r\n");
+      const headers = Object.fromEntries(headerLines.flatMap((line) => {
+        const separator = line.indexOf(":");
+        return separator > 0
+          ? [[line.slice(0, separator).toLowerCase(), line.slice(separator + 1).trim()]]
+          : [];
+      }));
+      resolveRequest({ statusLine, headers, body });
     });
   });
 }
@@ -110,11 +132,19 @@ function startStaticServer(root: string): Promise<Server & { url: string }> {
       writeJson(response, fixtureGraphSnapshot);
       return;
     }
-    const path = requestUrl.pathname === "/app/" || requestUrl.pathname === "/app"
+    const encodedPath = requestUrl.pathname === "/app/" || requestUrl.pathname === "/app"
       ? "index.html"
       : requestUrl.pathname.startsWith("/app/")
         ? requestUrl.pathname.slice("/app/".length)
         : "";
+    let path = "";
+    try {
+      path = decodeURIComponent(encodedPath);
+    } catch {
+      response.writeHead(404, { "x-static-containment": "blocked" });
+      response.end("not found");
+      return;
+    }
     if (!path || path.startsWith("/")) {
       response.writeHead(404);
       response.end("not found");
@@ -128,7 +158,9 @@ function startStaticServer(root: string): Promise<Server & { url: string }> {
       || !existsSync(filePath)
       || !statSync(filePath).isFile()
     ) {
-      response.writeHead(404);
+      response.writeHead(404, relativePath.startsWith("..") || isAbsolute(relativePath)
+        ? { "x-static-containment": "blocked" }
+        : undefined);
       response.end("not found");
       return;
     }

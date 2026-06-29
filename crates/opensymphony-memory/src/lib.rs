@@ -1390,6 +1390,8 @@ resource: https://linear.app/example/issue/COE-123
 tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
+apisecret: api-secret-compact-fixture
+apitoken: api-token-compact-fixture
 authtoken: auth-token-compact-fixture
 bearertoken: bearer-token-compact-fixture
 csrf_token: csrf-token-fixture
@@ -1641,6 +1643,8 @@ opensymphony:
         assert!(!public_json.contains("concept:issues/COE-123"));
         assert!(!public_json.contains("COE-123: OKF catalog rebuild"));
         assert!(!public_json.contains("sk-live-public-fixture"));
+        assert!(!public_json.contains("api-secret-compact-fixture"));
+        assert!(!public_json.contains("api-token-compact-fixture"));
         assert!(!public_json.contains("client-secret-fixture"));
         assert!(!public_json.contains("nested-token-fixture"));
         assert!(!public_json.contains("oauth-token-fixture"));
