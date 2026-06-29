@@ -4245,6 +4245,11 @@ function appShellStyles(): string {
     .os-kg-list li.is-selected { border-color: #c2410c; background: #fff7ed; }
     .os-kg-list button { min-width: 0; min-height: 24px; padding: 0; border: none; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-kg-list span { color: #667788; font-size: 11px; text-transform: uppercase; }
+    .os-kg-inspector { border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 10px; background: #ffffff; }
+    .os-kg-inspector h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0; }
+    .os-kg-inspector dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
+    .os-kg-inspector dt { color: #667788; font-size: 11px; }
+    .os-kg-inspector dd { margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
     .os-project-group { display: grid; gap: 8px; margin-bottom: 10px; }
     .os-project-group-header { width: 100%; min-height: 32px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 6px; background: #f8fafc; text-align: left; }
     .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

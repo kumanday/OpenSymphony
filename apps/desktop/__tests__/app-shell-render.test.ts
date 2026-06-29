@@ -22,7 +22,9 @@ import type {
   GatewayReader,
   OpenSymphonyAppHandle,
 } from "@opensymphony/ui-core";
+import { MockGatewayTransport } from "@opensymphony/api-client";
 import { createModelProfile } from "@opensymphony/gateway-schema";
+import { createFixtureGraphAdapter } from "@opensymphony/graph";
 import {
   createDesktopModelProfileController,
   createDesktopProfileController,
@@ -91,6 +93,56 @@ describe("desktop app shell render", () => {
     expect(root.querySelector("[data-save-profile]")).not.toBeNull();
 
     await handle.destroy();
+  });
+
+  it("smokes the shared Knowledge Graph package through the desktop shell", async () => {
+    document.body.innerHTML = `<div id="root"></div>`;
+    const root = document.getElementById("root") as HTMLElement;
+    const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation((
+      contextId: string,
+    ) => {
+      if (contextId !== "2d") return null;
+      return {
+        setTransform: jest.fn(),
+        fillRect: jest.fn(),
+        beginPath: jest.fn(),
+        moveTo: jest.fn(),
+        lineTo: jest.fn(),
+        stroke: jest.fn(),
+        arc: jest.fn(),
+        fill: jest.fn(),
+        set fillStyle(_value: string) {},
+        set strokeStyle(_value: string) {},
+        set lineWidth(_value: number) {},
+        set globalAlpha(_value: number) {},
+      } as unknown as CanvasRenderingContext2D;
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      title: "OpenSymphony Desktop",
+      transport: new MockGatewayTransport({ baseUri: "http://127.0.0.1:2468" }),
+      graphAdapter: createFixtureGraphAdapter(),
+      initialProfiles: [],
+    });
+
+    try {
+      await handle.refresh();
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await waitFor(() =>
+        root.querySelector("[data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank") === "true"
+      );
+
+      expect(root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent).toContain("COE-465");
+      (root.querySelector("[data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await waitFor(() =>
+        root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent?.includes("private") ?? false
+      );
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("private");
+    } finally {
+      getContext.mockRestore();
+      await handle.destroy();
+    }
   });
 
   it("selects active profiles with Tauri's camelCase command argument", async () => {
@@ -565,3 +617,26 @@ describe("desktop app shell render", () => {
     }
   });
 });
+
+async function waitFor(predicate: () => boolean, root: Node = document.body): Promise<void> {
+  if (predicate()) return;
+  await new Promise<void>((resolve, reject) => {
+    let observer: MutationObserver;
+    const timeout = setTimeout(() => {
+      observer.disconnect();
+      reject(new Error("condition was not met"));
+    }, 1_500);
+    observer = new MutationObserver(() => {
+      if (!predicate()) return;
+      clearTimeout(timeout);
+      observer.disconnect();
+      resolve();
+    });
+    observer.observe(root, { attributes: true, childList: true, subtree: true, characterData: true });
+    if (predicate()) {
+      clearTimeout(timeout);
+      observer.disconnect();
+      resolve();
+    }
+  });
+}
