@@ -943,6 +943,70 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("serializes overlapping Knowledge Graph loads from pane switches and events", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    let resolveFirstRead: (() => void) | null = null;
+    const firstReadGate = new Promise<void>((resolve) => {
+      resolveFirstRead = resolve;
+    });
+    let reads = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getGraphSnapshot() {
+        reads += 1;
+        if (reads === 1) {
+          await firstReadGate;
+          return fixtureGraphSnapshot;
+        }
+        return {
+          ...fixtureGraphSnapshot,
+          cursor: { ...fixtureGraphSnapshot.cursor, sequence: 2 },
+          metrics: { orphan_count: 0, broken_link_count: 0, stale_concept_count: 1, warning_count: 2 },
+        };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => reads === 1);
+
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 22, partition: "events" },
+      entity_ref: { kind: "unknown", id: "memory-graph:local-default" },
+      event_kind: "memory_graph_updated",
+      emitted_at: "2026-06-28T00:03:00Z",
+      payload: {
+        schema_version: schemaVersionV1(),
+        bundle_id: "local-default",
+        cursor: { sequence: 2, partition: "memory-graph:local-default" },
+        updated_at: "2026-06-28T00:03:00Z",
+      },
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph stale") ?? false);
+    expect(reads).toBe(1);
+    resolveFirstRead?.();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph warnings") ?? false);
+    expect(reads).toBe(2);
+
+    await handle.destroy();
+  });
+
   it("groups desktop task graph rows by explicit project metadata", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

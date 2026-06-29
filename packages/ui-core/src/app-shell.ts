@@ -276,6 +276,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshQueued = false;
   private liveRefreshFailureCount = 0;
   private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private knowledgeGraphLoadInFlight: Promise<void> | null = null;
+  private knowledgeGraphLoadQueuedBundleId: string | null | undefined = undefined;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -627,6 +629,25 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadKnowledgeGraph(bundleId?: string): Promise<void> {
+    if (this.knowledgeGraphLoadInFlight) {
+      if (bundleId !== undefined || this.state.graph.freshnessStatus === "stale") {
+        this.knowledgeGraphLoadQueuedBundleId = bundleId ?? null;
+      }
+      return this.knowledgeGraphLoadInFlight;
+    }
+    const load = this.loadKnowledgeGraphOnce(bundleId).finally(async () => {
+      this.knowledgeGraphLoadInFlight = null;
+      const queuedBundleId = this.knowledgeGraphLoadQueuedBundleId;
+      this.knowledgeGraphLoadQueuedBundleId = undefined;
+      if (queuedBundleId !== undefined && !this.destroyed) {
+        await this.loadKnowledgeGraph(queuedBundleId ?? undefined);
+      }
+    });
+    this.knowledgeGraphLoadInFlight = load;
+    return load;
+  }
+
+  private async loadKnowledgeGraphOnce(bundleId?: string): Promise<void> {
     if (!this.graphAdapter) {
       this.state.graphError = "Knowledge Graph unavailable for the active transport";
       this.render();
