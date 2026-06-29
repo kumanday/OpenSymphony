@@ -3428,7 +3428,7 @@ function renderKnowledgeMap(nodes: MemoryGraphNode[], selected: MemoryGraphNode 
     const selectedClass = node.id === selected?.id ? " is-selected" : "";
     const community = node.metrics?.community_id ?? "none";
     return `
-      <button type="button" class="os-kg-node os-kg-node-${escapeAttr(node.kind)}${selectedClass}" data-kg-node="${escapeAttr(node.id)}" style="--os-kg-index:${index}" aria-pressed="${node.id === selected?.id ? "true" : "false"}">
+      <button type="button" id="${escapeAttr(knowledgeOptionId(node.id))}" role="option" class="os-kg-node os-kg-node-${escapeAttr(node.kind)}${selectedClass}" data-kg-node="${escapeAttr(node.id)}" style="--os-kg-index:${index}" aria-selected="${node.id === selected?.id ? "true" : "false"}">
         <span>${escapeHtml(nodeKindLabel(node.kind))}</span>
         <strong>${escapeHtml(compactLabel(node.label, 28))}</strong>
         <em>${escapeHtml(community)}</em>
@@ -3439,7 +3439,7 @@ function renderKnowledgeMap(nodes: MemoryGraphNode[], selected: MemoryGraphNode 
     `<span class="os-kg-edge-label">${escapeHtml(edgeKindLabel(edge.kind))}${edge.unresolved ? " unresolved" : ""}</span>`
   ).join("");
   return `
-    <div class="os-knowledge-map" data-testid="knowledge-graph-map" role="img" aria-label="Visible Knowledge Graph nodes. Use the table below for full keyboard navigation.">
+    <div class="os-knowledge-map" data-testid="knowledge-graph-map" role="listbox" aria-label="Visible Knowledge Graph nodes. Use arrow keys to move through nodes and the table below for full summaries." aria-activedescendant="${selected ? escapeAttr(knowledgeOptionId(selected.id)) : ""}">
       ${rendered || `<span class="os-empty">No visible nodes</span>`}
       <div class="os-kg-edge-list" aria-hidden="true">${edgeLabels}</div>
     </div>
@@ -3716,6 +3716,10 @@ function humanizeToken(value: string): string {
 
 function compactLabel(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
+}
+
+function knowledgeOptionId(nodeId: string): string {
+  return `kg-option-${nodeId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 function compactWhitespace(value: string): string {
