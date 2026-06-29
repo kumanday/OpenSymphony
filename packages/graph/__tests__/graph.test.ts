@@ -1,10 +1,13 @@
 import {
   applyGraphFilters,
   createFixtureGraphAdapter,
+  computeGraphLayout,
+  createGraphLayoutAdapter,
   createInitialGraphState,
   createGatewayGraphAdapter,
   createTauriNativeGraphAdapter,
   fixtureGraphSnapshot,
+  graphLayoutKindForMode,
   graphReducer,
   graphStateToHistory,
   initialGraphFilters,
@@ -233,6 +236,49 @@ describe("@opensymphony/graph", () => {
       bundle_id: "local-default",
       results: [{ concept_id: "issues/COE-465" }],
     });
+  });
+
+  it("computes deterministic graph layouts for every graph mode", () => {
+    const layouts = ["atlas", "bundle", "neighborhood", "timeline"] as const;
+    for (const mode of layouts) {
+      const layout = computeGraphLayout(fixtureGraphSnapshot, {
+        kind: graphLayoutKindForMode(mode),
+        focusedNodeId: "concept:coe-465",
+        width: 640,
+        height: 360,
+      });
+      expect(layout.nodes.map((node) => node.nodeId)).toEqual([
+        "bundle:local-default",
+        "concept:coe-465",
+        "source:osym-822",
+        "tag:graph-view",
+      ]);
+      expect(layout.edges).toHaveLength(3);
+      expect(layout.nodes.every((node) => node.x >= 0 && node.x <= 640 && node.y >= 0 && node.y <= 360)).toBe(true);
+    }
+  });
+
+  it("uses a worker adapter when a worker is available", async () => {
+    class FakeWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      terminated = false;
+
+      postMessage(message: { id: number; snapshot: typeof fixtureGraphSnapshot; options: { kind: "force" } }): void {
+        const result = computeGraphLayout(message.snapshot, message.options);
+        queueMicrotask(() => this.onmessage?.({ data: { id: message.id, result } } as MessageEvent));
+      }
+
+      terminate(): void {
+        this.terminated = true;
+      }
+    }
+    const worker = new FakeWorker();
+    const adapter = createGraphLayoutAdapter(() => worker as unknown as Worker);
+    const layout = await adapter.layout(fixtureGraphSnapshot, { kind: "force" });
+    expect(layout.nodes).toHaveLength(fixtureGraphSnapshot.nodes.length);
+    adapter.dispose();
+    expect(worker.terminated).toBe(true);
   });
 
   it("returns fresh objects for graph and filter resets", () => {

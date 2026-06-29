@@ -1,0 +1,340 @@
+import type {
+  GraphLayoutResult,
+  GraphState,
+  LayoutStatus,
+  MemoryGraphSnapshot,
+} from "@opensymphony/graph";
+import * as THREE from "three";
+import { escapeAttr, escapeHtml } from "./html.js";
+
+export interface KnowledgeGraphSurface {
+  snapshot: MemoryGraphSnapshot | null;
+  layout: GraphLayoutResult | null;
+  state: GraphState;
+}
+
+export interface KnowledgeGraphMountOptions {
+  snapshot: MemoryGraphSnapshot | null;
+  layout: GraphLayoutResult | null;
+  selectedNodeIds: readonly string[];
+  onSelect(nodeId: string): void;
+  onFocus(nodeId: string): void;
+}
+
+export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): string {
+  const { snapshot, layout, state } = surface;
+  const status = state.layoutStatus;
+  const summary = snapshot
+    ? `${snapshot.nodes.length} nodes / ${snapshot.edges.length} edges`
+    : "No graph snapshot";
+  return `
+    <div class="os-knowledge-graph" data-testid="knowledge-graph-renderer" data-layout-status="${escapeAttr(status)}">
+      <div class="os-knowledge-toolbar">
+        <div>
+          <strong>Knowledge Graph</strong>
+          <span>${escapeHtml(summary)}</span>
+        </div>
+        ${renderStatus(status, state.layoutError)}
+      </div>
+      <div class="os-knowledge-stage" data-kg-stage>
+        <canvas class="os-knowledge-canvas" data-testid="knowledge-graph-canvas" aria-label="Knowledge Graph canvas"></canvas>
+        <div class="os-knowledge-labels" data-kg-labels>${renderLabels(layout, state.selectedNodeIds)}</div>
+      </div>
+      ${renderFallbackList(snapshot, state.selectedNodeIds)}
+    </div>
+  `;
+}
+
+export function mountKnowledgeGraphRenderer(
+  root: HTMLElement,
+  options: KnowledgeGraphMountOptions,
+): void {
+  const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
+  if (!canvas || !options.snapshot || !options.layout) return;
+  const stage = canvas.closest<HTMLElement>("[data-kg-stage]");
+  const viewport = canvasViewport(stage);
+  const view = {
+    scale: 1,
+    dx: 0,
+    dy: 0,
+    dragging: false,
+    moved: false,
+    px: 0,
+    py: 0,
+  };
+  const draw = () => {
+    canvas.width = Math.floor(viewport.width * viewport.ratio);
+    canvas.height = Math.floor(viewport.height * viewport.ratio);
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    const threeCanvas = document.createElement("canvas");
+    threeCanvas.width = canvas.width;
+    threeCanvas.height = canvas.height;
+    void drawThree(threeCanvas, options.layout!, options.selectedNodeIds, view);
+    drawCanvas2d(canvas, options.layout!, options.selectedNodeIds, view);
+    canvas.dataset.nonblank = options.layout!.nodes.length > 0 ? "true" : "false";
+  };
+  draw();
+  canvas.onwheel = (event) => {
+    event.preventDefault();
+    view.scale = clamp(view.scale * (event.deltaY < 0 ? 1.08 : 0.92), 0.45, 3);
+    draw();
+  };
+  canvas.onpointerdown = (event) => {
+    canvas.setPointerCapture(event.pointerId);
+    view.dragging = true;
+    view.moved = false;
+    view.px = event.clientX;
+    view.py = event.clientY;
+  };
+  canvas.onpointermove = (event) => {
+    if (!view.dragging) return;
+    const dx = event.clientX - view.px;
+    const dy = event.clientY - view.py;
+    if (Math.abs(dx) + Math.abs(dy) > 2) view.moved = true;
+    view.dx += dx;
+    view.dy += dy;
+    view.px = event.clientX;
+    view.py = event.clientY;
+    draw();
+  };
+  canvas.onpointerup = (event) => {
+    view.dragging = false;
+    canvas.releasePointerCapture(event.pointerId);
+    if (!view.moved) {
+      const nodeId = nearestNode(options.layout!, event.offsetX, event.offsetY, viewport, view);
+      if (nodeId) options.onSelect(nodeId);
+    }
+  };
+  root.querySelectorAll<HTMLElement>("[data-kg-node-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nodeId = button.dataset.kgNodeId;
+      if (nodeId) options.onSelect(nodeId);
+    });
+    button.addEventListener("focus", () => {
+      const nodeId = button.dataset.kgNodeId;
+      if (nodeId) options.onFocus(nodeId);
+    });
+  });
+}
+
+function renderStatus(status: LayoutStatus, error: string | null): string {
+  if (status === "failed") {
+    return `<span class="os-kg-status os-kg-status-failed">Error${error ? `: ${escapeHtml(error)}` : ""}</span>`;
+  }
+  if (status === "loading" || status === "stabilizing") {
+    return `<span class="os-kg-status">Stabilizing</span>`;
+  }
+  if (status === "ready") return `<span class="os-kg-status">Ready</span>`;
+  return `<span class="os-kg-status">Idle</span>`;
+}
+
+function renderLabels(layout: GraphLayoutResult | null, selectedNodeIds: readonly string[]): string {
+  if (!layout) return "";
+  const selected = new Set(selectedNodeIds);
+  const showAll = layout.nodes.length <= 80;
+  return layout.nodes
+    .filter((node) => showAll || selected.has(node.nodeId) || node.kind === "concept")
+    .map((node) => {
+      const left = (node.x / layout.width) * 100;
+      const top = (node.y / layout.height) * 100;
+      const picked = selected.has(node.nodeId) ? " is-selected" : "";
+      return `<button type="button" class="os-kg-label${picked}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%" data-kg-node-id="${escapeAttr(node.nodeId)}">${escapeHtml(shortLabel(node.label))}</button>`;
+    })
+    .join("");
+}
+
+function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
+  if (!snapshot || snapshot.nodes.length === 0) {
+    return `<div class="os-empty">No graph data available.</div>`;
+  }
+  const selected = new Set(selectedNodeIds);
+  return `
+    <ul class="os-kg-list" aria-label="Visible graph nodes">
+      ${snapshot.nodes.slice(0, 20).map((node) => `
+        <li class="${selected.has(node.id) ? "is-selected" : ""}">
+          <button type="button" data-kg-node-id="${escapeAttr(node.id)}">${escapeHtml(node.label)}</button>
+          <span>${escapeHtml(node.kind)}</span>
+        </li>
+      `).join("")}
+    </ul>
+  `;
+}
+
+function drawThree(
+  canvas: HTMLCanvasElement,
+  layout: GraphLayoutResult,
+  selectedNodeIds: readonly string[],
+  view: { scale: number; dx: number; dy: number },
+): boolean {
+  const context = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+  if (!context) return false;
+  try {
+    const renderer = new THREE.WebGLRenderer({ canvas, context, antialias: true, preserveDrawingBuffer: true });
+    const width = canvas.width;
+    const height = canvas.height;
+    renderer.setSize(width, height, false);
+    renderer.setClearColor(0xf8fafc, 1);
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-width / 2, width / 2, height / 2, -height / 2, 1, 2000);
+    camera.position.set(0, 0, 800);
+    scene.add(edgeSegments(layout, view));
+    scene.add(nodeInstances(layout, selectedNodeIds, view));
+    renderer.render(scene, camera);
+    renderer.dispose();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function edgeSegments(layout: GraphLayoutResult, view: { scale: number; dx: number; dy: number }): THREE.LineSegments {
+  const byId = new Map(layout.nodes.map((node) => [node.nodeId, node]));
+  const positions: number[] = [];
+  for (const edge of layout.edges) {
+    const source = byId.get(edge.sourceId);
+    const target = byId.get(edge.targetId);
+    if (!source || !target) continue;
+    positions.push(...projectPoint(source.x, source.y, source.z, layout, view));
+    positions.push(...projectPoint(target.x, target.y, target.z, layout, view));
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  return new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0x8aa4b8, transparent: true, opacity: 0.62 }));
+}
+
+function nodeInstances(
+  layout: GraphLayoutResult,
+  selectedNodeIds: readonly string[],
+  view: { scale: number; dx: number; dy: number },
+): THREE.InstancedMesh {
+  const selected = new Set(selectedNodeIds);
+  const geometry = new THREE.CircleGeometry(1, 24);
+  const material = new THREE.MeshBasicMaterial({ color: 0x1f6f8b });
+  const mesh = new THREE.InstancedMesh(geometry, material, layout.nodes.length);
+  const matrix = new THREE.Matrix4();
+  layout.nodes.forEach((node, index) => {
+    const [x, y, z] = projectPoint(node.x, node.y, node.z, layout, view);
+    const scale = (selected.has(node.nodeId) ? node.radius + 4 : node.radius) * view.scale;
+    matrix.compose(new THREE.Vector3(x, y, z), new THREE.Quaternion(), new THREE.Vector3(scale, scale, 1));
+    mesh.setMatrixAt(index, matrix);
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  return mesh;
+}
+
+function drawCanvas2d(
+  canvas: HTMLCanvasElement,
+  layout: GraphLayoutResult,
+  selectedNodeIds: readonly string[],
+  view: { scale: number; dx: number; dy: number },
+): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const ratio = canvas.width / Number.parseFloat(canvas.style.width || String(canvas.width));
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.fillStyle = "#f8fafc";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const selected = new Set(selectedNodeIds);
+  const byId = new Map(layout.nodes.map((node) => [node.nodeId, node]));
+  ctx.strokeStyle = "#8aa4b8";
+  ctx.lineWidth = 4;
+  ctx.globalAlpha = 0.72;
+  for (const edge of layout.edges) {
+    const source = byId.get(edge.sourceId);
+    const target = byId.get(edge.targetId);
+    if (!source || !target) continue;
+    const a = canvasPoint(source.x, source.y, layout, view);
+    const b = canvasPoint(target.x, target.y, layout, view);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  for (const node of layout.nodes) {
+    const p = canvasPoint(node.x, node.y, layout, view);
+    ctx.beginPath();
+    ctx.fillStyle = selected.has(node.nodeId) ? "#c2410c" : colorForKind(node.kind);
+    ctx.arc(p.x, p.y, (selected.has(node.nodeId) ? node.radius + 12 : node.radius + 9) * view.scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function nearestNode(
+  layout: GraphLayoutResult,
+  x: number,
+  y: number,
+  viewport: { width: number; height: number },
+  view: { scale: number; dx: number; dy: number },
+): string | null {
+  let best: { id: string; distance: number } | null = null;
+  for (const node of layout.nodes) {
+    const p = canvasPoint(node.x, node.y, layout, view, viewport);
+    const distance = Math.hypot(p.x - x, p.y - y);
+    if (distance <= 24 && (!best || distance < best.distance)) best = { id: node.nodeId, distance };
+  }
+  return best?.id ?? null;
+}
+
+function canvasViewport(stage: HTMLElement | null): { width: number; height: number; ratio: number } {
+  const rect = stage?.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect?.width || 640));
+  const height = Math.max(260, Math.floor(rect?.height || 360));
+  return { width, height, ratio: globalThis.devicePixelRatio || 1 };
+}
+
+function projectPoint(
+  x: number,
+  y: number,
+  z: number,
+  layout: GraphLayoutResult,
+  view: { scale: number; dx: number; dy: number },
+): [number, number, number] {
+  return [
+    (x - layout.width / 2) * view.scale + view.dx,
+    (layout.height / 2 - y) * view.scale - view.dy,
+    z,
+  ];
+}
+
+function canvasPoint(
+  x: number,
+  y: number,
+  layout: GraphLayoutResult,
+  view: { scale: number; dx: number; dy: number },
+  viewport = { width: Number.NaN, height: Number.NaN },
+): { x: number; y: number } {
+  const width = Number.isNaN(viewport.width) ? Math.max(320, layout.width) : viewport.width;
+  const height = Number.isNaN(viewport.height) ? Math.max(260, layout.height) : viewport.height;
+  return {
+    x: width / 2 + (x - layout.width / 2) * view.scale + view.dx,
+    y: height / 2 + (y - layout.height / 2) * view.scale + view.dy,
+  };
+}
+
+function shortLabel(label: string): string {
+  return label.length > 34 ? `${label.slice(0, 31)}...` : label;
+}
+
+function colorForKind(kind: string): string {
+  switch (kind) {
+    case "concept":
+      return "#1f6f8b";
+    case "bundle":
+      return "#334155";
+    case "tag":
+      return "#7c3aed";
+    case "source_ref":
+      return "#0f766e";
+    default:
+      return "#64748b";
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
