@@ -811,7 +811,23 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
       expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
       expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
+      expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain(`${fixtureGraphSnapshot.nodes.length} nodes`);
+      const fallbackButtons = Array.from(root.querySelectorAll<HTMLButtonElement>(".os-kg-list [data-kg-node-id]"));
+      expect(fallbackButtons.map((button) => button.dataset.kgNodeId).sort()).toEqual(
+        fixtureGraphSnapshot.nodes.map((node) => node.id).sort(),
+      );
+      const nextFocus = jest.spyOn(fallbackButtons[1]!, "focus").mockImplementation(() => {});
+      fallbackButtons[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      expect(nextFocus).toHaveBeenCalled();
+      nextFocus.mockRestore();
       expect(root.querySelector(".os-task-graph-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.textContent).not.toContain("unknown_frontmatter");
+      expect(root.textContent).not.toContain("frontmatter_summary");
+      // TODO(COE-471): migrate the COE-468 search/filter/inspector/raw-frontmatter controls
+      // into the live canvas renderer; COE-469 covers the current live canvas, fallback list,
+      // keyboard navigation, and privacy surface.
+      expect(root.querySelector("[data-kg-search]")).toBeNull();
+      expect(root.querySelector("[data-kg-raw-toggle]")).toBeNull();
       expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
     } finally {
       consoleError.mockRestore();
