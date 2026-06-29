@@ -580,6 +580,7 @@ if (root) {
     mode: "desktop",
     title: "OpenSymphony Desktop",
     transport,
+    graphAdapter: createDesktopGraphAdapter(),
     profileController: createDesktopProfileController(),
     initialProfiles: [
       {
@@ -594,5 +595,6 @@ if (root) {
     ],
     modelProfileController: createDesktopModelProfileController(),
     onGatewayUrlChanged: createTransportForGateway,
+    onGraphGatewayUrlChanged: (gatewayUrl) => createDesktopGraphAdapter(gatewayUrl),
   });
 }

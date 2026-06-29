@@ -19,20 +19,18 @@ import type {
   TaskGraphNodeKind,
   TaskGraphSnapshot,
   AuthState,
+  MemoryBundleList,
+  MemoryConceptDetail,
+  MemoryGraphEdge,
+  MemoryGraphEdgeKind,
+  MemoryGraphFreshness,
+  MemoryGraphNode,
+  MemoryGraphNodeKind,
+  MemoryGraphSnapshot,
+  MemoryGraphVisibility,
   ModelConfigurationProfile,
   ModelCredentialMode,
 } from "@opensymphony/gateway-schema";
-import {
-  createGraphLayoutAdapter,
-  createInitialGraphState,
-  fixtureGraphSnapshot,
-  graphLayoutKindForMode,
-  graphReducer,
-  visibleGraphSnapshot,
-  type GraphLayoutAdapter,
-  type GraphLayoutResult,
-  type GraphState,
-} from "@opensymphony/graph";
 import {
   authStateFromError,
   createModelProfile,
@@ -110,13 +108,6 @@ import {
   renderPlanningWorkspace,
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
-import {
-  disposeKnowledgeGraphCanvas,
-  disposeKnowledgeGraphRenderer,
-  type KnowledgeGraphViewState,
-  mountKnowledgeGraphRenderer,
-  renderKnowledgeGraphSurface,
-} from "./knowledge-graph-renderer.js";
 
 export interface GatewayReader {
   readonly baseUri: string;
@@ -168,12 +159,14 @@ export interface OpenSymphonyAppOptions {
   root: HTMLElement;
   mode: "desktop" | "web";
   transport: GatewayReader;
+  graphAdapter?: GraphDataAdapter;
   title?: string;
   profileController?: ProfileController;
   modelProfileController?: ModelProfileController;
   initialProfiles?: ConnectionProfile[];
   initialModelProfiles?: ModelConfigurationProfile[];
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
+  onGraphGatewayUrlChanged?: (gatewayUrl: string) => GraphDataAdapter;
 }
 
 export interface OpenSymphonyAppHandle {
@@ -182,6 +175,51 @@ export interface OpenSymphonyAppHandle {
 }
 
 type ConnectionMode = "connecting" | "connected" | "failed";
+type KnowledgeWarningFilter = "all" | "with_warnings" | "without_warnings";
+
+interface GraphDataAdapter {
+  listBundles(): Promise<MemoryBundleList>;
+  getGraphSnapshot(bundleId: string): Promise<MemoryGraphSnapshot>;
+  getConceptDetail(bundleId: string, conceptId: string): Promise<MemoryConceptDetail>;
+}
+
+interface KnowledgeGraphFilters {
+  bundle: string;
+  nodeKind: string;
+  conceptType: string;
+  tag: string;
+  area: string;
+  project: string;
+  milestone: string;
+  issue: string;
+  repository: string;
+  visibility: string;
+  freshness: string;
+  warning: KnowledgeWarningFilter;
+  sourceKind: string;
+  linkKind: string;
+  community: string;
+}
+
+interface KnowledgeGraphState {
+  bundles: MemoryBundleList | null;
+  snapshot: MemoryGraphSnapshot | null;
+  selectedNodeId: string | null;
+  detail: MemoryConceptDetail | null;
+  detailKey: string | null;
+  searchQuery: string;
+  filters: KnowledgeGraphFilters;
+  rawOpen: boolean;
+  loading: boolean;
+  error: string | null;
+}
+
+interface KnowledgeControlFocus {
+  selector?: string;
+  nodeId?: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
 
 interface AppState {
   connectionMode: ConnectionMode;
@@ -193,8 +231,7 @@ interface AppState {
   selectedProjectId: string | null;
   selectedNodeId: string | null;
   graphPaneView: GraphPaneView;
-  knowledgeGraph: GraphState;
-  knowledgeGraphLayout: GraphLayoutResult | null;
+  knowledgeGraph: KnowledgeGraphState;
   runDetail: RunDetail | null;
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
@@ -260,6 +297,41 @@ const liveRefreshPollIntervalMs = 5_000;
 const defaultWorkspacePaneSizes: WorkspacePaneSizes = { task: 48, run: 26, evidence: 26 };
 const minWorkspacePaneSizes: WorkspacePaneSizes = { task: 24, run: 20, evidence: 20 };
 
+function createEmptyKnowledgeGraphFilters(): KnowledgeGraphFilters {
+  return {
+    bundle: "",
+    nodeKind: "",
+    conceptType: "",
+    tag: "",
+    area: "",
+    project: "",
+    milestone: "",
+    issue: "",
+    repository: "",
+    visibility: "",
+    freshness: "",
+    warning: "all",
+    sourceKind: "",
+    linkKind: "",
+    community: "",
+  };
+}
+
+function createEmptyKnowledgeGraphState(): KnowledgeGraphState {
+  return {
+    bundles: null,
+    snapshot: null,
+    selectedNodeId: null,
+    detail: null,
+    detailKey: null,
+    searchQuery: "",
+    filters: createEmptyKnowledgeGraphFilters(),
+    rawOpen: false,
+    loading: false,
+    error: null,
+  };
+}
+
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
 ): OpenSymphonyAppHandle {
@@ -271,6 +343,7 @@ export function renderOpenSymphonyApp(
 class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private options: OpenSymphonyAppOptions;
   private transport: GatewayReader;
+  private graphAdapter: GraphDataAdapter | null;
   private state: AppState;
   private destroyed = false;
   private eventSubscription: {
@@ -283,16 +356,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshQueued = false;
   private liveRefreshFailureCount = 0;
   private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
-  private graphLayoutAdapter: GraphLayoutAdapter = createGraphLayoutAdapter(() => null);
-  private pendingGraphLayoutAdapter: GraphLayoutAdapter | null = null;
-  private graphLayoutRun = 0;
-  private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
-  private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
+  private knowledgeGraphLoadGeneration = 0;
+  private knowledgeDetailLoadGeneration = 0;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
     this.transport = options.transport;
-    this.installBrowserGraphLayoutAdapter();
+    this.graphAdapter = options.graphAdapter ?? null;
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
     const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
@@ -307,8 +377,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       selectedProjectId: null,
       selectedNodeId: null,
       graphPaneView: "task",
-      knowledgeGraph: graphReducer(createInitialGraphState(), { type: "SNAPSHOT_LOADED", snapshot: fixtureGraphSnapshot }),
-      knowledgeGraphLayout: null,
+      knowledgeGraph: createEmptyKnowledgeGraphState(),
       runDetail: null,
       runFiles: null,
       selectedDiffPath: null,
@@ -424,10 +493,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.destroyed = true;
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
-    this.graphLayoutAdapter.dispose();
-    this.pendingGraphLayoutAdapter?.dispose();
-    this.pendingGraphLayoutAdapter = null;
-    disposeKnowledgeGraphRenderer(this.options.root);
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
   }
@@ -450,6 +515,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
+        this.updateGraphAdapterForGateway(active.gatewayUrl);
       }
     } catch (error) {
       this.state.connectionMessage = `Profiles unavailable: ${errorMessage(error)}`;
@@ -543,6 +609,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.taskGraph = null;
     this.state.selectedProjectId = null;
     this.state.selectedNodeId = null;
+    this.clearKnowledgeGraphData();
     this.state.runDetail = null;
     this.state.runFiles = null;
     this.state.runDiff = null;
@@ -552,6 +619,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.collapsedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
+  }
+
+  private clearKnowledgeGraphData(): void {
+    this.knowledgeGraphLoadGeneration += 1;
+    this.knowledgeDetailLoadGeneration += 1;
+    this.state.knowledgeGraph = createEmptyKnowledgeGraphState();
   }
 
   /**
@@ -638,6 +711,99 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (initialNode) {
       await this.openRun(initialNode);
     }
+  }
+
+  private async loadKnowledgeGraph(): Promise<void> {
+    const adapter = this.graphAdapter;
+    if (!adapter || (this.state.knowledgeGraph.snapshot && !this.state.knowledgeGraph.loading)) {
+      return;
+    }
+    const generation = ++this.knowledgeGraphLoadGeneration;
+    this.state.knowledgeGraph = { ...this.state.knowledgeGraph, loading: true, error: null };
+    this.render();
+    try {
+      const bundles = await adapter.listBundles();
+      const bundleId = this.state.knowledgeGraph.filters.bundle || bundles.bundles[0]?.id;
+      if (generation !== this.knowledgeGraphLoadGeneration || adapter !== this.graphAdapter) return;
+      if (!bundleId) {
+        this.state.knowledgeGraph = {
+          ...this.state.knowledgeGraph,
+          bundles,
+          loading: false,
+          error: "No memory bundles available",
+        };
+        this.render();
+        return;
+      }
+      const snapshot = await adapter.getGraphSnapshot(bundleId);
+      if (generation !== this.knowledgeGraphLoadGeneration || adapter !== this.graphAdapter) return;
+      const selectedNodeId = this.state.knowledgeGraph.selectedNodeId
+        && snapshot.nodes.some((node) => node.id === this.state.knowledgeGraph.selectedNodeId)
+        ? this.state.knowledgeGraph.selectedNodeId
+        : snapshot.nodes.find((node) => node.kind === "concept")?.id ?? snapshot.nodes[0]?.id ?? null;
+      this.state.knowledgeGraph = {
+        ...this.state.knowledgeGraph,
+        bundles,
+        snapshot,
+        selectedNodeId,
+        loading: false,
+        error: null,
+      };
+      await this.loadKnowledgeConceptDetail(selectedNodeId);
+    } catch (error) {
+      if (generation !== this.knowledgeGraphLoadGeneration || adapter !== this.graphAdapter) return;
+      this.state.knowledgeGraph = {
+        ...this.state.knowledgeGraph,
+        loading: false,
+        error: `Knowledge Graph unavailable: ${errorMessage(error)}`,
+      };
+      this.render();
+    }
+  }
+
+  private async loadKnowledgeConceptDetail(nodeId: string | null): Promise<void> {
+    const generation = ++this.knowledgeDetailLoadGeneration;
+    const snapshot = this.state.knowledgeGraph.snapshot;
+    const adapter = this.graphAdapter;
+    if (!adapter || !snapshot || !nodeId) {
+      this.state.knowledgeGraph = { ...this.state.knowledgeGraph, detail: null, detailKey: null };
+      this.render();
+      return;
+    }
+    const node = snapshot.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node?.concept_id) {
+      this.state.knowledgeGraph = { ...this.state.knowledgeGraph, detail: null, detailKey: null };
+      this.render();
+      return;
+    }
+    const detailKey = `${snapshot.bundle_id}:${node.concept_id}`;
+    if (this.state.knowledgeGraph.detailKey === detailKey) {
+      this.render();
+      return;
+    }
+    try {
+      const detail = await adapter.getConceptDetail(snapshot.bundle_id, node.concept_id);
+      const selectedNode = this.state.knowledgeGraph.snapshot?.nodes.find(
+        (candidate) => candidate.id === this.state.knowledgeGraph.selectedNodeId,
+      );
+      if (
+        generation !== this.knowledgeDetailLoadGeneration
+        || adapter !== this.graphAdapter
+        || selectedNode?.concept_id !== node.concept_id
+      ) {
+        return;
+      }
+      this.state.knowledgeGraph = { ...this.state.knowledgeGraph, detail, detailKey };
+    } catch (error) {
+      if (generation !== this.knowledgeDetailLoadGeneration || adapter !== this.graphAdapter) return;
+      this.state.knowledgeGraph = {
+        ...this.state.knowledgeGraph,
+        detail: null,
+        detailKey: null,
+        error: `Concept detail unavailable: ${errorMessage(error)}`,
+      };
+    }
+    this.render();
   }
 
   private startEventSubscription(): void {
@@ -893,107 +1059,136 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private selectGraphPaneView(view: GraphPaneView): void {
     this.state.graphPaneView = view;
     this.render();
+    if (view === "knowledge") {
+      void this.loadKnowledgeGraph();
+    }
   }
 
-  private bindKnowledgeGraph(): void {
-    const root = this.options.root.querySelector<HTMLElement>("[data-testid='knowledge-graph-renderer']");
-    if (!root) return;
-    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
-    const stageSize = measureKnowledgeGraphStage(root);
-    if (
-      snapshot
-      && this.state.knowledgeGraphLayout
-      && this.state.knowledgeGraph.layoutStatus === "ready"
-      && this.knowledgeGraphLayoutSize
-      && stageSizeChanged(this.knowledgeGraphLayoutSize, stageSize)
-    ) {
-      this.state.knowledgeGraphLayout = null;
-      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
-      this.knowledgeGraphLayoutSize = null;
-      this.scheduleKnowledgeGraphLayout(stageSize);
+  private selectKnowledgeNode(nodeId: string, focusNode = false): void {
+    this.state.knowledgeGraph = { ...this.state.knowledgeGraph, selectedNodeId: nodeId };
+    this.render();
+    if (focusNode) {
+      this.focusKnowledgeNode(nodeId);
+    }
+    void this.loadKnowledgeConceptDetail(nodeId);
+  }
+
+  private onKnowledgeSearch(query: string): void {
+    this.state.knowledgeGraph = {
+      ...this.state.knowledgeGraph,
+      searchQuery: compactWhitespace(query),
+    };
+    const nextNodeId = this.clampKnowledgeSelectionToVisible();
+    this.render();
+    if (nextNodeId) {
+      void this.loadKnowledgeConceptDetail(nextNodeId);
+    }
+  }
+
+  private onKnowledgeFilterChange(control: HTMLElement): void {
+    const key = control.dataset.kgFilter as keyof KnowledgeGraphFilters | undefined;
+    if (!key) return;
+    const value = control instanceof HTMLSelectElement || control instanceof HTMLInputElement
+      ? control.value
+      : "";
+    this.state.knowledgeGraph = {
+      ...this.state.knowledgeGraph,
+      filters: { ...this.state.knowledgeGraph.filters, [key]: value },
+    };
+    if (key === "bundle") {
+      this.state.knowledgeGraph = {
+        ...this.state.knowledgeGraph,
+        snapshot: null,
+        selectedNodeId: null,
+        detail: null,
+        detailKey: null,
+        loading: false,
+      };
+      void this.loadKnowledgeGraph();
       return;
     }
-    if (snapshot && !this.state.knowledgeGraphLayout && this.state.knowledgeGraph.layoutStatus === "idle") {
-      this.scheduleKnowledgeGraphLayout(stageSize);
+    const nextNodeId = this.clampKnowledgeSelectionToVisible();
+    this.render();
+    if (nextNodeId) {
+      void this.loadKnowledgeConceptDetail(nextNodeId);
     }
-    mountKnowledgeGraphRenderer(root, {
-      snapshot,
-      layout: this.state.knowledgeGraphLayout,
-      selectedNodeIds: this.state.knowledgeGraph.selectedNodeIds,
-      view: this.knowledgeGraphView,
-      onSelect: (nodeId) => {
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [nodeId] });
-        this.render();
-      },
-      onFocus: (nodeId) => {
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
-        this.render();
-        if (this.state.knowledgeGraph.mode !== "neighborhood") return;
-        this.state.knowledgeGraphLayout = null;
-        this.knowledgeGraphLayoutSize = null;
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
-        this.scheduleKnowledgeGraphLayout();
-      },
-    });
   }
 
-  private installBrowserGraphLayoutAdapter(): void {
-    if (typeof Worker === "undefined") return;
-    void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
-      if (this.destroyed) return;
-      this.replaceGraphLayoutAdapter(createBrowserGraphLayoutAdapter());
-    }).catch((error: unknown) => {
-      console.warn("Knowledge graph layout worker unavailable; using synchronous fallback.", error);
-      this.graphLayoutAdapter = createGraphLayoutAdapter(() => null);
-    });
+  private resetKnowledgeFilters(): void {
+    this.state.knowledgeGraph = {
+      ...this.state.knowledgeGraph,
+      filters: {
+        ...createEmptyKnowledgeGraphFilters(),
+        bundle: this.state.knowledgeGraph.snapshot?.bundle_id ?? "",
+      },
+      searchQuery: "",
+    };
+    const nextNodeId = this.clampKnowledgeSelectionToVisible();
+    this.render();
+    if (nextNodeId) {
+      void this.loadKnowledgeConceptDetail(nextNodeId);
+    }
   }
 
-  private replaceGraphLayoutAdapter(adapter: GraphLayoutAdapter): void {
-    if (this.state.knowledgeGraph.layoutStatus === "loading") {
-      this.pendingGraphLayoutAdapter?.dispose();
-      this.pendingGraphLayoutAdapter = adapter;
+  private navigateKnowledgeNode(fromNodeId: string, direction: "previous" | "next" | "neighbor-previous" | "neighbor-next"): void {
+    const visible = visibleKnowledgeNodes(this.state.knowledgeGraph);
+    const ids = visible.map((node) => node.id);
+    const currentIndex = ids.indexOf(fromNodeId);
+    if (currentIndex < 0) return;
+    if (direction === "previous" || direction === "next") {
+      const offset = direction === "previous" ? -1 : 1;
+      const nextId = ids[(currentIndex + offset + ids.length) % ids.length];
+      if (nextId) this.selectKnowledgeNode(nextId, true);
       return;
     }
-    this.graphLayoutAdapter.dispose();
-    this.graphLayoutAdapter = adapter;
+    const neighbors = visibleKnowledgeNeighborIds(this.state.knowledgeGraph.snapshot, fromNodeId)
+      .filter((nodeId) => ids.includes(nodeId));
+    if (neighbors.length === 0) return;
+    const sorted = direction === "neighbor-previous" ? [...neighbors].reverse() : neighbors;
+    this.selectKnowledgeNode(sorted[0]!, true);
   }
 
-  private applyPendingGraphLayoutAdapter(): void {
-    if (!this.pendingGraphLayoutAdapter || this.state.knowledgeGraph.layoutStatus === "loading") return;
-    const adapter = this.pendingGraphLayoutAdapter;
-    this.pendingGraphLayoutAdapter = null;
-    this.graphLayoutAdapter.dispose();
-    this.graphLayoutAdapter = adapter;
+  private focusKnowledgeNode(nodeId: string): void {
+    Array.from(this.options.root.querySelectorAll<HTMLElement>("[data-kg-node]"))
+      .find((node) => node.dataset.kgNode === nodeId)
+      ?.focus();
   }
 
-  private scheduleKnowledgeGraphLayout(size = measureKnowledgeGraphStage(this.options.root)): void {
-    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
-    if (!snapshot || this.state.knowledgeGraph.layoutStatus === "loading") return;
-    const run = ++this.graphLayoutRun;
-    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
-    const { width, height } = size;
-    void this.graphLayoutAdapter.layout(snapshot, {
-      kind: graphLayoutKindForMode(this.state.knowledgeGraph.mode),
-      focusedNodeId: this.state.knowledgeGraph.focusedNodeId,
-      width,
-      height,
-    }).then((layout) => {
-      if (this.destroyed || run !== this.graphLayoutRun) return;
-      this.state.knowledgeGraphLayout = layout;
-      this.knowledgeGraphLayoutSize = { width, height };
-      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
-      this.applyPendingGraphLayoutAdapter();
-      this.render();
-    }).catch((error) => {
-      if (this.destroyed || run !== this.graphLayoutRun) return;
-      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, {
-        type: "LAYOUT_STATUS_SET",
-        status: "failed",
-        error: errorMessage(error),
-      });
-      this.applyPendingGraphLayoutAdapter();
-      this.render();
-    });
+  private clampKnowledgeSelectionToVisible(): string | null {
+    const current = this.state.knowledgeGraph.selectedNodeId;
+    const visible = visibleKnowledgeNodes(this.state.knowledgeGraph);
+    const nextNodeId = visible.some((node) => node.id === current)
+      ? current
+      : visible[0]?.id ?? null;
+    if (nextNodeId === current) {
+      return null;
+    }
+    const detailStillMatches = Boolean(
+      nextNodeId
+      && this.state.knowledgeGraph.snapshot?.nodes.some((node) => {
+        const detailKey = `${this.state.knowledgeGraph.snapshot?.bundle_id}:${node.concept_id ?? ""}`;
+        return node.id === nextNodeId && detailKey === this.state.knowledgeGraph.detailKey;
+      }),
+    );
+    this.state.knowledgeGraph = {
+      ...this.state.knowledgeGraph,
+      selectedNodeId: nextNodeId,
+      detail: detailStillMatches ? this.state.knowledgeGraph.detail : null,
+      detailKey: detailStillMatches ? this.state.knowledgeGraph.detailKey : null,
+    };
+    return nextNodeId;
+  }
+
+  private updateGraphAdapterForGateway(gatewayUrl: string): void {
+    if (this.options.onGraphGatewayUrlChanged) {
+      this.graphAdapter = this.options.onGraphGatewayUrlChanged(gatewayUrl);
+      this.knowledgeGraphLoadGeneration += 1;
+      this.knowledgeDetailLoadGeneration += 1;
+      this.clearKnowledgeGraphData();
+      if (this.state.graphPaneView === "knowledge") {
+        void this.loadKnowledgeGraph();
+      }
+    }
   }
 
   private toggleActivityEvent(eventKey: string): void {
@@ -1179,6 +1374,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.stopEventSubscription();
       await this.transport.close().catch(() => undefined);
       this.transport = await this.options.onGatewayUrlChanged(profile.gatewayUrl);
+      this.updateGraphAdapterForGateway(profile.gatewayUrl);
     }
     await this.refresh();
   }
@@ -1216,6 +1412,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(saved.gatewayUrl);
+        this.updateGraphAdapterForGateway(saved.gatewayUrl);
       }
       await this.refresh();
     } catch (error) {
@@ -1280,6 +1477,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
+        this.updateGraphAdapterForGateway(active.gatewayUrl);
       }
       this.render();
     } catch (error) {
@@ -1484,13 +1682,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
+    const controlFocus = captureKnowledgeControlFocus(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
-    const preservedKnowledgeCanvas = this.state.graphPaneView === "knowledge"
-      ? this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']")
-      : null;
-    if (!preservedKnowledgeCanvas) {
-      disposeKnowledgeGraphRenderer(this.options.root);
-    }
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}" data-auth-state="${this.state.authState}">
@@ -1512,16 +1705,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </section>
       </main>
     `;
-    if (preservedKnowledgeCanvas) {
-      const nextCanvas = this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
-      if (nextCanvas) {
-        nextCanvas.replaceWith(preservedKnowledgeCanvas);
-      } else {
-        disposeKnowledgeGraphCanvas(preservedKnowledgeCanvas);
-      }
-    }
     this.bindEvents();
     restoreShellScrollPositions(this.options.root, scrollPositions);
+    restoreKnowledgeControlFocus(this.options.root, controlFocus);
   }
 
   private renderViewContent(): string {
@@ -1898,11 +2084,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const showingTasks = this.state.graphPaneView === "task";
     const content = showingTasks
       ? this.renderTaskGraph()
-      : renderKnowledgeGraphSurface({
-        snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
-        layout: this.state.knowledgeGraphLayout,
-        state: this.state.knowledgeGraph,
-      });
+      : renderKnowledgeGraphSurface(this.state.knowledgeGraph, this.selectedTaskNode(), this.graphAdapter !== null);
     return `
       <section class="os-panel os-task-graph-panel">
         <div class="os-segmented" data-testid="graph-view-toggle">
@@ -2245,7 +2427,53 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
-    this.bindKnowledgeGraph();
+    this.options.root.querySelector<HTMLInputElement>("[data-kg-search]")?.addEventListener("input", (event) => {
+      this.onKnowledgeSearch((event.currentTarget as HTMLInputElement).value);
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-kg-filter]").forEach((control) => {
+      if (control instanceof HTMLInputElement) {
+        control.addEventListener("input", () => this.onKnowledgeFilterChange(control));
+      } else {
+        control.addEventListener("change", () => this.onKnowledgeFilterChange(control));
+      }
+    });
+    this.options.root.querySelector("[data-kg-filter-reset]")?.addEventListener("click", () => {
+      this.resetKnowledgeFilters();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-kg-node]").forEach((node) => {
+      node.addEventListener("click", () => {
+        const nodeId = node.dataset.kgNode;
+        if (nodeId) this.selectKnowledgeNode(nodeId);
+      });
+      node.addEventListener("keydown", (event) => {
+        const keyboard = event as KeyboardEvent;
+        const nodeId = node.dataset.kgNode;
+        if (!nodeId) return;
+        if (keyboard.key === "ArrowUp") {
+          keyboard.preventDefault();
+          this.navigateKnowledgeNode(nodeId, "previous");
+        } else if (keyboard.key === "ArrowDown") {
+          keyboard.preventDefault();
+          this.navigateKnowledgeNode(nodeId, "next");
+        } else if (keyboard.key === "ArrowLeft") {
+          keyboard.preventDefault();
+          this.navigateKnowledgeNode(nodeId, "neighbor-previous");
+        } else if (keyboard.key === "ArrowRight") {
+          keyboard.preventDefault();
+          this.navigateKnowledgeNode(nodeId, "neighbor-next");
+        } else if (keyboard.key === "Enter" || keyboard.key === " ") {
+          keyboard.preventDefault();
+          this.selectKnowledgeNode(nodeId);
+        }
+      });
+    });
+    this.options.root.querySelector("[data-kg-raw-toggle]")?.addEventListener("click", () => {
+      this.state.knowledgeGraph = {
+        ...this.state.knowledgeGraph,
+        rawOpen: !this.state.knowledgeGraph.rawOpen,
+      };
+      this.render();
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach((handle) => {
       handle.addEventListener("pointerdown", (event) => {
         this.startPaneResize(handle.dataset.paneResizer, event as PointerEvent);
@@ -3056,6 +3284,68 @@ function restoreShellScrollPositions(
   }
 }
 
+function captureKnowledgeControlFocus(root: HTMLElement): KnowledgeControlFocus | null {
+  const active = root.ownerDocument.activeElement;
+  if (!(active instanceof HTMLElement)) {
+    return null;
+  }
+  let selector: string | null = null;
+  if (active.matches("[data-kg-search]")) {
+    selector = "[data-kg-search]";
+  } else if (active.matches("[data-kg-filter]")) {
+    const key = active.dataset.kgFilter;
+    if (key) {
+      selector = `[data-kg-filter="${cssEscape(key)}"]`;
+    }
+  } else if (active.matches("[data-kg-node]")) {
+    const nodeId = active.dataset.kgNode;
+    if (nodeId) {
+      return {
+        nodeId,
+        selectionStart: null,
+        selectionEnd: null,
+      };
+    }
+  } else if (active.matches("[data-kg-filter-reset]")) {
+    selector = "[data-kg-filter-reset]";
+  } else if (active.matches("[data-kg-raw-toggle]")) {
+    selector = "[data-kg-raw-toggle]";
+  }
+  if (!selector) {
+    return null;
+  }
+  return {
+    selector,
+    selectionStart: active instanceof HTMLInputElement ? active.selectionStart : null,
+    selectionEnd: active instanceof HTMLInputElement ? active.selectionEnd : null,
+  };
+}
+
+function restoreKnowledgeControlFocus(root: HTMLElement, focus: KnowledgeControlFocus | null): void {
+  if (!focus) {
+    return;
+  }
+  const next = focus.nodeId
+    ? Array.from(root.querySelectorAll<HTMLElement>("[data-kg-node]"))
+      .find((node) => node.dataset.kgNode === focus.nodeId) ?? null
+    : root.querySelector<HTMLElement>(focus.selector ?? "");
+  if (!next) {
+    return;
+  }
+  next.focus();
+  if (
+    next instanceof HTMLInputElement
+    && focus.selectionStart !== null
+    && focus.selectionEnd !== null
+    && typeof next.setSelectionRange === "function"
+  ) {
+    next.setSelectionRange(
+      Math.min(focus.selectionStart, next.value.length),
+      Math.min(focus.selectionEnd, next.value.length),
+    );
+  }
+}
+
 function renderPaneResizer(handle: WorkspacePaneResizeHandle, label: string, value: number): string {
   return `
     <div class="os-pane-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="${escapeAttr(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(value)}" data-pane-resizer="${handle}">
@@ -3157,6 +3447,425 @@ function renderActivityEvent(event: RunEvent, eventKey: string, expanded: boolea
     </div>
     ${body && expanded ? `<pre class="os-activity-detail">${escapeHtml(body)}</pre>` : ""}
   `;
+}
+
+function renderKnowledgeGraphSurface(state: KnowledgeGraphState, taskNode: TaskGraphNode | null, hasAdapter: boolean): string {
+  const taskLabel = taskNode ? `${nodeLabel(taskNode)}: ${taskNode.title}` : "No selected task context";
+  if (!hasAdapter) {
+    return `
+      <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold">
+        <div class="os-knowledge-summary" role="status">
+          <strong>${escapeHtml(taskLabel)}</strong>
+          <span>Knowledge Graph adapter unavailable</span>
+        </div>
+      </div>
+    `;
+  }
+  const snapshot = state.snapshot;
+  const visibleNodes = visibleKnowledgeNodes(state);
+  const selected = visibleNodes.find((node) => node.id === state.selectedNodeId)
+    ?? visibleNodes[0]
+    ?? null;
+  const selectedEdges = selected && snapshot ? snapshot.edges.filter((edge) =>
+    edge.source_id === selected.id || edge.target_id === selected.id
+  ) : [];
+  const nodeOptions = snapshot ? optionValues(snapshot.nodes.map((node) => node.kind)) : [];
+  const conceptTypes = snapshot ? optionValues(snapshot.nodes.map((node) => node.concept_type)) : [];
+  const tagOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => node.tags)) : [];
+  const areaOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => valuesForFrontmatter(node, "area"))) : [];
+  const projectOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => valuesForFrontmatter(node, "project"))) : [];
+  const milestoneOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => valuesForFrontmatter(node, "milestone"))) : [];
+  const issueOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => valuesForFrontmatter(node, "issue"))) : [];
+  const repositoryOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => valuesForFrontmatter(node, "repository"))) : [];
+  const sourceKindOptions = snapshot ? optionValues(snapshot.nodes.flatMap((node) => valuesForFrontmatter(node, "source_kind"))) : [];
+  const linkKindOptions = snapshot ? optionValues(snapshot.edges.map((edge) => edge.kind)) : [];
+  const communityOptions = snapshot ? optionValues(snapshot.communities.map((community) => community.id)) : [];
+  const bundleOptions = state.bundles?.bundles.map((bundle) => ({
+    value: bundle.id,
+    label: `${bundle.title} (${bundle.concept_count})`,
+  })) ?? [];
+  const filterControls = [
+    renderKnowledgeTextFilter("Concept type", "conceptType", state.filters.conceptType, conceptTypes),
+    renderKnowledgeTextFilter("Tag", "tag", state.filters.tag, tagOptions),
+    renderKnowledgeTextFilter("Area", "area", state.filters.area, areaOptions),
+    renderKnowledgeTextFilter("Project", "project", state.filters.project, projectOptions),
+    renderKnowledgeTextFilter("Milestone", "milestone", state.filters.milestone, milestoneOptions),
+    renderKnowledgeTextFilter("Issue", "issue", state.filters.issue, issueOptions),
+    renderKnowledgeTextFilter("Repository", "repository", state.filters.repository, repositoryOptions),
+    renderKnowledgeSelect("Type", "nodeKind", state.filters.nodeKind, nodeOptions),
+    renderKnowledgeSelect("Visibility", "visibility", state.filters.visibility, ["public", "private"]),
+    renderKnowledgeSelect("Freshness", "freshness", state.filters.freshness, ["current", "stale", "unknown"]),
+    renderKnowledgeSelect("Warnings", "warning", state.filters.warning, ["all", "with_warnings", "without_warnings"]),
+    renderKnowledgeTextFilter("Source kind", "sourceKind", state.filters.sourceKind, sourceKindOptions),
+    renderKnowledgeSelect("Link kind", "linkKind", state.filters.linkKind, linkKindOptions),
+    renderKnowledgeSelect("Community", "community", state.filters.community, communityOptions),
+  ].join("");
+  const mode = reducedMotionEnabled() ? "reduced" : "stable";
+  return `
+    <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold" data-layout-motion="${mode}">
+      <div class="os-knowledge-toolbar" aria-label="Knowledge Graph controls">
+        <label>Bundle
+          <select data-kg-filter="bundle">${renderBundleOptions(state.filters.bundle || snapshot?.bundle_id || "", bundleOptions)}</select>
+        </label>
+        <label>Search
+          <input data-kg-search type="search" value="${escapeAttr(state.searchQuery)}" placeholder="Search concepts, tags, resources, and source refs" />
+        </label>
+        <button type="button" data-kg-filter-reset>Reset</button>
+      </div>
+      <div class="os-knowledge-layout">
+        <aside class="os-knowledge-rail" aria-label="Knowledge Graph filters">
+          <div class="os-knowledge-filter-grid">${filterControls}</div>
+        </aside>
+        <section class="os-knowledge-main" aria-label="Knowledge Graph visible nodes">
+          ${renderKnowledgeStatus(state, visibleNodes.length, taskLabel)}
+          ${renderKnowledgeMap(visibleNodes, selected, selectedEdges)}
+          ${renderKnowledgeFallbackTable(visibleNodes, selected?.id ?? null)}
+        </section>
+        ${renderKnowledgeInspector(selected, selectedEdges, state)}
+      </div>
+    </div>
+  `;
+}
+
+function renderKnowledgeStatus(state: KnowledgeGraphState, visibleCount: number, taskLabel: string): string {
+  if (state.loading) {
+    return `<div class="os-knowledge-status" role="status">Loading Knowledge Graph for ${escapeHtml(taskLabel)}</div>`;
+  }
+  if (state.error) {
+    return `<div class="os-knowledge-status os-knowledge-status-warning" role="status">${escapeHtml(state.error)}</div>`;
+  }
+  const total = state.snapshot?.nodes.length ?? 0;
+  const filters = activeKnowledgeFilterLabels(state);
+  return `
+    <div class="os-knowledge-status" role="status" aria-live="polite">
+      <strong>${visibleCount} visible</strong>
+      <span>${total} total nodes</span>
+      <span>Task context: ${escapeHtml(taskLabel)}</span>
+      <span>${filters.length > 0 ? `Filters: ${escapeHtml(filters.join(", "))}` : "No active filters"}</span>
+    </div>
+  `;
+}
+
+function renderKnowledgeMap(nodes: MemoryGraphNode[], selected: MemoryGraphNode | null, selectedEdges: MemoryGraphEdge[]): string {
+  const shown = nodes;
+  const rendered = shown.map((node, index) => {
+    const selectedClass = node.id === selected?.id ? " is-selected" : "";
+    const community = node.metrics?.community_id ?? "none";
+    return `
+      <button type="button" id="${escapeAttr(knowledgeOptionId(node.id))}" role="option" class="os-kg-node os-kg-node-${escapeAttr(node.kind)}${selectedClass}" data-kg-node="${escapeAttr(node.id)}" style="--os-kg-index:${index}" aria-selected="${node.id === selected?.id ? "true" : "false"}" tabindex="${node.id === selected?.id ? "0" : "-1"}">
+        <span>${escapeHtml(nodeKindLabel(node.kind))}</span>
+        <strong>${escapeHtml(compactLabel(node.label, 28))}</strong>
+        <em>${escapeHtml(community)}</em>
+      </button>
+    `;
+  }).join("");
+  const edgeLabels = selectedEdges.slice(0, 4).map((edge) =>
+    `<span class="os-kg-edge-label">${escapeHtml(edgeKindLabel(edge.kind))}${edge.unresolved ? " unresolved" : ""}</span>`
+  ).join("");
+  return `
+    <div class="os-knowledge-map" data-testid="knowledge-graph-map" role="listbox" aria-label="Visible Knowledge Graph nodes. Use arrow keys to move through nodes and the table below for full summaries.">
+      ${rendered || `<span class="os-empty">No visible nodes</span>`}
+      <div class="os-kg-edge-list" aria-hidden="true">${edgeLabels}</div>
+    </div>
+  `;
+}
+
+function renderKnowledgeFallbackTable(nodes: MemoryGraphNode[], selectedNodeId: string | null): string {
+  const rows = nodes.map((node) => {
+    const community = node.metrics?.community_id ?? "none";
+    const status = [node.visibility ?? "private", node.freshness ?? "unknown", node.warning_count > 0 ? `${node.warning_count} warnings` : "no warnings"].join(" / ");
+    return `
+      <tr>
+        <td>
+          <button type="button" data-kg-node="${escapeAttr(node.id)}" class="${node.id === selectedNodeId ? "is-selected" : ""}" aria-current="${node.id === selectedNodeId ? "true" : "false"}">
+            ${escapeHtml(node.label)}
+          </button>
+        </td>
+        <td><span class="os-kg-cue os-kg-cue-${escapeAttr(node.kind)}">${escapeHtml(nodeKindLabel(node.kind))}</span></td>
+        <td>${escapeHtml(status)}</td>
+        <td>${escapeHtml(community)}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <section class="os-knowledge-fallback" aria-label="Accessible visible node list">
+      <table>
+        <caption>Visible Knowledge Graph nodes</caption>
+        <thead><tr><th>Node</th><th>Type</th><th>Status</th><th>Community</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4">No nodes match the current filters.</td></tr>`}</tbody>
+      </table>
+    </section>
+  `;
+}
+
+function renderKnowledgeInspector(node: MemoryGraphNode | null, edges: MemoryGraphEdge[], state: KnowledgeGraphState): string {
+  if (!node) {
+    return `<aside class="os-knowledge-inspector" aria-label="Concept inspector"><div class="os-empty">Select a graph node</div></aside>`;
+  }
+  const detail = state.detailKey === `${state.snapshot?.bundle_id}:${node.concept_id}` ? state.detail : null;
+  const primaryRows = [
+    ["Title", detailValue(detail?.frontmatter_view.primary.title) ?? node.label],
+    ["Type", node.concept_type ?? nodeKindLabel(node.kind)],
+    ["Description", detailValue(detail?.frontmatter_view.primary.description) ?? node.description ?? node.body_preview ?? ""],
+    ["Timestamp", node.timestamp ?? ""],
+    ["Visibility", node.visibility ?? "private"],
+    ["Freshness", node.freshness ?? "unknown"],
+  ];
+  const relationshipRows = [
+    ["Tags", node.tags.join(", ")],
+    ["Area", valuesForFrontmatter(node, "area").join(", ")],
+    ["Project", valuesForFrontmatter(node, "project").join(", ")],
+    ["Milestone", valuesForFrontmatter(node, "milestone").join(", ")],
+    ["Issue", valuesForFrontmatter(node, "issue").join(", ")],
+    ["Repository", valuesForFrontmatter(node, "repository").join(", ")],
+  ];
+  const sourceRows = [
+    ...edges.map((edge) => [edgeKindLabel(edge.kind), `${edge.source_id} -> ${edge.target_id}${edge.unresolved ? " (unresolved)" : ""}`]),
+    ...(detail?.source_refs ?? []).map((source) => [`Source ${source.kind}`, source.url ? `${source.id} ${source.url}` : source.id]),
+    ...(detail?.citations ?? []).map((citation) => ["Citation", citation.label ?? citation.target]),
+  ];
+  const resourceRows = [["Canonical URI", node.resource ?? node.path_display ?? node.concept_id ?? node.id]];
+  const systemRows = [
+    ["Bundle", node.bundle_id ?? state.snapshot?.bundle_id ?? ""],
+    ["Schema", state.snapshot ? `${state.snapshot.schema_version.major}.${state.snapshot.schema_version.minor}.${state.snapshot.schema_version.patch}` : ""],
+    ["Generated", state.snapshot?.generated_at ?? ""],
+    ["Warnings", String(node.warning_count)],
+  ];
+  const advanced = { ...node.unknown_frontmatter, ...(detail?.frontmatter_view.unknown ?? {}) };
+  return `
+    <aside class="os-knowledge-inspector" aria-label="Concept inspector" data-testid="knowledge-inspector">
+      <header>
+        <span class="os-kg-cue os-kg-cue-${escapeAttr(node.kind)}">${escapeHtml(nodeKindLabel(node.kind))}</span>
+        <h3>${escapeHtml(node.label)}</h3>
+      </header>
+      ${renderInspectorSection("Primary", primaryRows)}
+      ${renderInspectorSection("Relationships", relationshipRows)}
+      ${renderInspectorSection("Resource", resourceRows)}
+      ${renderInspectorSection("Source Support", sourceRows)}
+      ${renderInspectorSection("System", systemRows)}
+      ${renderInspectorObjectSection("Advanced", advanced)}
+      <section>
+        <button type="button" data-kg-raw-toggle aria-expanded="${state.rawOpen ? "true" : "false"}">Raw frontmatter</button>
+        ${state.rawOpen ? `<pre class="os-knowledge-raw">${escapeHtml(yamlLike({ frontmatter_summary: node.frontmatter_summary, unknown_frontmatter: node.unknown_frontmatter, detail: detail?.frontmatter_view ?? null }))}</pre>` : ""}
+      </section>
+    </aside>
+  `;
+}
+
+function visibleKnowledgeNodes(state: KnowledgeGraphState): MemoryGraphNode[] {
+  const snapshot = state.snapshot;
+  if (!snapshot) return [];
+  const query = state.searchQuery.toLowerCase();
+  return snapshot.nodes
+    .filter((node) => matchesKnowledgeFilters(node, snapshot.edges, state.filters))
+    .filter((node) => !query || knowledgeSearchText(node).includes(query));
+}
+
+function matchesKnowledgeFilters(
+  node: MemoryGraphNode,
+  edges: readonly MemoryGraphEdge[],
+  filters: KnowledgeGraphFilters,
+): boolean {
+  if (filters.bundle && node.bundle_id !== filters.bundle) return false;
+  if (filters.nodeKind && node.kind !== filters.nodeKind as MemoryGraphNodeKind) return false;
+  if (filters.conceptType && !includesText([node.concept_type], filters.conceptType)) return false;
+  if (filters.tag && !includesText(node.tags, filters.tag)) return false;
+  if (filters.area && !includesText(valuesForFrontmatter(node, "area"), filters.area)) return false;
+  if (filters.project && !includesText(valuesForFrontmatter(node, "project"), filters.project)) return false;
+  if (filters.milestone && !includesText(valuesForFrontmatter(node, "milestone"), filters.milestone)) return false;
+  if (filters.issue && !includesText(valuesForFrontmatter(node, "issue"), filters.issue)) return false;
+  if (filters.repository && !includesText(valuesForFrontmatter(node, "repository"), filters.repository)) return false;
+  if (filters.visibility && node.visibility !== filters.visibility as MemoryGraphVisibility) return false;
+  if (filters.freshness && node.freshness !== filters.freshness as MemoryGraphFreshness) return false;
+  if (filters.warning === "with_warnings" && node.warning_count <= 0) return false;
+  if (filters.warning === "without_warnings" && node.warning_count > 0) return false;
+  if (filters.sourceKind && !includesText(valuesForFrontmatter(node, "source_kind"), filters.sourceKind)) return false;
+  if (filters.linkKind && !edges.some((edge) =>
+    edge.kind === filters.linkKind as MemoryGraphEdgeKind
+    && (edge.source_id === node.id || edge.target_id === node.id)
+  )) return false;
+  if (filters.community && node.metrics?.community_id !== filters.community) return false;
+  return true;
+}
+
+function visibleKnowledgeNeighborIds(snapshot: MemoryGraphSnapshot | null, nodeId: string): string[] {
+  if (!snapshot) return [];
+  return [...new Set(snapshot.edges
+    .flatMap((edge) => {
+      if (edge.source_id === nodeId) return [edge.target_id];
+      if (edge.target_id === nodeId) return [edge.source_id];
+      return [];
+    }))]
+    .sort(compareText);
+}
+
+function valuesForFrontmatter(node: MemoryGraphNode, key: string): string[] {
+  const values = [
+    node.frontmatter_summary[key],
+    node.frontmatter_summary[`${key}s`],
+    node.unknown_frontmatter[key],
+    node.unknown_frontmatter[`${key}s`],
+  ];
+  return values.flatMap(stringValues).sort(compareText);
+}
+
+function stringValues(value: unknown): string[] {
+  if (typeof value === "string" && value) return [value];
+  if (Array.isArray(value)) return value.flatMap(stringValues);
+  return [];
+}
+
+function includesText(values: Array<string | undefined>, needle: string): boolean {
+  const normalized = needle.toLowerCase();
+  return values.some((value) => value?.toLowerCase().includes(normalized));
+}
+
+function knowledgeSearchText(node: MemoryGraphNode): string {
+  return [
+    node.id,
+    node.label,
+    node.concept_id,
+    node.concept_type,
+    node.description,
+    node.path_display,
+    node.resource,
+    ...node.tags,
+    ...Object.values(node.frontmatter_summary).flatMap(stringValues),
+    ...Object.values(node.unknown_frontmatter).flatMap(stringValues),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function renderKnowledgeTextFilter(
+  label: string,
+  key: keyof KnowledgeGraphFilters,
+  value: string,
+  suggestions: string[],
+): string {
+  const listId = `kg-${String(key)}-options`;
+  return `
+    <label>${escapeHtml(label)}
+      <input data-kg-filter="${escapeAttr(String(key))}" value="${escapeAttr(value)}" list="${escapeAttr(listId)}" />
+      <datalist id="${escapeAttr(listId)}">${suggestions.map((option) => `<option value="${escapeAttr(option)}"></option>`).join("")}</datalist>
+    </label>
+  `;
+}
+
+function renderKnowledgeSelect(
+  label: string,
+  key: keyof KnowledgeGraphFilters,
+  value: string,
+  options: string[],
+): string {
+  return `
+    <label>${escapeHtml(label)}
+      <select data-kg-filter="${escapeAttr(String(key))}">${renderKnowledgeOptions(value, options.map((option) => ({ value: option, label: humanizeToken(option) })))}</select>
+    </label>
+  `;
+}
+
+function renderKnowledgeOptions(
+  selected: string,
+  options: Array<string | { value: string; label: string }>,
+): string {
+  const normalized = options.map((option) => typeof option === "string" ? { value: option, label: option } : option);
+  return [
+    `<option value="">All</option>`,
+    ...normalized.map((option) =>
+      `<option value="${escapeAttr(option.value)}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+    ),
+  ].join("");
+}
+
+function renderBundleOptions(
+  selected: string,
+  options: Array<{ value: string; label: string }>,
+): string {
+  return options.map((option) =>
+    `<option value="${escapeAttr(option.value)}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+  ).join("");
+}
+
+function renderInspectorSection(title: string, rows: string[][]): string {
+  const rendered = rows
+    .filter(([, value]) => value !== "")
+    .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+    .join("");
+  return `<section><h4>${escapeHtml(title)}</h4><dl>${rendered || `<div><dt>Status</dt><dd>None</dd></div>`}</dl></section>`;
+}
+
+function renderInspectorObjectSection(title: string, value: Record<string, unknown>): string {
+  return renderInspectorSection(
+    title,
+    Object.entries(value).map(([key, got]) => [humanizeToken(key), formatUnknownValue(got)]),
+  );
+}
+
+function activeKnowledgeFilterLabels(state: KnowledgeGraphState): string[] {
+  return Object.entries(state.filters)
+    .filter(([key, value]) => value && !(key === "warning" && value === "all"))
+    .map(([key, value]) => `${humanizeToken(key)}=${value}`);
+}
+
+function optionValues(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))].sort(compareText);
+}
+
+function detailValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return null;
+}
+
+function formatUnknownValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(formatUnknownValue).join(", ");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return "";
+}
+
+function yamlLike(value: unknown, indent = 0): string {
+  if (!value || typeof value !== "object") return formatUnknownValue(value);
+  return Object.entries(value as Record<string, unknown>).map(([key, got]) => {
+    if (got && typeof got === "object" && !Array.isArray(got)) {
+      return `${" ".repeat(indent)}${key}:\n${yamlLike(got, indent + 2)}`;
+    }
+    return `${" ".repeat(indent)}${key}: ${formatUnknownValue(got)}`;
+  }).join("\n");
+}
+
+function nodeKindLabel(kind: MemoryGraphNodeKind): string {
+  return humanizeToken(kind);
+}
+
+function edgeKindLabel(kind: MemoryGraphEdgeKind): string {
+  return humanizeToken(kind);
+}
+
+function humanizeToken(value: string): string {
+  return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function compactLabel(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
+}
+
+function knowledgeOptionId(nodeId: string): string {
+  return `kg-option-${nodeId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+function compactWhitespace(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function reducedMotionEnabled(): boolean {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function renderActivityLifecycleIndicator(events: RunEvent[]): string {
@@ -4029,22 +4738,6 @@ function stateToneForTaskNode(node: TaskGraphNode): string {
   return "neutral";
 }
 
-function measureKnowledgeGraphStage(root: ParentNode): { width: number; height: number } {
-  const stage = root.querySelector<HTMLElement>("[data-kg-stage]");
-  const rect = stage?.getBoundingClientRect();
-  return {
-    width: Math.max(360, Math.floor(rect?.width || 720)),
-    height: Math.max(260, Math.floor(rect?.height || 420)),
-  };
-}
-
-function stageSizeChanged(
-  previous: { width: number; height: number },
-  next: { width: number; height: number },
-): boolean {
-  return Math.abs(previous.width - next.width) > 32 || Math.abs(previous.height - next.height) > 32;
-}
-
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
@@ -4109,23 +4802,6 @@ function appShellStyles(): string {
     .os-task-graph-link-skip { opacity: 0.78; }
     .os-task-graph-links marker path { fill: #39708f; }
     .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
-    .os-knowledge-graph { display: grid; gap: 10px; min-width: 0; }
-    .os-knowledge-toolbar { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
-    .os-knowledge-toolbar div { display: grid; gap: 2px; min-width: 0; }
-    .os-knowledge-toolbar strong { font-size: 13px; }
-    .os-knowledge-toolbar span { color: #667788; font-size: 12px; }
-    .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
-    .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
-    .os-knowledge-stage { position: relative; height: clamp(260px, 38vh, 460px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
-    .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
-    .os-knowledge-labels { position: absolute; inset: 0; pointer-events: none; }
-    .os-kg-label { position: absolute; transform: translate(-50%, calc(-100% - 10px)); max-width: min(180px, 42%); min-height: 24px; padding: 3px 7px; border-color: rgba(57, 112, 143, 0.28); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); }
-    .os-kg-label.is-selected { border-color: #c2410c; color: #9a3412; background: #fff7ed; }
-    .os-kg-list { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; max-height: 160px; overflow: auto; }
-    .os-kg-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 6px 8px; background: #ffffff; }
-    .os-kg-list li.is-selected { border-color: #c2410c; background: #fff7ed; }
-    .os-kg-list button { min-width: 0; min-height: 24px; padding: 0; border: none; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .os-kg-list span { color: #667788; font-size: 11px; text-transform: uppercase; }
     .os-project-group { display: grid; gap: 8px; margin-bottom: 10px; }
     .os-project-group-header { width: 100%; min-height: 32px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 6px; background: #f8fafc; text-align: left; }
     .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4209,20 +4885,44 @@ function appShellStyles(): string {
     .os-activity-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #27313a; }
     .os-activity-toggle { width: 24px; height: 24px; min-height: 24px; padding: 0; border-radius: 999px; display: inline-grid; place-items: center; font-size: 13px; line-height: 1; }
     .os-activity-detail { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #d8dee4; border-radius: 5px; padding: 8px; background: #ffffff; font-size: 12px; line-height: 1.35; }
-    .os-knowledge-graph { display: grid; gap: 10px; }
-    .os-knowledge-map { position: relative; min-height: 220px; border-radius: 8px; background: #fbfcfd; box-shadow: inset 0 0 0 1px rgba(57, 112, 143, 0.14); overflow: hidden; }
-    .os-kg-node { position: absolute; z-index: 2; display: grid; place-items: center; width: 54px; height: 54px; border-radius: 999px; background: #e7f1f5; color: #23566f; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.24), 0 10px 24px rgba(15, 23, 42, 0.08); font-size: 11px; font-weight: 700; }
-    .os-kg-node-main { left: calc(50% - 27px); top: calc(50% - 27px); background: #dcfce7; color: #166534; }
-    .os-kg-node-a { left: 18%; top: 22%; }
-    .os-kg-node-b { right: 14%; top: 24%; }
-    .os-kg-node-c { left: 34%; bottom: 12%; }
-    .os-kg-edge { position: absolute; z-index: 1; left: 50%; top: 50%; width: clamp(110px, 22%, 190px); height: 2px; transform-origin: left center; background: rgba(57, 112, 143, 0.35); border-radius: 999px; }
-    .os-kg-edge-a { transform: rotate(210deg); }
-    .os-kg-edge-b { transform: rotate(330deg); }
-    .os-kg-edge-c { transform: rotate(108deg); width: 28%; }
-    .os-knowledge-summary { display: grid; gap: 3px; padding: 10px; border-radius: 6px; background: #f8fafc; box-shadow: inset 0 0 0 1px rgba(216, 222, 228, 0.9); }
-    .os-knowledge-summary strong { color: #23566f; }
-    .os-knowledge-summary span, .os-knowledge-summary em { color: #667788; font-size: 12px; font-style: normal; text-wrap: pretty; }
+    .os-knowledge-graph { display: grid; gap: 10px; min-width: 0; }
+    .os-knowledge-toolbar { display: grid; grid-template-columns: minmax(150px, 0.7fr) minmax(190px, 1fr) auto; gap: 8px; align-items: end; }
+    .os-knowledge-toolbar label, .os-knowledge-filter-grid label { display: grid; gap: 4px; color: #667788; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .os-knowledge-toolbar input, .os-knowledge-toolbar select, .os-knowledge-filter-grid input, .os-knowledge-filter-grid select { width: 100%; min-width: 0; height: 30px; border: 1px solid #cbd5df; border-radius: 5px; background: #ffffff; color: #17202a; padding: 4px 7px; font: inherit; text-transform: none; }
+    .os-knowledge-layout { display: grid; grid-template-columns: minmax(170px, 0.62fr) minmax(280px, 1fr) minmax(240px, 0.82fr); gap: 10px; min-width: 0; align-items: start; }
+    .os-knowledge-rail, .os-knowledge-main, .os-knowledge-inspector { min-width: 0; }
+    .os-knowledge-filter-grid { display: grid; gap: 7px; }
+    .os-knowledge-status { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; min-height: 28px; padding: 6px 8px; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; font-size: 12px; }
+    .os-knowledge-status strong { color: #23566f; }
+    .os-knowledge-status span { color: #667788; }
+    .os-knowledge-status-warning { color: #991b1b; background: #fff7ed; }
+    .os-knowledge-map { display: grid; grid-template-columns: repeat(4, minmax(96px, 1fr)); align-content: start; gap: 8px; min-height: 220px; margin-top: 8px; border: 1px solid #d8dee4; border-radius: 6px; background: #fbfcfd; overflow: hidden; padding: 8px; }
+    .os-kg-node { display: grid; gap: 2px; width: 100%; min-height: 64px; border: 1px solid #b7c8d3; border-radius: 6px; background: #ffffff; color: #17202a; padding: 7px; text-align: left; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.07); font-size: 11px; }
+    .os-kg-node span, .os-kg-cue { display: inline-block; width: max-content; max-width: 100%; border: 1px solid #a7c3d1; border-radius: 4px; padding: 1px 5px; color: #23566f; background: #e7f1f5; font-size: 10px; font-weight: 700; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-kg-node strong { color: #17202a; font-size: 12px; line-height: 1.15; overflow-wrap: anywhere; }
+    .os-kg-node em { color: #667788; font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-kg-node.is-selected, .os-knowledge-fallback button.is-selected { border-color: #23566f; box-shadow: 0 0 0 2px rgba(57, 112, 143, 0.16); }
+    .os-kg-node-concept span, .os-kg-cue-concept { color: #166534; background: #dcfce7; border-color: #86efac; }
+    .os-kg-node-source_ref span, .os-kg-cue-source_ref, .os-kg-node-citation span, .os-kg-cue-citation { color: #6b3f00; background: #fff7ed; border-color: #fed7aa; }
+    .os-kg-edge-list { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 5px; }
+    .os-kg-edge-label { border: 1px dashed #9fb2bf; border-radius: 4px; padding: 2px 5px; color: #465766; background: rgba(255,255,255,0.76); font-size: 10px; }
+    .os-knowledge-fallback { margin-top: 8px; overflow-x: auto; }
+    .os-knowledge-fallback table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .os-knowledge-fallback caption { text-align: left; color: #667788; font-weight: 700; margin-bottom: 5px; }
+    .os-knowledge-fallback th, .os-knowledge-fallback td { border: 1px solid #d8dee4; padding: 6px; text-align: left; vertical-align: top; }
+    .os-knowledge-fallback th { background: #f8fafc; color: #465766; }
+    .os-knowledge-fallback button { width: 100%; text-align: left; background: #ffffff; }
+    .os-knowledge-inspector { display: grid; gap: 8px; border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #ffffff; }
+    .os-knowledge-inspector header { display: grid; gap: 5px; }
+    .os-knowledge-inspector h3, .os-knowledge-inspector h4 { margin: 0; color: #17202a; }
+    .os-knowledge-inspector h3 { font-size: 15px; line-height: 1.2; overflow-wrap: anywhere; }
+    .os-knowledge-inspector h4 { font-size: 12px; }
+    .os-knowledge-inspector section { display: grid; gap: 5px; border-top: 1px solid #edf0f3; padding-top: 7px; }
+    .os-knowledge-inspector dl { display: grid; gap: 4px; margin: 0; }
+    .os-knowledge-inspector dl div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 7px; }
+    .os-knowledge-inspector dt { color: #667788; font-weight: 700; font-size: 11px; }
+    .os-knowledge-inspector dd { margin: 0; min-width: 0; color: #27313a; font-size: 12px; overflow-wrap: anywhere; }
+    .os-knowledge-raw { margin: 0; max-height: 220px; overflow: auto; border: 1px solid #d8dee4; border-radius: 5px; padding: 8px; background: #f8fafc; font-size: 11px; line-height: 1.35; white-space: pre-wrap; }
     .os-changed-file-list { display: grid; gap: 6px; }
     .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px 8px; background: #ffffff; font-size: 12px; line-height: 1.2; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
@@ -4360,9 +5060,6 @@ function appShellStyles(): string {
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
       .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-run-meta-row span, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
-      .os-knowledge-stage, .os-kg-list li { background: #111820; border-color: #2a3440; }
-      .os-kg-label { background: rgba(17, 24, 32, 0.92); color: #d9e2ea; border-color: #2a3440; }
-      .os-kg-list button { color: #d9e2ea; }
       .os-run-meta-row code { color: #d9e2ea; }
       .os-run-meta-row a { color: #8bd0e6; }
       .os-run-meta-row em { color: #94a3b3; }

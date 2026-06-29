@@ -22,6 +22,9 @@ import type {
   GatewayEnvelope,
   GatewayCapabilities,
   ModelConfigurationProfile,
+  MemoryBundleList,
+  MemoryConceptDetail,
+  MemoryGraphSnapshot,
   RunDetail,
   RunEventPage,
   TaskGraphSnapshot,
@@ -267,6 +270,187 @@ const sharedProjectGroupingTaskGraph: TaskGraphSnapshot = {
     run_id: item.id,
     labels: item.workspace_label ? [item.workspace_label] : [],
   })),
+};
+
+const knowledgeBundles: MemoryBundleList = {
+  schema_version: schemaVersionV1(),
+  bundles: [
+    {
+      id: "local-default",
+      title: "OpenSymphony Memory",
+      okf_version: "0.1",
+      visibility: "private",
+      concept_count: 2,
+      updated_at: "2026-06-29T00:00:00Z",
+    },
+  ],
+};
+
+const knowledgeGraph: MemoryGraphSnapshot = {
+  schema_version: schemaVersionV1(),
+  bundle_id: "local-default",
+  cursor: { sequence: 1, partition: "memory-graph:local-default" },
+  generated_at: "2026-06-29T00:00:00Z",
+  filters_applied: [],
+  communities: [
+    {
+      id: "area:graph-view",
+      label: "Graph View",
+      node_ids: ["concept:coe-468", "tag:graph-view", "source:osym-824"],
+      concept_count: 1,
+    },
+    {
+      id: "area:memory",
+      label: "Memory",
+      node_ids: ["concept:coe-465"],
+      concept_count: 1,
+    },
+  ],
+  metrics: {
+    orphan_count: 0,
+    broken_link_count: 1,
+    stale_concept_count: 1,
+    warning_count: 1,
+  },
+  nodes: [
+    {
+      id: "concept:coe-468",
+      kind: "concept",
+      label: "COE-468 Concept Inspector",
+      bundle_id: "local-default",
+      concept_id: "issues/COE-468",
+      concept_type: "issue",
+      description: "Human readable graph inspector",
+      path_display: "issues/COE-468.md",
+      tags: ["graph-view", "frontend"],
+      timestamp: "2026-06-29T00:00:00Z",
+      visibility: "private",
+      freshness: "current",
+      warning_count: 1,
+      frontmatter_summary: {
+        area: "graph-view",
+        project: "OpenSymphony-bootstrap",
+        milestone: "M11.5",
+        issue: "COE-468",
+        repository: "OpenSymphony",
+        source_kind: "task",
+      },
+      unknown_frontmatter: { custom_owner: "frontend" },
+      body_preview: "Inspector, filters, and accessibility fallback.",
+      metrics: { indegree: 1, outdegree: 2, community_id: "area:graph-view" },
+    },
+    {
+      id: "concept:coe-465",
+      kind: "concept",
+      label: "COE-465 Shared Graph Frontend",
+      bundle_id: "local-default",
+      concept_id: "issues/COE-465",
+      concept_type: "issue",
+      path_display: "issues/COE-465.md",
+      tags: ["graph-view"],
+      visibility: "private",
+      freshness: "stale",
+      warning_count: 0,
+      frontmatter_summary: {
+        area: "memory",
+        project: "OpenSymphony-bootstrap",
+        milestone: "M11.5",
+        issue: "COE-465",
+        repository: "OpenSymphony",
+      },
+      unknown_frontmatter: {},
+      body_preview: "Shared graph frontend package.",
+      metrics: { indegree: 0, outdegree: 1, community_id: "area:memory" },
+    },
+    {
+      id: "tag:graph-view",
+      kind: "tag",
+      label: "graph-view",
+      bundle_id: "local-default",
+      tags: ["graph-view"],
+      visibility: "private",
+      freshness: "current",
+      warning_count: 0,
+      frontmatter_summary: {},
+      unknown_frontmatter: {},
+      metrics: { indegree: 1, outdegree: 0, community_id: "area:graph-view" },
+    },
+    {
+      id: "source:osym-824",
+      kind: "source_ref",
+      label: "OSYM-824",
+      bundle_id: "local-default",
+      tags: [],
+      visibility: "private",
+      freshness: "current",
+      warning_count: 0,
+      frontmatter_summary: { source_kind: "task" },
+      unknown_frontmatter: {},
+      metrics: { indegree: 1, outdegree: 0, community_id: "area:graph-view" },
+    },
+  ],
+  edges: [
+    {
+      id: "edge:coe-468:tag",
+      kind: "tagged_with",
+      source_id: "concept:coe-468",
+      target_id: "tag:graph-view",
+      unresolved: false,
+      metadata: {},
+    },
+    {
+      id: "edge:coe-468:source",
+      kind: "source_supported_by",
+      source_id: "concept:coe-468",
+      target_id: "source:osym-824",
+      unresolved: false,
+      metadata: { source_kind: "task" },
+    },
+    {
+      id: "edge:coe-465:coe-468",
+      kind: "markdown_link",
+      source_id: "concept:coe-465",
+      target_id: "concept:coe-468",
+      unresolved: true,
+      metadata: {},
+    },
+  ],
+};
+
+const knowledgeDetail: MemoryConceptDetail = {
+  schema_version: schemaVersionV1(),
+  bundle_id: "local-default",
+  concept_id: "issues/COE-468",
+  frontmatter_view: {
+    primary: {
+      title: "Concept Inspector, Search, Filters, And Accessibility Fallback",
+      description: "Human readable concept frontmatter without raw YAML first.",
+    },
+    opensymphony: {
+      issue: "COE-468",
+      milestone: "M11.5",
+    },
+    unknown: {
+      reviewer_note: "raw toggle coverage",
+    },
+  },
+  body_markdown: "# COE-468\n\nInspector content.",
+  links: [{ target: "tag:graph-view", label: "graph-view" }],
+  citations: [{ id: "spec-13", target: "docs/specs/llm-wiki-graph-view-spec.md#13", label: "Accessibility" }],
+  source_refs: [{ kind: "task", id: "OSYM-824" }],
+};
+
+const knowledgeGraphAdapter = {
+  async listBundles() {
+    return knowledgeBundles;
+  },
+  async getGraphSnapshot() {
+    return knowledgeGraph;
+  },
+  async getConceptDetail(_bundleId: string, conceptId: string) {
+    if (conceptId === "issues/COE-468") return knowledgeDetail;
+    return { ...knowledgeDetail, concept_id: conceptId };
+  },
 };
 
 const runEvents: RunEventPage = {
@@ -584,6 +768,41 @@ async function flushUntil(
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function mockReducedMotionPreference(): () => void {
+  const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: jest.fn().mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    })),
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(window, "matchMedia", original);
+    } else {
+      delete (window as Partial<Window>).matchMedia;
+    }
+  };
+}
+
 async function expandSettingsPanel(
   root: HTMLElement,
   panel: "connection" | "model",
@@ -598,6 +817,13 @@ async function expandSettingsPanel(
 }
 
 describe("OpenSymphonyApp mount", () => {
+  let restoreMatchMedia: (() => void) | null = null;
+
+  afterEach(() => {
+    restoreMatchMedia?.();
+    restoreMatchMedia = null;
+  });
+
   it("flushUntil rejects with a clear timeout message instead of returning silently", async () => {
     // Regression coverage for the reviewer finding that exhausted
     // flushUntil iterations used to resolve silently, which masked the
@@ -662,10 +888,12 @@ describe("OpenSymphonyApp mount", () => {
   it("lays out status, task graph, run detail, and activity panels", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
+    restoreMatchMedia = mockReducedMotionPreference();
     const handle = renderOpenSymphonyApp({
       root,
       mode: "desktop",
       transport: buildTransport(),
+      graphAdapter: knowledgeGraphAdapter,
     });
 
     await flushUntil(
@@ -764,56 +992,267 @@ describe("OpenSymphonyApp mount", () => {
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
 
-    const originalGetContext = HTMLCanvasElement.prototype.getContext;
-    const originalConsoleError = console.error;
-    const consoleError = jest.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-      const first = args[0];
-      const message = first instanceof Error ? first.message : String(first);
-      if (message.includes("HTMLCanvasElement.prototype.getContext")) return;
-      originalConsoleError(...args);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']") !== null);
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']") !== null);
+    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+    expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.getAttribute("data-layout-motion")).toBe("reduced");
+    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-449");
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-scaffold']")).toBeNull();
+    expect(root.querySelector("[data-testid='knowledge-graph-map']")?.getAttribute("role")).toBe("listbox");
+    expect(root.querySelector("[data-testid='knowledge-graph-map']")?.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("role")).toBe("option");
+    expect(root.querySelector("[data-kg-node='concept:coe-468']")?.getAttribute("aria-selected")).toBe("true");
+    expect(root.querySelector("[data-kg-node='concept:coe-468']")?.hasAttribute("aria-pressed")).toBe(false);
+    expect(Array.from((root.querySelector("[data-kg-filter='bundle']") as HTMLSelectElement).options).map((option) => option.textContent)).toEqual([
+      "OpenSymphony Memory (2)",
+    ]);
+    expect((root.querySelector("[data-kg-search]") as HTMLInputElement).placeholder).toBe("Search concepts, tags, resources, and source refs");
+    expect(Array.from(root.querySelectorAll("[data-testid='knowledge-graph-map'] [data-kg-node]")).map((node) =>
+      (node as HTMLElement).dataset.kgNode
+    )).toEqual(["concept:coe-468", "concept:coe-465", "tag:graph-view", "source:osym-824"]);
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Concept Inspector, Search, Filters, And Accessibility Fallback");
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Relationships");
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Source Support");
+    expect(root.querySelector(".os-knowledge-fallback table")).not.toBeNull();
+    expect(root.querySelectorAll("[data-kg-filter]").length).toBeGreaterThanOrEqual(14);
+    expect(root.querySelector(".os-kg-cue-concept")?.textContent).toContain("Concept");
+
+    let search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    search.focus();
+    search.value = "O";
+    search.setSelectionRange(1, 1);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    expect(document.activeElement).toBe(search);
+    expect(search.selectionStart).toBe(1);
+    search.value = "OS";
+    search.setSelectionRange(2, 2);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    expect(document.activeElement).toBe(search);
+    expect(search.value).toBe("OS");
+    expect(search.selectionStart).toBe(2);
+    search.value = "OSYM-824";
+    search.setSelectionRange(8, 8);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("1 visible") ?? false);
+    expect(root.querySelector(".os-knowledge-fallback tbody")?.textContent).toContain("OSYM-824");
+    await flushUntil(() =>
+      root.querySelector("[data-kg-node='source:osym-824']")?.getAttribute("aria-selected") === "true"
+    );
+    expect(root.querySelector("[data-testid='knowledge-graph-map'] [data-kg-node='concept:coe-468']")).toBeNull();
+    const singleVisibleNode = root.querySelector("[data-testid='knowledge-graph-map'] [data-kg-node='source:osym-824']") as HTMLButtonElement;
+    singleVisibleNode.focus();
+    singleVisibleNode.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await flushUntil(() =>
+      root.querySelector("[data-kg-node='source:osym-824']")?.getAttribute("aria-selected") === "true"
+    );
+
+    const reset = root.querySelector("[data-kg-filter-reset]") as HTMLButtonElement;
+    reset.focus();
+    reset.click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+    expect(document.activeElement).toBe(root.querySelector("[data-kg-filter-reset]"));
+    const selectedButton = root.querySelector("[data-kg-node='concept:coe-468']") as HTMLButtonElement;
+    selectedButton.focus();
+    selectedButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("graph-view") ?? false);
+    await flushUntil(() => {
+      const activeNode = document.activeElement as HTMLElement | null;
+      return Boolean(activeNode?.dataset.kgNode && activeNode.getAttribute("aria-selected") === "true");
     });
-    const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (
-      this: HTMLCanvasElement,
-      contextId: string,
-      contextOptions?: unknown,
-    ) {
-      if (contextId.startsWith("webgl")) {
-        return originalGetContext.call(this, contextId as "webgl", contextOptions as WebGLContextAttributes);
-      }
-      if (contextId !== "2d") return null;
-      return {
-        setTransform: jest.fn(),
-        fillRect: jest.fn(),
-        beginPath: jest.fn(),
-        moveTo: jest.fn(),
-        lineTo: jest.fn(),
-        stroke: jest.fn(),
-        arc: jest.fn(),
-        fill: jest.fn(),
-        set fillStyle(_value: string) {},
-        set strokeStyle(_value: string) {},
-        set lineWidth(_value: number) {},
-        set globalAlpha(_value: number) {},
-      } as unknown as CanvasRenderingContext2D;
-    });
-    try {
-      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
-      expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
-      expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
-      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
-      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
-      expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
-      expect(root.querySelector(".os-task-graph-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
-      expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
-    } finally {
-      consoleError.mockRestore();
-      getContext.mockRestore();
-    }
+
+    (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-468']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-468") ?? false);
+    const rawToggle = root.querySelector("[data-kg-raw-toggle]") as HTMLButtonElement;
+    rawToggle.focus();
+    rawToggle.click();
+    await flushUntil(() => root.querySelector(".os-knowledge-raw") !== null);
+    expect(document.activeElement).toBe(root.querySelector("[data-kg-raw-toggle]"));
+    expect(root.querySelector(".os-knowledge-raw")?.textContent).toContain("custom_owner");
 
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
     expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("keeps the latest Knowledge Graph bundle load when older requests finish late", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const slowOtherBundle = deferred<MemoryGraphSnapshot>();
+    const otherGraph: MemoryGraphSnapshot = {
+      ...knowledgeGraph,
+      bundle_id: "other-bundle",
+      nodes: knowledgeGraph.nodes.map((node) => ({
+        ...node,
+        id: node.id.replace("coe-", "other-"),
+        label: node.kind === "concept" ? "Other Bundle Concept" : node.label,
+        bundle_id: "other-bundle",
+      })),
+      edges: [],
+      communities: [],
+    };
+    const adapter = {
+      async listBundles() {
+        return {
+          ...knowledgeBundles,
+          bundles: [
+            ...knowledgeBundles.bundles,
+            { ...knowledgeBundles.bundles[0]!, id: "other-bundle", title: "Other Memory" },
+          ],
+        };
+      },
+      async getGraphSnapshot(bundleId: string) {
+        return bundleId === "other-bundle" ? slowOtherBundle.promise : knowledgeGraph;
+      },
+      async getConceptDetail(_bundleId: string, conceptId: string) {
+        return { ...knowledgeDetail, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: adapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+
+    const selectOther = root.querySelector("[data-kg-filter='bundle']") as HTMLSelectElement;
+    selectOther.value = "other-bundle";
+    selectOther.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("Loading") ?? false);
+
+    const selectLocal = root.querySelector("[data-kg-filter='bundle']") as HTMLSelectElement;
+    selectLocal.value = "local-default";
+    selectLocal.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+
+    slowOtherBundle.resolve(otherGraph);
+    await flushMicrotasks();
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-468 Concept Inspector");
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).not.toContain("Other Bundle Concept");
+
+    await handle.destroy();
+  });
+
+  it("keeps the latest Knowledge Graph detail when older detail requests finish late", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const slowDetail = deferred<MemoryConceptDetail>();
+    const adapter = {
+      async listBundles() {
+        return knowledgeBundles;
+      },
+      async getGraphSnapshot() {
+        return knowledgeGraph;
+      },
+      async getConceptDetail(_bundleId: string, conceptId: string) {
+        if (conceptId === "issues/COE-465") return slowDetail.promise;
+        return { ...knowledgeDetail, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: adapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-468") ?? false);
+
+    (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-465']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("COE-465") ?? false);
+    (root.querySelector(".os-knowledge-fallback [data-kg-node='concept:coe-468']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='knowledge-inspector']")?.textContent?.includes("Concept Inspector, Search") ?? false);
+
+    slowDetail.resolve({
+      ...knowledgeDetail,
+      concept_id: "issues/COE-465",
+      frontmatter_view: {
+        ...knowledgeDetail.frontmatter_view,
+        primary: { title: "Stale COE-465 Detail" },
+      },
+    });
+    await flushMicrotasks();
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).toContain("Concept Inspector, Search");
+    expect(root.querySelector("[data-testid='knowledge-inspector']")?.textContent).not.toContain("Stale COE-465 Detail");
+
+    await handle.destroy();
+  });
+
+  it("invalidates in-flight Knowledge Graph loads when gateway state resets", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    class ResettableTransport extends MockGatewayTransport {
+      failSnapshot = false;
+
+      override async snapshot(): Promise<DashboardSnapshot> {
+        if (this.failSnapshot) {
+          throw new Error("simulated gateway reset");
+        }
+        return super.snapshot();
+      }
+    }
+    const transport = new ResettableTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    const staleGraph: MemoryGraphSnapshot = {
+      ...knowledgeGraph,
+      nodes: knowledgeGraph.nodes.map((node) => ({
+        ...node,
+        label: node.id === "concept:coe-468" ? "Stale After Reset" : node.label,
+      })),
+    };
+    const slowGraph = deferred<MemoryGraphSnapshot>();
+    let graphReads = 0;
+    const adapter = {
+      async listBundles() {
+        return knowledgeBundles;
+      },
+      async getGraphSnapshot() {
+        graphReads += 1;
+        return graphReads === 1 ? slowGraph.promise : knowledgeGraph;
+      },
+      async getConceptDetail(_bundleId: string, conceptId: string) {
+        return { ...knowledgeDetail, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter: adapter,
+    });
+
+    await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("Loading") ?? false);
+    transport.failSnapshot = true;
+    await handle.refresh();
+    slowGraph.resolve(staleGraph);
+    await flushMicrotasks();
+
+    transport.failSnapshot = false;
+    await handle.refresh();
+    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("4 visible") ?? false);
+
+    expect(graphReads).toBe(2);
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).toContain("COE-468 Concept Inspector");
+    expect(root.querySelector("[data-testid='knowledge-graph-scaffold']")?.textContent).not.toContain("Stale After Reset");
 
     await handle.destroy();
   });
