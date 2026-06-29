@@ -659,8 +659,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async loadKnowledgeGraph(bundleId?: string): Promise<void> {
     if (this.knowledgeGraphLoadInFlight) {
-      if (bundleId !== undefined || this.state.knowledgeGraph.freshnessStatus === "stale") {
+      if (bundleId !== undefined) {
         this.knowledgeGraphLoadQueuedBundleId = bundleId ?? null;
+      } else if (this.state.knowledgeGraph.freshnessStatus === "stale" && this.knowledgeGraphLoadQueuedBundleId === undefined) {
+        this.knowledgeGraphLoadQueuedBundleId = null;
       }
       return this.knowledgeGraphLoadInFlight;
     }
@@ -804,10 +806,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (envelope.event_kind === "memory_graph_updated") {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });
-        this.state.knowledgeGraphLayout = null;
-        this.knowledgeGraphLayoutSize = null;
-        this.render();
+        const selectedBundleId = this.state.knowledgeGraph.selectedBundleId;
+        if (!selectedBundleId || selectedBundleId === envelope.payload.bundle_id) {
+          this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });
+          this.state.knowledgeGraphLayout = null;
+          this.knowledgeGraphLayoutSize = null;
+          this.render();
+        }
       }
     }
     if (!handledMemoryGraphUpdate && !this.eventAffectsCurrentView(envelope)) {

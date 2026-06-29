@@ -978,6 +978,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(reads).toEqual(["selected-bundle", "selected-bundle"]);
     expect(root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent).toContain("Selected Bundle Concept");
     expect(root.querySelector("[data-testid='knowledge-graph-node-list']")?.textContent).not.toContain("Background Bundle Concept");
+    expect(root.querySelector("[data-testid='knowledge-graph-status']")?.textContent).not.toContain("Graph stale");
 
     await handle.destroy();
   });
