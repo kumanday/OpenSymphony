@@ -36,5 +36,7 @@ jobs:
         run: npm run type-check
       - name: build-web
         run: npm run build --workspace=@opensymphony/web
+      - name: install-playwright
+        run: npx playwright install --with-deps chromium
       - name: jest
         run: npx jest --config jest.config.js --testPathIgnorePatterns="apps"

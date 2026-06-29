@@ -11,8 +11,9 @@ describe("Knowledge Graph renderer", () => {
     const indexPath = join(webDist, "index.html");
     expect(existsSync(indexPath)).toBe(true);
     const server = await startStaticServer(webDist);
-    const browser = await chromium.launch({ headless: true });
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
     try {
+      browser = await chromium.launch({ headless: true });
       const page = await browser.newPage({ viewport: { width: 1024, height: 768 } });
       await page.goto(`${server.url}/app/`, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "Knowledge Graph" }).click();
@@ -25,7 +26,7 @@ describe("Knowledge Graph renderer", () => {
       expect(dataUrl).toMatch(/^data:image\/png;base64,/);
       expect(dataUrl.length).toBeGreaterThan(1_000);
     } finally {
-      await browser.close();
+      await browser?.close();
       await new Promise<void>((resolveClose) => server.close(resolveClose));
     }
   }, 20_000);
