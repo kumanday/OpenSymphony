@@ -128,7 +128,7 @@ export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
   root.querySelectorAll<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']").forEach((canvas) => {
     const state = threeCanvasState.get(canvas);
     if (!state) return;
-    disposeScene(state.scene);
+    disposeObject3D(state.graph);
     state.renderer.dispose();
     state.renderer.forceContextLoss();
     threeCanvasState.delete(canvas);
@@ -213,6 +213,9 @@ interface ThreeCanvasState {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.OrthographicCamera;
+  graph: THREE.Group;
+  layoutKey: string | null;
+  selectionKey: string | null;
 }
 
 const threeCanvasState = new WeakMap<HTMLCanvasElement, ThreeCanvasState>();
@@ -226,7 +229,6 @@ function drawThree(
 ): boolean {
   try {
     const state = threeStateFor(canvas);
-    disposeScene(state.scene);
     state.renderer.setPixelRatio(viewport.ratio);
     state.renderer.setSize(viewport.width, viewport.height, false);
     state.renderer.setClearColor(0xf8fafc, 1);
@@ -236,9 +238,9 @@ function drawThree(
     state.camera.top = viewport.height / 2;
     state.camera.bottom = -viewport.height / 2;
     state.camera.updateProjectionMatrix();
-    state.scene.clear();
-    state.scene.add(edgeSegments(layout, view));
-    state.scene.add(nodeInstances(layout, selectedNodeIds, view));
+    syncGraphObjects(state, layout, selectedNodeIds);
+    state.graph.scale.set(view.scale, view.scale, 1);
+    state.graph.position.set(view.dx, -view.dy, 0);
     state.renderer.render(state.scene, state.camera);
     return true;
   } catch {
@@ -261,33 +263,60 @@ function threeStateFor(canvas: HTMLCanvasElement): ThreeCanvasState {
     preserveDrawingBuffer: true,
   });
   const scene = new THREE.Scene();
+  const graph = new THREE.Group();
+  scene.add(graph);
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2000);
   camera.position.set(0, 0, 800);
-  const state = { renderer, scene, camera };
+  const state = { renderer, scene, camera, graph, layoutKey: null, selectionKey: null };
   threeCanvasState.set(canvas, state);
   return state;
 }
 
-function disposeScene(scene: THREE.Scene): void {
-  scene.traverse((object) => {
+function syncGraphObjects(
+  state: ThreeCanvasState,
+  layout: GraphLayoutResult,
+  selectedNodeIds: readonly string[],
+): void {
+  const layoutKey = graphLayoutKey(layout);
+  const selectionKey = [...selectedNodeIds].sort().join("\u0000");
+  if (state.layoutKey === layoutKey && state.selectionKey === selectionKey) return;
+  disposeObject3D(state.graph);
+  state.graph.clear();
+  state.graph.add(edgeSegments(layout));
+  state.graph.add(nodeInstances(layout, selectedNodeIds));
+  state.layoutKey = layoutKey;
+  state.selectionKey = selectionKey;
+}
+
+function disposeObject3D(object: THREE.Object3D): void {
+  object.traverse((child) => {
+    if (child === object) return;
+    disposeRenderable(child);
+  });
+}
+
+function disposeRenderable(object: THREE.Object3D): void {
     const mesh = object as THREE.Mesh | THREE.LineSegments;
     if ("geometry" in mesh) mesh.geometry.dispose();
     const materials = "material" in mesh
       ? Array.isArray(mesh.material) ? mesh.material : [mesh.material]
       : [];
     for (const material of materials) material.dispose();
-  });
 }
 
-function edgeSegments(layout: GraphLayoutResult, view: { scale: number; dx: number; dy: number }): THREE.LineSegments {
+function graphLayoutKey(layout: GraphLayoutResult): string {
+  return `${layout.kind}:${layout.width}:${layout.height}:${layout.generatedAt}:${layout.nodes.length}:${layout.edges.length}`;
+}
+
+function edgeSegments(layout: GraphLayoutResult): THREE.LineSegments {
   const byId = new Map(layout.nodes.map((node) => [node.nodeId, node]));
   const positions: number[] = [];
   for (const edge of layout.edges) {
     const source = byId.get(edge.sourceId);
     const target = byId.get(edge.targetId);
     if (!source || !target) continue;
-    positions.push(...projectPoint(source.x, source.y, source.z, layout, view));
-    positions.push(...projectPoint(target.x, target.y, target.z, layout, view));
+    positions.push(...projectPoint(source.x, source.y, source.z, layout, { scale: 1, dx: 0, dy: 0 }));
+    positions.push(...projectPoint(target.x, target.y, target.z, layout, { scale: 1, dx: 0, dy: 0 }));
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
@@ -297,13 +326,17 @@ function edgeSegments(layout: GraphLayoutResult, view: { scale: number; dx: numb
 function nodeInstances(
   layout: GraphLayoutResult,
   selectedNodeIds: readonly string[],
-  view: { scale: number; dx: number; dy: number },
 ): THREE.Group {
   const selected = new Set(selectedNodeIds);
   const grouped = new Map<string, GraphLayoutResult["nodes"]>();
   for (const node of layout.nodes) {
     const color = selected.has(node.nodeId) ? "#c2410c" : colorForKind(node.kind);
-    grouped.set(color, [...(grouped.get(color) ?? []), node]);
+    const nodes = grouped.get(color);
+    if (nodes) {
+      nodes.push(node);
+    } else {
+      grouped.set(color, [node]);
+    }
   }
   const group = new THREE.Group();
   for (const [color, nodes] of grouped) {
@@ -312,8 +345,8 @@ function nodeInstances(
     const mesh = new THREE.InstancedMesh(geometry, material, nodes.length);
     const matrix = new THREE.Matrix4();
     nodes.forEach((node, index) => {
-      const [x, y, z] = projectPoint(node.x, node.y, node.z, layout, view);
-      const scale = (selected.has(node.nodeId) ? node.radius + 4 : node.radius) * view.scale;
+      const [x, y, z] = projectPoint(node.x, node.y, node.z, layout, { scale: 1, dx: 0, dy: 0 });
+      const scale = selected.has(node.nodeId) ? node.radius + 4 : node.radius;
       matrix.compose(new THREE.Vector3(x, y, z), new THREE.Quaternion(), new THREE.Vector3(scale, scale, 1));
       mesh.setMatrixAt(index, matrix);
     });
