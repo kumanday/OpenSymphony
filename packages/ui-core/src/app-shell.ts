@@ -23,6 +23,17 @@ import type {
   ModelCredentialMode,
 } from "@opensymphony/gateway-schema";
 import {
+  createGraphLayoutAdapter,
+  createInitialGraphState,
+  fixtureGraphSnapshot,
+  graphLayoutKindForMode,
+  graphReducer,
+  visibleGraphSnapshot,
+  type GraphLayoutAdapter,
+  type GraphLayoutResult,
+  type GraphState,
+} from "@opensymphony/graph";
+import {
   authStateFromError,
   createModelProfile,
   defaultModelProfiles,
@@ -99,6 +110,13 @@ import {
   renderPlanningWorkspace,
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
+import {
+  disposeKnowledgeGraphCanvas,
+  disposeKnowledgeGraphRenderer,
+  type KnowledgeGraphViewState,
+  mountKnowledgeGraphRenderer,
+  renderKnowledgeGraphSurface,
+} from "./knowledge-graph-renderer.js";
 
 export interface GatewayReader {
   readonly baseUri: string;
@@ -175,6 +193,8 @@ interface AppState {
   selectedProjectId: string | null;
   selectedNodeId: string | null;
   graphPaneView: GraphPaneView;
+  knowledgeGraph: GraphState;
+  knowledgeGraphLayout: GraphLayoutResult | null;
   runDetail: RunDetail | null;
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
@@ -263,10 +283,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshQueued = false;
   private liveRefreshFailureCount = 0;
   private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private graphLayoutAdapter: GraphLayoutAdapter = createGraphLayoutAdapter(() => null);
+  private pendingGraphLayoutAdapter: GraphLayoutAdapter | null = null;
+  private graphLayoutRun = 0;
+  private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
+  private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
     this.transport = options.transport;
+    this.installBrowserGraphLayoutAdapter();
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
     const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
@@ -281,6 +307,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       selectedProjectId: null,
       selectedNodeId: null,
       graphPaneView: "task",
+      knowledgeGraph: graphReducer(createInitialGraphState(), { type: "SNAPSHOT_LOADED", snapshot: fixtureGraphSnapshot }),
+      knowledgeGraphLayout: null,
       runDetail: null,
       runFiles: null,
       selectedDiffPath: null,
@@ -396,6 +424,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.destroyed = true;
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
+    this.graphLayoutAdapter.dispose();
+    this.pendingGraphLayoutAdapter?.dispose();
+    this.pendingGraphLayoutAdapter = null;
+    disposeKnowledgeGraphRenderer(this.options.root);
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
   }
@@ -861,6 +893,107 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private selectGraphPaneView(view: GraphPaneView): void {
     this.state.graphPaneView = view;
     this.render();
+  }
+
+  private bindKnowledgeGraph(): void {
+    const root = this.options.root.querySelector<HTMLElement>("[data-testid='knowledge-graph-renderer']");
+    if (!root) return;
+    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
+    const stageSize = measureKnowledgeGraphStage(root);
+    if (
+      snapshot
+      && this.state.knowledgeGraphLayout
+      && this.state.knowledgeGraph.layoutStatus === "ready"
+      && this.knowledgeGraphLayoutSize
+      && stageSizeChanged(this.knowledgeGraphLayoutSize, stageSize)
+    ) {
+      this.state.knowledgeGraphLayout = null;
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+      this.knowledgeGraphLayoutSize = null;
+      this.scheduleKnowledgeGraphLayout(stageSize);
+      return;
+    }
+    if (snapshot && !this.state.knowledgeGraphLayout && this.state.knowledgeGraph.layoutStatus === "idle") {
+      this.scheduleKnowledgeGraphLayout(stageSize);
+    }
+    mountKnowledgeGraphRenderer(root, {
+      snapshot,
+      layout: this.state.knowledgeGraphLayout,
+      selectedNodeIds: this.state.knowledgeGraph.selectedNodeIds,
+      view: this.knowledgeGraphView,
+      onSelect: (nodeId) => {
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [nodeId] });
+        this.render();
+      },
+      onFocus: (nodeId) => {
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
+        this.render();
+        if (this.state.knowledgeGraph.mode !== "neighborhood") return;
+        this.state.knowledgeGraphLayout = null;
+        this.knowledgeGraphLayoutSize = null;
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+        this.scheduleKnowledgeGraphLayout();
+      },
+    });
+  }
+
+  private installBrowserGraphLayoutAdapter(): void {
+    if (typeof Worker === "undefined") return;
+    void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
+      if (this.destroyed) return;
+      this.replaceGraphLayoutAdapter(createBrowserGraphLayoutAdapter());
+    }).catch((error: unknown) => {
+      console.warn("Knowledge graph layout worker unavailable; using synchronous fallback.", error);
+      this.graphLayoutAdapter = createGraphLayoutAdapter(() => null);
+    });
+  }
+
+  private replaceGraphLayoutAdapter(adapter: GraphLayoutAdapter): void {
+    if (this.state.knowledgeGraph.layoutStatus === "loading") {
+      this.pendingGraphLayoutAdapter?.dispose();
+      this.pendingGraphLayoutAdapter = adapter;
+      return;
+    }
+    this.graphLayoutAdapter.dispose();
+    this.graphLayoutAdapter = adapter;
+  }
+
+  private applyPendingGraphLayoutAdapter(): void {
+    if (!this.pendingGraphLayoutAdapter || this.state.knowledgeGraph.layoutStatus === "loading") return;
+    const adapter = this.pendingGraphLayoutAdapter;
+    this.pendingGraphLayoutAdapter = null;
+    this.graphLayoutAdapter.dispose();
+    this.graphLayoutAdapter = adapter;
+  }
+
+  private scheduleKnowledgeGraphLayout(size = measureKnowledgeGraphStage(this.options.root)): void {
+    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
+    if (!snapshot || this.state.knowledgeGraph.layoutStatus === "loading") return;
+    const run = ++this.graphLayoutRun;
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
+    const { width, height } = size;
+    void this.graphLayoutAdapter.layout(snapshot, {
+      kind: graphLayoutKindForMode(this.state.knowledgeGraph.mode),
+      focusedNodeId: this.state.knowledgeGraph.focusedNodeId,
+      width,
+      height,
+    }).then((layout) => {
+      if (this.destroyed || run !== this.graphLayoutRun) return;
+      this.state.knowledgeGraphLayout = layout;
+      this.knowledgeGraphLayoutSize = { width, height };
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+      this.applyPendingGraphLayoutAdapter();
+      this.render();
+    }).catch((error) => {
+      if (this.destroyed || run !== this.graphLayoutRun) return;
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, {
+        type: "LAYOUT_STATUS_SET",
+        status: "failed",
+        error: errorMessage(error),
+      });
+      this.applyPendingGraphLayoutAdapter();
+      this.render();
+    });
   }
 
   private toggleActivityEvent(eventKey: string): void {
@@ -1352,6 +1485,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
+    const preservedKnowledgeCanvas = this.state.graphPaneView === "knowledge"
+      ? this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']")
+      : null;
+    if (!preservedKnowledgeCanvas) {
+      disposeKnowledgeGraphRenderer(this.options.root);
+    }
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}" data-auth-state="${this.state.authState}">
@@ -1373,6 +1512,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </section>
       </main>
     `;
+    if (preservedKnowledgeCanvas) {
+      const nextCanvas = this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
+      if (nextCanvas) {
+        nextCanvas.replaceWith(preservedKnowledgeCanvas);
+      } else {
+        disposeKnowledgeGraphCanvas(preservedKnowledgeCanvas);
+      }
+    }
     this.bindEvents();
     restoreShellScrollPositions(this.options.root, scrollPositions);
   }
@@ -1751,7 +1898,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const showingTasks = this.state.graphPaneView === "task";
     const content = showingTasks
       ? this.renderTaskGraph()
-      : renderKnowledgeGraphScaffold(this.selectedTaskNode());
+      : renderKnowledgeGraphSurface({
+        snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
+        layout: this.state.knowledgeGraphLayout,
+        state: this.state.knowledgeGraph,
+      });
     return `
       <section class="os-panel os-task-graph-panel">
         <div class="os-segmented" data-testid="graph-view-toggle">
@@ -2094,6 +2245,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
+    this.bindKnowledgeGraph();
     this.options.root.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach((handle) => {
       handle.addEventListener("pointerdown", (event) => {
         this.startPaneResize(handle.dataset.paneResizer, event as PointerEvent);
@@ -3007,29 +3159,6 @@ function renderActivityEvent(event: RunEvent, eventKey: string, expanded: boolea
   `;
 }
 
-function renderKnowledgeGraphScaffold(node: TaskGraphNode | null): string {
-  const label = node ? nodeLabel(node) : "No issue selected";
-  const title = node?.title ?? "Select a task to anchor graph context";
-  return `
-    <div class="os-knowledge-graph" data-testid="knowledge-graph-scaffold">
-      <div class="os-knowledge-map" aria-hidden="true">
-        <span class="os-kg-node os-kg-node-main">KG</span>
-        <span class="os-kg-node os-kg-node-a">Issue</span>
-        <span class="os-kg-node os-kg-node-b">Docs</span>
-        <span class="os-kg-node os-kg-node-c">Refs</span>
-        <span class="os-kg-edge os-kg-edge-a"></span>
-        <span class="os-kg-edge os-kg-edge-b"></span>
-        <span class="os-kg-edge os-kg-edge-c"></span>
-      </div>
-      <div class="os-knowledge-summary">
-        <strong>${escapeHtml(label)}</strong>
-        <span>${escapeHtml(title)}</span>
-        <em>Graph data unavailable</em>
-      </div>
-    </div>
-  `;
-}
-
 function renderActivityLifecycleIndicator(events: RunEvent[]): string {
   const lifecycleEvents = events
     .map((event) => ({ event, state: activityLifecycleState(event) }))
@@ -3900,6 +4029,22 @@ function stateToneForTaskNode(node: TaskGraphNode): string {
   return "neutral";
 }
 
+function measureKnowledgeGraphStage(root: ParentNode): { width: number; height: number } {
+  const stage = root.querySelector<HTMLElement>("[data-kg-stage]");
+  const rect = stage?.getBoundingClientRect();
+  return {
+    width: Math.max(360, Math.floor(rect?.width || 720)),
+    height: Math.max(260, Math.floor(rect?.height || 420)),
+  };
+}
+
+function stageSizeChanged(
+  previous: { width: number; height: number },
+  next: { width: number; height: number },
+): boolean {
+  return Math.abs(previous.width - next.width) > 32 || Math.abs(previous.height - next.height) > 32;
+}
+
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
@@ -3964,6 +4109,23 @@ function appShellStyles(): string {
     .os-task-graph-link-skip { opacity: 0.78; }
     .os-task-graph-links marker path { fill: #39708f; }
     .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
+    .os-knowledge-graph { display: grid; gap: 10px; min-width: 0; }
+    .os-knowledge-toolbar { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
+    .os-knowledge-toolbar div { display: grid; gap: 2px; min-width: 0; }
+    .os-knowledge-toolbar strong { font-size: 13px; }
+    .os-knowledge-toolbar span { color: #667788; font-size: 12px; }
+    .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
+    .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
+    .os-knowledge-stage { position: relative; height: clamp(260px, 38vh, 460px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
+    .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+    .os-knowledge-labels { position: absolute; inset: 0; pointer-events: none; }
+    .os-kg-label { position: absolute; transform: translate(-50%, calc(-100% - 10px)); max-width: min(180px, 42%); min-height: 24px; padding: 3px 7px; border-color: rgba(57, 112, 143, 0.28); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); }
+    .os-kg-label.is-selected { border-color: #c2410c; color: #9a3412; background: #fff7ed; }
+    .os-kg-list { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; max-height: 160px; overflow: auto; }
+    .os-kg-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 6px 8px; background: #ffffff; }
+    .os-kg-list li.is-selected { border-color: #c2410c; background: #fff7ed; }
+    .os-kg-list button { min-width: 0; min-height: 24px; padding: 0; border: none; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-kg-list span { color: #667788; font-size: 11px; text-transform: uppercase; }
     .os-project-group { display: grid; gap: 8px; margin-bottom: 10px; }
     .os-project-group-header { width: 100%; min-height: 32px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 6px; background: #f8fafc; text-align: left; }
     .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4198,6 +4360,9 @@ function appShellStyles(): string {
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
       .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-run-meta-row span, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-knowledge-stage, .os-kg-list li { background: #111820; border-color: #2a3440; }
+      .os-kg-label { background: rgba(17, 24, 32, 0.92); color: #d9e2ea; border-color: #2a3440; }
+      .os-kg-list button { color: #d9e2ea; }
       .os-run-meta-row code { color: #d9e2ea; }
       .os-run-meta-row a { color: #8bd0e6; }
       .os-run-meta-row em { color: #94a3b3; }

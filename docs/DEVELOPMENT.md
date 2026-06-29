@@ -80,6 +80,11 @@ cd apps/desktop/src-tauri
 cargo run
 ```
 
+The frontend workspace intentionally does not commit an npm lockfile today:
+`package-lock.json` is listed in `.gitignore`, and CI installs from the
+workspace package manifests with `npm install`. Revisit that policy before
+release packaging or other supply-chain-sensitive frontend dependency changes.
+
 `cargo run` rebuilds the desktop frontend first, so local source changes under
 `apps/desktop` and shared frontend packages are reflected in the Tauri shell.
 

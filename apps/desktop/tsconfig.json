@@ -4,5 +4,12 @@
     "outDir": "./dist",
     "rootDir": "./src"
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/api-client" },
+    { "path": "../../packages/gateway-schema" },
+    { "path": "../../packages/graph" },
+    { "path": "../../packages/state" },
+    { "path": "../../packages/ui-core" }
+  ]
 }
