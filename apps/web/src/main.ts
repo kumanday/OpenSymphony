@@ -34,6 +34,7 @@ if (root) {
     mode: "web",
     title: "OpenSymphony Web",
     transport: createWebTransport(),
+    graphAdapter: createWebGraphAdapter(),
     profileController: createWebProfileController({ defaultGatewayUrl }),
     modelProfileController: createWebModelProfileController(),
     onGatewayUrlChanged: async (gatewayUrl) =>
@@ -41,6 +42,7 @@ if (root) {
         baseUri: gatewayUrl,
         transport: "loopback_http",
       }),
+    onGraphGatewayUrlChanged: (gatewayUrl) => createWebGraphAdapter(gatewayUrl),
   });
 }
 
