@@ -1391,8 +1391,14 @@ tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
 api_key: sk-live-public-fixture
+api_key_format: sk-live-prefix
+client_secret_64: client-secret-fixture
 nested_secret:
   token: nested-token-fixture
+password_policy: rotate-often
+private_key_type: ed25519
+secretariat: public-office
+token_bucket: graph-rate-limit
 opensymphony:
   visibility: public
   credential_ref: local-secret-fixture
@@ -1612,8 +1618,11 @@ opensymphony:
         assert!(!public_json.contains("concept:issues/COE-123"));
         assert!(!public_json.contains("COE-123: OKF catalog rebuild"));
         assert!(!public_json.contains("sk-live-public-fixture"));
+        assert!(!public_json.contains("client-secret-fixture"));
         assert!(!public_json.contains("nested-token-fixture"));
         assert!(!public_json.contains("local-secret-fixture"));
+        assert!(public_json.contains("sk-live-prefix"));
+        assert!(public_json.contains("graph-rate-limit"));
         assert!(public_json.contains("[redacted-secret]"));
         assert!(!public_json.contains(".opensymphony/memory"));
         assert!(!public_json.contains(&format!("{}/", repo.path().display())));
@@ -1698,7 +1707,33 @@ opensymphony:
         );
         assert_eq!(
             detail.frontmatter_view.unknown.get("nested_secret"),
+            Some(&serde_json::json!({
+                "token": "[redacted-secret]"
+            }))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("client_secret_64"),
             Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("api_key_format"),
+            Some(&serde_json::json!("sk-live-prefix"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("password_policy"),
+            Some(&serde_json::json!("rotate-often"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("private_key_type"),
+            Some(&serde_json::json!("ed25519"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("secretariat"),
+            Some(&serde_json::json!("public-office"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("token_bucket"),
+            Some(&serde_json::json!("graph-rate-limit"))
         );
         assert_eq!(
             detail.frontmatter_view.opensymphony.get("credential_ref"),

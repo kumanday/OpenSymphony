@@ -741,15 +741,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async onGatewayEvent(envelope: GatewayEnvelope): Promise<void> {
+    let handledMemoryGraphUpdate = false;
     if (envelope.event_kind === "memory_graph_updated") {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
+        handledMemoryGraphUpdate = true;
         this.state.graph = graphReducer(this.state.graph, { type: "GRAPH_UPDATED", event: envelope.payload });
         this.render();
         await this.loadKnowledgeGraph(envelope.payload.bundle_id);
       }
-      return;
     }
-    if (!this.eventAffectsCurrentView(envelope)) {
+    if (!handledMemoryGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
       return;
     }
     await this.requestLiveRefresh();

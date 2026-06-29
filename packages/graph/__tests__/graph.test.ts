@@ -115,7 +115,7 @@ describe("@opensymphony/graph", () => {
     );
   });
 
-  it("clamps scoped HTTP graph adapters to public visibility", async () => {
+  it("rejects scoped HTTP graph adapter requests that exceed public visibility", async () => {
     const fetchMock = jest.fn(async () => ({
       ok: true,
       status: 200,
@@ -127,8 +127,11 @@ describe("@opensymphony/graph", () => {
     });
 
     await gateway.listBundles();
-    await gateway.getGraphSnapshot("local-default", { visibility: "all_accessible" });
-    await gateway.search("graph", { visibility: "private", limit: 5 });
+    await gateway.getGraphSnapshot("local-default", { visibility: "public" });
+    expect(() => gateway.getGraphSnapshot("local-default", { visibility: "all_accessible" }))
+      .toThrow('Graph visibility "all_accessible" exceeds adapter policy "public"');
+    expect(() => gateway.search("graph", { visibility: "private", limit: 5 }))
+      .toThrow('Graph visibility "private" exceeds adapter policy "public"');
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -138,10 +141,7 @@ describe("@opensymphony/graph", () => {
       2,
       "http://localhost:2468/api/v1/memory/bundles/local-default/graph?visibility=public",
     );
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      3,
-      "http://localhost:2468/api/v1/memory/search?visibility=public&query=graph&limit=5",
-    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("marks graph updates stale until the updated snapshot loads", () => {
@@ -174,6 +174,34 @@ describe("@opensymphony/graph", () => {
     expect(refreshed.freshnessStatus).toBe("warning");
     expect(refreshed.staleBundleIds).toEqual([]);
     expect(refreshed.warningBundleIds).toEqual(["local-default"]);
+  });
+
+  it("does not let an older snapshot clear a newer graph update", () => {
+    const current = graphReducer(initialGraphState, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: fixtureGraphSnapshot,
+    });
+    const stale = graphReducer(current, {
+      type: "GRAPH_UPDATED",
+      event: {
+        schema_version: fixtureGraphSnapshot.schema_version,
+        bundle_id: fixtureGraphSnapshot.bundle_id,
+        cursor: { sequence: fixtureGraphSnapshot.cursor.sequence + 2, partition: fixtureGraphSnapshot.cursor.partition },
+        updated_at: "2026-06-28T00:02:00Z",
+      },
+    });
+
+    const unchanged = graphReducer(stale, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: {
+        ...fixtureGraphSnapshot,
+        cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 1 },
+      },
+    });
+
+    expect(unchanged.freshnessStatus).toBe("stale");
+    expect(unchanged.staleBundleIds).toEqual(["local-default"]);
+    expect(unchanged.snapshots["local-default"].cursor.sequence).toBe(1);
   });
 
   it("rejects non-OK HTTP graph responses before parsing JSON", async () => {

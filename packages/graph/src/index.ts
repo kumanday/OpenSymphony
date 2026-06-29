@@ -92,6 +92,7 @@ export interface GraphState {
   lastUpdatedAt: string | null;
   freshnessStatus: GraphFreshnessStatus;
   staleBundleIds: string[];
+  staleCursorSequences: Record<string, number>;
   warningBundleIds: string[];
 }
 
@@ -189,6 +190,7 @@ export function createInitialGraphState(): GraphState {
     lastUpdatedAt: null,
     freshnessStatus: "current",
     staleBundleIds: [],
+    staleCursorSequences: {},
     warningBundleIds: [],
   };
 }
@@ -204,7 +206,14 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
       };
     case "SNAPSHOT_LOADED":
       {
+        const staleSequence = state.staleCursorSequences[action.snapshot.bundle_id];
+        const isStaleSnapshot = staleSequence !== undefined && action.snapshot.cursor.sequence < staleSequence;
+        if (isStaleSnapshot) {
+          return state;
+        }
         const staleBundleIds = state.staleBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
+        const staleCursorSequences = { ...state.staleCursorSequences };
+        delete staleCursorSequences[action.snapshot.bundle_id];
         const warningBundleIds = action.snapshot.metrics && action.snapshot.metrics.warning_count > 0
           ? uniqueSorted([...state.warningBundleIds, action.snapshot.bundle_id])
           : state.warningBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
@@ -214,6 +223,7 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
           selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
           lastUpdatedAt: action.snapshot.generated_at,
           staleBundleIds,
+          staleCursorSequences,
           warningBundleIds,
           freshnessStatus: graphFreshnessStatus(staleBundleIds, warningBundleIds),
         };
@@ -274,6 +284,10 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         ...state,
         lastUpdatedAt: action.event.updated_at,
         staleBundleIds,
+        staleCursorSequences: {
+          ...state.staleCursorSequences,
+          [action.event.bundle_id]: action.event.cursor.sequence,
+        },
         freshnessStatus: graphFreshnessStatus(staleBundleIds, state.warningBundleIds),
       };
     }
@@ -579,6 +593,9 @@ function effectiveVisibility(
   requested: GraphRequestOptions["visibility"] | undefined,
   policy: GraphAdapterPolicy,
 ): GraphRequestOptions["visibility"] | undefined {
+  if (policy.maxVisibility === "public" && requested !== undefined && requested !== "public") {
+    throw new Error(`Graph visibility "${requested}" exceeds adapter policy "public"`);
+  }
   const visibility = requested ?? policy.defaultVisibility;
   if (policy.maxVisibility === "public" && visibility !== "public") return "public";
   return visibility;

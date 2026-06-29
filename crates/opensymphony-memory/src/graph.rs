@@ -928,7 +928,7 @@ fn redact_value_for_dto_key(
     value: serde_json::Value,
 ) -> serde_json::Value {
     if is_secret_like_frontmatter_key(key) {
-        return serde_json::Value::String("[redacted-secret]".to_string());
+        return redact_secret_value_shape(value);
     }
     match value {
         serde_json::Value::String(value) => serde_json::Value::String(redact_for_dto(config, &value)),
@@ -951,15 +951,63 @@ fn redact_value_for_dto_key(
     }
 }
 
+fn redact_secret_value_shape(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(redact_secret_value_shape)
+                .collect(),
+        ),
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, redact_secret_value_shape(value)))
+                .collect(),
+        ),
+        _ => serde_json::Value::String("[redacted-secret]".to_string()),
+    }
+}
+
 fn is_secret_like_frontmatter_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    key.contains("secret")
-        || key.contains("password")
-        || key.contains("token")
-        || key.contains("api_key")
-        || key.contains("access_key")
-        || key.contains("private_key")
-        || key.contains("credential")
+    let parts = key
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let has = |part: &str| parts.contains(&part);
+    if parts.is_empty() || has_non_secret_descriptor(&parts) {
+        return false;
+    }
+    if has("secret") || has("password") || has("credential") {
+        return true;
+    }
+    if has("token")
+        && (parts.len() == 1
+            || parts
+                .iter()
+                .any(|part| matches!(*part, "auth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api")))
+    {
+        return true;
+    }
+    has_adjacent_parts(&parts, "api", "key")
+        || has_adjacent_parts(&parts, "access", "key")
+        || has_adjacent_parts(&parts, "private", "key")
+}
+
+fn has_non_secret_descriptor(parts: &[&str]) -> bool {
+    parts.iter().any(|part| {
+        matches!(
+            *part,
+            "policy" | "policies" | "type" | "types" | "format" | "formats" | "example" | "examples"
+        )
+    })
+}
+
+fn has_adjacent_parts(parts: &[&str], left: &str, right: &str) -> bool {
+    parts
+        .windows(2)
+        .any(|window| window == [left, right])
 }
 
 fn json_string(value: &str) -> serde_json::Value {
