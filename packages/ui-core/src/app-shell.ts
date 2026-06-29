@@ -937,8 +937,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private installBrowserGraphLayoutAdapter(): void {
-    const processEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-    if (typeof Worker === "undefined" || processEnv?.JEST_WORKER_ID) return;
+    if (typeof Worker === "undefined") return;
     void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
       if (this.destroyed) return;
       this.replaceGraphLayoutAdapter(createBrowserGraphLayoutAdapter());

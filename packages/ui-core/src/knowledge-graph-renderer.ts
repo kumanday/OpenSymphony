@@ -198,7 +198,7 @@ function renderLabels(layout: GraphLayoutResult | null, selectedNodeIds: readonl
       const left = (node.x / layout.width) * 100;
       const top = (node.y / layout.height) * 100;
       const picked = selected.has(node.nodeId) ? " is-selected" : "";
-      return `<button type="button" class="os-kg-label${picked}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%" data-kg-node-id="${escapeAttr(node.nodeId)}">${escapeHtml(shortLabel(node.label))}</button>`;
+      return `<button type="button" class="os-kg-label${picked}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%;visibility:hidden" data-kg-node-id="${escapeAttr(node.nodeId)}">${escapeHtml(shortLabel(node.label))}</button>`;
     })
     .join("");
 }
@@ -225,6 +225,7 @@ interface ThreeCanvasState {
   scene: THREE.Scene;
   camera: THREE.OrthographicCamera;
   graph: THREE.Group;
+  viewportKey: string | null;
   layoutKey: string | null;
   selectionKey: string | null;
 }
@@ -240,15 +241,19 @@ function drawThree(
 ): boolean {
   try {
     const state = threeStateFor(canvas);
-    state.renderer.setPixelRatio(viewport.ratio);
-    state.renderer.setSize(viewport.width, viewport.height, false);
+    const viewportKey = `${viewport.width}:${viewport.height}:${viewport.ratio}`;
+    if (state.viewportKey !== viewportKey) {
+      state.renderer.setPixelRatio(viewport.ratio);
+      state.renderer.setSize(viewport.width, viewport.height, false);
+      state.camera.left = -viewport.width / 2;
+      state.camera.right = viewport.width / 2;
+      state.camera.top = viewport.height / 2;
+      state.camera.bottom = -viewport.height / 2;
+      state.camera.updateProjectionMatrix();
+      state.viewportKey = viewportKey;
+    }
     state.renderer.setClearColor(0xf8fafc, 1);
     state.renderer.clear(true, true, true);
-    state.camera.left = -viewport.width / 2;
-    state.camera.right = viewport.width / 2;
-    state.camera.top = viewport.height / 2;
-    state.camera.bottom = -viewport.height / 2;
-    state.camera.updateProjectionMatrix();
     syncGraphObjects(state, layout, selectedNodeIds);
     state.graph.scale.set(view.scale, view.scale, 1);
     state.graph.position.set(view.dx, -view.dy, 0);
@@ -278,7 +283,7 @@ function threeStateFor(canvas: HTMLCanvasElement): ThreeCanvasState {
   scene.add(graph);
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2000);
   camera.position.set(0, 0, 800);
-  const state = { renderer, scene, camera, graph, layoutKey: null, selectionKey: null };
+  const state = { renderer, scene, camera, graph, viewportKey: null, layoutKey: null, selectionKey: null };
   threeCanvasState.set(canvas, state);
   return state;
 }
@@ -388,7 +393,7 @@ function drawCanvas2d(
   const selected = new Set(selectedNodeIds);
   const byId = new Map(layout.nodes.map((node) => [node.nodeId, node]));
   ctx.strokeStyle = "#8aa4b8";
-  ctx.lineWidth = 4;
+  ctx.lineWidth = Math.max(1, 4 * view.scale);
   ctx.globalAlpha = 0.72;
   for (const edge of layout.edges) {
     const source = byId.get(edge.sourceId);
@@ -443,6 +448,7 @@ function syncLabels(
     const point = canvasPoint(node.x, node.y, layout, view, viewport);
     label.style.left = `${point.x}px`;
     label.style.top = `${point.y}px`;
+    label.style.visibility = "visible";
   });
 }
 
