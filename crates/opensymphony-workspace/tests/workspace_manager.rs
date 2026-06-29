@@ -624,7 +624,7 @@ async fn before_run_timeout_kills_spawned_descendants() {
             before_run: Some(HookDefinition::shell(
                 timeout_with_background_child_command(),
             )),
-            timeout: Duration::from_millis(100),
+            timeout: Duration::from_millis(500),
             ..HookConfig::default()
         },
         CleanupConfig::default(),

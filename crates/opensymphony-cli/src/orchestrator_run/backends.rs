@@ -3128,10 +3128,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn codex_schema_validator_cache_invalidates_when_binary_changes() {
+        use std::os::unix::fs::symlink;
+
         let tempdir = TempDir::new().expect("tempdir should exist");
         let fake_codex = tempdir.path().join("fake-codex-schema-changing");
+        let first_codex = tempdir.path().join("fake-codex-schema-changing-first");
+        let second_codex = tempdir.path().join("fake-codex-schema-changing-second");
         let count_path = tempdir.path().join("schema-count-changing.log");
-        write_fake_codex_schema_generator_with_marker(&fake_codex, &count_path, "first");
+        write_fake_codex_schema_generator_with_marker(&first_codex, &count_path, "first");
+        write_fake_codex_schema_generator_with_marker(&second_codex, &count_path, "second marker");
+        symlink(&first_codex, &fake_codex).expect("first fake codex symlink should be created");
         let cache = empty_codex_schema_cache();
         let codex_bin = fake_codex
             .to_str()
@@ -3140,7 +3146,8 @@ mod tests {
         cached_installed_codex_schema_validator(&cache, codex_bin)
             .await
             .expect("first schema load should compile");
-        write_fake_codex_schema_generator_with_marker(&fake_codex, &count_path, "second marker");
+        fs::remove_file(&fake_codex).expect("fake codex symlink should be removable");
+        symlink(&second_codex, &fake_codex).expect("second fake codex symlink should be created");
         cached_installed_codex_schema_validator(&cache, codex_bin)
             .await
             .expect("changed binary should force a second schema load");
@@ -3586,7 +3593,7 @@ Run the scheduler.
 "#,
         )
         .expect("workflow should parse")
-        .resolve_with_process_env(tempdir.path())
+        .resolve(tempdir.path(), &BTreeMap::new())
         .expect("workflow should resolve");
         let runtime = RunRuntimeConfig {
             config_path: None,

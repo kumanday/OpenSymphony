@@ -278,6 +278,12 @@ Run the scheduler.
         .arg("run")
         .current_dir(project.path())
         .env("LINEAR_API_KEY", "test-linear-key")
+        .env_remove("OPENSYMPHONY_HARNESS")
+        .env_remove("OPENSYMPHONY_MODEL")
+        .env_remove("OPENSYMPHONY_MODEL_PROFILE")
+        .env_remove("LLM_MODEL")
+        .env_remove("LLM_API_KEY")
+        .env_remove("LLM_BASE_URL")
         .output()
         .expect("run command should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
