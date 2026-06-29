@@ -7,6 +7,7 @@
  */
 
 import { HttpGatewayTransport } from "@opensymphony/api-client";
+import { createGatewayGraphAdapter } from "@opensymphony/graph";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
 import { createWebModelProfileController } from "./model-profile-controller.js";
@@ -21,6 +22,10 @@ export function createWebTransport(gatewayUrl = defaultGatewayUrl) {
     baseUri: gatewayUrl,
     transport: "loopback_http",
   });
+}
+
+export function createWebGraphAdapter(gatewayUrl = defaultGatewayUrl) {
+  return createGatewayGraphAdapter(gatewayUrl);
 }
 
 if (root) {

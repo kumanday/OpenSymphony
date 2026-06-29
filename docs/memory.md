@@ -151,6 +151,29 @@ Migration is intentionally incremental:
 - Phase 3 can expose graph, hosted import/export, and visibility-filtered APIs
   from the OKF-derived catalog.
 
+The memory graph projection is derived from the OKF catalog, not from client
+edits. Graph snapshots include bundle, directory, concept, tag, resource,
+citation, source-ref, and community nodes plus derived containment, Markdown,
+external, citation, tag, resource, scope, source-support, and same-resource
+edges. Broken Markdown links are kept as unresolved edges. Snapshot metrics
+report orphan, broken-link, stale-concept, and warning counts, while node
+metrics report degree, global normalized centrality across all graph node
+kinds, bridge score, and community ID. Community labels prefer concept areas,
+then tags, directories, and concept type. Each concept is assigned to exactly
+one deterministic community; when multiple areas are present the sorted first
+area wins, and tag fallback uses frontmatter order.
+Tags, citations, and source refs are excluded from community membership by
+default and can be included with the memory graph endpoint query flags. Those
+flags also parameterize node community IDs and bridge scores because the
+community membership input set changes with the query. Community IDs are stable
+grouping keys, not graph node IDs; community graph nodes are separately
+namespaced with `community:<id>`.
+
+No graph-library dependency is currently selected for memory graph extraction:
+the shipped backend work only derives deterministic catalog relationships and
+metadata communities. Add a graph library when the server owns true clustering
+or graph algorithms beyond these deterministic DTO metrics.
+
 The default visibility posture is private memory with optional public docs.
 Private capsules may include Linear comments, review context, and source
 snapshots, while public docs should contain public source refs such as issue
@@ -394,7 +417,13 @@ require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
 `opensymphony memory serve`. If an admin token is configured without a separate
 read token, the admin token also protects read tools.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
-to include available codebase-analysis artifacts alongside selected memory.
+to include code-intelligence artifacts alongside selected memory. For requested
+Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,
+and a trace section before falling back to repository analysis. Unsupported
+languages, parser diagnostics, oversized files, and calls without requested
+paths use the existing `CodebaseAnalyzer` repository-summary fallback; mixed
+supported and unsupported requests can include both AST artifacts and fallback
+artifacts. The trace section records parse/query counts and the fallback reason.
 `opensymphony memory reindex --from-okf [bundle-root]` rebuilds the derived
 DuckDB catalog from OKF concept documents, defaulting to the configured memory
 root. Broken links and unknown concept types are indexed as warnings; malformed

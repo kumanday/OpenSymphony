@@ -5,6 +5,11 @@ import {
   type ActionReceipt,
   type GatewayTransport,
 } from "@opensymphony/api-client";
+import {
+  createGatewayGraphAdapter,
+  createTauriNativeGraphAdapter,
+  type NativeGraphApi,
+} from "@opensymphony/graph";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
 import type { RunDetail } from "@opensymphony/gateway-schema";
 import { defaultModelProfiles } from "@opensymphony/gateway-schema";
@@ -20,6 +25,14 @@ import {
 } from "@opensymphony/ui-core";
 
 const DEFAULT_GATEWAY_URL = "http://127.0.0.1:2468";
+
+export function createDesktopGraphAdapter(gatewayUrl = DEFAULT_GATEWAY_URL) {
+  return createGatewayGraphAdapter(gatewayUrl);
+}
+
+export function createDesktopNativeGraphAdapter(api: NativeGraphApi) {
+  return createTauriNativeGraphAdapter(api);
+}
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 

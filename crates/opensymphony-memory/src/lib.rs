@@ -1438,6 +1438,22 @@ public graph
 "#,
         )
         .expect("private search concept should write");
+        fs::write(
+            issues_dir.join("COE-333.md"),
+            r#"---
+type: issue
+title: "COE-333: Isolated private concept"
+description: No semantic graph edges.
+opensymphony:
+  visibility: private
+---
+
+# COE-333: Isolated private concept
+
+This concept intentionally has no tags, links, citations, resources, or refs.
+"#,
+        )
+        .expect("isolated private concept should write");
         fs::create_dir_all(bundle.join("backlog")).expect("backlog dir should write");
         fs::write(
             bundle.join("backlog/COE-222.md"),
@@ -1472,6 +1488,10 @@ opensymphony:
             MemoryGraphAccess::AllAccessible,
         )
         .expect("graph snapshot");
+        assert_eq!(all_graph.metrics.broken_link_count, 1);
+        assert_eq!(all_graph.metrics.stale_concept_count, 1);
+        assert!(all_graph.metrics.warning_count >= 1);
+        assert_eq!(all_graph.metrics.orphan_count, 1);
         let node_kinds = all_graph
             .nodes
             .iter()
@@ -1530,6 +1550,24 @@ opensymphony:
             all_graph
                 .edges
                 .iter()
+                .any(|edge| edge.kind == EdgeKind::MarkdownLink && edge.unresolved)
+        );
+        let linked_private_node = all_graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "concept:issues/COE-123")
+            .expect("linked private concept node");
+        assert!(linked_private_node.metrics.degree > 0);
+        assert!(linked_private_node.metrics.centrality.is_some());
+        assert!(linked_private_node.metrics.bridge_score.is_some());
+        assert_eq!(
+            linked_private_node.metrics.community_id.as_deref(),
+            Some("area:openhands-runtime")
+        );
+        assert!(
+            all_graph
+                .edges
+                .iter()
                 .any(|edge| edge.id.ends_with(":label:external"))
         );
         assert!(
@@ -1573,6 +1611,57 @@ opensymphony:
         assert!(!public_json.contains(&format!("{}/", repo.path().display())));
         assert!(!public_json.contains(&format!("{}.", repo.path().display())));
         assert!(!public_json.contains("[redacted-local-path]bed"));
+        assert!(
+            public_graph
+                .communities
+                .iter()
+                .any(|community| community.label == "graph-view")
+        );
+        assert!(public_graph.communities.iter().all(|community| {
+            !community
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "tag:graph")
+        }));
+        let public_graph_with_aux = memory_graph_snapshot_with_options(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::Public,
+            MemoryGraphCommunityOptions {
+                include_tags: true,
+                include_citations: true,
+                include_source_refs: true,
+            },
+        )
+        .expect("public graph with auxiliary community inputs");
+        let graph_view = public_graph_with_aux
+            .communities
+            .iter()
+            .find(|community| community.id == "area:graph-view")
+            .expect("graph-view community");
+        assert!(
+            graph_view
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "tag:graph")
+        );
+        assert!(
+            graph_view
+                .node_ids
+                .iter()
+                .any(|node_id| node_id == "citation:1")
+        );
+        assert!(
+            graph_view
+                .node_ids
+                .iter()
+                .any(|node_id| { node_id == "source_ref:linear_issue:COE-200" })
+        );
+        assert!(
+            public_graph_with_aux
+                .filters_applied
+                .contains(&"communities:include_tags".to_string())
+        );
 
         let detail = memory_concept_detail(
             &config,
@@ -1632,6 +1721,145 @@ opensymphony:
             .expect("public graph search");
         assert_eq!(search.results.len(), 1);
         assert_eq!(search.results[0].concept_id, "issues/COE-200");
+    }
+
+    #[test]
+    fn memory_graph_snapshot_metrics_count_only_semantic_orphans() {
+        use crate::opensymphony_gateway_schema::memory_graph::{
+            MemoryGraphEdgeKind as EdgeKind, MemoryGraphNodeKind as NodeKind,
+        };
+
+        let nodes = vec![
+            simple_node(
+                "bundle:local-default",
+                NodeKind::Bundle,
+                "bundle",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:isolated",
+                NodeKind::Concept,
+                "isolated",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:linked",
+                NodeKind::Concept,
+                "linked",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "tag:memory",
+                NodeKind::Tag,
+                "memory",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+        ];
+        let mut edges = BTreeMap::new();
+        insert_edge(
+            &mut edges,
+            EdgeKind::Contains,
+            "bundle:local-default",
+            "concept:isolated",
+            None,
+            false,
+        );
+        insert_edge(
+            &mut edges,
+            EdgeKind::Contains,
+            "bundle:local-default",
+            "concept:linked",
+            None,
+            false,
+        );
+        insert_edge(
+            &mut edges,
+            EdgeKind::TaggedWith,
+            "concept:linked",
+            "tag:memory",
+            None,
+            false,
+        );
+
+        let metrics = graph_snapshot_metrics(&nodes, &edges.into_values().collect::<Vec<_>>());
+
+        assert_eq!(metrics.orphan_count, 1);
+    }
+
+    #[test]
+    fn memory_graph_bridge_score_counts_only_cross_community_edges() {
+        use crate::opensymphony_gateway_schema::memory_graph::{
+            MemoryGraphCommunity, MemoryGraphEdgeKind as EdgeKind, MemoryGraphNodeKind as NodeKind,
+        };
+
+        let mut nodes = vec![
+            simple_node(
+                "concept:left",
+                NodeKind::Concept,
+                "left",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:unknown",
+                NodeKind::Concept,
+                "unknown",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+            simple_node(
+                "concept:right",
+                NodeKind::Concept,
+                "right",
+                Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID),
+            ),
+        ];
+        let communities = vec![
+            MemoryGraphCommunity {
+                id: "area:left".to_string(),
+                label: "left".to_string(),
+                node_ids: vec!["concept:left".to_string()],
+                concept_count: 1,
+            },
+            MemoryGraphCommunity {
+                id: "area:right".to_string(),
+                label: "right".to_string(),
+                node_ids: vec!["concept:right".to_string()],
+                concept_count: 1,
+            },
+        ];
+        let mut edges = BTreeMap::new();
+        insert_edge(
+            &mut edges,
+            EdgeKind::MarkdownLink,
+            "concept:left",
+            "concept:unknown",
+            None,
+            false,
+        );
+        insert_edge(
+            &mut edges,
+            EdgeKind::MarkdownLink,
+            "concept:left",
+            "concept:right",
+            None,
+            false,
+        );
+
+        apply_node_metrics(
+            &mut nodes,
+            &edges.into_values().collect::<Vec<_>>(),
+            &communities,
+        );
+
+        let metric = |id: &str| {
+            &nodes
+                .iter()
+                .find(|node| node.id == id)
+                .expect("node")
+                .metrics
+        };
+        assert_eq!(metric("concept:left").bridge_score, Some(1.0));
+        assert_eq!(metric("concept:right").bridge_score, Some(1.0));
+        assert_eq!(metric("concept:unknown").bridge_score, None);
     }
 
     #[test]

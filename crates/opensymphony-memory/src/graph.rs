@@ -7,7 +7,8 @@ use crate::opensymphony_gateway_schema::{
         MemoryFrontmatterView, MemoryGraphCitation, MemoryGraphCommunity, MemoryGraphEdge,
         MemoryGraphEdgeKind, MemoryGraphFreshness, MemoryGraphLink, MemoryGraphNode,
         MemoryGraphNodeKind, MemoryGraphNodeMetrics, MemoryGraphSnapshot, MemoryGraphSourceRef,
-        MemoryGraphUpdatedEvent, MemoryGraphVisibility, MemorySearchResponse, MemorySearchResult,
+        MemoryGraphSnapshotMetrics, MemoryGraphUpdatedEvent, MemoryGraphVisibility,
+        MemorySearchResponse, MemorySearchResult,
     },
     version::SchemaVersion,
 };
@@ -29,6 +30,13 @@ pub enum MemoryGraphProjectionError {
 pub enum MemoryGraphAccess {
     Public,
     AllAccessible,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryGraphCommunityOptions {
+    pub include_tags: bool,
+    pub include_citations: bool,
+    pub include_source_refs: bool,
 }
 
 pub fn memory_graph_bundles(
@@ -54,10 +62,24 @@ pub fn memory_graph_snapshot(
     bundle_id: &str,
     access: MemoryGraphAccess,
 ) -> Result<MemoryGraphSnapshot, MemoryGraphProjectionError> {
+    memory_graph_snapshot_with_options(
+        config,
+        bundle_id,
+        access,
+        MemoryGraphCommunityOptions::default(),
+    )
+}
+
+pub fn memory_graph_snapshot_with_options(
+    config: &MemoryConfig,
+    bundle_id: &str,
+    access: MemoryGraphAccess,
+    community_options: MemoryGraphCommunityOptions,
+) -> Result<MemoryGraphSnapshot, MemoryGraphProjectionError> {
     ensure_default_memory_bundle(bundle_id)?;
     let generated_at = Utc::now();
     let issues = accessible_issues(config, access)?;
-    let communities = memory_graph_communities_from_issues(&issues);
+    let communities = memory_graph_communities_from_issues(&issues, community_options);
     let mut nodes = BTreeMap::<String, MemoryGraphNode>::new();
     let mut edges = BTreeMap::<String, MemoryGraphEdge>::new();
 
@@ -314,6 +336,7 @@ pub fn memory_graph_snapshot(
     let mut nodes = nodes.into_values().collect::<Vec<_>>();
     let edges = edges.into_values().collect::<Vec<_>>();
     apply_node_metrics(&mut nodes, &edges, &communities);
+    let metrics = graph_snapshot_metrics(&nodes, &edges);
 
     Ok(MemoryGraphSnapshot {
         schema_version: SchemaVersion::v1(),
@@ -322,7 +345,8 @@ pub fn memory_graph_snapshot(
         nodes,
         edges,
         communities,
-        filters_applied: filters_applied(access),
+        metrics,
+        filters_applied: filters_applied(access, community_options),
         generated_at,
     })
 }
@@ -384,12 +408,26 @@ pub fn memory_graph_communities(
     bundle_id: &str,
     access: MemoryGraphAccess,
 ) -> Result<MemoryCommunityList, MemoryGraphProjectionError> {
+    memory_graph_communities_with_options(
+        config,
+        bundle_id,
+        access,
+        MemoryGraphCommunityOptions::default(),
+    )
+}
+
+pub fn memory_graph_communities_with_options(
+    config: &MemoryConfig,
+    bundle_id: &str,
+    access: MemoryGraphAccess,
+    community_options: MemoryGraphCommunityOptions,
+) -> Result<MemoryCommunityList, MemoryGraphProjectionError> {
     ensure_default_memory_bundle(bundle_id)?;
     let issues = accessible_issues(config, access)?;
     Ok(MemoryCommunityList {
         schema_version: SchemaVersion::v1(),
         bundle_id: bundle_id.to_string(),
-        communities: memory_graph_communities_from_issues(&issues),
+        communities: memory_graph_communities_from_issues(&issues, community_options),
         generated_at: Utc::now(),
     })
 }
@@ -499,11 +537,24 @@ fn freshness_dto(freshness: MemoryFreshness) -> MemoryGraphFreshness {
     }
 }
 
-fn filters_applied(access: MemoryGraphAccess) -> Vec<String> {
-    match access {
+fn filters_applied(
+    access: MemoryGraphAccess,
+    community_options: MemoryGraphCommunityOptions,
+) -> Vec<String> {
+    let mut filters = match access {
         MemoryGraphAccess::Public => vec!["visibility:public".to_string()],
         MemoryGraphAccess::AllAccessible => Vec::new(),
+    };
+    if community_options.include_tags {
+        filters.push("communities:include_tags".to_string());
     }
+    if community_options.include_citations {
+        filters.push("communities:include_citations".to_string());
+    }
+    if community_options.include_source_refs {
+        filters.push("communities:include_source_refs".to_string());
+    }
+    filters
 }
 
 fn indexed_issue_updated_at(issue: &IndexedIssue) -> Option<DateTime<Utc>> {
@@ -1008,25 +1059,72 @@ fn insert_same_resource_edges(
     }
 }
 
-fn memory_graph_communities_from_issues(issues: &[IndexedIssue]) -> Vec<MemoryGraphCommunity> {
-    let mut by_area = BTreeMap::<String, Vec<String>>::new();
+fn memory_graph_communities_from_issues(
+    issues: &[IndexedIssue],
+    options: MemoryGraphCommunityOptions,
+) -> Vec<MemoryGraphCommunity> {
+    let mut communities = BTreeMap::<String, (String, Vec<String>)>::new();
     for issue in issues {
-        for area in issue.areas() {
-            by_area.entry(area).or_default().push(concept_node_id(issue));
+        let (id, label) = community_key(issue);
+        let (_, node_ids) = communities
+            .entry(id)
+            .or_insert_with(|| (label, Vec::new()));
+        node_ids.push(concept_node_id(issue));
+        if options.include_tags {
+            node_ids.extend(issue.tags.iter().map(|tag| format!("tag:{tag}")));
+        }
+        if options.include_citations {
+            node_ids.extend(
+                issue
+                    .citations
+                    .iter()
+                    .map(|citation| format!("citation:{}", citation.id)),
+            );
+        }
+        if options.include_source_refs {
+            node_ids.extend(
+                issue
+                    .source_refs
+                    .iter()
+                    .map(|source_ref| format!("source_ref:{}:{}", source_ref.kind, source_ref.id)),
+            );
         }
     }
-    by_area
+    communities
         .into_iter()
-        .map(|(area, mut node_ids)| {
+        .map(|(id, (label, mut node_ids))| {
             node_ids.sort();
+            node_ids.dedup();
+            let concept_count = node_ids
+                .iter()
+                .filter(|node_id| node_id.starts_with("concept:"))
+                .count();
             MemoryGraphCommunity {
-                id: format!("area:{area}"),
-                label: area,
-                concept_count: node_ids.len(),
+                id,
+                label,
+                concept_count,
                 node_ids,
             }
         })
         .collect()
+}
+
+fn community_key(issue: &IndexedIssue) -> (String, String) {
+    // Assign exactly one stable community per concept. Multiple areas are
+    // ordered before selecting the first; tags keep frontmatter order.
+    if let Some(area) = issue.areas().into_iter().next() {
+        return (format!("area:{area}"), area);
+    }
+    if let Some(tag) = issue.tags.first() {
+        return (format!("tag:{tag}"), tag.clone());
+    }
+    if let Some((directory, _)) = issue.concept_id.rsplit_once('/') {
+        return (format!("directory:{directory}"), directory.to_string());
+    }
+    (
+        format!("type:{}", issue.concept_type),
+        issue.concept_type.clone(),
+    )
 }
 
 fn apply_node_metrics(
@@ -1040,6 +1138,16 @@ fn apply_node_metrics(
         *outdegree.entry(edge.source_id.clone()).or_default() += 1;
         *indegree.entry(edge.target_id.clone()).or_default() += 1;
     }
+    let max_degree = nodes
+        .iter()
+        .map(|node| {
+            indegree.get(&node.id).copied().unwrap_or_default()
+                + outdegree.get(&node.id).copied().unwrap_or_default()
+        })
+        .max()
+        .unwrap_or(0);
+    // Centrality is global normalized degree across all graph node kinds, not
+    // concept-only centrality.
     let community_by_node = communities
         .iter()
         .flat_map(|community| {
@@ -1049,9 +1157,60 @@ fn apply_node_metrics(
                 .map(move |node_id| (node_id.clone(), community.id.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let mut bridge_edges = BTreeMap::<String, usize>::new();
+    for edge in edges {
+        let source_community = community_by_node.get(&edge.source_id);
+        let target_community = community_by_node.get(&edge.target_id);
+        if source_community.zip(target_community).is_some_and(|(left, right)| left != right) {
+            *bridge_edges.entry(edge.source_id.clone()).or_default() += 1;
+            *bridge_edges.entry(edge.target_id.clone()).or_default() += 1;
+        }
+    }
     for node in nodes {
-        node.metrics.indegree = indegree.get(&node.id).copied().unwrap_or_default();
-        node.metrics.outdegree = outdegree.get(&node.id).copied().unwrap_or_default();
+        let indegree = indegree.get(&node.id).copied().unwrap_or_default();
+        let outdegree = outdegree.get(&node.id).copied().unwrap_or_default();
+        let degree = indegree + outdegree;
+        node.metrics.degree = degree;
+        node.metrics.indegree = indegree;
+        node.metrics.outdegree = outdegree;
+        if max_degree > 0 {
+            node.metrics.centrality = Some(degree as f64 / max_degree as f64);
+        }
+        if let Some(bridge_count) = bridge_edges.get(&node.id).copied() {
+            node.metrics.bridge_score = Some(bridge_count as f64);
+        }
         node.metrics.community_id = community_by_node.get(&node.id).cloned();
+    }
+}
+
+fn graph_snapshot_metrics(
+    nodes: &[MemoryGraphNode],
+    edges: &[MemoryGraphEdge],
+) -> MemoryGraphSnapshotMetrics {
+    let mut semantic_nodes = BTreeSet::<String>::new();
+    for edge in edges.iter().filter(|edge| edge.kind != MemoryGraphEdgeKind::Contains) {
+        semantic_nodes.insert(edge.source_id.clone());
+        semantic_nodes.insert(edge.target_id.clone());
+    }
+    MemoryGraphSnapshotMetrics {
+        orphan_count: nodes
+            .iter()
+            .filter(|node| {
+                node.kind == MemoryGraphNodeKind::Concept && !semantic_nodes.contains(&node.id)
+            })
+            .count(),
+        broken_link_count: edges.iter().filter(|edge| edge.unresolved).count(),
+        stale_concept_count: nodes
+            .iter()
+            .filter(|node| {
+                node.kind == MemoryGraphNodeKind::Concept
+                    && node.freshness == Some(MemoryGraphFreshness::Stale)
+            })
+            .count(),
+        warning_count: nodes
+            .iter()
+            .filter(|node| node.kind == MemoryGraphNodeKind::Concept)
+            .map(|node| node.warning_count)
+            .sum(),
     }
 }
