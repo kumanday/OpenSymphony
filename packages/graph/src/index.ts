@@ -14,6 +14,7 @@ import type {
   MemorySearchResult,
 } from "@opensymphony/gateway-schema";
 import {
+  createScaleGraphSnapshot,
   fixtureBundleList,
   fixtureCommunityList,
   fixtureConceptDetail,
@@ -34,6 +35,7 @@ export {
   fixtureConceptDetail,
   fixtureGraphSnapshot,
   fixtureSearchResponse,
+  createScaleGraphSnapshot,
 } from "./fixture.js";
 
 export type GraphMode =
@@ -138,6 +140,8 @@ export interface GraphAdapterPolicy {
 }
 
 export type GraphLayoutKind = "force" | "hierarchical" | "radial" | "timeline";
+
+export const graphOverviewNodeThreshold = 10_000;
 
 export interface GraphLayoutOptions {
   kind: GraphLayoutKind;
@@ -364,7 +368,44 @@ export function currentGraphSnapshot(state: GraphState): MemoryGraphSnapshot | n
 export function visibleGraphSnapshot(state: GraphState): MemoryGraphSnapshot | null {
   const snapshot = currentGraphSnapshot(state);
   if (!snapshot) return null;
-  return applyGraphFilters(snapshot, state.filters, state.mode, state.focusedNodeId, state.neighborhoodDepth);
+  const visible = applyGraphFilters(snapshot, state.filters, state.mode, state.focusedNodeId, state.neighborhoodDepth);
+  if (state.mode === "neighborhood" || visible.nodes.length < graphOverviewNodeThreshold) return visible;
+  return createCommunityOverviewSnapshot(visible);
+}
+
+export function createCommunityOverviewSnapshot(snapshot: MemoryGraphSnapshot): MemoryGraphSnapshot {
+  const bundle = snapshot.nodes.find((node) => node.kind === "bundle");
+  const communityNodes: MemoryGraphNode[] = snapshot.communities.map((community) => ({
+    id: community.id,
+    kind: "community",
+    label: community.label,
+    bundle_id: snapshot.bundle_id,
+    tags: [],
+    visibility: "private",
+    freshness: "current",
+    warning_count: 0,
+    frontmatter_summary: { concept_count: community.concept_count },
+    unknown_frontmatter: {},
+    body_preview: `${community.concept_count} concepts`,
+    metrics: { indegree: bundle ? 1 : 0, outdegree: 0, community_id: community.id },
+  }));
+  const nodes = [...(bundle ? [bundle] : []), ...communityNodes].sort(compareNodes);
+  const edges: MemoryGraphEdge[] = bundle
+    ? communityNodes.map((node) => ({
+      id: `edge:${bundle.id}:${node.id}`,
+      kind: "contains",
+      source_id: bundle.id,
+      target_id: node.id,
+      unresolved: false,
+      metadata: { aggregation: "community" },
+    }))
+    : [];
+  return {
+    ...snapshot,
+    nodes,
+    edges,
+    filters_applied: uniqueSorted([...snapshot.filters_applied, "overview:community-aggregation"]),
+  };
 }
 
 export function applyGraphFilters(
@@ -642,6 +683,7 @@ function forceLayout(
   width: number,
   height: number,
 ): GraphLayoutNode[] {
+  if (nodes.length > 400) return progressiveCommunityLayout(nodes, width, height);
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const tickCount = nodes.length > 400 ? 24 : nodes.length > 160 ? 45 : 90;
   const points = nodes.map((node, index) => ({
@@ -692,6 +734,36 @@ function forceLayout(
   return points.map((point) => {
     const node = nodesById.get(point.id)!;
     return layoutNode(node, point.x, point.y, zFor(node));
+  }).sort(compareLayoutNodes);
+}
+
+function progressiveCommunityLayout(
+  nodes: readonly MemoryGraphNode[],
+  width: number,
+  height: number,
+): GraphLayoutNode[] {
+  const groups = [...groupBy(nodes, (node) => node.metrics?.community_id ?? `kind:${node.kind}`).entries()]
+    .sort(([a], [b]) => compareStrings(a, b));
+  const columns = Math.max(1, Math.ceil(Math.sqrt(groups.length)));
+  const cellWidth = width / columns;
+  const rows = Math.max(1, Math.ceil(groups.length / columns));
+  const cellHeight = height / rows;
+  return groups.flatMap(([_key, group], groupIndex) => {
+    const column = groupIndex % columns;
+    const row = Math.floor(groupIndex / columns);
+    const sorted = [...group].sort(compareNodes);
+    const innerColumns = Math.max(1, Math.ceil(Math.sqrt(sorted.length)));
+    return sorted.map((node, nodeIndex) => {
+      const innerColumn = nodeIndex % innerColumns;
+      const innerRow = Math.floor(nodeIndex / innerColumns);
+      const innerRows = Math.max(1, Math.ceil(sorted.length / innerColumns));
+      return layoutNode(
+        node,
+        column * cellWidth + ((innerColumn + 1) / (innerColumns + 1)) * cellWidth,
+        row * cellHeight + ((innerRow + 1) / (innerRows + 1)) * cellHeight,
+        zFor(node),
+      );
+    });
   }).sort(compareLayoutNodes);
 }
 

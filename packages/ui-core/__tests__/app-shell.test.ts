@@ -9,6 +9,7 @@ import { MockGatewayTransport } from "@opensymphony/api-client";
 import {
   computeGraphLayout,
   createFixtureGraphAdapter,
+  createScaleGraphSnapshot,
   fixtureGraphSnapshot,
   initialGraphState,
   type GraphDataAdapter,
@@ -973,6 +974,57 @@ describe("OpenSymphonyApp mount", () => {
         globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
       } else {
         delete (globalThis as { cancelAnimationFrame?: typeof cancelAnimationFrame }).cancelAnimationFrame;
+      }
+      root.remove();
+    }
+  });
+
+  it("keeps scale rendering accessible with LOD labels and reduced motion", () => {
+    const snapshot = createScaleGraphSnapshot(5_000);
+    const layout = computeGraphLayout(snapshot, { kind: "force", width: 1280, height: 720 });
+    const selectedNodeId = "concept:scale-1";
+    const root = document.createElement("div");
+    root.innerHTML = renderKnowledgeGraphSurface({
+      snapshot,
+      layout,
+      state: {
+        ...initialGraphState,
+        selectedNodeIds: [selectedNodeId],
+        layoutStatus: "ready",
+      },
+    });
+    document.body.appendChild(root);
+    const labels = root.querySelectorAll(".os-kg-label");
+    expect(labels.length).toBeLessThanOrEqual(80);
+    expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
+    expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
+
+    const originalMatchMedia = globalThis.matchMedia;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const requestAnimationFrameMock = jest.fn();
+    globalThis.matchMedia = jest.fn().mockReturnValue({ matches: true }) as unknown as typeof matchMedia;
+    globalThis.requestAnimationFrame = requestAnimationFrameMock as unknown as typeof requestAnimationFrame;
+    const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    try {
+      mountKnowledgeGraphRenderer(root, {
+        snapshot,
+        layout,
+        selectedNodeIds: [selectedNodeId],
+        view: { scale: 1, dx: 0, dy: 0 },
+        onSelect: jest.fn(),
+        onFocus: jest.fn(),
+      });
+      const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
+      expect(canvas?.dataset.reducedMotion).toBe("true");
+      canvas?.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true, cancelable: true }));
+      expect(requestAnimationFrameMock).not.toHaveBeenCalled();
+    } finally {
+      getContext.mockRestore();
+      globalThis.matchMedia = originalMatchMedia;
+      if (originalRequestAnimationFrame) {
+        globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      } else {
+        delete (globalThis as { requestAnimationFrame?: typeof requestAnimationFrame }).requestAnimationFrame;
       }
       root.remove();
     }
