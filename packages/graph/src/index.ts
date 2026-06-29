@@ -577,20 +577,7 @@ function normalizeFilters(filters: GraphFilters): GraphFilters {
 }
 
 function defaultGraphLayoutWorkerFactory(): Worker | null {
-  if (typeof Worker === "undefined" || typeof URL === "undefined") return null;
-  try {
-    return new Worker(new URL("./layout-worker.js", graphWorkerBaseUrl()).href, { type: "module" });
-  } catch {
-    return null;
-  }
-}
-
-function graphWorkerBaseUrl(): string {
-  if (typeof document !== "undefined") {
-    const currentScript = document.currentScript;
-    if (currentScript instanceof HTMLScriptElement && currentScript.src) return currentScript.src;
-  }
-  return globalThis.location?.href ?? "http://localhost/";
+  return null;
 }
 
 function forceLayout(
@@ -765,7 +752,12 @@ function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, 
   const grouped = new Map<string, T[]>();
   for (const item of items) {
     const bucket = key(item);
-    grouped.set(bucket, [...(grouped.get(bucket) ?? []), item]);
+    const values = grouped.get(bucket);
+    if (values) {
+      values.push(item);
+    } else {
+      grouped.set(bucket, [item]);
+    }
   }
   return grouped;
 }

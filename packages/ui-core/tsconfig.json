@@ -2,7 +2,10 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "paths": {
+      "@opensymphony/graph/worker-factory": ["../graph/src/worker-factory.ts"]
+    }
   },
   "include": ["src/**/*.ts"],
   "references": [

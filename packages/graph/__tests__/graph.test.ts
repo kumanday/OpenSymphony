@@ -240,6 +240,7 @@ describe("@opensymphony/graph", () => {
 
   it("computes deterministic graph layouts for every graph mode", () => {
     const layouts = ["atlas", "bundle", "neighborhood", "timeline"] as const;
+    const byMode = new Map<(typeof layouts)[number], ReturnType<typeof computeGraphLayout>>();
     for (const mode of layouts) {
       const layout = computeGraphLayout(fixtureGraphSnapshot, {
         kind: graphLayoutKindForMode(mode),
@@ -247,15 +248,29 @@ describe("@opensymphony/graph", () => {
         width: 640,
         height: 360,
       });
-      expect(layout.nodes.map((node) => node.nodeId)).toEqual([
+      byMode.set(mode, layout);
+      expect(new Set(layout.nodes.map((node) => node.nodeId))).toEqual(new Set([
         "bundle:local-default",
         "concept:coe-465",
         "source:osym-822",
         "tag:graph-view",
-      ]);
+      ]));
       expect(layout.edges).toHaveLength(3);
       expect(layout.nodes.every((node) => node.x >= 0 && node.x <= 640 && node.y >= 0 && node.y <= 360)).toBe(true);
     }
+    const bundle = nodeById(byMode.get("bundle")!, "bundle:local-default");
+    const concept = nodeById(byMode.get("bundle")!, "concept:coe-465");
+    const tag = nodeById(byMode.get("bundle")!, "tag:graph-view");
+    expect(bundle.x).toBeLessThan(concept.x);
+    expect(concept.x).toBeLessThan(tag.x);
+    const focused = nodeById(byMode.get("neighborhood")!, "concept:coe-465");
+    expect(focused.x).toBeCloseTo(320);
+    expect(focused.y).toBeCloseTo(180);
+    const timeline = byMode.get("timeline")!;
+    expect(new Set(timeline.nodes.map((node) => node.x)).size).toBe(fixtureGraphSnapshot.nodes.length);
+    const timelineConcept = nodeById(timeline, "concept:coe-465");
+    const timelineTag = nodeById(timeline, "tag:graph-view");
+    expect(timelineConcept.y).not.toBe(timelineTag.y);
   });
 
   it("uses a worker adapter when a worker is available", async () => {
@@ -296,3 +311,12 @@ describe("@opensymphony/graph", () => {
     expect(graphReset.filters).not.toBe(initialGraphFilters);
   });
 });
+
+function nodeById(
+  layout: ReturnType<typeof computeGraphLayout>,
+  nodeId: string,
+): ReturnType<typeof computeGraphLayout>["nodes"][number] {
+  const node = layout.nodes.find((candidate) => candidate.nodeId === nodeId);
+  if (!node) throw new Error(`Missing layout node ${nodeId}`);
+  return node;
+}

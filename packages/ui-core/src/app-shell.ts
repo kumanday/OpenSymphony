@@ -285,6 +285,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private graphLayoutAdapter: GraphLayoutAdapter = createGraphLayoutAdapter(() => null);
   private graphLayoutRun = 0;
   private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
+  private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -894,8 +895,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const root = this.options.root.querySelector<HTMLElement>("[data-testid='knowledge-graph-renderer']");
     if (!root) return;
     const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
+    const stageSize = measureKnowledgeGraphStage(root);
+    if (
+      snapshot
+      && this.state.knowledgeGraphLayout
+      && this.state.knowledgeGraph.layoutStatus === "ready"
+      && this.knowledgeGraphLayoutSize
+      && stageSizeChanged(this.knowledgeGraphLayoutSize, stageSize)
+    ) {
+      this.state.knowledgeGraphLayout = null;
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+      this.knowledgeGraphLayoutSize = null;
+      this.scheduleKnowledgeGraphLayout(stageSize);
+      return;
+    }
     if (snapshot && !this.state.knowledgeGraphLayout && this.state.knowledgeGraph.layoutStatus === "idle") {
-      this.scheduleKnowledgeGraphLayout();
+      this.scheduleKnowledgeGraphLayout(stageSize);
     }
     mountKnowledgeGraphRenderer(root, {
       snapshot,
@@ -924,15 +939,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
   }
 
-  private scheduleKnowledgeGraphLayout(): void {
+  private scheduleKnowledgeGraphLayout(size = measureKnowledgeGraphStage(this.options.root)): void {
     const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
     if (!snapshot || this.state.knowledgeGraph.layoutStatus === "loading") return;
     const run = ++this.graphLayoutRun;
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
-    const stage = this.options.root.querySelector<HTMLElement>("[data-kg-stage]");
-    const rect = stage?.getBoundingClientRect();
-    const width = Math.max(360, Math.floor(rect?.width || 720));
-    const height = Math.max(260, Math.floor(rect?.height || 420));
+    const { width, height } = size;
     void this.graphLayoutAdapter.layout(snapshot, {
       kind: graphLayoutKindForMode(this.state.knowledgeGraph.mode),
       focusedNodeId: this.state.knowledgeGraph.focusedNodeId,
@@ -941,6 +953,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }).then((layout) => {
       if (this.destroyed || run !== this.graphLayoutRun) return;
       this.state.knowledgeGraphLayout = layout;
+      this.knowledgeGraphLayoutSize = { width, height };
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
       this.render();
     }).catch((error) => {
@@ -3972,6 +3985,22 @@ function stateToneForTaskNode(node: TaskGraphNode): string {
   if (value.includes("todo")) return "todo";
   if (value.includes("idle")) return "idle";
   return "neutral";
+}
+
+function measureKnowledgeGraphStage(root: ParentNode): { width: number; height: number } {
+  const stage = root.querySelector<HTMLElement>("[data-kg-stage]");
+  const rect = stage?.getBoundingClientRect();
+  return {
+    width: Math.max(360, Math.floor(rect?.width || 720)),
+    height: Math.max(260, Math.floor(rect?.height || 420)),
+  };
+}
+
+function stageSizeChanged(
+  previous: { width: number; height: number },
+  next: { width: number; height: number },
+): boolean {
+  return Math.abs(previous.width - next.width) > 32 || Math.abs(previous.height - next.height) > 32;
 }
 
 function appShellStyles(): string {

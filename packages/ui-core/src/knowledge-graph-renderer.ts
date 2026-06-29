@@ -68,12 +68,10 @@ export function mountKnowledgeGraphRenderer(
     px: 0,
     py: 0,
   };
+  let canvasSize = { width: 0, height: 0, cssWidth: 0, cssHeight: 0 };
   const draw = () => {
     const viewport = canvasViewport(stage);
-    canvas.width = Math.floor(viewport.width * viewport.ratio);
-    canvas.height = Math.floor(viewport.height * viewport.ratio);
-    canvas.style.width = `${viewport.width}px`;
-    canvas.style.height = `${viewport.height}px`;
+    canvasSize = resizeCanvasIfNeeded(canvas, viewport, canvasSize);
     if (!drawThree(canvas, viewport, options.layout!, options.selectedNodeIds, view)) {
       drawCanvas2d(canvas, options.layout!, options.selectedNodeIds, view);
     }
@@ -144,6 +142,28 @@ function syncViewState(
   target.scale = view.scale;
   target.dx = view.dx;
   target.dy = view.dy;
+}
+
+function resizeCanvasIfNeeded(
+  canvas: HTMLCanvasElement,
+  viewport: { width: number; height: number; ratio: number },
+  previous: { width: number; height: number; cssWidth: number; cssHeight: number },
+): { width: number; height: number; cssWidth: number; cssHeight: number } {
+  const width = Math.floor(viewport.width * viewport.ratio);
+  const height = Math.floor(viewport.height * viewport.ratio);
+  if (
+    previous.width === width
+    && previous.height === height
+    && previous.cssWidth === viewport.width
+    && previous.cssHeight === viewport.height
+  ) {
+    return previous;
+  }
+  canvas.width = width;
+  canvas.height = height;
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  return { width, height, cssWidth: viewport.width, cssHeight: viewport.height };
 }
 
 function renderStatus(status: LayoutStatus, error: string | null): string {
