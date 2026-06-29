@@ -992,11 +992,30 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelectorAll("[data-kg-filter]").length).toBeGreaterThanOrEqual(14);
     expect(root.querySelector(".os-kg-cue-concept")?.textContent).toContain("Concept");
 
-    const search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    let search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    search.focus();
+    search.value = "O";
+    search.setSelectionRange(1, 1);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    expect(document.activeElement).toBe(search);
+    expect(search.selectionStart).toBe(1);
+    search.value = "OS";
+    search.setSelectionRange(2, 2);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search = root.querySelector("[data-kg-search]") as HTMLInputElement;
+    expect(document.activeElement).toBe(search);
+    expect(search.value).toBe("OS");
+    expect(search.selectionStart).toBe(2);
     search.value = "OSYM-824";
+    search.setSelectionRange(8, 8);
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flushUntil(() => root.querySelector(".os-knowledge-status")?.textContent?.includes("1 visible") ?? false);
     expect(root.querySelector(".os-knowledge-fallback tbody")?.textContent).toContain("OSYM-824");
+    await flushUntil(() =>
+      root.querySelector("[data-kg-node='source:osym-824']")?.getAttribute("aria-selected") === "true"
+    );
+    expect(root.querySelector("[data-testid='knowledge-graph-map'] [data-kg-node='concept:coe-468']")).toBeNull();
 
     const reset = root.querySelector("[data-kg-filter-reset]") as HTMLButtonElement;
     reset.click();

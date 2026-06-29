@@ -214,6 +214,12 @@ interface KnowledgeGraphState {
   error: string | null;
 }
 
+interface KnowledgeControlFocus {
+  selector: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
+
 interface AppState {
   connectionMode: ConnectionMode;
   connectionMessage: string;
@@ -1066,7 +1072,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ...this.state.knowledgeGraph,
       searchQuery: compactWhitespace(query),
     };
+    const nextNodeId = this.clampKnowledgeSelectionToVisible();
     this.render();
+    if (nextNodeId) {
+      void this.loadKnowledgeConceptDetail(nextNodeId);
+    }
   }
 
   private onKnowledgeFilterChange(control: HTMLElement): void {
@@ -1091,7 +1101,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       void this.loadKnowledgeGraph();
       return;
     }
+    const nextNodeId = this.clampKnowledgeSelectionToVisible();
     this.render();
+    if (nextNodeId) {
+      void this.loadKnowledgeConceptDetail(nextNodeId);
+    }
   }
 
   private resetKnowledgeFilters(): void {
@@ -1103,7 +1117,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       },
       searchQuery: "",
     };
+    const nextNodeId = this.clampKnowledgeSelectionToVisible();
     this.render();
+    if (nextNodeId) {
+      void this.loadKnowledgeConceptDetail(nextNodeId);
+    }
   }
 
   private navigateKnowledgeNode(fromNodeId: string, direction: "previous" | "next" | "neighbor-previous" | "neighbor-next"): void {
@@ -1122,6 +1140,31 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (neighbors.length === 0) return;
     const sorted = direction === "neighbor-previous" ? [...neighbors].reverse() : neighbors;
     this.selectKnowledgeNode(sorted[0]!);
+  }
+
+  private clampKnowledgeSelectionToVisible(): string | null {
+    const current = this.state.knowledgeGraph.selectedNodeId;
+    const visible = visibleKnowledgeNodes(this.state.knowledgeGraph);
+    const nextNodeId = visible.some((node) => node.id === current)
+      ? current
+      : visible[0]?.id ?? null;
+    if (nextNodeId === current) {
+      return null;
+    }
+    const detailStillMatches = Boolean(
+      nextNodeId
+      && this.state.knowledgeGraph.snapshot?.nodes.some((node) => {
+        const detailKey = `${this.state.knowledgeGraph.snapshot?.bundle_id}:${node.concept_id ?? ""}`;
+        return node.id === nextNodeId && detailKey === this.state.knowledgeGraph.detailKey;
+      }),
+    );
+    this.state.knowledgeGraph = {
+      ...this.state.knowledgeGraph,
+      selectedNodeId: nextNodeId,
+      detail: detailStillMatches ? this.state.knowledgeGraph.detail : null,
+      detailKey: detailStillMatches ? this.state.knowledgeGraph.detailKey : null,
+    };
+    return nextNodeId;
   }
 
   private updateGraphAdapterForGateway(gatewayUrl: string): void {
@@ -1627,6 +1670,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
+    const controlFocus = captureKnowledgeControlFocus(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
@@ -1651,6 +1695,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     `;
     this.bindEvents();
     restoreShellScrollPositions(this.options.root, scrollPositions);
+    restoreKnowledgeControlFocus(this.options.root, controlFocus);
   }
 
   private renderViewContent(): string {
@@ -3224,6 +3269,52 @@ function restoreShellScrollPositions(
   }
 }
 
+function captureKnowledgeControlFocus(root: HTMLElement): KnowledgeControlFocus | null {
+  const active = root.ownerDocument.activeElement;
+  if (!(active instanceof HTMLElement)) {
+    return null;
+  }
+  let selector: string | null = null;
+  if (active.matches("[data-kg-search]")) {
+    selector = "[data-kg-search]";
+  } else if (active.matches("[data-kg-filter]")) {
+    const key = active.dataset.kgFilter;
+    if (key) {
+      selector = `[data-kg-filter="${cssEscape(key)}"]`;
+    }
+  }
+  if (!selector) {
+    return null;
+  }
+  return {
+    selector,
+    selectionStart: active instanceof HTMLInputElement ? active.selectionStart : null,
+    selectionEnd: active instanceof HTMLInputElement ? active.selectionEnd : null,
+  };
+}
+
+function restoreKnowledgeControlFocus(root: HTMLElement, focus: KnowledgeControlFocus | null): void {
+  if (!focus) {
+    return;
+  }
+  const next = root.querySelector<HTMLElement>(focus.selector);
+  if (!next) {
+    return;
+  }
+  next.focus();
+  if (
+    next instanceof HTMLInputElement
+    && focus.selectionStart !== null
+    && focus.selectionEnd !== null
+    && typeof next.setSelectionRange === "function"
+  ) {
+    next.setSelectionRange(
+      Math.min(focus.selectionStart, next.value.length),
+      Math.min(focus.selectionEnd, next.value.length),
+    );
+  }
+}
+
 function renderPaneResizer(handle: WorkspacePaneResizeHandle, label: string, value: number): string {
   return `
     <div class="os-pane-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="${escapeAttr(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(value)}" data-pane-resizer="${handle}">
@@ -3342,7 +3433,6 @@ function renderKnowledgeGraphSurface(state: KnowledgeGraphState, taskNode: TaskG
   const snapshot = state.snapshot;
   const visibleNodes = visibleKnowledgeNodes(state);
   const selected = visibleNodes.find((node) => node.id === state.selectedNodeId)
-    ?? snapshot?.nodes.find((node) => node.id === state.selectedNodeId)
     ?? visibleNodes[0]
     ?? null;
   const selectedEdges = selected && snapshot ? snapshot.edges.filter((edge) =>
