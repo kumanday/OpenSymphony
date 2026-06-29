@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium } from "playwright";
 
 const repoRoot = resolve(__dirname, "../../..");
@@ -17,14 +17,39 @@ describe("Knowledge Graph renderer", () => {
       const page = await browser.newPage({ viewport: { width: 1024, height: 768 } });
       await page.goto(`${server.url}/app/`, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "Knowledge Graph" }).click();
-      await page.waitForSelector("[data-testid='knowledge-graph-canvas'][data-nonblank='true']");
-      await page.waitForTimeout(300);
-      const dataUrl = await page.$eval(
+      await page.waitForFunction(() => {
+        const canvas = document.querySelector("[data-testid='knowledge-graph-canvas']");
+        return canvas instanceof HTMLCanvasElement && canvas.dataset.nonblank === "true";
+      });
+      const stats = await page.$eval(
         "[data-testid='knowledge-graph-canvas']",
-        (canvas) => (canvas as HTMLCanvasElement).toDataURL("image/png"),
+        (canvasElement) => {
+          const canvas = canvasElement as HTMLCanvasElement;
+          const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+          if (!gl) return { changed: 0, total: 0, width: canvas.width, height: canvas.height };
+          const width = canvas.width;
+          const height = canvas.height;
+          const pixels = new Uint8Array(width * height * 4);
+          gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const stride = Math.max(1, Math.floor((width * height) / 5_000));
+          let changed = 0;
+          let total = 0;
+          for (let pixel = 0; pixel < width * height; pixel += stride) {
+            const index = pixel * 4;
+            if (pixels[index + 3] === 0) continue;
+            total += 1;
+            const delta = Math.abs(pixels[index] - 248)
+              + Math.abs(pixels[index + 1] - 250)
+              + Math.abs(pixels[index + 2] - 252);
+            if (delta > 30) changed += 1;
+          }
+          return { changed, total, width, height };
+        },
       );
-      expect(dataUrl).toMatch(/^data:image\/png;base64,/);
-      expect(dataUrl.length).toBeGreaterThan(1_000);
+      expect(stats.width).toBeGreaterThan(0);
+      expect(stats.height).toBeGreaterThan(0);
+      expect(stats.total).toBeGreaterThan(100);
+      expect(stats.changed).toBeGreaterThan(20);
     } finally {
       await browser?.close();
       await new Promise<void>((resolveClose) => server.close(resolveClose));
@@ -33,13 +58,20 @@ describe("Knowledge Graph renderer", () => {
 });
 
 function startStaticServer(root: string): Promise<Server & { url: string }> {
+  const rootPath = resolve(root);
   const server = createServer((request, response) => {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
     const path = requestUrl.pathname === "/app/" || requestUrl.pathname === "/app"
       ? "index.html"
       : requestUrl.pathname.replace(/^\/app\//, "");
-    const filePath = resolve(root, path);
-    if (!filePath.startsWith(root) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    const filePath = resolve(rootPath, path);
+    const relativePath = relative(rootPath, filePath);
+    if (
+      relativePath.startsWith("..")
+      || isAbsolute(relativePath)
+      || !existsSync(filePath)
+      || !statSync(filePath).isFile()
+    ) {
       response.writeHead(404);
       response.end("not found");
       return;

@@ -312,12 +312,15 @@ function disposeObject3D(object: THREE.Object3D): void {
 }
 
 function disposeRenderable(object: THREE.Object3D): void {
-    const mesh = object as THREE.Mesh | THREE.LineSegments;
-    if ("geometry" in mesh) mesh.geometry.dispose();
-    const materials = "material" in mesh
-      ? Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-      : [];
-    for (const material of materials) material.dispose();
+  const renderable = object as THREE.Object3D & {
+    geometry?: { dispose(): void };
+    material?: THREE.Material | THREE.Material[];
+  };
+  renderable.geometry?.dispose();
+  const materials = renderable.material
+    ? Array.isArray(renderable.material) ? renderable.material : [renderable.material]
+    : [];
+  for (const material of materials) material.dispose();
 }
 
 function graphLayoutKey(layout: GraphLayoutResult): string {
@@ -430,7 +433,8 @@ function nearestNode(
   for (const node of layout.nodes) {
     const p = canvasPoint(node.x, node.y, layout, view, viewport);
     const distance = Math.hypot(p.x - x, p.y - y);
-    if (distance <= 24 && (!best || distance < best.distance)) best = { id: node.nodeId, distance };
+    const hitRadius = Math.max(8, (node.radius + 9) * view.scale);
+    if (distance <= hitRadius && (!best || distance < best.distance)) best = { id: node.nodeId, distance };
   }
   return best?.id ?? null;
 }
