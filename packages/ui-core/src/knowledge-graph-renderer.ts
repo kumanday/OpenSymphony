@@ -256,13 +256,26 @@ function labelNodes(
 ): GraphLayoutResult["nodes"][number][] {
   if (nodes.length <= maxVisibleGraphLabels) return [...nodes];
   const selectedNodes = nodes.filter((node) => selected.has(node.nodeId));
-  const selectedIds = new Set(selectedNodes.map((node) => node.nodeId));
+  const bundleNodes = nodes.filter((node) => node.kind === "bundle");
+  const priorityNodes = uniqueLayoutNodes([...bundleNodes, ...selectedNodes]).slice(0, maxVisibleGraphLabels);
+  const priorityIds = new Set(priorityNodes.map((node) => node.nodeId));
   return [
-    ...selectedNodes,
+    ...priorityNodes,
     ...nodes
-      .filter((node) => !selectedIds.has(node.nodeId) && (node.kind === "community" || node.kind === "concept"))
-      .slice(0, Math.max(0, maxVisibleGraphLabels - selectedNodes.length)),
+      .filter((node) => !priorityIds.has(node.nodeId) && (node.kind === "community" || node.kind === "concept"))
+      .slice(0, Math.max(0, maxVisibleGraphLabels - priorityNodes.length)),
   ];
+}
+
+function uniqueLayoutNodes(
+  nodes: readonly GraphLayoutResult["nodes"][number][],
+): GraphLayoutResult["nodes"][number][] {
+  const seen = new Set<string>();
+  return nodes.filter((node) => {
+    if (seen.has(node.nodeId)) return false;
+    seen.add(node.nodeId);
+    return true;
+  });
 }
 
 function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {

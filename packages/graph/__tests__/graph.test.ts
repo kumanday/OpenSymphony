@@ -1,6 +1,7 @@
 import {
   applyGraphFilters,
   createFixtureGraphAdapter,
+  createCommunityOverviewSnapshot,
   createScaleGraphSnapshot,
   computeGraphLayout,
   createGraphLayoutAdapter,
@@ -64,6 +65,18 @@ describe("@opensymphony/graph", () => {
     expect(visible?.filters_applied).toContain("overview:community-aggregation");
     expect(visible?.metrics).toBeUndefined();
     expect(visible?.communities.every((community) => community.node_ids.every((nodeId) => nodeId.startsWith("concept:")))).toBe(true);
+    expect(() => createCommunityOverviewSnapshot({
+      ...large,
+      nodes: [
+        ...large.nodes,
+        {
+          ...large.nodes[0],
+          id: "bundle:other",
+          bundle_id: "other",
+          label: "Other bundle",
+        },
+      ],
+    })).toThrow("single bundle node");
 
     const neighborhood = visibleGraphSnapshot(graphReducer(state, {
       type: "NODE_FOCUSED",

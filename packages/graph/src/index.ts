@@ -374,8 +374,11 @@ export function visibleGraphSnapshot(state: GraphState): MemoryGraphSnapshot | n
 }
 
 export function createCommunityOverviewSnapshot(snapshot: MemoryGraphSnapshot): MemoryGraphSnapshot {
-  const bundle = snapshot.nodes.find((node) => node.kind === "bundle" && node.bundle_id === snapshot.bundle_id)
-    ?? snapshot.nodes.find((node) => node.kind === "bundle");
+  const bundleNodes = snapshot.nodes.filter((node) => node.kind === "bundle");
+  if (bundleNodes.length !== 1 || bundleNodes[0]?.bundle_id !== snapshot.bundle_id) {
+    throw new Error("Community overview requires a single bundle node matching snapshot.bundle_id");
+  }
+  const bundle = bundleNodes[0];
   const nodesById = new Map(snapshot.nodes.map((node) => [node.id, node]));
   const normalizedCommunities = snapshot.communities
     .map((community) => ({

@@ -996,6 +996,7 @@ describe("OpenSymphonyApp mount", () => {
     document.body.appendChild(root);
     const labels = root.querySelectorAll(".os-kg-label");
     expect(labels.length).toBeLessThanOrEqual(80);
+    expect(root.querySelector(".os-kg-label[data-kg-node-id='bundle:scale-5000']")?.textContent).toContain("Scale fixture");
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl div")).toBeNull();
     expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
