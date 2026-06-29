@@ -9,6 +9,14 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./layout-worker": {
+      "import": "./dist/layout-worker.js",
+      "types": "./dist/layout-worker.d.ts"
+    },
+    "./worker-factory": {
+      "import": "./dist/worker-factory.js",
+      "types": "./dist/worker-factory.d.ts"
     }
   },
   "files": ["dist", "src"],

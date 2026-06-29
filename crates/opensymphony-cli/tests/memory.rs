@@ -775,7 +775,10 @@ fn memory_context_can_include_code_intelligence_without_a_separate_cli_command()
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("# Memory Context: COE-999"));
     assert!(stdout.contains("## Code Intelligence"));
-    assert!(stdout.contains("Repository summary"));
+    assert!(stdout.contains("ast-summary: src/lib.rs"));
+    assert!(stdout.contains("ast-symbols: Symbols in src/lib.rs"));
+    assert!(stdout.contains("function `answer`"));
+    assert!(stdout.contains("fallback: CodebaseAnalyzer not used"));
 
     let help = run(repo.path(), ["memory", "--help"]);
     assert_success(&help, "memory help");
@@ -783,6 +786,114 @@ fn memory_context_can_include_code_intelligence_without_a_separate_cli_command()
         !String::from_utf8_lossy(&help.stdout).contains("code-context"),
         "memory help should keep context as the agent-facing command"
     );
+}
+
+#[test]
+fn memory_context_code_intelligence_falls_back_for_unsupported_files() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::write(repo.path().join("notes.txt"), "Example\n").expect("notes should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--paths",
+            "notes.txt",
+            "--include-code-intel",
+        ],
+    );
+
+    assert_success(&output, "unsupported code intelligence fallback");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Repository summary"));
+    assert!(stdout.contains("fallback: CodebaseAnalyzer used"));
+    assert!(stdout.contains("notes.txt has unsupported language"));
+}
+
+#[test]
+fn memory_context_code_intelligence_falls_back_without_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("src")).expect("src dir should write");
+    fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("source file should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--include-code-intel",
+        ],
+    );
+
+    assert_success(&output, "empty path code intelligence fallback");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Repository summary"));
+    assert!(stdout.contains("no requested paths; repository summary fallback used"));
+}
+
+#[test]
+fn memory_context_code_intelligence_mixes_ast_and_fallback_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("src")).expect("src dir should write");
+    fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("source file should write");
+    fs::write(repo.path().join("notes.txt"), "Example\n").expect("notes should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--paths",
+            "src/lib.rs,notes.txt",
+            "--include-code-intel",
+        ],
+    );
+
+    assert_success(&output, "mixed code intelligence fallback");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ast-summary: src/lib.rs"));
+    assert!(stdout.contains("function `answer`"));
+    assert!(stdout.contains("Repository summary"));
+    assert!(stdout.contains("notes.txt has unsupported language"));
+}
+
+#[test]
+fn memory_context_code_intelligence_rejects_outside_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    let outside = TempDir::new().expect("outside repo should exist");
+    let outside_file = outside.path().join("lib.rs");
+    fs::write(&outside_file, "pub fn outside() {}\n").expect("outside file should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--paths",
+            outside_file.to_str().expect("outside path"),
+            "--include-code-intel",
+        ],
+    );
+
+    assert_failure(&output, "outside code intelligence path");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside the repository root"));
 }
 
 #[test]

@@ -5,7 +5,7 @@ use crate::opensymphony_openhands::{
     TransportConfig,
 };
 use crate::opensymphony_testkit::FakeOpenHandsServer;
-use crate::opensymphony_workflow::{ProcessEnvironment, WorkflowDefinition};
+use crate::opensymphony_workflow::WorkflowDefinition;
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, IssueDescriptor, WorkspaceManager, WorkspaceManagerConfig,
 };
@@ -165,9 +165,13 @@ async fn debug_resumes_existing_conversation_history_and_sends_follow_up_input()
     write_project_files(project.path(), &workspace_root, openhands.base_url());
 
     let workflow_path = project.path().join("WORKFLOW.md");
+    let test_env = std::collections::BTreeMap::from([(
+        "OPENHANDS_API_KEY".to_string(),
+        "test-openhands-key".to_string(),
+    )]);
     let workflow = WorkflowDefinition::load_from_path(&workflow_path)
         .expect("workflow should load")
-        .resolve_with_process_env(project.path())
+        .resolve(project.path(), &test_env)
         .expect("workflow should resolve");
     let manager = WorkspaceManager::new(WorkspaceManagerConfig {
         root: workspace_root.clone(),
@@ -189,21 +193,13 @@ async fn debug_resumes_existing_conversation_history_and_sends_follow_up_input()
         .await
         .expect("workspace should exist");
 
-    let transport = TransportConfig::from_workflow(
-        &workflow,
-        &std::collections::BTreeMap::from([(
-            "OPENHANDS_API_KEY".to_string(),
-            "test-openhands-key".to_string(),
-        )]),
-    )
-    .expect("transport should resolve");
-    let client = OpenHandsClient::new(transport);
+    let client = OpenHandsClient::new(TransportConfig::new(openhands.base_url()));
     let launch_profile =
         ConversationLaunchProfile::from_workflow(&workflow).expect("launch profile should build");
     let conversation_id = Uuid::new_v4();
     let request = launch_profile
         .to_create_request(
-            &ProcessEnvironment,
+            &test_env,
             ensured.handle.workspace_path(),
             &ensured.handle.openhands_dir(),
             Some(conversation_id),
@@ -261,11 +257,21 @@ async fn debug_resumes_existing_conversation_history_and_sends_follow_up_input()
     )
     .expect("conversation manifest should write");
 
+    let config_path = project.path().join("config.yaml");
+    std::fs::write(
+        &config_path,
+        format!("target_repo: {}\n", project.path().display()),
+    )
+    .expect("debug config should write");
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     child
         .arg("debug")
         .arg("COE-287")
+        .arg("--config")
+        .arg(&config_path)
         .current_dir(project.path())
+        .env_clear()
         .env("OPENHANDS_API_KEY", "test-openhands-key")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

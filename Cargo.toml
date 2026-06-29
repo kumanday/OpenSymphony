@@ -54,7 +54,10 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tree-sitter.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true
@@ -114,7 +117,10 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tree-sitter = "=0.26.9"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-python = "=0.25.0"
 tree-sitter-rust = "=0.24.2"
+tree-sitter-typescript = "=0.23.2"
 unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }

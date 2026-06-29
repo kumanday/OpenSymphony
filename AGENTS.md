@@ -180,6 +180,18 @@ logical bundle layout and migration model documented in `docs/memory.md` and
 `docs/specs/okf-memory-spec.md`. Do not move the durable `.opensymphony/memory/` store
 to the final OKF layout unless a task explicitly includes that migration.
 
+### Keep memory code intelligence AST-first and fallback-safe
+
+`memory.context --include-code-intel` uses the Tree-sitter provider first for
+supported requested Rust paths, then falls back to `CodebaseAnalyzer` for
+unsupported languages, parser diagnostics, oversized files, and empty-path
+repository summaries. Mixed supported and unsupported requests should keep both
+AST evidence and fallback trace visibility without changing the public
+`memory.context` contract or adding new MCP tool names. The current
+`opensymphony_code_intel` adapter still implements
+`opensymphony_memory::CodeIntelIndex`; keep that bridge narrow until a follow-up
+inverts trait ownership into the code-intelligence module.
+
 ### Separate Symphony hooks from OpenHands hooks
 
 Symphony workspace hooks:
