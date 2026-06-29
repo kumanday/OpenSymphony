@@ -778,6 +778,31 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function mockReducedMotionPreference(): () => void {
+  const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: jest.fn().mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    })),
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(window, "matchMedia", original);
+    } else {
+      delete (window as Partial<Window>).matchMedia;
+    }
+  };
+}
+
 async function expandSettingsPanel(
   root: HTMLElement,
   panel: "connection" | "model",
@@ -792,6 +817,13 @@ async function expandSettingsPanel(
 }
 
 describe("OpenSymphonyApp mount", () => {
+  let restoreMatchMedia: (() => void) | null = null;
+
+  afterEach(() => {
+    restoreMatchMedia?.();
+    restoreMatchMedia = null;
+  });
+
   it("flushUntil rejects with a clear timeout message instead of returning silently", async () => {
     // Regression coverage for the reviewer finding that exhausted
     // flushUntil iterations used to resolve silently, which masked the
@@ -856,19 +888,7 @@ describe("OpenSymphonyApp mount", () => {
   it("lays out status, task graph, run detail, and activity panels", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    Object.defineProperty(window, "matchMedia", {
-      writable: true,
-      value: jest.fn().mockImplementation((query: string) => ({
-        matches: query === "(prefers-reduced-motion: reduce)",
-        media: query,
-        onchange: null,
-        addListener: jest.fn(),
-        removeListener: jest.fn(),
-        addEventListener: jest.fn(),
-        removeEventListener: jest.fn(),
-        dispatchEvent: jest.fn(),
-      })),
-    });
+    restoreMatchMedia = mockReducedMotionPreference();
     const handle = renderOpenSymphonyApp({
       root,
       mode: "desktop",
