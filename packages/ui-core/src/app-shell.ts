@@ -811,8 +811,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         const selectedBundleId = this.state.knowledgeGraph.selectedBundleId;
         if (!selectedBundleId || selectedBundleId === envelope.payload.bundle_id) {
           this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });
-          this.state.knowledgeGraphLayout = null;
-          this.knowledgeGraphLayoutSize = null;
           this.render();
         }
       }

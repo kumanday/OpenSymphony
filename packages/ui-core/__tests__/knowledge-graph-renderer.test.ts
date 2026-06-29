@@ -8,6 +8,8 @@ const repoRoot = resolve(__dirname, "../../..");
 const webDist = join(repoRoot, "apps/web/dist");
 
 describe("Knowledge Graph renderer", () => {
+  // Expects the repo test setup: `npm test` builds apps/web/dist before Jest,
+  // and Playwright Chromium is installed in the CI/browser-test environment.
   it("renders a nonblank WebGL canvas in the built web app", async () => {
     const indexPath = join(webDist, "index.html");
     expect(existsSync(indexPath)).toBe(true);

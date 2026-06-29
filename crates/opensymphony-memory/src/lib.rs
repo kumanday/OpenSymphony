@@ -1390,6 +1390,14 @@ resource: https://linear.app/example/issue/COE-123
 tags: [memory, graph]
 timestamp: 2026-06-22T10:00:00Z
 unknown_field: keep-me
+authtoken: auth-token-compact-fixture
+bearertoken: bearer-token-compact-fixture
+csrf_token: csrf-token-fixture
+encryptionkey: encryption-key-compact-fixture
+idtoken: id-token-compact-fixture
+refreshtoken: refresh-token-compact-fixture
+signingkey: signing-key-compact-fixture
+xsrf_token: xsrf-token-fixture
 apikey: sk-live-compact-fixture
 api_key: sk-live-public-fixture
 apiKey: sk-live-camel-fixture
@@ -1723,6 +1731,38 @@ opensymphony:
         );
         assert_eq!(
             detail.frontmatter_view.unknown.get("api_key"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("authtoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("bearertoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("csrf_token"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("encryptionkey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("idtoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("refreshtoken"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("signingkey"),
+            Some(&serde_json::json!("[redacted-secret]"))
+        );
+        assert_eq!(
+            detail.frontmatter_view.unknown.get("xsrf_token"),
             Some(&serde_json::json!("[redacted-secret]"))
         );
         assert_eq!(

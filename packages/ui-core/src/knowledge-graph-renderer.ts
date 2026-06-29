@@ -128,6 +128,20 @@ export function mountKnowledgeGraphRenderer(
       const nodeId = button.dataset.kgNodeId;
       if (nodeId) options.onSelect(nodeId);
     });
+    button.addEventListener("keydown", (event) => {
+      const direction = graphListNavigationDirection(event.key);
+      if (!direction) return;
+      const buttons = Array.from(root.querySelectorAll<HTMLElement>(".os-kg-list [data-kg-node-id]"));
+      const index = buttons.indexOf(button);
+      if (index < 0) return;
+      event.preventDefault();
+      const nextIndex = direction === "first"
+        ? 0
+        : direction === "last"
+          ? buttons.length - 1
+          : (index + direction + buttons.length) % buttons.length;
+      buttons[nextIndex]?.focus();
+    });
     button.addEventListener("focus", () => {
       const nodeId = button.dataset.kgNodeId;
       if (nodeId) options.onFocus(nodeId);
@@ -216,7 +230,7 @@ function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeId
   const selected = new Set(selectedNodeIds);
   return `
     <ul class="os-kg-list" data-testid="knowledge-graph-node-list" aria-label="Visible graph nodes">
-      ${snapshot.nodes.slice(0, 20).map((node) => `
+      ${snapshot.nodes.map((node) => `
         <li class="${selected.has(node.id) ? "is-selected" : ""}">
           <button type="button" data-kg-node-id="${escapeAttr(node.id)}">${escapeHtml(node.label)}</button>
           <span>${escapeHtml(node.kind)}</span>
@@ -224,6 +238,23 @@ function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeId
       `).join("")}
     </ul>
   `;
+}
+
+function graphListNavigationDirection(key: string): -1 | 1 | "first" | "last" | null {
+  switch (key) {
+    case "ArrowUp":
+    case "ArrowLeft":
+      return -1;
+    case "ArrowDown":
+    case "ArrowRight":
+      return 1;
+    case "Home":
+      return "first";
+    case "End":
+      return "last";
+    default:
+      return null;
+  }
 }
 
 interface ThreeCanvasState {

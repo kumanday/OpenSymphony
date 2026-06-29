@@ -1000,13 +1000,15 @@ fn is_secret_like_frontmatter_key(key: &str) -> bool {
         && (part_refs.len() == 1
             || part_refs
                 .iter()
-                .any(|part| matches!(*part, "auth" | "oauth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api")))
+                .any(|part| matches!(*part, "auth" | "oauth" | "access" | "refresh" | "session" | "bearer" | "client" | "id" | "api" | "xsrf" | "csrf")))
     {
         return true;
     }
     has_adjacent_parts(&part_refs, "api", "key")
         || has_adjacent_parts(&part_refs, "access", "key")
         || has_adjacent_parts(&part_refs, "private", "key")
+        || has_adjacent_parts(&part_refs, "signing", "key")
+        || has_adjacent_parts(&part_refs, "encryption", "key")
         || has_adjacent_parts(&part_refs, "session", "id")
         || has_compound_secret_key(&part_refs)
 }
@@ -1069,11 +1071,22 @@ fn has_any(parts: &[&str], candidates: &[&str]) -> bool {
 }
 
 fn has_compound_secret_key(parts: &[&str]) -> bool {
-    let compact = parts.join("");
-    matches!(
-        compact.as_str(),
-        "apikey" | "clientsecret" | "accesstoken" | "sessionid" | "privatekey"
-    )
+    if parts.len() != 1 {
+        return false;
+    }
+    let compact = parts[0];
+    (compact.ends_with("token")
+        && matches!(
+            compact.trim_end_matches("token"),
+            "auth" | "refresh" | "id" | "xsrf" | "csrf" | "bearer" | "access" | "client" | "session"
+        ))
+        || (compact.ends_with("key")
+            && matches!(
+                compact.trim_end_matches("key"),
+                "api" | "private" | "signing" | "encryption" | "access"
+            ))
+        || (compact.ends_with("secret") && compact.trim_end_matches("secret") == "client")
+        || (compact.ends_with("id") && compact.trim_end_matches("id") == "session")
 }
 
 fn json_string(value: &str) -> serde_json::Value {
