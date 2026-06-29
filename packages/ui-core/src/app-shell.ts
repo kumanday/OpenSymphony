@@ -111,6 +111,7 @@ import {
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
 import {
+  disposeKnowledgeGraphCanvas,
   disposeKnowledgeGraphRenderer,
   type KnowledgeGraphViewState,
   mountKnowledgeGraphRenderer,
@@ -941,7 +942,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     void import("./graph-layout-worker-factory.js").then(({ createBrowserGraphLayoutAdapter }) => {
       if (this.destroyed) return;
       this.replaceGraphLayoutAdapter(createBrowserGraphLayoutAdapter());
-    }).catch(() => {
+    }).catch((error: unknown) => {
+      console.warn("Knowledge graph layout worker unavailable; using synchronous fallback.", error);
       this.graphLayoutAdapter = createGraphLayoutAdapter(() => null);
     });
   }
@@ -1483,7 +1485,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
-    disposeKnowledgeGraphRenderer(this.options.root);
+    const preservedKnowledgeCanvas = this.state.graphPaneView === "knowledge"
+      ? this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']")
+      : null;
+    if (!preservedKnowledgeCanvas) {
+      disposeKnowledgeGraphRenderer(this.options.root);
+    }
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}" data-auth-state="${this.state.authState}">
@@ -1505,6 +1512,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </section>
       </main>
     `;
+    if (preservedKnowledgeCanvas) {
+      const nextCanvas = this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
+      if (nextCanvas) {
+        nextCanvas.replaceWith(preservedKnowledgeCanvas);
+      } else {
+        disposeKnowledgeGraphCanvas(preservedKnowledgeCanvas);
+      }
+    }
     this.bindEvents();
     restoreShellScrollPositions(this.options.root, scrollPositions);
   }

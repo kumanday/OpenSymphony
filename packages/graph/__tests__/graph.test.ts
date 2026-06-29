@@ -280,6 +280,15 @@ describe("@opensymphony/graph", () => {
       edges: [],
     }, { kind: "timeline", width: 640, height: 360 });
     expect(nodeById(timestamped, "concept:older").x).toBeLessThan(nodeById(timestamped, "concept:newer").x);
+    const offsetTimestamped = computeGraphLayout({
+      ...fixtureGraphSnapshot,
+      nodes: [
+        { ...fixtureGraphSnapshot.nodes[0], id: "concept:later-offset", kind: "concept", timestamp: "2026-01-01T01:00:00+02:00" },
+        { ...fixtureGraphSnapshot.nodes[1], id: "concept:earlier-z", kind: "concept", timestamp: "2025-12-31T23:30:00Z" },
+      ],
+      edges: [],
+    }, { kind: "timeline", width: 640, height: 360 });
+    expect(nodeById(offsetTimestamped, "concept:later-offset").x).toBeLessThan(nodeById(offsetTimestamped, "concept:earlier-z").x);
   });
 
   it("uses a worker adapter when a worker is available", async () => {

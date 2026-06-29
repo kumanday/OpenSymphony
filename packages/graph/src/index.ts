@@ -696,7 +696,7 @@ function timelineLayout(
   height: number,
 ): GraphLayoutNode[] {
   const sorted = [...nodes].sort((a, b) =>
-    compareStrings(a.timestamp ?? a.label, b.timestamp ?? b.label) || compareNodes(a, b)
+    compareTimelineNodes(a, b) || compareNodes(a, b)
   );
   const lanes = groupBy(sorted, (node) => node.kind);
   const laneKeys = [...lanes.keys()].sort(compareStrings);
@@ -709,6 +709,21 @@ function timelineLayout(
       zFor(node),
     );
   }).sort(compareLayoutNodes);
+}
+
+function compareTimelineNodes(a: MemoryGraphNode, b: MemoryGraphNode): number {
+  const aTime = timestampMillis(a.timestamp);
+  const bTime = timestampMillis(b.timestamp);
+  if (aTime !== null && bTime !== null && aTime !== bTime) return aTime - bTime;
+  if (aTime !== null && bTime === null) return -1;
+  if (aTime === null && bTime !== null) return 1;
+  return compareStrings(a.timestamp ?? a.label, b.timestamp ?? b.label);
+}
+
+function timestampMillis(timestamp: string | undefined): number | null {
+  if (!timestamp) return null;
+  const value = Date.parse(timestamp);
+  return Number.isFinite(value) ? value : null;
 }
 
 function layoutNode(node: MemoryGraphNode, x: number, y: number, z: number): GraphLayoutNode {

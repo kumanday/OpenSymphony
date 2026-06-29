@@ -796,17 +796,20 @@ describe("OpenSymphonyApp mount", () => {
         set globalAlpha(_value: number) {},
       } as unknown as CanvasRenderingContext2D;
     });
-    (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
-    await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
-    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
-    expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
-    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
-    expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
-    expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
-    expect(root.querySelector(".os-task-graph-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
-    expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
-    consoleError.mockRestore();
-    getContext.mockRestore();
+    try {
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
+      expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+      expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
+      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
+      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
+      expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
+      expect(root.querySelector(".os-task-graph-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
+    } finally {
+      consoleError.mockRestore();
+      getContext.mockRestore();
+    }
 
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);

@@ -74,7 +74,7 @@ export function mountKnowledgeGraphRenderer(
     const viewport = canvasViewport(stage);
     canvasSize = resizeCanvasIfNeeded(canvas, viewport, canvasSize);
     if (!drawThree(canvas, viewport, options.layout!, options.selectedNodeIds, view)) {
-      drawCanvas2d(canvas, options.layout!, options.selectedNodeIds, view);
+      drawCanvas2d(canvas, viewport, options.layout!, options.selectedNodeIds, view);
     }
     syncLabels(root, options.layout!, view, viewport);
     canvas.dataset.nonblank = options.layout!.nodes.length > 0 ? "true" : "false";
@@ -137,13 +137,17 @@ export function mountKnowledgeGraphRenderer(
 
 export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
   root.querySelectorAll<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']").forEach((canvas) => {
-    const state = threeCanvasState.get(canvas);
-    if (!state) return;
-    disposeObject3D(state.graph);
-    state.renderer.dispose();
-    state.renderer.forceContextLoss();
-    threeCanvasState.delete(canvas);
+    disposeKnowledgeGraphCanvas(canvas);
   });
+}
+
+export function disposeKnowledgeGraphCanvas(canvas: HTMLCanvasElement): void {
+  const state = threeCanvasState.get(canvas);
+  if (!state) return;
+  disposeObject3D(state.graph);
+  state.renderer.dispose();
+  state.renderer.forceContextLoss();
+  threeCanvasState.delete(canvas);
 }
 
 function syncViewState(
@@ -371,7 +375,7 @@ function nodeInstances(
     const matrix = new THREE.Matrix4();
     nodes.forEach((node, index) => {
       const [x, y, z] = projectPoint(node.x, node.y, node.z, layout, { scale: 1, dx: 0, dy: 0 });
-      const scale = selected.has(node.nodeId) ? node.radius + 4 : node.radius;
+      const scale = selected.has(node.nodeId) ? node.radius + 12 : node.radius;
       matrix.compose(new THREE.Vector3(x, y, z), new THREE.Quaternion(), new THREE.Vector3(scale, scale, 1));
       mesh.setMatrixAt(index, matrix);
     });
@@ -383,6 +387,7 @@ function nodeInstances(
 
 function drawCanvas2d(
   canvas: HTMLCanvasElement,
+  viewport: { width: number; height: number },
   layout: GraphLayoutResult,
   selectedNodeIds: readonly string[],
   view: { scale: number; dx: number; dy: number },
@@ -402,8 +407,8 @@ function drawCanvas2d(
     const source = byId.get(edge.sourceId);
     const target = byId.get(edge.targetId);
     if (!source || !target) continue;
-    const a = canvasPoint(source.x, source.y, layout, view);
-    const b = canvasPoint(target.x, target.y, layout, view);
+    const a = canvasPoint(source.x, source.y, layout, view, viewport);
+    const b = canvasPoint(target.x, target.y, layout, view, viewport);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
@@ -411,7 +416,7 @@ function drawCanvas2d(
   }
   ctx.globalAlpha = 1;
   for (const node of layout.nodes) {
-    const p = canvasPoint(node.x, node.y, layout, view);
+    const p = canvasPoint(node.x, node.y, layout, view, viewport);
     ctx.beginPath();
     ctx.fillStyle = selected.has(node.nodeId) ? "#c2410c" : colorForKind(node.kind);
     ctx.arc(p.x, p.y, (selected.has(node.nodeId) ? node.radius + 12 : node.radius + 9) * view.scale, 0, Math.PI * 2);
