@@ -37,6 +37,20 @@ pub const JAVASCRIPT_QUERY_PACK_VERSION: &str = "javascript-query-pack-v1";
 pub const JSX_QUERY_PACK_VERSION: &str = "jsx-query-pack-v1";
 pub const PYTHON_QUERY_PACK_VERSION: &str = "python-query-pack-v1";
 const MARKDOWN_FENCE_QUERY_NAME: &str = "markdown_fences";
+const SKIPPED_DIRECTORY_COMPONENTS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    "coverage",
+    ".next",
+    ".turbo",
+    "vendor",
+    "generated",
+];
 
 const RUST_METADATA: &str = include_str!("../queries/rust/metadata.toml");
 const TYPESCRIPT_METADATA: &str = include_str!("../queries/typescript/metadata.toml");
@@ -44,7 +58,7 @@ const TSX_METADATA: &str = include_str!("../queries/tsx/metadata.toml");
 const JAVASCRIPT_METADATA: &str = include_str!("../queries/javascript/metadata.toml");
 const JSX_METADATA: &str = include_str!("../queries/jsx/metadata.toml");
 const PYTHON_METADATA: &str = include_str!("../queries/python/metadata.toml");
-const DEFAULT_MAX_FILE_BYTES: u64 = 1_000_000;
+const DEFAULT_MAX_FILE_BYTES: u64 = 2_097_152;
 
 const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "definition.module",
@@ -501,6 +515,20 @@ impl AstCodeIntelProvider {
                 .to_path_buf();
             let relative_display = relative_path.to_string_lossy().to_string();
 
+            if resolved.is_dir() {
+                if let Some(component) = skipped_directory_name(&resolved) {
+                    report.fallback_reasons.push(format!(
+                        "{relative_display} skipped directory `{component}`"
+                    ));
+                    continue;
+                }
+                report
+                    .fallback_reasons
+                    .push(format!("{relative_display} is a directory"));
+                report.fallback_paths.push(relative_path);
+                continue;
+            }
+
             let Some(source) = self.read_limited_source(&resolved, &relative_display, &mut report)
             else {
                 continue;
@@ -673,6 +701,14 @@ impl AstCodeIntelProvider {
             .unwrap_or(&candidate)
             .to_path_buf())
     }
+}
+
+pub fn skipped_directory_name(path: impl AsRef<Path>) -> Option<&'static str> {
+    let value = path.as_ref().file_name()?.to_str()?;
+    SKIPPED_DIRECTORY_COMPONENTS
+        .iter()
+        .copied()
+        .find(|skipped| value == *skipped)
 }
 
 fn requested_candidate(repo_root: &Path, path: &Path) -> PathBuf {
@@ -2367,7 +2403,10 @@ mod tests {
         fs::create_dir_all(repo.path().join("src")).expect("src dir");
         fs::write(
             repo.path().join("src/lib.rs"),
-            format!("pub const LARGE: &str = \"{}\";\n", "x".repeat(1_000_001)),
+            format!(
+                "pub const LARGE: &str = \"{}\";\n",
+                "x".repeat(DEFAULT_MAX_FILE_BYTES as usize + 1)
+            ),
         )
         .expect("large rust");
 
@@ -2385,6 +2424,57 @@ mod tests {
         }));
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace" && artifact.summary.contains("max AST file size")
+        }));
+    }
+
+    #[test]
+    fn composite_parses_explicit_files_under_generated_directories() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src/generated")).expect("generated dir");
+        fs::write(
+            repo.path().join("src/generated/mod.rs"),
+            "pub fn answer() {}\n",
+        )
+        .expect("generated module");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/generated/mod.rs")], &[], 20)
+            .expect("code context");
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.title == "src/generated/mod.rs")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-symbols"
+                    && artifact.summary.contains("function `answer`"))
+        );
+    }
+
+    #[test]
+    fn composite_skips_requested_generated_directories_with_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("generated")).expect("generated dir");
+        fs::write(repo.path().join("generated/mod.rs"), "pub fn hidden() {}\n")
+            .expect("generated module");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("generated")], &[], 20)
+            .expect("code context");
+
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.title.contains("generated/mod.rs"))
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace"
+                && artifact
+                    .summary
+                    .contains("generated skipped directory `generated`")
         }));
     }
 

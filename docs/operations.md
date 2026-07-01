@@ -429,7 +429,14 @@ admin token is configured, it also gates read tools; do not inject that token
 into ordinary worker environments. When `code_intel.ast.enabled` is true,
 `tools/list` also exposes read-only `code.ast.*` inspection tools. The ad hoc
 `code.ast.query` tool is available for local trusted use without tokens, and is
-admin-gated when an admin token is configured.
+admin-gated when an admin token is configured. AST work runs off the async
+server thread, enforces configured file/match/capture limits, rejects paths and
+symlinks outside the repo root, skips generated/vendor/build/cache directories
+during traversal and oversized files with trace warnings, and never executes
+target-repo code. Direct file requests inside skipped directory names still pass
+through containment and resource checks. See
+[`docs/code-intelligence.md`](code-intelligence.md) for agent and operator
+usage.
 
 Linear archival is a separate command and is guarded by captured memory:
 

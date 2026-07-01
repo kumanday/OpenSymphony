@@ -201,7 +201,7 @@ workflow.
     - If the ticket description/comment context includes `Validation`, `Test Plan`, or `Testing` sections, copy those requirements into the workpad `Acceptance Criteria` and `Validation` sections as required checkboxes (no optional downgrade).
 8.  Run a principal-style self-review of the plan and refine it in the comment.
 9.  Before implementing, capture a concrete reproduction signal and record it in the workpad `Notes` section (command/output, screenshot, or deterministic UI behavior).
-10. After initial file discovery, re-run `opensymphony memory context --issue {{ issue.identifier }} --paths <path1>,<path2> --include-code-intel` for touched areas when memory is configured, and record useful references in the workpad.
+10. After initial file discovery, re-run `opensymphony memory context --issue {{ issue.identifier }} --paths <path1>,<path2> --include-code-intel` for touched areas when memory is configured, record useful references in the workpad, and treat current source files and tests as authoritative over generated context.
 11. Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the pull/sync result in the workpad `Notes`.
     - Include a `pull skill evidence` note with:
       - merge source(s),
