@@ -1898,26 +1898,38 @@ async fn call_code_ast_outline_tool(
     ast_mcp_tool_blocking("code.ast.outline", move || {
         let documents = ast_documents(&config, &arguments)?;
         let limit = ast_limit(&config, &arguments);
-        let truncated = documents
-            .iter()
-            .any(|document| document.summary.symbols.len() > limit);
-        Ok(json!({
-            "documents": documents.iter().map(|document| json!({
-                "path": document.display,
-                "language": document.summary.source.language.id(),
-                "contentSha256": document.summary.source.sha256,
-                "parserVersion": parser_version_string(&document.summary),
-                "queryPackVersion": document.summary.versions.query_pack,
-                "symbols": document.summary.symbols.iter().take(limit).map(|symbol| json!({
+        let mut remaining = limit;
+        let mut truncated = false;
+        let mut response_documents = Vec::new();
+        for document in &documents {
+            let selected_symbols = document
+                .summary
+                .symbols
+                .iter()
+                .take(remaining)
+                .map(|symbol| json!({
                     "kind": symbol_kind_id(&symbol.kind),
                     "name": symbol.name,
                     "span": span_json(&symbol.span),
                     "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
                     "parserVersion": symbol.parser_version,
                     "queryPackVersion": symbol.query_pack_version
-                })).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>();
+            remaining = remaining.saturating_sub(selected_symbols.len());
+            truncated |= document.summary.symbols.len() > selected_symbols.len();
+            response_documents.push(json!({
+                "path": document.display,
+                "language": document.summary.source.language.id(),
+                "contentSha256": document.summary.source.sha256,
+                "parserVersion": parser_version_string(&document.summary),
+                "queryPackVersion": document.summary.versions.query_pack,
+                "symbols": selected_symbols,
                 "diagnostics": diagnostics_json(&document.summary)
-            })).collect::<Vec<_>>(),
+            }));
+        }
+        Ok(json!({
+            "documents": response_documents,
             "limit": limit,
             "trace": ast_trace_json(&config, &documents, truncated)
         }))
@@ -2099,17 +2111,34 @@ async fn call_code_ast_diagnostics_tool(
 ) -> Result<Value, MemoryError> {
     ast_mcp_tool_blocking("code.ast.diagnostics", move || {
         let documents = ast_documents(&config, &arguments)?;
-        Ok(json!({
-            "diagnostics": documents.iter().flat_map(|document| {
-                document.summary.diagnostics.iter().map(|diagnostic| json!({
+        let limit = ast_limit(&config, &arguments);
+        let mut diagnostics = Vec::new();
+        for document in &documents {
+            for diagnostic in &document.summary.diagnostics {
+                if diagnostics.len() >= limit {
+                    break;
+                }
+                diagnostics.push(json!({
                     "path": document.display,
                     "kind": diagnostic_kind_id(&diagnostic.kind),
                     "nodeKind": diagnostic.node_kind,
                     "span": span_json(&diagnostic.span),
                     "source": source_json(&document.summary)
-                }))
-            }).collect::<Vec<_>>(),
-            "trace": ast_trace_json(&config, &documents, false)
+                }));
+            }
+            if diagnostics.len() >= limit {
+                break;
+            }
+        }
+        let truncated = documents
+            .iter()
+            .map(|document| document.summary.diagnostics.len())
+            .sum::<usize>()
+            > diagnostics.len();
+        Ok(json!({
+            "diagnostics": diagnostics,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, truncated)
         }))
     })
     .await
@@ -5427,7 +5456,7 @@ Public memory concept.
             &config,
             json!({
                 "name": "code.ast.context",
-                "arguments": { "paths": ["src/lib.rs"], "limit": 5 }
+                "arguments": { "paths": ["src/lib.rs"], "symbols": ["function"], "limit": 5 }
             }),
         )
         .await
@@ -5644,6 +5673,11 @@ Public memory concept.
             "pub fn one() -> u8 { 1 }\npub fn two() -> u8 { 2 }\n",
         )
         .expect("source");
+        std::fs::write(
+            repo_root.join("src/more.rs"),
+            "pub fn three() -> u8 { 3 }\npub fn four() -> u8 { 4 }\n",
+        )
+        .expect("source");
         let config_path = repo_root.join("opensymphony-memory.yaml");
         std::fs::write(
             &config_path,
@@ -5664,6 +5698,73 @@ Public memory concept.
 
         assert_eq!(symbols["symbols"].as_array().expect("symbols").len(), 1);
         assert_eq!(symbols["limit"], 1);
+
+        let outline = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("outline");
+        let outline_symbol_count = outline["documents"]
+            .as_array()
+            .expect("documents")
+            .iter()
+            .map(|document| document["symbols"].as_array().expect("symbols").len())
+            .sum::<usize>();
+        assert_eq!(outline_symbol_count, 1);
+        assert_eq!(outline["limit"], 1);
+        assert!(
+            outline["trace"]
+                .as_array()
+                .expect("outline trace")
+                .iter()
+                .any(|line| line == "truncated by limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_diagnostics_enforces_request_limit() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/bad.rs"), "pub fn broken( {\n").expect("source");
+        std::fs::write(repo_root.join("src/worse.rs"), "pub fn worse( {\n").expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_matches_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let diagnostics = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.diagnostics",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("diagnostics");
+
+        assert_eq!(
+            diagnostics["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .len(),
+            1
+        );
+        assert_eq!(diagnostics["limit"], 1);
+        assert!(
+            diagnostics["trace"]
+                .as_array()
+                .expect("diagnostics trace")
+                .iter()
+                .any(|line| line == "truncated by limit")
+        );
     }
 
     #[tokio::test]

@@ -634,6 +634,8 @@ Rationale: agents keep `memory.context` as their main context-loading path, whil
 
 ### 9.3 MCP tool contracts
 
+Response-level `limit` fields are request-wide caps across all returned files.
+
 #### `code.ast.status`
 
 Request:
@@ -822,13 +824,16 @@ Request:
   "repo": ".",
   "issue": "COE-123",
   "paths": ["crates/opensymphony-cli/src/memory.rs"],
-  "symbols": ["run_context"],
+  "symbols": ["function"],
   "includeCallers": true,
   "includeCallees": true,
   "includeTests": true,
   "limit": 40
 }
 ```
+
+The current MCP-backed implementation treats `symbols` as a symbol-kind filter
+that reuses the same provider path as `memory.context --include-code-intel`.
 
 Response:
 
@@ -839,6 +844,44 @@ Response:
     "parsed crates/opensymphony-cli/src/memory.rs",
     "ran rust definitions/references/calls/tests/diagnostics",
     "selected 8 symbols and 3 call edges"
+  ]
+}
+```
+
+#### `code.ast.diagnostics`
+
+Request:
+
+```json
+{
+  "repo": ".",
+  "paths": ["crates/opensymphony-cli/src/memory.rs"],
+  "limit": 50
+}
+```
+
+Response:
+
+```json
+{
+  "diagnostics": [
+    {
+      "path": "crates/opensymphony-cli/src/memory.rs",
+      "kind": "parse-error",
+      "nodeKind": "ERROR",
+      "span": { "startLine": 954, "endLine": 954 },
+      "source": {
+        "contentSha256": "...",
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
+      }
+    }
+  ],
+  "limit": 50,
+  "trace": [
+    "parsed 1 file(s)",
+    "max files per request 200",
+    "max matches per request 2000"
   ]
 }
 ```
