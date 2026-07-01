@@ -444,10 +444,12 @@ provenance on the current rows; a clean re-ingest with identical content,
 parser version, and query-pack version updates that provenance without reporting
 phantom stale rows.
 
-Generated and vendor directories are skipped by default with trace warnings, as
-are files over `code_intel.ast.max_file_bytes`. The AST tools only use built-in
-pinned grammar crates and never execute target-repo source, build scripts,
-package manager scripts, tests, or macros. See
+Generated and vendor directories are skipped during directory traversal with
+trace warnings, as are files over `code_intel.ast.max_file_bytes`. Explicit file
+requests inside generated or vendor directory names still parse when they pass
+path containment and resource limits. The AST tools only use built-in pinned
+grammar crates and never execute target-repo source, build scripts, package
+manager scripts, tests, or macros. See
 [`docs/code-intelligence.md`](code-intelligence.md) for the operator and agent
 workflow.
 

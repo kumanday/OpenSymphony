@@ -53,8 +53,10 @@ read the cited files and run the relevant tests before changing behavior.
 
 Generated and vendor directories such as `node_modules`, `target`, `dist`,
 `build`, `.venv`, `.next`, `.turbo`, `vendor`, and `generated` are skipped with
-trace warnings. Oversized files are skipped with trace warnings rather than
-failing the whole request.
+trace warnings during directory traversal. Explicitly requested files inside
+those directories are still parsed when they stay inside the repo root and pass
+the configured limits. Oversized files are skipped with trace warnings rather
+than failing the whole request.
 
 ## MCP Tools
 

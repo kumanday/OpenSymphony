@@ -19,7 +19,7 @@ use crate::{
         JAVASCRIPT_QUERY_PACK_VERSION, JSX_QUERY_PACK_VERSION, PROVIDER_NAME,
         PYTHON_QUERY_PACK_VERSION, ParsedDocumentSummary, RUST_QUERY_PACK_VERSION, SourceLanguage,
         SymbolKind, TREE_SITTER_VERSION, TSX_QUERY_PACK_VERSION, TYPESCRIPT_QUERY_PACK_VERSION,
-        parse_path, run_ad_hoc_query, skipped_directory_component,
+        parse_path, run_ad_hoc_query, skipped_directory_name,
     },
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
@@ -2259,19 +2259,6 @@ fn collect_ast_files(
             repo_root: repo_root.to_path_buf(),
         });
     }
-    let relative = resolved
-        .strip_prefix(repo_root)
-        .map_err(|_| MemoryError::PathOutsideRepo {
-            path: resolved.clone(),
-            repo_root: repo_root.to_path_buf(),
-        })?;
-    if let Some(component) = skipped_directory_component(relative) {
-        warnings.push(format!(
-            "{} skipped generated/vendor directory component `{component}`",
-            relative.display()
-        ));
-        return Ok(());
-    }
     if resolved.is_file() {
         if ast_file_is_supported(repo_root, &resolved)? && files.len() < max_files {
             files.push(resolved);
@@ -2282,6 +2269,19 @@ fn collect_ast_files(
         return Ok(());
     }
     if files.len() >= max_files {
+        return Ok(());
+    }
+    let relative = resolved
+        .strip_prefix(repo_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: resolved.clone(),
+            repo_root: repo_root.to_path_buf(),
+        })?;
+    if let Some(component) = skipped_directory_name(&resolved) {
+        warnings.push(format!(
+            "{} skipped generated/vendor directory `{component}`",
+            relative.display()
+        ));
         return Ok(());
     }
     let mut entries = fs::read_dir(&resolved)
@@ -5877,10 +5877,15 @@ Public memory concept.
     async fn code_ast_tools_skip_generated_and_vendor_directories_with_trace() {
         let repo = TempDir::new().expect("temp repo");
         let repo_root = repo.path().canonicalize().expect("canonical repo");
-        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::create_dir_all(repo_root.join("src/generated")).expect("src dir");
         std::fs::create_dir_all(repo_root.join("node_modules/pkg")).expect("node_modules");
         std::fs::create_dir_all(repo_root.join("vendor/pkg")).expect("vendor");
         std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        std::fs::write(
+            repo_root.join("src/generated/mod.rs"),
+            "pub fn generated_mod() {}\n",
+        )
+        .expect("explicit generated source");
         std::fs::write(
             repo_root.join("node_modules/pkg/lib.rs"),
             "pub fn generated_dep() {}\n",
@@ -5916,6 +5921,33 @@ Public memory concept.
                 .expect("trace line")
                 .contains("warning: vendor skipped generated/vendor")
         }));
+        assert!(trace.iter().any(|line| {
+            line.as_str()
+                .expect("trace line")
+                .contains("warning: src/generated skipped generated/vendor")
+        }));
+
+        let explicit_generated = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src/generated/mod.rs"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("explicit generated symbols");
+
+        assert_eq!(explicit_generated["symbols"][0]["name"], "generated_mod");
+        assert!(
+            !explicit_generated["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line
+                    .as_str()
+                    .expect("trace line")
+                    .contains("skipped generated/vendor"))
+        );
     }
 
     #[tokio::test]
@@ -5986,7 +6018,7 @@ Public memory concept.
                 &diagnostics_config,
                 json!({
                     "name": "code.ast.diagnostics",
-                    "arguments": { "paths": ["src/bad.rs"], "limit": 10 }
+                    "arguments": { "paths": ["src/bad.rs"], "limit": 1 }
                 }),
             ),
             call_memory_tool(

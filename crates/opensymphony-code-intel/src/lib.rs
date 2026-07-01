@@ -58,7 +58,7 @@ const TSX_METADATA: &str = include_str!("../queries/tsx/metadata.toml");
 const JAVASCRIPT_METADATA: &str = include_str!("../queries/javascript/metadata.toml");
 const JSX_METADATA: &str = include_str!("../queries/jsx/metadata.toml");
 const PYTHON_METADATA: &str = include_str!("../queries/python/metadata.toml");
-const DEFAULT_MAX_FILE_BYTES: u64 = 1_000_000;
+const DEFAULT_MAX_FILE_BYTES: u64 = 2_097_152;
 
 const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "definition.module",
@@ -515,13 +515,6 @@ impl AstCodeIntelProvider {
                 .to_path_buf();
             let relative_display = relative_path.to_string_lossy().to_string();
 
-            if let Some(component) = skipped_directory_component(&relative_path) {
-                report.fallback_reasons.push(format!(
-                    "{relative_display} skipped generated/vendor directory component `{component}`"
-                ));
-                continue;
-            }
-
             let Some(source) = self.read_limited_source(&resolved, &relative_display, &mut report)
             else {
                 continue;
@@ -696,17 +689,12 @@ impl AstCodeIntelProvider {
     }
 }
 
-pub fn skipped_directory_component(path: impl AsRef<Path>) -> Option<&'static str> {
-    path.as_ref().components().find_map(|component| {
-        let Component::Normal(value) = component else {
-            return None;
-        };
-        let value = value.to_str()?;
-        SKIPPED_DIRECTORY_COMPONENTS
-            .iter()
-            .copied()
-            .find(|skipped| value == *skipped)
-    })
+pub fn skipped_directory_name(path: impl AsRef<Path>) -> Option<&'static str> {
+    let value = path.as_ref().file_name()?.to_str()?;
+    SKIPPED_DIRECTORY_COMPONENTS
+        .iter()
+        .copied()
+        .find(|skipped| value == *skipped)
 }
 
 fn requested_candidate(repo_root: &Path, path: &Path) -> PathBuf {
@@ -2401,7 +2389,10 @@ mod tests {
         fs::create_dir_all(repo.path().join("src")).expect("src dir");
         fs::write(
             repo.path().join("src/lib.rs"),
-            format!("pub const LARGE: &str = \"{}\";\n", "x".repeat(1_000_001)),
+            format!(
+                "pub const LARGE: &str = \"{}\";\n",
+                "x".repeat(DEFAULT_MAX_FILE_BYTES as usize + 1)
+            ),
         )
         .expect("large rust");
 
@@ -2423,63 +2414,30 @@ mod tests {
     }
 
     #[test]
-    fn composite_skips_generated_and_vendor_directories_with_trace() {
+    fn composite_parses_explicit_files_under_generated_directories() {
         let repo = TempDir::new().expect("temp repo");
-        fs::create_dir_all(repo.path().join("src")).expect("src dir");
-        fs::create_dir_all(repo.path().join("node_modules/pkg")).expect("node_modules dir");
-        fs::create_dir_all(repo.path().join("vendor/pkg")).expect("vendor dir");
+        fs::create_dir_all(repo.path().join("src/generated")).expect("generated dir");
         fs::write(
-            repo.path().join("src/lib.rs"),
-            "pub fn answer() -> u8 { 42 }\n",
+            repo.path().join("src/generated/mod.rs"),
+            "pub fn answer() {}\n",
         )
-        .expect("rust file");
-        fs::write(
-            repo.path().join("node_modules/pkg/lib.rs"),
-            "pub fn generated_dep() {}\n",
-        )
-        .expect("generated file");
-        fs::write(
-            repo.path().join("vendor/pkg/lib.rs"),
-            "pub fn vendored() {}\n",
-        )
-        .expect("vendor file");
+        .expect("generated module");
 
         let artifacts = CompositeCodeIntelProvider::new(repo.path())
-            .code_context(
-                &[
-                    PathBuf::from("src/lib.rs"),
-                    PathBuf::from("node_modules/pkg/lib.rs"),
-                    PathBuf::from("vendor/pkg/lib.rs"),
-                ],
-                &[],
-                20,
-            )
+            .code_context(&[PathBuf::from("src/generated/mod.rs")], &[], 20)
             .expect("code context");
 
         assert!(
             artifacts
                 .iter()
-                .any(|artifact| artifact.title == "src/lib.rs")
+                .any(|artifact| artifact.title == "src/generated/mod.rs")
         );
         assert!(
-            !artifacts
+            artifacts
                 .iter()
-                .any(|artifact| artifact.title.contains("node_modules"))
+                .any(|artifact| artifact.kind == "ast-symbols"
+                    && artifact.summary.contains("function `answer`"))
         );
-        assert!(
-            !artifacts
-                .iter()
-                .any(|artifact| artifact.title.contains("vendor"))
-        );
-        assert!(artifacts.iter().any(|artifact| {
-            artifact.kind == "trace"
-                && artifact
-                    .summary
-                    .contains("node_modules/pkg/lib.rs skipped generated/vendor")
-                && artifact
-                    .summary
-                    .contains("vendor/pkg/lib.rs skipped generated/vendor")
-        }));
     }
 
     #[test]
