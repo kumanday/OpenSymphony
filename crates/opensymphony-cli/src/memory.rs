@@ -1850,12 +1850,16 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
             }))
         }
         "code.ast.status" => call_code_ast_status_tool(config),
-        "code.ast.outline" => call_code_ast_outline_tool(config, &arguments),
-        "code.ast.symbols" => call_code_ast_symbols_tool(config, &arguments),
-        "code.ast.references" => call_code_ast_references_tool(config, &arguments),
-        "code.ast.query" => call_code_ast_query_tool(config, &arguments),
+        "code.ast.outline" => call_code_ast_outline_tool(config.clone(), arguments.clone()).await,
+        "code.ast.symbols" => call_code_ast_symbols_tool(config.clone(), arguments.clone()).await,
+        "code.ast.references" => {
+            call_code_ast_references_tool(config.clone(), arguments.clone()).await
+        }
+        "code.ast.query" => call_code_ast_query_tool(config.clone(), arguments.clone()).await,
         "code.ast.context" => call_code_ast_context_tool(config, &arguments).await,
-        "code.ast.diagnostics" => call_code_ast_diagnostics_tool(config, &arguments),
+        "code.ast.diagnostics" => {
+            call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
+        }
         "memory.capture" => call_memory_capture_tool(config, &arguments).await,
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
@@ -1887,154 +1891,167 @@ fn call_code_ast_status_tool(config: &MemoryConfig) -> Result<Value, MemoryError
     }))
 }
 
-fn call_code_ast_outline_tool(
-    config: &MemoryConfig,
-    arguments: &Value,
+async fn call_code_ast_outline_tool(
+    config: MemoryConfig,
+    arguments: Value,
 ) -> Result<Value, MemoryError> {
-    let documents = ast_documents(config, arguments)?;
-    Ok(json!({
-        "documents": documents.iter().map(|document| json!({
-            "path": document.display,
-            "language": document.summary.source.language.id(),
-            "contentSha256": document.summary.source.sha256,
-            "parserVersion": parser_version_string(&document.summary),
-            "queryPackVersion": document.summary.versions.query_pack,
-            "symbols": document.summary.symbols.iter().take(ast_limit(config, arguments)).map(|symbol| json!({
-                "kind": symbol_kind_id(&symbol.kind),
-                "name": symbol.name,
-                "span": span_json(&symbol.span),
-                "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
-                "parserVersion": symbol.parser_version,
-                "queryPackVersion": symbol.query_pack_version
+    ast_mcp_tool_blocking("code.ast.outline", move || {
+        let documents = ast_documents(&config, &arguments)?;
+        Ok(json!({
+            "documents": documents.iter().map(|document| json!({
+                "path": document.display,
+                "language": document.summary.source.language.id(),
+                "contentSha256": document.summary.source.sha256,
+                "parserVersion": parser_version_string(&document.summary),
+                "queryPackVersion": document.summary.versions.query_pack,
+                "symbols": document.summary.symbols.iter().take(ast_limit(&config, &arguments)).map(|symbol| json!({
+                    "kind": symbol_kind_id(&symbol.kind),
+                    "name": symbol.name,
+                    "span": span_json(&symbol.span),
+                    "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
+                    "parserVersion": symbol.parser_version,
+                    "queryPackVersion": symbol.query_pack_version
+                })).collect::<Vec<_>>(),
+                "diagnostics": diagnostics_json(&document.summary)
             })).collect::<Vec<_>>(),
-            "diagnostics": diagnostics_json(&document.summary)
-        })).collect::<Vec<_>>(),
-        "trace": ast_trace_json(config, &documents, false)
-    }))
+            "trace": ast_trace_json(&config, &documents, false)
+        }))
+    })
+    .await
 }
 
-fn call_code_ast_symbols_tool(
-    config: &MemoryConfig,
-    arguments: &Value,
+async fn call_code_ast_symbols_tool(
+    config: MemoryConfig,
+    arguments: Value,
 ) -> Result<Value, MemoryError> {
-    let query = optional_string_arg(arguments, "query").map(|value| value.to_ascii_lowercase());
-    let kinds = normalized_string_set_args(arguments, &["kinds"]);
-    let limit = ast_limit(config, arguments);
-    let mut symbols = Vec::new();
-    for document in ast_documents(config, arguments)? {
-        for symbol in document.summary.symbols.iter().filter(|symbol| {
-            query
-                .as_ref()
-                .is_none_or(|query| symbol.name.to_ascii_lowercase().contains(query))
-                && (kinds.is_empty() || kinds.contains(symbol_kind_id(&symbol.kind)))
-        }) {
+    ast_mcp_tool_blocking("code.ast.symbols", move || {
+        let query =
+            optional_string_arg(&arguments, "query").map(|value| value.to_ascii_lowercase());
+        let kinds = normalized_string_set_args(&arguments, &["kinds"]);
+        let limit = ast_limit(&config, &arguments);
+        let mut symbols = Vec::new();
+        for document in ast_documents(&config, &arguments)? {
+            for symbol in document.summary.symbols.iter().filter(|symbol| {
+                query
+                    .as_ref()
+                    .is_none_or(|query| symbol.name.to_ascii_lowercase().contains(query))
+                    && (kinds.is_empty() || kinds.contains(symbol_kind_id(&symbol.kind)))
+            }) {
+                if symbols.len() >= limit {
+                    break;
+                }
+                symbols.push(json!({
+                    "id": format!("{}:{}:{}", document.display, symbol.name, symbol.rendered_span),
+                    "kind": symbol_kind_id(&symbol.kind),
+                    "name": symbol.name,
+                    "path": document.display,
+                    "span": span_json(&symbol.span),
+                    "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
+                    "source": source_json(&document.summary)
+                }));
+            }
             if symbols.len() >= limit {
                 break;
             }
-            symbols.push(json!({
-                "id": format!("{}:{}:{}", document.display, symbol.name, symbol.rendered_span),
-                "kind": symbol_kind_id(&symbol.kind),
-                "name": symbol.name,
-                "path": document.display,
-                "span": span_json(&symbol.span),
-                "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
-                "source": source_json(&document.summary)
-            }));
         }
-        if symbols.len() >= limit {
-            break;
-        }
-    }
-    Ok(json!({ "symbols": symbols, "limit": limit }))
+        Ok(json!({ "symbols": symbols, "limit": limit }))
+    })
+    .await
 }
 
-fn call_code_ast_references_tool(
-    config: &MemoryConfig,
-    arguments: &Value,
+async fn call_code_ast_references_tool(
+    config: MemoryConfig,
+    arguments: Value,
 ) -> Result<Value, MemoryError> {
-    let symbol = required_string_arg(arguments, "symbol")?;
-    let limit = ast_limit(config, arguments);
-    let mut references = Vec::new();
-    for document in ast_documents(config, arguments)? {
-        for capture in document
-            .summary
-            .captures
-            .iter()
-            .filter(|capture| capture.capture_name.starts_with("reference."))
-            .filter(|capture| capture.text.contains(&symbol))
-        {
+    ast_mcp_tool_blocking("code.ast.references", move || {
+        let symbol = required_string_arg(&arguments, "symbol")?;
+        let limit = ast_limit(&config, &arguments);
+        let mut references = Vec::new();
+        for document in ast_documents(&config, &arguments)? {
+            for capture in document
+                .summary
+                .captures
+                .iter()
+                .filter(|capture| capture.capture_name.starts_with("reference."))
+                .filter(|capture| capture.text.contains(&symbol))
+            {
+                if references.len() >= limit {
+                    break;
+                }
+                references.push(json!({
+                    "kind": capture.capture_name,
+                    "path": document.display,
+                    "span": span_json(&capture.span),
+                    "snippet": truncate_capture(&capture.text, config.code_intel.ast.max_capture_bytes).0,
+                    "source": source_json(&document.summary)
+                }));
+            }
             if references.len() >= limit {
                 break;
             }
-            references.push(json!({
-                "kind": capture.capture_name,
-                "path": document.display,
-                "span": span_json(&capture.span),
-                "snippet": truncate_capture(&capture.text, config.code_intel.ast.max_capture_bytes).0,
-                "source": source_json(&document.summary)
-            }));
         }
-        if references.len() >= limit {
-            break;
-        }
-    }
-    Ok(json!({ "references": references, "confidence": "syntactic", "limit": limit }))
+        Ok(json!({ "references": references, "confidence": "syntactic", "limit": limit }))
+    })
+    .await
 }
 
-fn call_code_ast_query_tool(
-    config: &MemoryConfig,
-    arguments: &Value,
+async fn call_code_ast_query_tool(
+    config: MemoryConfig,
+    arguments: Value,
 ) -> Result<Value, MemoryError> {
-    let language = required_string_arg(arguments, "language")?.to_ascii_lowercase();
-    let language = SourceLanguage::from_id(&language).ok_or_else(|| {
-        MemoryError::InvalidInput(format!("unsupported AST query language `{language}`"))
-    })?;
-    if !language.supports_ast_queries() {
-        return Err(MemoryError::InvalidInput(format!(
-            "language `{}` does not support Tree-sitter ad hoc queries",
-            language.id()
-        )));
-    }
-    let query = required_string_arg(arguments, "query")?;
-    let limit = ast_limit(config, arguments);
-    let documents = ast_documents(config, arguments)?;
-    let mut matches = Vec::new();
-    for document in documents
-        .iter()
-        .filter(|document| document.summary.source.language == language)
-    {
-        let query_matches = run_ad_hoc_query(language, &document.source, &query, limit)
-            .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
-        for query_match in query_matches {
+    ast_mcp_tool_blocking("code.ast.query", move || {
+        let language = required_string_arg(&arguments, "language")?.to_ascii_lowercase();
+        let language = SourceLanguage::from_id(&language).ok_or_else(|| {
+            MemoryError::InvalidInput(format!("unsupported AST query language `{language}`"))
+        })?;
+        if !language.supports_ast_queries() {
+            return Err(MemoryError::InvalidInput(format!(
+                "language `{}` does not support Tree-sitter ad hoc queries",
+                language.id()
+            )));
+        }
+        let query = required_string_arg(&arguments, "query")?;
+        let limit = ast_limit(&config, &arguments);
+        let documents = ast_documents(&config, &arguments)?;
+        let mut matches = Vec::new();
+        for document in documents
+            .iter()
+            .filter(|document| document.summary.source.language == language)
+        {
+            let query_matches = run_ad_hoc_query(language, &document.source, &query, limit)
+                .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+            for query_match in query_matches {
+                if matches.len() >= limit {
+                    break;
+                }
+                matches.push(json!({
+                    "path": document.display,
+                    "captures": query_match.captures.iter().map(|capture| {
+                        let (text, truncated) = truncate_capture(
+                            &capture.text,
+                            config.code_intel.ast.max_capture_bytes,
+                        );
+                        json!({
+                            "name": capture.capture_name,
+                            "text": text,
+                            "truncated": truncated,
+                            "span": span_json(&capture.span)
+                        })
+                    }).collect::<Vec<_>>(),
+                    "source": source_json(&document.summary)
+                }));
+            }
             if matches.len() >= limit {
                 break;
             }
-            matches.push(json!({
-                "path": document.display,
-                "captures": query_match.captures.iter().map(|capture| {
-                    let (text, truncated) = truncate_capture(
-                        &capture.text,
-                        config.code_intel.ast.max_capture_bytes,
-                    );
-                    json!({
-                        "name": capture.capture_name,
-                        "text": text,
-                        "truncated": truncated,
-                        "span": span_json(&capture.span)
-                    })
-                }).collect::<Vec<_>>(),
-                "source": source_json(&document.summary)
-            }));
         }
-        if matches.len() >= limit {
-            break;
-        }
-    }
-    Ok(json!({
-        "matches": matches,
-        "limit": limit,
-        "trace": ast_trace_json(config, &documents, matches.len() >= limit)
-    }))
+        Ok(json!({
+            "matches": matches,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, matches.len() >= limit)
+        }))
+    })
+    .await
 }
 
 async fn call_code_ast_context_tool(
@@ -2057,23 +2074,35 @@ async fn call_code_ast_context_tool(
     Ok(json!({ "markdown": markdown, "trace": trace }))
 }
 
-fn call_code_ast_diagnostics_tool(
-    config: &MemoryConfig,
-    arguments: &Value,
+async fn call_code_ast_diagnostics_tool(
+    config: MemoryConfig,
+    arguments: Value,
 ) -> Result<Value, MemoryError> {
-    let documents = ast_documents(config, arguments)?;
-    Ok(json!({
-        "diagnostics": documents.iter().flat_map(|document| {
-            document.summary.diagnostics.iter().map(|diagnostic| json!({
-                "path": document.display,
-                "kind": diagnostic_kind_id(&diagnostic.kind),
-                "nodeKind": diagnostic.node_kind,
-                "span": span_json(&diagnostic.span),
-                "source": source_json(&document.summary)
-            }))
-        }).collect::<Vec<_>>(),
-        "trace": ast_trace_json(config, &documents, false)
-    }))
+    ast_mcp_tool_blocking("code.ast.diagnostics", move || {
+        let documents = ast_documents(&config, &arguments)?;
+        Ok(json!({
+            "diagnostics": documents.iter().flat_map(|document| {
+                document.summary.diagnostics.iter().map(|diagnostic| json!({
+                    "path": document.display,
+                    "kind": diagnostic_kind_id(&diagnostic.kind),
+                    "nodeKind": diagnostic.node_kind,
+                    "span": span_json(&diagnostic.span),
+                    "source": source_json(&document.summary)
+                }))
+            }).collect::<Vec<_>>(),
+            "trace": ast_trace_json(&config, &documents, false)
+        }))
+    })
+    .await
+}
+
+async fn ast_mcp_tool_blocking<F>(tool_name: &'static str, task: F) -> Result<Value, MemoryError>
+where
+    F: FnOnce() -> Result<Value, MemoryError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task).await.map_err(|error| {
+        MemoryError::InvalidInput(format!("{tool_name} analysis task failed: {error}"))
+    })?
 }
 
 fn ast_documents(
