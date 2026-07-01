@@ -1897,6 +1897,10 @@ async fn call_code_ast_outline_tool(
 ) -> Result<Value, MemoryError> {
     ast_mcp_tool_blocking("code.ast.outline", move || {
         let documents = ast_documents(&config, &arguments)?;
+        let limit = ast_limit(&config, &arguments);
+        let truncated = documents
+            .iter()
+            .any(|document| document.summary.symbols.len() > limit);
         Ok(json!({
             "documents": documents.iter().map(|document| json!({
                 "path": document.display,
@@ -1904,7 +1908,7 @@ async fn call_code_ast_outline_tool(
                 "contentSha256": document.summary.source.sha256,
                 "parserVersion": parser_version_string(&document.summary),
                 "queryPackVersion": document.summary.versions.query_pack,
-                "symbols": document.summary.symbols.iter().take(ast_limit(&config, &arguments)).map(|symbol| json!({
+                "symbols": document.summary.symbols.iter().take(limit).map(|symbol| json!({
                     "kind": symbol_kind_id(&symbol.kind),
                     "name": symbol.name,
                     "span": span_json(&symbol.span),
@@ -1914,7 +1918,8 @@ async fn call_code_ast_outline_tool(
                 })).collect::<Vec<_>>(),
                 "diagnostics": diagnostics_json(&document.summary)
             })).collect::<Vec<_>>(),
-            "trace": ast_trace_json(&config, &documents, false)
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, truncated)
         }))
     })
     .await
@@ -4656,6 +4661,24 @@ mod tests {
 
         assert!(names.contains(&"memory.context".to_string()));
         assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
+
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  enabled: true\n  ast:\n    enabled: false\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(repo.path(), Some(&config_path)).expect("memory config");
+        let names = memory_tool_descriptors(&config, &MemoryServerAuth::default())
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"memory.context".to_string()));
+        assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
     }
 
     #[test]
@@ -5389,6 +5412,52 @@ Public memory concept.
     }
 
     #[tokio::test]
+    async fn code_ast_context_returns_markdown_and_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let context = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.context",
+                "arguments": { "paths": ["src/lib.rs"], "limit": 5 }
+            }),
+        )
+        .await
+        .expect("context");
+
+        assert!(
+            context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("## Structural Context")
+        );
+        assert!(
+            context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("ast-summary: src/lib.rs")
+        );
+        assert!(
+            context["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line
+                    .as_str()
+                    .expect("trace line")
+                    .contains("fallback: CodebaseAnalyzer not used"))
+        );
+    }
+
+    #[tokio::test]
     async fn code_ast_outline_symbols_and_query_return_source_citations() {
         let repo = TempDir::new().expect("temp repo");
         let repo_root = repo.path().canonicalize().expect("canonical repo");
@@ -5404,7 +5473,7 @@ Public memory concept.
             &config,
             json!({
                 "name": "code.ast.outline",
-                "arguments": { "paths": ["src/lib.rs"], "limit": 10 }
+                "arguments": { "paths": ["src/lib.rs"], "limit": 1 }
             }),
         )
         .await
@@ -5427,6 +5496,14 @@ Public memory concept.
         assert_eq!(
             outline["documents"][0]["symbols"][0]["span"]["startLine"],
             1
+        );
+        assert_eq!(outline["limit"], 1);
+        assert!(
+            outline["trace"]
+                .as_array()
+                .expect("outline trace")
+                .iter()
+                .any(|line| line == "truncated by limit")
         );
 
         let symbols = call_memory_tool(
