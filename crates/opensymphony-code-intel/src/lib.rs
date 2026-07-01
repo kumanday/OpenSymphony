@@ -37,6 +37,20 @@ pub const JAVASCRIPT_QUERY_PACK_VERSION: &str = "javascript-query-pack-v1";
 pub const JSX_QUERY_PACK_VERSION: &str = "jsx-query-pack-v1";
 pub const PYTHON_QUERY_PACK_VERSION: &str = "python-query-pack-v1";
 const MARKDOWN_FENCE_QUERY_NAME: &str = "markdown_fences";
+const SKIPPED_DIRECTORY_COMPONENTS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    "coverage",
+    ".next",
+    ".turbo",
+    "vendor",
+    "generated",
+];
 
 const RUST_METADATA: &str = include_str!("../queries/rust/metadata.toml");
 const TYPESCRIPT_METADATA: &str = include_str!("../queries/typescript/metadata.toml");
@@ -501,6 +515,13 @@ impl AstCodeIntelProvider {
                 .to_path_buf();
             let relative_display = relative_path.to_string_lossy().to_string();
 
+            if let Some(component) = skipped_directory_component(&relative_path) {
+                report.fallback_reasons.push(format!(
+                    "{relative_display} skipped generated/vendor directory component `{component}`"
+                ));
+                continue;
+            }
+
             let Some(source) = self.read_limited_source(&resolved, &relative_display, &mut report)
             else {
                 continue;
@@ -673,6 +694,19 @@ impl AstCodeIntelProvider {
             .unwrap_or(&candidate)
             .to_path_buf())
     }
+}
+
+pub fn skipped_directory_component(path: impl AsRef<Path>) -> Option<&'static str> {
+    path.as_ref().components().find_map(|component| {
+        let Component::Normal(value) = component else {
+            return None;
+        };
+        let value = value.to_str()?;
+        SKIPPED_DIRECTORY_COMPONENTS
+            .iter()
+            .copied()
+            .find(|skipped| value == *skipped)
+    })
 }
 
 fn requested_candidate(repo_root: &Path, path: &Path) -> PathBuf {
@@ -2385,6 +2419,66 @@ mod tests {
         }));
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace" && artifact.summary.contains("max AST file size")
+        }));
+    }
+
+    #[test]
+    fn composite_skips_generated_and_vendor_directories_with_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::create_dir_all(repo.path().join("node_modules/pkg")).expect("node_modules dir");
+        fs::create_dir_all(repo.path().join("vendor/pkg")).expect("vendor dir");
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("rust file");
+        fs::write(
+            repo.path().join("node_modules/pkg/lib.rs"),
+            "pub fn generated_dep() {}\n",
+        )
+        .expect("generated file");
+        fs::write(
+            repo.path().join("vendor/pkg/lib.rs"),
+            "pub fn vendored() {}\n",
+        )
+        .expect("vendor file");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(
+                &[
+                    PathBuf::from("src/lib.rs"),
+                    PathBuf::from("node_modules/pkg/lib.rs"),
+                    PathBuf::from("vendor/pkg/lib.rs"),
+                ],
+                &[],
+                20,
+            )
+            .expect("code context");
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.title == "src/lib.rs")
+        );
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.title.contains("node_modules"))
+        );
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.title.contains("vendor"))
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace"
+                && artifact
+                    .summary
+                    .contains("node_modules/pkg/lib.rs skipped generated/vendor")
+                && artifact
+                    .summary
+                    .contains("vendor/pkg/lib.rs skipped generated/vendor")
         }));
     }
 

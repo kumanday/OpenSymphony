@@ -22,6 +22,7 @@ OpenSymphony automates software development workflows by:
 - **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
 - **Conversation reuse policies**: Default per-issue reuse with optional fresh-per-run resets
 - **Harness selection**: Default OpenHands agent-server execution, plus local Codex app-server support for ChatGPT subscription-backed runs
+- **Tree-sitter code intelligence**: Local AST parsing, symbols, diagnostics, and source-cited structural context for agents
 - **Local-first MVP**: Trusted-machine deployment with optional hosted mode
 
 OpenSymphony `1.0.0` is the compatibility boundary for the GraphQL-only Linear
