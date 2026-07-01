@@ -2095,8 +2095,14 @@ async fn call_code_ast_context_tool(
     let symbol_kinds = normalized_string_set_args(arguments, &["symbols"]);
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
-    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
-    let artifacts = filter_code_intel_artifacts_by_symbol_kinds(artifacts, &symbol_kinds);
+    let artifacts = code_intel_artifacts_with_symbol_kinds_blocking(
+        repo_root,
+        paths,
+        scope_refs,
+        limit,
+        symbol_kinds,
+    )
+    .await?;
     let trace = artifacts
         .iter()
         .filter(|artifact| artifact.kind == "trace")
@@ -2105,50 +2111,6 @@ async fn call_code_ast_context_tool(
     let mut markdown = String::from("## Structural Context\n\n");
     append_code_intel_artifacts(config, &mut markdown, artifacts);
     Ok(json!({ "markdown": markdown, "trace": trace }))
-}
-
-fn filter_code_intel_artifacts_by_symbol_kinds(
-    artifacts: Vec<CodeIntelArtifact>,
-    symbol_kinds: &BTreeSet<String>,
-) -> Vec<CodeIntelArtifact> {
-    if symbol_kinds.is_empty() {
-        return artifacts;
-    }
-    artifacts
-        .into_iter()
-        .filter_map(|mut artifact| {
-            if artifact.kind != "ast-symbols" {
-                return Some(artifact);
-            }
-            let lines = artifact.summary.lines().collect::<Vec<_>>();
-            let keep = lines
-                .iter()
-                .map(|line| {
-                    line.strip_prefix("- ")
-                        .and_then(|line| line.split_whitespace().next())
-                        .is_some_and(|kind| symbol_kinds.contains(kind))
-                })
-                .collect::<Vec<_>>();
-            let selected_lines = lines
-                .iter()
-                .zip(&keep)
-                .filter_map(|(line, keep)| keep.then_some(*line))
-                .collect::<Vec<_>>();
-            if selected_lines.is_empty() {
-                return None;
-            }
-            artifact.summary = selected_lines.join("\n");
-            if artifact.source_refs.len() == keep.len() {
-                artifact.source_refs = artifact
-                    .source_refs
-                    .into_iter()
-                    .zip(keep)
-                    .filter_map(|(source_ref, keep)| keep.then_some(source_ref))
-                    .collect();
-            }
-            Some(artifact)
-        })
-        .collect()
 }
 
 async fn call_code_ast_diagnostics_tool(
@@ -2269,9 +2231,6 @@ fn collect_ast_files(
     max_files: usize,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), MemoryError> {
-    if files.len() >= max_files {
-        return Ok(());
-    }
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -2290,13 +2249,15 @@ fn collect_ast_files(
         });
     }
     if resolved.is_file() {
-        if !ast_file_is_supported(repo_root, &resolved)? {
-            return Ok(());
+        if ast_file_is_supported(repo_root, &resolved)? && files.len() < max_files {
+            files.push(resolved);
         }
-        files.push(resolved);
         return Ok(());
     }
     if !resolved.is_dir() {
+        return Ok(());
+    }
+    if files.len() >= max_files {
         return Ok(());
     }
     let mut entries = fs::read_dir(&resolved)
@@ -3393,6 +3354,27 @@ async fn code_intel_artifacts_blocking(
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
         CompositeCodeIntelProvider::new(repo_root).code_context(&paths, &scope_refs, limit)
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("code-intelligence analysis task failed: {error}"))
+    })?
+}
+
+async fn code_intel_artifacts_with_symbol_kinds_blocking(
+    repo_root: PathBuf,
+    paths: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    limit: usize,
+    symbol_kinds: BTreeSet<String>,
+) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    tokio::task::spawn_blocking(move || {
+        CompositeCodeIntelProvider::new(repo_root).code_context_with_symbol_kinds(
+            &paths,
+            &scope_refs,
+            limit,
+            &symbol_kinds,
+        )
     })
     .await
     .map_err(|error| {
@@ -5894,6 +5876,32 @@ Public memory concept.
     }
 
     #[tokio::test]
+    async fn code_ast_query_accepts_custom_capture_names() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let query = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.query",
+                "arguments": {
+                    "paths": ["src/lib.rs"],
+                    "language": "rust",
+                    "query": "(function_item name: (identifier) @my_capture)"
+                }
+            }),
+        )
+        .await
+        .expect("query");
+
+        assert_eq!(query["matches"][0]["captures"][0]["name"], "my_capture");
+        assert_eq!(query["matches"][0]["captures"][0]["text"], "answer");
+    }
+
+    #[tokio::test]
     async fn code_ast_tools_reject_paths_outside_repo() {
         let repo = TempDir::new().expect("temp repo");
         let outside = TempDir::new().expect("outside repo");
@@ -5910,6 +5918,36 @@ Public memory concept.
         )
         .await
         .expect_err("outside path should fail");
+
+        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_validate_all_requested_paths_before_budget_skip() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let outside = TempDir::new().expect("outside repo");
+        let outside_path = outside.path().join("lib.rs");
+        std::fs::write(&outside_path, "pub fn outside() {}\n").expect("outside source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_files_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src", outside_path] }
+            }),
+        )
+        .await
+        .expect_err("outside path should fail even after file budget is full");
 
         assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
     }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
@@ -462,6 +462,17 @@ impl AstCodeIntelProvider {
         scope_refs: &[KnowledgeScope],
         limit: usize,
     ) -> Result<AstCodeIntelReport, MemoryError> {
+        let symbol_kinds = BTreeSet::new();
+        self.code_context_report_with_symbols(paths, scope_refs, limit, &symbol_kinds)
+    }
+
+    fn code_context_report_with_symbols(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+        symbol_kinds: &BTreeSet<String>,
+    ) -> Result<AstCodeIntelReport, MemoryError> {
         let repo_root = self.canonical_root()?;
         let commit_sha = git_commit_sha(&repo_root);
         let mut report = AstCodeIntelReport::default();
@@ -528,6 +539,7 @@ impl AstCodeIntelProvider {
                 scope_refs,
                 commit_sha.clone(),
                 remaining_symbols,
+                symbol_kinds,
             );
             remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
             report.used_symbols += used_symbols;
@@ -713,6 +725,44 @@ impl CompositeCodeIntelProvider {
             fallback: CodebaseAnalyzer::new(root),
         }
     }
+
+    pub fn code_context_with_symbol_kinds(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+        symbol_kinds: &BTreeSet<String>,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        let mut report =
+            self.ast
+                .code_context_report_with_symbols(paths, scope_refs, limit, symbol_kinds)?;
+        let use_fallback = !report.fallback_reasons.is_empty();
+        let mut artifacts = std::mem::take(&mut report.artifacts);
+        let fallback_paths = if paths.is_empty() {
+            paths
+        } else {
+            &report.fallback_paths
+        };
+        let has_fallback_target = paths.is_empty() || !fallback_paths.is_empty();
+        let fallback_limit = limit.saturating_sub(report.used_symbols);
+        let mut fallback_used = false;
+
+        if use_fallback && has_fallback_target {
+            artifacts.extend(self.fallback.code_context(
+                fallback_paths,
+                scope_refs,
+                fallback_limit,
+            )?);
+            fallback_used = true;
+        }
+        let trace = report.trace_artifact(
+            scope_refs,
+            "composite-code-intel",
+            report.composite_fallback(fallback_used),
+        );
+        artifacts.push(trace);
+        Ok(artifacts)
+    }
 }
 
 impl CodeIntelIndex for CompositeCodeIntelProvider {
@@ -817,6 +867,7 @@ fn ast_artifacts_for_summary(
     scope_refs: &[KnowledgeScope],
     commit_sha: Option<String>,
     symbol_limit: usize,
+    symbol_kinds: &BTreeSet<String>,
 ) -> (Vec<CodeIntelArtifact>, usize) {
     let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
     let mut artifacts = vec![CodeIntelArtifact {
@@ -844,11 +895,20 @@ fn ast_artifacts_for_summary(
 
     if !summary.symbols.is_empty() && symbol_limit > 0 {
         let max_symbols = symbol_limit;
-        let used_symbols = summary.symbols.len().min(max_symbols);
-        let symbols = summary
+        let selected_symbols = summary
             .symbols
             .iter()
+            .filter(|symbol| {
+                symbol_kinds.is_empty() || symbol_kinds.contains(symbol_kind_label(&symbol.kind))
+            })
             .take(max_symbols)
+            .collect::<Vec<_>>();
+        let used_symbols = selected_symbols.len();
+        if selected_symbols.is_empty() {
+            return (artifacts, 0);
+        }
+        let symbols = selected_symbols
+            .iter()
             .map(|symbol| {
                 format!(
                     "- {} `{}` at {}:{}",
@@ -864,10 +924,8 @@ fn ast_artifacts_for_summary(
             provider: PROVIDER_NAME.to_string(),
             kind: "ast-symbols".to_string(),
             scope_refs: scope_refs.to_vec(),
-            source_refs: summary
-                .symbols
+            source_refs: selected_symbols
                 .iter()
-                .take(max_symbols)
                 .map(|symbol| MemorySourceRef {
                     kind: "code-symbol".to_string(),
                     id: format!("{relative_display}:{}", symbol.rendered_span),
@@ -1048,13 +1106,11 @@ pub fn run_ad_hoc_query(
     let mut parser = Parser::new();
     parser.set_language(&parser_language)?;
     let tree = parser.parse(source, None).ok_or(CodeIntelError::Parse)?;
-    let metadata = load_metadata(config)?;
     let query =
         Query::new(&parser_language, query_source).map_err(|source| CodeIntelError::Query {
             query_name: "ad_hoc".to_string(),
             source,
         })?;
-    validate_capture_names("ad_hoc", &query, &metadata)?;
 
     let mut results = Vec::new();
     let mut cursor = QueryCursor::new();
