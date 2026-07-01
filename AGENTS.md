@@ -187,8 +187,15 @@ supported requested Rust paths, then falls back to `CodebaseAnalyzer` for
 unsupported languages, parser diagnostics, oversized files, and empty-path
 repository summaries. Mixed supported and unsupported requests should keep both
 AST evidence and fallback trace visibility without changing the public
-`memory.context` contract or adding new MCP tool names. The current
-`opensymphony_code_intel` adapter still implements
+`memory.context` contract. The memory MCP server may expose read-only
+`code.ast.status`, `code.ast.outline`, `code.ast.symbols`,
+`code.ast.references`, `code.ast.query`, `code.ast.context`, and
+`code.ast.diagnostics` tools only when `code_intel.enabled` and
+`code_intel.ast.enabled` are true. These tools are evidence APIs, not edit APIs:
+keep path containment, file/match/capture limits, parser/query-pack/source
+citations, and trace output intact. `code.ast.query` is local read-only by
+default and becomes admin-gated whenever a memory admin token is configured.
+The current `opensymphony_code_intel` adapter still implements
 `opensymphony_memory::CodeIntelIndex`; keep that bridge narrow until a follow-up
 inverts trait ownership into the code-intelligence module.
 

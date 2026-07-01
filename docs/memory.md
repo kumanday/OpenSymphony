@@ -410,7 +410,12 @@ Startup and write paths own schema creation or migration.
 Streamable HTTP JSON-RPC endpoint at `/mcp`. CLI commands call that endpoint
 when `OPENSYMPHONY_MEMORY_ENDPOINT` is set; otherwise they use offline direct
 mode. Read tools are `memory.context`, `memory.search`, `memory.related`,
-`memory.brief`, `memory.docs`, and `memory.status`. Admin tools are
+`memory.brief`, `memory.docs`, `memory.status`, and, when
+`code_intel.ast.enabled` is true, `code.ast.status`, `code.ast.outline`,
+`code.ast.symbols`, `code.ast.references`, `code.ast.context`, and
+`code.ast.diagnostics`. `code.ast.query` is also local read-only by default,
+but requires the admin token when an admin token is configured so hosted or
+token-gated deployments can restrict ad hoc query execution. Admin tools are
 `memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`,
 `memory.export_okf`, `memory.import_okf`, and `memory.ingest_code_intel`; these
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
@@ -424,6 +429,9 @@ languages, parser diagnostics, oversized files, and calls without requested
 paths use the existing `CodebaseAnalyzer` repository-summary fallback; mixed
 supported and unsupported requests can include both AST artifacts and fallback
 artifacts. The trace section records parse/query counts and the fallback reason.
+The direct `code.ast.*` tools return JSON with path, line range, content hash,
+parser version, query-pack version, trace, and truncation metadata for targeted
+agent inspection. `memory.context` remains the recommended kickoff path.
 `memory.ingest_code_intel` generates code-intelligence artifacts without
 persistence by default. Admin callers can pass `persist=true` to write derived
 DuckDB rows for code documents, symbols, query-pack edges, and parser

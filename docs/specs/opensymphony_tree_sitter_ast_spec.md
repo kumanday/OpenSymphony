@@ -477,7 +477,7 @@ captures:
   import.path: Import path or module use path
   test.case: Test function or test block
 limits:
-  max_matches_per_file: 2000
+  max_matches_per_request: 2000
   max_capture_bytes: 4096
 ```
 
@@ -634,6 +634,8 @@ Rationale: agents keep `memory.context` as their main context-loading path, whil
 
 ### 9.3 MCP tool contracts
 
+Response-level `limit` fields are request-wide caps across all returned files.
+
 #### `code.ast.status`
 
 Request:
@@ -689,6 +691,13 @@ Response:
       ],
       "diagnostics": []
     }
+  ],
+  "limit": 20,
+  "trace": [
+    "parsed 1 file(s)",
+    "max files per request 200",
+    "max matches per request 2000",
+    "crates/opensymphony-cli/src/memory.rs lines 1-1400 parser tree-sitter-rust@... query-pack rust@1 content sha256:..."
   ]
 }
 ```
@@ -720,9 +729,9 @@ Response:
       "span": { "startLine": 954, "endLine": 990 },
       "selectionSpan": { "startLine": 954, "endLine": 954 },
       "source": {
-        "commitSha": "...",
         "contentSha256": "...",
-        "queryPackVersion": "rust@1"
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
       }
     }
   ]
@@ -751,10 +760,23 @@ Response:
       "kind": "reference.call",
       "path": "crates/opensymphony-cli/src/memory.rs",
       "span": { "startLine": 1258, "endLine": 1258 },
-      "snippet": "run_context(&repo_root, &config, args).await"
+      "snippet": "run_context",
+      "truncated": false,
+      "source": {
+        "contentSha256": "...",
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
+      }
     }
   ],
-  "confidence": "syntactic"
+  "confidence": "syntactic",
+  "limit": 50,
+  "trace": [
+    "parsed 1 file(s)",
+    "max files per request 200",
+    "max matches per request 2000",
+    "crates/opensymphony-cli/src/memory.rs lines 1-1400 parser tree-sitter-rust@... query-pack rust@1 content sha256:..."
+  ]
 }
 ```
 
@@ -785,7 +807,12 @@ Response:
           "text": "run_context",
           "span": { "startLine": 954, "endLine": 954 }
         }
-      ]
+      ],
+      "source": {
+        "contentSha256": "...",
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
+      }
     }
   ]
 }
@@ -802,13 +829,16 @@ Request:
   "repo": ".",
   "issue": "COE-123",
   "paths": ["crates/opensymphony-cli/src/memory.rs"],
-  "symbols": ["run_context"],
+  "symbols": ["function"],
   "includeCallers": true,
   "includeCallees": true,
   "includeTests": true,
   "limit": 40
 }
 ```
+
+The current MCP-backed implementation treats `symbols` as a symbol-kind filter
+that reuses the same provider path as `memory.context --include-code-intel`.
 
 Response:
 
@@ -822,6 +852,47 @@ Response:
   ]
 }
 ```
+
+#### `code.ast.diagnostics`
+
+Request:
+
+```json
+{
+  "repo": ".",
+  "paths": ["crates/opensymphony-cli/src/memory.rs"],
+  "limit": 50
+}
+```
+
+Response:
+
+```json
+{
+  "diagnostics": [
+    {
+      "path": "crates/opensymphony-cli/src/memory.rs",
+      "kind": "error",
+      "nodeKind": "ERROR",
+      "span": { "startLine": 954, "endLine": 954 },
+      "source": {
+        "contentSha256": "...",
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
+      }
+    }
+  ],
+  "limit": 50,
+  "trace": [
+    "parsed 1 file(s)",
+    "max files per request 200",
+    "max matches per request 2000"
+  ]
+}
+```
+
+Diagnostic `kind` values are the AST diagnostic vocabulary currently emitted by
+the parser bridge: `error` and `missing`.
 
 ### 9.4 CLI surface
 
@@ -1161,10 +1232,8 @@ code_intel:
     persist_by_default: false
     max_file_bytes: 2097152
     max_files_per_request: 200
-    max_matches_per_file: 2000
-    query_timeout_ms: 5000
-    parsed_tree_cache_entries: 256
-    document_cache_bytes: 134217728
+    max_matches_per_request: 2000
+    max_capture_bytes: 4096
     languages:
       rust: true
       typescript: true
@@ -1443,7 +1512,6 @@ These are engineering targets for local mode and should be measured with reposit
 | File too large | Skip file and return warning. |
 | Stale persisted record | Reparse if file is available, otherwise return stale only when requested. |
 | Path outside repo | Reject request. |
-| Query timeout | Return partial results with truncation warning. |
 | Too many matches | Truncate with trace entry and deterministic ordering. |
 
 ## 20. Documentation updates
