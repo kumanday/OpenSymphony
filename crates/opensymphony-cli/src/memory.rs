@@ -1549,7 +1549,7 @@ async fn memory_server_mcp(
             "capabilities": { "tools": {} }
         })),
         "tools/list" => Ok(json!({
-            "tools": memory_tool_descriptors(&state.config)
+            "tools": memory_tool_descriptors(&state.config, &state.auth)
         })),
         "tools/call" => match tokio::time::timeout(
             MEMORY_MCP_TOOL_TIMEOUT,
@@ -1601,7 +1601,7 @@ fn required_access_for_request(
     }
 }
 
-fn memory_tool_descriptors(config: &MemoryConfig) -> Vec<Value> {
+fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Vec<Value> {
     let mut tools = vec![
         json!({ "name": "memory.context", "description": "Build a pre-implementation memory context bundle", "access": "read" }),
         json!({ "name": "memory.search", "description": "Search captured issue memory", "access": "read" }),
@@ -1619,7 +1619,14 @@ fn memory_tool_descriptors(config: &MemoryConfig) -> Vec<Value> {
     ];
     if ast_tools_enabled(config) {
         tools.extend(AST_MCP_TOOL_NAMES.iter().map(|name| {
-            json!({ "name": name, "description": "Read-only Tree-sitter AST code intelligence", "access": "read" })
+            json!({
+                "name": name,
+                "description": "Read-only Tree-sitter AST code intelligence",
+                "access": match required_access_for_tool(name, auth) {
+                    MemoryServerAccess::Read => "read",
+                    MemoryServerAccess::Admin => "admin",
+                }
+            })
         }));
     }
     tools
@@ -4517,11 +4524,11 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, authorize_memory_request, call_memory_ingest_code_intel_tool,
-        call_memory_tool, context_source_from_mcp, memory_server_health_payload,
-        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_intel_repo, trim_auto_memory_status_log,
+        MemoryServerAuth, RUST_QUERY_PACK_VERSION, authorize_memory_request,
+        call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
@@ -4537,7 +4544,7 @@ mod tests {
     fn mcp_tool_list_exposes_context_admin_and_ast_tools_when_enabled() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
-        let names = memory_tool_descriptors(&config)
+        let names = memory_tool_descriptors(&config, &MemoryServerAuth::default())
             .into_iter()
             .filter_map(|tool| {
                 tool.get("name")
@@ -4571,7 +4578,7 @@ mod tests {
         )
         .expect("config");
         let config = MemoryConfig::load(repo.path(), Some(&config_path)).expect("memory config");
-        let names = memory_tool_descriptors(&config)
+        let names = memory_tool_descriptors(&config, &MemoryServerAuth::default())
             .into_iter()
             .filter_map(|tool| {
                 tool.get("name")
@@ -4582,6 +4589,30 @@ mod tests {
 
         assert!(names.contains(&"memory.context".to_string()));
         assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
+    }
+
+    #[test]
+    fn mcp_tool_list_marks_ast_query_admin_when_admin_token_is_configured() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let tools = memory_tool_descriptors(
+            &config,
+            &MemoryServerAuth {
+                read_token: Some("read-token".to_string()),
+                admin_token: Some("admin-token".to_string()),
+            },
+        );
+        let query_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "code.ast.query")
+            .expect("query tool");
+        let outline_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "code.ast.outline")
+            .expect("outline tool");
+
+        assert_eq!(query_tool["access"], "admin");
+        assert_eq!(outline_tool["access"], "read");
     }
 
     #[test]
@@ -5319,7 +5350,7 @@ Public memory concept.
         assert_eq!(symbols["symbols"][0]["name"], "answer");
         assert_eq!(
             symbols["symbols"][0]["source"]["queryPackVersion"],
-            "rust-query-pack-v2"
+            RUST_QUERY_PACK_VERSION
         );
 
         let query = call_memory_tool(
@@ -5344,6 +5375,61 @@ Public memory concept.
                 .as_str()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn code_ast_references_returns_span_and_source_citation() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "fn helper() -> u8 { 42 }\npub fn answer() -> u8 { helper() }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let references = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.references",
+                "arguments": { "paths": ["src/lib.rs"], "symbol": "helper" }
+            }),
+        )
+        .await
+        .expect("references");
+        let first = &references["references"][0];
+
+        assert_eq!(first["path"], "src/lib.rs");
+        assert_eq!(first["kind"], "reference.call");
+        assert_eq!(first["span"]["startLine"], 2);
+        assert!(first["source"]["contentSha256"].as_str().is_some());
+        assert_eq!(first["source"]["queryPackVersion"], RUST_QUERY_PACK_VERSION);
+    }
+
+    #[tokio::test]
+    async fn code_ast_diagnostics_returns_parser_diagnostics_with_source() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn broken( {\n").expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let diagnostics = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.diagnostics",
+                "arguments": { "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect("diagnostics");
+        let first = &diagnostics["diagnostics"][0];
+
+        assert_eq!(first["path"], "src/lib.rs");
+        assert!(first["span"]["startLine"].as_u64().expect("line") >= 1);
+        assert!(first["source"]["contentSha256"].as_str().is_some());
+        assert_eq!(first["source"]["queryPackVersion"], RUST_QUERY_PACK_VERSION);
     }
 
     #[tokio::test]
