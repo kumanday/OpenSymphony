@@ -515,6 +515,20 @@ impl AstCodeIntelProvider {
                 .to_path_buf();
             let relative_display = relative_path.to_string_lossy().to_string();
 
+            if resolved.is_dir() {
+                if let Some(component) = skipped_directory_name(&resolved) {
+                    report.fallback_reasons.push(format!(
+                        "{relative_display} skipped directory `{component}`"
+                    ));
+                    continue;
+                }
+                report
+                    .fallback_reasons
+                    .push(format!("{relative_display} is a directory"));
+                report.fallback_paths.push(relative_path);
+                continue;
+            }
+
             let Some(source) = self.read_limited_source(&resolved, &relative_display, &mut report)
             else {
                 continue;
@@ -2438,6 +2452,30 @@ mod tests {
                 .any(|artifact| artifact.kind == "ast-symbols"
                     && artifact.summary.contains("function `answer`"))
         );
+    }
+
+    #[test]
+    fn composite_skips_requested_generated_directories_with_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("generated")).expect("generated dir");
+        fs::write(repo.path().join("generated/mod.rs"), "pub fn hidden() {}\n")
+            .expect("generated module");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("generated")], &[], 20)
+            .expect("code context");
+
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.title.contains("generated/mod.rs"))
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace"
+                && artifact
+                    .summary
+                    .contains("generated skipped directory `generated`")
+        }));
     }
 
     #[test]
