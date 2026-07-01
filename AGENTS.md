@@ -348,6 +348,8 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/linear-and-tools.md`: Linear integration and GraphQL helper assets
 - `docs/memory.md`: project memory capture, DuckDB indexing, documentation sync,
   and archive guard design
+- `docs/code-intelligence.md`: agent and operator workflow for AST-backed code
+  intelligence
 - `docs/ui-frankentui.md`: operator UI design
 - `docs/repository-layout.md`: crate ownership
 - `docs/deployment-modes.md`: local MVP and hosted follow-on

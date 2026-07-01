@@ -5822,11 +5822,12 @@ Public memory concept.
         .await
         .expect("diagnostics");
 
-        assert!(
-            !diagnostics["diagnostics"]
+        assert_eq!(
+            diagnostics["diagnostics"]
                 .as_array()
                 .expect("diagnostics")
-                .is_empty()
+                .len(),
+            1
         );
         assert_eq!(diagnostics["limit"], 1);
         assert!(
