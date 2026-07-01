@@ -729,9 +729,9 @@ Response:
       "span": { "startLine": 954, "endLine": 990 },
       "selectionSpan": { "startLine": 954, "endLine": 954 },
       "source": {
-        "commitSha": "...",
         "contentSha256": "...",
-        "queryPackVersion": "rust@1"
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
       }
     }
   ]
@@ -763,9 +763,9 @@ Response:
       "snippet": "run_context",
       "truncated": false,
       "source": {
-        "commitSha": "...",
         "contentSha256": "...",
-        "queryPackVersion": "rust@1"
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
       }
     }
   ],
@@ -807,7 +807,12 @@ Response:
           "text": "run_context",
           "span": { "startLine": 954, "endLine": 954 }
         }
-      ]
+      ],
+      "source": {
+        "contentSha256": "...",
+        "parserVersion": "tree-sitter-rust:...",
+        "queryPackVersion": "rust-query-pack-v2"
+      }
     }
   ]
 }
@@ -1228,9 +1233,7 @@ code_intel:
     max_file_bytes: 2097152
     max_files_per_request: 200
     max_matches_per_request: 2000
-    query_timeout_ms: 5000
-    parsed_tree_cache_entries: 256
-    document_cache_bytes: 134217728
+    max_capture_bytes: 4096
     languages:
       rust: true
       typescript: true
@@ -1509,7 +1512,6 @@ These are engineering targets for local mode and should be measured with reposit
 | File too large | Skip file and return warning. |
 | Stale persisted record | Reparse if file is available, otherwise return stale only when requested. |
 | Path outside repo | Reject request. |
-| Query timeout | Return partial results with truncation warning. |
 | Too many matches | Truncate with trace entry and deterministic ordering. |
 
 ## 20. Documentation updates
