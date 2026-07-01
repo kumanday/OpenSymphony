@@ -867,7 +867,7 @@ Response:
   "diagnostics": [
     {
       "path": "crates/opensymphony-cli/src/memory.rs",
-      "kind": "parse-error",
+      "kind": "error",
       "nodeKind": "ERROR",
       "span": { "startLine": 954, "endLine": 954 },
       "source": {
@@ -885,6 +885,9 @@ Response:
   ]
 }
 ```
+
+Diagnostic `kind` values are the AST diagnostic vocabulary currently emitted by
+the parser bridge: `error` and `missing`.
 
 ### 9.4 CLI surface
 

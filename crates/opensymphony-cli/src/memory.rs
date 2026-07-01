@@ -2092,9 +2092,11 @@ async fn call_code_ast_context_tool(
     let scope = scope_filter_from_mcp(arguments, true);
     let paths = ast_path_args(arguments)?;
     let limit = ast_limit(config, arguments);
+    let symbol_kinds = normalized_string_set_args(arguments, &["symbols"]);
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
     let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    let artifacts = filter_code_intel_artifacts_by_symbol_kinds(artifacts, &symbol_kinds);
     let trace = artifacts
         .iter()
         .filter(|artifact| artifact.kind == "trace")
@@ -2103,6 +2105,50 @@ async fn call_code_ast_context_tool(
     let mut markdown = String::from("## Structural Context\n\n");
     append_code_intel_artifacts(config, &mut markdown, artifacts);
     Ok(json!({ "markdown": markdown, "trace": trace }))
+}
+
+fn filter_code_intel_artifacts_by_symbol_kinds(
+    artifacts: Vec<CodeIntelArtifact>,
+    symbol_kinds: &BTreeSet<String>,
+) -> Vec<CodeIntelArtifact> {
+    if symbol_kinds.is_empty() {
+        return artifacts;
+    }
+    artifacts
+        .into_iter()
+        .filter_map(|mut artifact| {
+            if artifact.kind != "ast-symbols" {
+                return Some(artifact);
+            }
+            let lines = artifact.summary.lines().collect::<Vec<_>>();
+            let keep = lines
+                .iter()
+                .map(|line| {
+                    line.strip_prefix("- ")
+                        .and_then(|line| line.split_whitespace().next())
+                        .is_some_and(|kind| symbol_kinds.contains(kind))
+                })
+                .collect::<Vec<_>>();
+            let selected_lines = lines
+                .iter()
+                .zip(&keep)
+                .filter_map(|(line, keep)| keep.then_some(*line))
+                .collect::<Vec<_>>();
+            if selected_lines.is_empty() {
+                return None;
+            }
+            artifact.summary = selected_lines.join("\n");
+            if artifact.source_refs.len() == keep.len() {
+                artifact.source_refs = artifact
+                    .source_refs
+                    .into_iter()
+                    .zip(keep)
+                    .filter_map(|(source_ref, keep)| keep.then_some(source_ref))
+                    .collect();
+            }
+            Some(artifact)
+        })
+        .collect()
 }
 
 async fn call_code_ast_diagnostics_tool(
@@ -5447,7 +5493,7 @@ Public memory concept.
         std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
         std::fs::write(
             repo_root.join("src/lib.rs"),
-            "pub fn answer() -> u8 { 42 }\n",
+            "pub struct Thing {\n    value: u8,\n}\npub fn answer() -> u8 { 42 }\n",
         )
         .expect("source");
         let config = MemoryConfig::load(&repo_root, None).expect("config");
@@ -5456,7 +5502,7 @@ Public memory concept.
             &config,
             json!({
                 "name": "code.ast.context",
-                "arguments": { "paths": ["src/lib.rs"], "symbols": ["function"], "limit": 5 }
+                "arguments": { "paths": ["src/lib.rs"], "symbols": ["struct"], "limit": 5 }
             }),
         )
         .await
@@ -5472,7 +5518,13 @@ Public memory concept.
             context["markdown"]
                 .as_str()
                 .expect("markdown")
-                .contains("ast-summary: src/lib.rs")
+                .contains("struct `Thing`")
+        );
+        assert!(
+            !context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("function `answer`")
         );
         assert!(
             context["trace"]
@@ -5658,6 +5710,13 @@ Public memory concept.
         let first = &diagnostics["diagnostics"][0];
 
         assert_eq!(first["path"], "src/lib.rs");
+        assert!(
+            matches!(
+                first["kind"].as_str().expect("diagnostic kind"),
+                "error" | "missing"
+            ),
+            "diagnostic kind should use the serialized AST diagnostic vocabulary"
+        );
         assert!(first["span"]["startLine"].as_u64().expect("line") >= 1);
         assert!(first["source"]["contentSha256"].as_str().is_some());
         assert_eq!(first["source"]["queryPackVersion"], RUST_QUERY_PACK_VERSION);
