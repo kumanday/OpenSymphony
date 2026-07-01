@@ -367,6 +367,7 @@ pub enum SourceSnapshotPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryConfig {
     pub enabled: bool,
+    pub code_intel: CodeIntelConfig,
     pub config_path: PathBuf,
     pub repo_root: PathBuf,
     pub memory_root: PathBuf,
@@ -378,6 +379,21 @@ pub struct MemoryConfig {
     pub docs: DocsConfig,
     pub areas: BTreeMap<String, AreaConfig>,
     pub redaction: RedactionConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelConfig {
+    pub enabled: bool,
+    pub ast: AstCodeIntelConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstCodeIntelConfig {
+    pub enabled: bool,
+    pub max_file_bytes: u64,
+    pub max_files_per_request: usize,
+    pub max_matches_per_file: usize,
+    pub max_capture_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,6 +490,8 @@ struct MemoryConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    code_intel: Option<CodeIntelConfigFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     visibility: Option<MemoryVisibility>,
@@ -491,6 +509,28 @@ struct MemoryConfigFile {
     areas: BTreeMap<String, AreaConfigFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     redaction: Option<RedactionConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct CodeIntelConfigFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ast: Option<AstCodeIntelConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct AstCodeIntelConfigFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_file_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_files_per_request: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_matches_per_file: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_capture_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

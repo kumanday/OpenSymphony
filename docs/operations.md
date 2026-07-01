@@ -426,7 +426,10 @@ pass `--token` to require bearer-token access for read tools. Admin tools
 `memory.export_okf`, `memory.import_okf`, and `memory.ingest_code_intel`)
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token`. When only the
 admin token is configured, it also gates read tools; do not inject that token
-into ordinary worker environments.
+into ordinary worker environments. When `code_intel.ast.enabled` is true,
+`tools/list` also exposes read-only `code.ast.*` inspection tools. The ad hoc
+`code.ast.query` tool is available for local trusted use without tokens, and is
+admin-gated when an admin token is configured.
 
 Linear archival is a separate command and is guarded by captured memory:
 

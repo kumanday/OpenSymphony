@@ -196,7 +196,7 @@ pub enum SourceLanguage {
 }
 
 impl SourceLanguage {
-    fn id(self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
             SourceLanguage::Rust => "rust",
             SourceLanguage::TypeScript => "typescript",
@@ -209,6 +209,26 @@ impl SourceLanguage {
             SourceLanguage::Toml => "toml",
             SourceLanguage::Markdown => "markdown",
         }
+    }
+
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "rust" => Some(SourceLanguage::Rust),
+            "typescript" => Some(SourceLanguage::TypeScript),
+            "tsx" => Some(SourceLanguage::Tsx),
+            "javascript" => Some(SourceLanguage::JavaScript),
+            "jsx" => Some(SourceLanguage::Jsx),
+            "python" => Some(SourceLanguage::Python),
+            "json" => Some(SourceLanguage::Json),
+            "yaml" => Some(SourceLanguage::Yaml),
+            "toml" => Some(SourceLanguage::Toml),
+            "markdown" => Some(SourceLanguage::Markdown),
+            _ => None,
+        }
+    }
+
+    pub fn supports_ast_queries(self) -> bool {
+        !self.is_lightweight()
     }
 
     fn display_name(self) -> &'static str {
@@ -324,6 +344,11 @@ pub struct CaptureRecord {
     pub text: String,
     pub span: SourceSpan,
     pub rendered_span: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdHocQueryMatch {
+    pub captures: Vec<CaptureRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1007,6 +1032,57 @@ pub fn parse_source(
     })
 }
 
+pub fn run_ad_hoc_query(
+    language: SourceLanguage,
+    source: &str,
+    query_source: &str,
+    limit: usize,
+) -> Result<Vec<AdHocQueryMatch>, CodeIntelError> {
+    if !language.supports_ast_queries() {
+        return Err(CodeIntelError::UnsupportedLanguage {
+            path: language.id().to_string(),
+        });
+    }
+    let config = language_config(language);
+    let parser_language = (config.parser)();
+    let mut parser = Parser::new();
+    parser.set_language(&parser_language)?;
+    let tree = parser.parse(source, None).ok_or(CodeIntelError::Parse)?;
+    let metadata = load_metadata(config)?;
+    let query =
+        Query::new(&parser_language, query_source).map_err(|source| CodeIntelError::Query {
+            query_name: "ad_hoc".to_string(),
+            source,
+        })?;
+    validate_capture_names("ad_hoc", &query, &metadata)?;
+
+    let mut results = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(query_match) = matches.next() {
+        if results.len() >= limit {
+            break;
+        }
+        let captures = query_match
+            .captures
+            .iter()
+            .map(|capture| {
+                let span = one_based_span(capture.node);
+                let rendered_span = span.render();
+                Ok(CaptureRecord {
+                    query_name: "ad_hoc".to_string(),
+                    capture_name: query.capture_names()[capture.index as usize].to_string(),
+                    text: capture.node.utf8_text(source.as_bytes())?.to_string(),
+                    span,
+                    rendered_span,
+                })
+            })
+            .collect::<Result<Vec<_>, CodeIntelError>>()?;
+        results.push(AdHocQueryMatch { captures });
+    }
+    Ok(results)
+}
+
 fn language_config(language: SourceLanguage) -> LanguageConfig {
     match language {
         SourceLanguage::Rust => LanguageConfig {
@@ -1127,7 +1203,7 @@ fn compile_query<'a>(
         query_name: asset.name.to_string(),
         source,
     })?;
-    validate_capture_names(asset, &query, metadata)?;
+    validate_capture_names(asset.name, &query, metadata)?;
     Ok(CompiledQuery {
         asset,
         query,
@@ -1136,20 +1212,20 @@ fn compile_query<'a>(
 }
 
 fn validate_capture_names(
-    asset: QueryAsset,
+    query_name: &str,
     query: &Query,
     metadata: &QueryPackMetadata,
 ) -> Result<(), CodeIntelError> {
     for capture_name in query.capture_names().iter().copied() {
         if !STANDARD_CAPTURE_NAMES.contains(&capture_name) {
             return Err(CodeIntelError::NonstandardCapture {
-                query_name: asset.name.to_string(),
+                query_name: query_name.to_string(),
                 capture_name: capture_name.to_string(),
             });
         }
         if !metadata.captures.contains_key(capture_name) {
             return Err(CodeIntelError::UndocumentedCapture {
-                query_name: asset.name.to_string(),
+                query_name: query_name.to_string(),
                 capture_name: capture_name.to_string(),
             });
         }
