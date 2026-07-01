@@ -2279,7 +2279,7 @@ fn collect_ast_files(
         })?;
     if let Some(component) = skipped_directory_name(&resolved) {
         warnings.push(format!(
-            "{} skipped generated/vendor directory `{component}`",
+            "{} skipped directory `{component}` (generated/vendor/build list)",
             relative.display()
         ));
         return Ok(());
@@ -5915,17 +5915,17 @@ Public memory concept.
         assert!(trace.iter().any(|line| {
             line.as_str()
                 .expect("trace line")
-                .contains("warning: node_modules skipped generated/vendor")
+                .contains("warning: node_modules skipped directory `node_modules` (generated/vendor/build list)")
+        }));
+        assert!(trace.iter().any(|line| {
+            line.as_str().expect("trace line").contains(
+                "warning: vendor skipped directory `vendor` (generated/vendor/build list)",
+            )
         }));
         assert!(trace.iter().any(|line| {
             line.as_str()
                 .expect("trace line")
-                .contains("warning: vendor skipped generated/vendor")
-        }));
-        assert!(trace.iter().any(|line| {
-            line.as_str()
-                .expect("trace line")
-                .contains("warning: src/generated skipped generated/vendor")
+                .contains("warning: src/generated skipped directory `generated` (generated/vendor/build list)")
         }));
 
         let explicit_generated = call_memory_tool(
@@ -5947,7 +5947,7 @@ Public memory concept.
                 .any(|line| line
                     .as_str()
                     .expect("trace line")
-                    .contains("skipped generated/vendor"))
+                    .contains("generated/vendor/build list"))
         );
     }
 

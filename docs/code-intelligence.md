@@ -51,12 +51,12 @@ opensymphony memory context --issue COE-123 \
 Use the output to find likely symbols, diagnostics, and related tests. Then
 read the cited files and run the relevant tests before changing behavior.
 
-Generated and vendor directories such as `node_modules`, `target`, `dist`,
-`build`, `.venv`, `.next`, `.turbo`, `vendor`, and `generated` are skipped with
-trace warnings during directory traversal. Explicitly requested files inside
-those directories are still parsed when they stay inside the repo root and pass
-the configured limits. Oversized files are skipped with trace warnings rather
-than failing the whole request.
+Generated, vendor, build, and cache directories such as `node_modules`,
+`target`, `dist`, `build`, `.venv`, `.next`, `.turbo`, `vendor`, and
+`generated` are skipped with trace warnings during directory traversal.
+Explicitly requested files inside those directories are still parsed when they
+stay inside the repo root and pass the configured limits. Oversized files are
+skipped with trace warnings rather than failing the whole request.
 
 ## MCP Tools
 
