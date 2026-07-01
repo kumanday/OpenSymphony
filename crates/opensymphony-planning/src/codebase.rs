@@ -311,8 +311,13 @@ impl RepoWalker {
             "target",
             ".venv",
             "__pycache__",
+            "coverage",
+            ".next",
+            ".turbo",
             "dist",
             "build",
+            "vendor",
+            "generated",
         ] {
             exclude_dirs.insert(dir.to_string());
         }

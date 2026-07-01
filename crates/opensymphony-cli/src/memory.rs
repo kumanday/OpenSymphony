@@ -19,7 +19,7 @@ use crate::{
         JAVASCRIPT_QUERY_PACK_VERSION, JSX_QUERY_PACK_VERSION, PROVIDER_NAME,
         PYTHON_QUERY_PACK_VERSION, ParsedDocumentSummary, RUST_QUERY_PACK_VERSION, SourceLanguage,
         SymbolKind, TREE_SITTER_VERSION, TSX_QUERY_PACK_VERSION, TYPESCRIPT_QUERY_PACK_VERSION,
-        parse_path, run_ad_hoc_query,
+        parse_path, run_ad_hoc_query, skipped_directory_name,
     },
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
@@ -1879,6 +1879,11 @@ struct AstDocument {
     summary: ParsedDocumentSummary,
 }
 
+struct AstDocuments {
+    documents: Vec<AstDocument>,
+    warnings: Vec<String>,
+}
+
 fn call_code_ast_status_tool(config: &MemoryConfig) -> Result<Value, MemoryError> {
     let _ = resolve_code_intel_repo(config, None)?;
     Ok(json!({
@@ -1896,12 +1901,12 @@ async fn call_code_ast_outline_tool(
     arguments: Value,
 ) -> Result<Value, MemoryError> {
     ast_mcp_tool_blocking("code.ast.outline", move || {
-        let documents = ast_documents(&config, &arguments)?;
+        let ast_documents = ast_documents(&config, &arguments)?;
         let limit = ast_limit(&config, &arguments);
         let mut remaining = limit;
         let mut truncated = false;
         let mut response_documents = Vec::new();
-        for document in &documents {
+        for document in &ast_documents.documents {
             let selected_symbols = document
                 .summary
                 .symbols
@@ -1931,7 +1936,7 @@ async fn call_code_ast_outline_tool(
         Ok(json!({
             "documents": response_documents,
             "limit": limit,
-            "trace": ast_trace_json(&config, &documents, truncated)
+            "trace": ast_trace_json(&config, &ast_documents, truncated)
         }))
     })
     .await
@@ -1947,8 +1952,8 @@ async fn call_code_ast_symbols_tool(
         let kinds = normalized_string_set_args(&arguments, &["kinds"]);
         let limit = ast_limit(&config, &arguments);
         let mut symbols = Vec::new();
-        let documents = ast_documents(&config, &arguments)?;
-        for document in &documents {
+        let ast_documents = ast_documents(&config, &arguments)?;
+        for document in &ast_documents.documents {
             for symbol in document.summary.symbols.iter().filter(|symbol| {
                 query
                     .as_ref()
@@ -1975,7 +1980,7 @@ async fn call_code_ast_symbols_tool(
         Ok(json!({
             "symbols": symbols,
             "limit": limit,
-            "trace": ast_trace_json(&config, &documents, symbols.len() >= limit)
+            "trace": ast_trace_json(&config, &ast_documents, symbols.len() >= limit)
         }))
     })
     .await
@@ -1989,8 +1994,8 @@ async fn call_code_ast_references_tool(
         let symbol = required_string_arg(&arguments, "symbol")?;
         let limit = ast_limit(&config, &arguments);
         let mut references = Vec::new();
-        let documents = ast_documents(&config, &arguments)?;
-        for document in &documents {
+        let ast_documents = ast_documents(&config, &arguments)?;
+        for document in &ast_documents.documents {
             for capture in document
                 .summary
                 .captures
@@ -2020,7 +2025,7 @@ async fn call_code_ast_references_tool(
             "references": references,
             "confidence": "syntactic",
             "limit": limit,
-            "trace": ast_trace_json(&config, &documents, references.len() >= limit)
+            "trace": ast_trace_json(&config, &ast_documents, references.len() >= limit)
         }))
     })
     .await
@@ -2043,9 +2048,10 @@ async fn call_code_ast_query_tool(
         }
         let query = required_string_arg(&arguments, "query")?;
         let limit = ast_limit(&config, &arguments);
-        let documents = ast_documents(&config, &arguments)?;
+        let ast_documents = ast_documents(&config, &arguments)?;
         let mut matches = Vec::new();
-        for document in documents
+        for document in ast_documents
+            .documents
             .iter()
             .filter(|document| document.summary.source.language == language)
         {
@@ -2079,7 +2085,7 @@ async fn call_code_ast_query_tool(
         Ok(json!({
             "matches": matches,
             "limit": limit,
-            "trace": ast_trace_json(&config, &documents, matches.len() >= limit)
+            "trace": ast_trace_json(&config, &ast_documents, matches.len() >= limit)
         }))
     })
     .await
@@ -2118,10 +2124,10 @@ async fn call_code_ast_diagnostics_tool(
     arguments: Value,
 ) -> Result<Value, MemoryError> {
     ast_mcp_tool_blocking("code.ast.diagnostics", move || {
-        let documents = ast_documents(&config, &arguments)?;
+        let ast_documents = ast_documents(&config, &arguments)?;
         let limit = ast_limit(&config, &arguments);
         let mut diagnostics = Vec::new();
-        for document in &documents {
+        for document in &ast_documents.documents {
             for diagnostic in &document.summary.diagnostics {
                 if diagnostics.len() >= limit {
                     break;
@@ -2138,7 +2144,8 @@ async fn call_code_ast_diagnostics_tool(
                 break;
             }
         }
-        let truncated = documents
+        let truncated = ast_documents
+            .documents
             .iter()
             .map(|document| document.summary.diagnostics.len())
             .sum::<usize>()
@@ -2146,7 +2153,7 @@ async fn call_code_ast_diagnostics_tool(
         Ok(json!({
             "diagnostics": diagnostics,
             "limit": limit,
-            "trace": ast_trace_json(&config, &documents, truncated)
+            "trace": ast_trace_json(&config, &ast_documents, truncated)
         }))
     })
     .await
@@ -2161,20 +2168,19 @@ where
     })?
 }
 
-fn ast_documents(
-    config: &MemoryConfig,
-    arguments: &Value,
-) -> Result<Vec<AstDocument>, MemoryError> {
+fn ast_documents(config: &MemoryConfig, arguments: &Value) -> Result<AstDocuments, MemoryError> {
     let scope = scope_filter_from_mcp(arguments, false);
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let paths = ast_path_args(arguments)?;
     let mut files = Vec::new();
+    let mut warnings = Vec::new();
     for path in paths {
         collect_ast_files(
             &repo_root,
             &path,
             config.code_intel.ast.max_files_per_request,
             &mut files,
+            &mut warnings,
         )?;
     }
     let mut documents = Vec::new();
@@ -2191,11 +2197,12 @@ fn ast_documents(
             source,
         })?;
         if metadata.len() > config.code_intel.ast.max_file_bytes {
-            return Err(MemoryError::InvalidInput(format!(
+            warnings.push(format!(
                 "{} exceeds AST max_file_bytes {}",
                 relative.display(),
                 config.code_intel.ast.max_file_bytes
-            )));
+            ));
+            continue;
         }
         let source = fs::read_to_string(&path).map_err(|source| MemoryError::ReadFile {
             path: path.clone(),
@@ -2209,7 +2216,10 @@ fn ast_documents(
             summary,
         });
     }
-    Ok(documents)
+    Ok(AstDocuments {
+        documents,
+        warnings,
+    })
 }
 
 fn ast_path_args(arguments: &Value) -> Result<Vec<PathBuf>, MemoryError> {
@@ -2230,6 +2240,7 @@ fn collect_ast_files(
     path: &Path,
     max_files: usize,
     files: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
 ) -> Result<(), MemoryError> {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
@@ -2260,6 +2271,19 @@ fn collect_ast_files(
     if files.len() >= max_files {
         return Ok(());
     }
+    let relative = resolved
+        .strip_prefix(repo_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: resolved.clone(),
+            repo_root: repo_root.to_path_buf(),
+        })?;
+    if let Some(component) = skipped_directory_name(&resolved) {
+        warnings.push(format!(
+            "{} skipped directory `{component}`",
+            relative.display()
+        ));
+        return Ok(());
+    }
     let mut entries = fs::read_dir(&resolved)
         .map_err(|source| MemoryError::ReadFile {
             path: resolved.clone(),
@@ -2280,7 +2304,7 @@ fn collect_ast_files(
             source,
         })?;
         if file_type.is_dir() {
-            collect_ast_files(repo_root, &entry.path(), max_files, files)?;
+            collect_ast_files(repo_root, &entry.path(), max_files, files, warnings)?;
         } else if file_type.is_file() && ast_file_is_supported(repo_root, &entry.path())? {
             files.push(entry.path());
         }
@@ -2342,9 +2366,10 @@ fn ast_limits_json(config: &MemoryConfig) -> Value {
 
 fn ast_trace_json(
     config: &MemoryConfig,
-    documents: &[AstDocument],
+    ast_documents: &AstDocuments,
     truncated: bool,
 ) -> Vec<String> {
+    let documents = &ast_documents.documents;
     let mut trace = vec![
         format!("parsed {} file(s)", documents.len()),
         format!(
@@ -2359,6 +2384,12 @@ fn ast_trace_json(
     if truncated {
         trace.push("truncated by limit".to_string());
     }
+    trace.extend(
+        ast_documents
+            .warnings
+            .iter()
+            .map(|warning| format!("warning: {warning}")),
+    );
     trace.extend(documents.iter().map(|document| {
         format!(
             "{} lines {}-{} parser {} query-pack {} content sha256:{}",
@@ -5840,6 +5871,197 @@ Public memory concept.
                 .expect("trace")
                 .iter()
                 .any(|line| line.as_str().expect("trace line").contains("parsed 1 file"))
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_skip_generated_and_vendor_directories_with_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src/generated")).expect("src dir");
+        std::fs::create_dir_all(repo_root.join("node_modules/pkg")).expect("node_modules");
+        std::fs::create_dir_all(repo_root.join("vendor/pkg")).expect("vendor");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        std::fs::write(
+            repo_root.join("src/generated/mod.rs"),
+            "pub fn generated_mod() {}\n",
+        )
+        .expect("explicit generated source");
+        std::fs::write(
+            repo_root.join("node_modules/pkg/lib.rs"),
+            "pub fn generated_dep() {}\n",
+        )
+        .expect("generated source");
+        std::fs::write(
+            repo_root.join("vendor/pkg/lib.rs"),
+            "pub fn vendored() {}\n",
+        )
+        .expect("vendor source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let symbols = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src", "node_modules", "vendor"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("symbols");
+
+        assert_eq!(symbols["symbols"][0]["name"], "answer");
+        assert_eq!(symbols["symbols"].as_array().expect("symbols").len(), 1);
+        let trace = symbols["trace"].as_array().expect("trace");
+        assert!(trace.iter().any(|line| {
+            line.as_str()
+                .expect("trace line")
+                .contains("warning: node_modules skipped directory `node_modules`")
+        }));
+        assert!(trace.iter().any(|line| {
+            line.as_str()
+                .expect("trace line")
+                .contains("warning: vendor skipped directory `vendor`")
+        }));
+        assert!(trace.iter().any(|line| {
+            line.as_str()
+                .expect("trace line")
+                .contains("warning: src/generated skipped directory `generated`")
+        }));
+
+        let explicit_generated = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src/generated/mod.rs"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("explicit generated symbols");
+
+        assert_eq!(explicit_generated["symbols"][0]["name"], "generated_mod");
+        assert!(
+            !explicit_generated["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line
+                    .as_str()
+                    .expect("trace line")
+                    .contains("skipped directory"))
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_skip_oversized_files_with_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/big.rs"), "pub fn oversized() {}\n")
+            .expect("big source");
+        std::fs::write(repo_root.join("src/small.rs"), "pub fn ok() {}\n").expect("small source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_file_bytes: 15\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let symbols = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("symbols");
+
+        assert_eq!(symbols["symbols"][0]["name"], "ok");
+        assert_eq!(symbols["symbols"].as_array().expect("symbols").len(), 1);
+        assert!(
+            symbols["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line
+                    .as_str()
+                    .expect("trace line")
+                    .contains("warning: src/big.rs exceeds AST max_file_bytes 15"))
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_code_ast_tool_calls_do_not_share_parser_or_query_state() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "pub fn answer() -> u8 { helper() }\nfn helper() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        std::fs::write(repo_root.join("src/bad.rs"), "pub fn broken( {\n").expect("bad source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let symbols_config = config.clone();
+        let diagnostics_config = config.clone();
+        let query_config = config.clone();
+        let (symbols, diagnostics, query) = tokio::join!(
+            call_memory_tool(
+                &symbols_config,
+                json!({
+                    "name": "code.ast.symbols",
+                    "arguments": { "paths": ["src/lib.rs"], "limit": 10 }
+                }),
+            ),
+            call_memory_tool(
+                &diagnostics_config,
+                json!({
+                    "name": "code.ast.diagnostics",
+                    "arguments": { "paths": ["src/bad.rs"], "limit": 1 }
+                }),
+            ),
+            call_memory_tool(
+                &query_config,
+                json!({
+                    "name": "code.ast.query",
+                    "arguments": {
+                        "paths": ["src/lib.rs"],
+                        "language": "rust",
+                        "query": "(function_item name: (identifier) @definition.function)",
+                        "limit": 10
+                    }
+                }),
+            )
+        );
+
+        let symbols = symbols.expect("symbols");
+        let diagnostics = diagnostics.expect("diagnostics");
+        let query = query.expect("query");
+        assert!(
+            symbols["symbols"]
+                .as_array()
+                .expect("symbols")
+                .iter()
+                .any(|symbol| symbol["name"] == "answer")
+        );
+        assert_eq!(
+            diagnostics["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .len(),
+            1
+        );
+        assert_eq!(
+            query["matches"]
+                .as_array()
+                .expect("matches")
+                .iter()
+                .flat_map(|item| item["captures"].as_array().expect("captures"))
+                .filter(|capture| capture["name"] == "definition.function")
+                .count(),
+            2
         );
     }
 

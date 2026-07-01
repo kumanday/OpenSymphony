@@ -553,6 +553,14 @@ areas:
         - runtime
 ```
 
+`code_intel.ast.max_file_bytes`, `max_files_per_request`,
+`max_matches_per_request`, and `max_capture_bytes` bound AST reads, query
+results, and rendered snippets. Generated, vendor, build, and cache directories
+(`.git`, `node_modules`, `target`, `dist`, `build`, `.venv`, `__pycache__`,
+`coverage`, `.next`, `.turbo`, `vendor`, and `generated`) are skipped with
+trace warnings during directory traversal; explicitly requested files inside
+them can still be parsed when they pass path containment and resource limits.
+
 Private memory should stay out of source control. Commit
 `.opensymphony/memory/memory.yaml` and generated public docs when appropriate;
 do not commit issue capsules, markdown indexes, DuckDB, source snapshots, or

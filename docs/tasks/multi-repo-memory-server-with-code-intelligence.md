@@ -61,7 +61,9 @@ Keep **MCP over Streamable HTTP** as the canonical agent/CLI protocol. It still 
 ## Code Intelligence Integration
 
 - Treat DeepWiki/Codemaps as inspiration for a clean-room OpenSymphony capability: generated architecture docs, code maps, source links, summaries, dependency/call graphs, and queryable code understanding.
-- Add `CodeIntelProvider` with initial implementation wrapping the existing repository `CodebaseAnalyzer`.
+- Use the concrete Tree-sitter AST provider as the first structural code-intelligence implementation. It feeds `memory.context --include-code-intel` and the read-only `code.ast.*` MCP tools with source-cited symbols, diagnostics, references, parser/query-pack versions, and content hashes.
+- Keep `CodebaseAnalyzer` as the repository-summary fallback for unsupported languages, no requested paths, parser diagnostics, oversized files, and mixed-path requests.
+- Run parse/query work from async paths through `spawn_blocking`, keep parser/query cursor state local to each task, and rely on configured file, match, and capture limits before adding any cache.
 - Future providers:
   - Qdrant-backed multi-vector embeddings.
   - Colleague code graph adapter.
