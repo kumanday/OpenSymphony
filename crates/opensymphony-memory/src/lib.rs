@@ -392,7 +392,7 @@ pub struct AstCodeIntelConfig {
     pub enabled: bool,
     pub max_file_bytes: u64,
     pub max_files_per_request: usize,
-    pub max_matches_per_file: usize,
+    pub max_matches_per_request: usize,
     pub max_capture_bytes: usize,
 }
 
@@ -527,6 +527,8 @@ struct AstCodeIntelConfigFile {
     max_file_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_files_per_request: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_matches_per_request: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_matches_per_file: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -477,7 +477,7 @@ captures:
   import.path: Import path or module use path
   test.case: Test function or test block
 limits:
-  max_matches_per_file: 2000
+  max_matches_per_request: 2000
   max_capture_bytes: 4096
 ```
 
@@ -689,6 +689,13 @@ Response:
       ],
       "diagnostics": []
     }
+  ],
+  "limit": 20,
+  "trace": [
+    "parsed 1 file(s)",
+    "max files per request 200",
+    "max matches per request 2000",
+    "crates/opensymphony-cli/src/memory.rs lines 1-1400 parser tree-sitter-rust@... query-pack rust@1 content sha256:..."
   ]
 }
 ```
@@ -751,10 +758,23 @@ Response:
       "kind": "reference.call",
       "path": "crates/opensymphony-cli/src/memory.rs",
       "span": { "startLine": 1258, "endLine": 1258 },
-      "snippet": "run_context(&repo_root, &config, args).await"
+      "snippet": "run_context",
+      "truncated": false,
+      "source": {
+        "commitSha": "...",
+        "contentSha256": "...",
+        "queryPackVersion": "rust@1"
+      }
     }
   ],
-  "confidence": "syntactic"
+  "confidence": "syntactic",
+  "limit": 50,
+  "trace": [
+    "parsed 1 file(s)",
+    "max files per request 200",
+    "max matches per request 2000",
+    "crates/opensymphony-cli/src/memory.rs lines 1-1400 parser tree-sitter-rust@... query-pack rust@1 content sha256:..."
+  ]
 }
 ```
 
@@ -1161,7 +1181,7 @@ code_intel:
     persist_by_default: false
     max_file_bytes: 2097152
     max_files_per_request: 200
-    max_matches_per_file: 2000
+    max_matches_per_request: 2000
     query_timeout_ms: 5000
     parsed_tree_cache_entries: 256
     document_cache_bytes: 134217728

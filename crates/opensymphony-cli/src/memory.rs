@@ -1930,7 +1930,8 @@ async fn call_code_ast_symbols_tool(
         let kinds = normalized_string_set_args(&arguments, &["kinds"]);
         let limit = ast_limit(&config, &arguments);
         let mut symbols = Vec::new();
-        for document in ast_documents(&config, &arguments)? {
+        let documents = ast_documents(&config, &arguments)?;
+        for document in &documents {
             for symbol in document.summary.symbols.iter().filter(|symbol| {
                 query
                     .as_ref()
@@ -1954,7 +1955,11 @@ async fn call_code_ast_symbols_tool(
                 break;
             }
         }
-        Ok(json!({ "symbols": symbols, "limit": limit }))
+        Ok(json!({
+            "symbols": symbols,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, symbols.len() >= limit)
+        }))
     })
     .await
 }
@@ -1967,22 +1972,26 @@ async fn call_code_ast_references_tool(
         let symbol = required_string_arg(&arguments, "symbol")?;
         let limit = ast_limit(&config, &arguments);
         let mut references = Vec::new();
-        for document in ast_documents(&config, &arguments)? {
+        let documents = ast_documents(&config, &arguments)?;
+        for document in &documents {
             for capture in document
                 .summary
                 .captures
                 .iter()
                 .filter(|capture| capture.capture_name.starts_with("reference."))
-                .filter(|capture| capture.text.contains(&symbol))
+                .filter(|capture| capture_matches_symbol(&capture.text, &symbol))
             {
                 if references.len() >= limit {
                     break;
                 }
+                let (snippet, truncated) =
+                    truncate_capture(&capture.text, config.code_intel.ast.max_capture_bytes);
                 references.push(json!({
                     "kind": capture.capture_name,
                     "path": document.display,
                     "span": span_json(&capture.span),
-                    "snippet": truncate_capture(&capture.text, config.code_intel.ast.max_capture_bytes).0,
+                    "snippet": snippet,
+                    "truncated": truncated,
                     "source": source_json(&document.summary)
                 }));
             }
@@ -1990,7 +1999,12 @@ async fn call_code_ast_references_tool(
                 break;
             }
         }
-        Ok(json!({ "references": references, "confidence": "syntactic", "limit": limit }))
+        Ok(json!({
+            "references": references,
+            "confidence": "syntactic",
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, references.len() >= limit)
+        }))
     })
     .await
 }
@@ -2130,9 +2144,6 @@ fn ast_documents(
                 repo_root: repo_root.clone(),
             })?
             .to_path_buf();
-        if crate::opensymphony_code_intel::detect_language(&relative).is_none() {
-            continue;
-        }
         let metadata = fs::metadata(&path).map_err(|source| MemoryError::ReadFile {
             path: path.clone(),
             source,
@@ -2199,6 +2210,9 @@ fn collect_ast_files(
         });
     }
     if resolved.is_file() {
+        if !ast_file_is_supported(repo_root, &resolved)? {
+            return Ok(());
+        }
         files.push(resolved);
         return Ok(());
     }
@@ -2226,15 +2240,39 @@ fn collect_ast_files(
         })?;
         if file_type.is_dir() {
             collect_ast_files(repo_root, &entry.path(), max_files, files)?;
-        } else if file_type.is_file() {
+        } else if file_type.is_file() && ast_file_is_supported(repo_root, &entry.path())? {
             files.push(entry.path());
         }
     }
     Ok(())
 }
 
+fn ast_file_is_supported(repo_root: &Path, path: &Path) -> Result<bool, MemoryError> {
+    let relative = path
+        .strip_prefix(repo_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: path.to_path_buf(),
+            repo_root: repo_root.to_path_buf(),
+        })?;
+    Ok(crate::opensymphony_code_intel::detect_language(relative).is_some())
+}
+
+fn capture_matches_symbol(capture_text: &str, symbol: &str) -> bool {
+    capture_text.match_indices(symbol).any(|(start, value)| {
+        let end = start + value.len();
+        let before = capture_text[..start].chars().next_back();
+        let after = capture_text[end..].chars().next();
+        before.is_none_or(|value| !is_identifier_char(value))
+            && after.is_none_or(|value| !is_identifier_char(value))
+    })
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value == '_' || value.is_alphanumeric()
+}
+
 fn ast_limit(config: &MemoryConfig, arguments: &Value) -> usize {
-    usize_arg(arguments, "limit", 50).min(config.code_intel.ast.max_matches_per_file)
+    usize_arg(arguments, "limit", 50).min(config.code_intel.ast.max_matches_per_request)
 }
 
 fn ast_language_ids() -> Vec<&'static str> {
@@ -2256,7 +2294,7 @@ fn ast_limits_json(config: &MemoryConfig) -> Value {
     json!({
         "maxFileBytes": config.code_intel.ast.max_file_bytes,
         "maxFilesPerRequest": config.code_intel.ast.max_files_per_request,
-        "maxMatchesPerFile": config.code_intel.ast.max_matches_per_file,
+        "maxMatchesPerRequest": config.code_intel.ast.max_matches_per_request,
         "maxCaptureBytes": config.code_intel.ast.max_capture_bytes
     })
 }
@@ -2273,8 +2311,8 @@ fn ast_trace_json(
             config.code_intel.ast.max_files_per_request
         ),
         format!(
-            "max matches per file {}",
-            config.code_intel.ast.max_matches_per_file
+            "max matches per request {}",
+            config.code_intel.ast.max_matches_per_request
         ),
     ];
     if truncated {
@@ -5322,6 +5360,35 @@ Public memory concept.
     }
 
     #[tokio::test]
+    async fn code_ast_status_returns_provider_versions_and_limits() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let status = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": {}
+            }),
+        )
+        .await
+        .expect("status");
+
+        assert_eq!(status["provider"], "tree-sitter-ast");
+        assert_eq!(status["available"], true);
+        assert!(
+            status["languages"]
+                .as_array()
+                .expect("languages")
+                .iter()
+                .any(|language| language == "rust")
+        );
+        assert_eq!(status["queryPackVersions"]["rust"], RUST_QUERY_PACK_VERSION);
+        assert_eq!(status["limits"]["maxMatchesPerRequest"], 2000);
+    }
+
+    #[tokio::test]
     async fn code_ast_outline_symbols_and_query_return_source_citations() {
         let repo = TempDir::new().expect("temp repo");
         let repo_root = repo.path().canonicalize().expect("canonical repo");
@@ -5381,6 +5448,13 @@ Public memory concept.
             symbols["symbols"][0]["source"]["queryPackVersion"],
             RUST_QUERY_PACK_VERSION
         );
+        assert!(
+            symbols["trace"]
+                .as_array()
+                .expect("symbols trace")
+                .iter()
+                .any(|line| line.as_str().expect("trace line").contains("src/lib.rs"))
+        );
 
         let query = call_memory_tool(
             &config,
@@ -5413,10 +5487,16 @@ Public memory concept.
         std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
         std::fs::write(
             repo_root.join("src/lib.rs"),
-            "fn helper() -> u8 { 42 }\npub fn answer() -> u8 { helper() }\n",
+            "fn helper() {}\nfn myhelper() {}\npub fn answer() { helper(); myhelper(); }\n",
         )
         .expect("source");
-        let config = MemoryConfig::load(&repo_root, None).expect("config");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_capture_bytes: 3\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
 
         let references = call_memory_tool(
             &config,
@@ -5427,13 +5507,29 @@ Public memory concept.
         )
         .await
         .expect("references");
+        assert_eq!(
+            references["references"]
+                .as_array()
+                .expect("references")
+                .len(),
+            1
+        );
         let first = &references["references"][0];
 
         assert_eq!(first["path"], "src/lib.rs");
         assert_eq!(first["kind"], "reference.call");
-        assert_eq!(first["span"]["startLine"], 2);
+        assert_eq!(first["span"]["startLine"], 3);
+        assert_eq!(first["snippet"], "hel");
+        assert_eq!(first["truncated"], true);
         assert!(first["source"]["contentSha256"].as_str().is_some());
         assert_eq!(first["source"]["queryPackVersion"], RUST_QUERY_PACK_VERSION);
+        assert!(
+            references["trace"]
+                .as_array()
+                .expect("references trace")
+                .iter()
+                .any(|line| line.as_str().expect("trace line").contains("src/lib.rs"))
+        );
     }
 
     #[tokio::test]
@@ -5474,7 +5570,7 @@ Public memory concept.
         let config_path = repo_root.join("opensymphony-memory.yaml");
         std::fs::write(
             &config_path,
-            "code_intel:\n  ast:\n    max_matches_per_file: 1\n",
+            "code_intel:\n  ast:\n    max_matches_per_request: 1\n",
         )
         .expect("config");
         let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
@@ -5491,6 +5587,41 @@ Public memory concept.
 
         assert_eq!(symbols["symbols"].as_array().expect("symbols").len(), 1);
         assert_eq!(symbols["limit"], 1);
+    }
+
+    #[tokio::test]
+    async fn code_ast_file_limit_counts_supported_source_files() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/aaa.bin"), b"notes").expect("notes");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_files_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let symbols = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("symbols");
+
+        assert_eq!(symbols["symbols"][0]["name"], "answer");
+        assert!(
+            symbols["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line.as_str().expect("trace line").contains("parsed 1 file"))
+        );
     }
 
     #[tokio::test]

@@ -531,7 +531,7 @@ code_intel:
     enabled: true
     max_file_bytes: 2097152
     max_files_per_request: 200
-    max_matches_per_file: 2000
+    max_matches_per_request: 2000
     max_capture_bytes: 4096
 docs:
   public_root: docs

@@ -82,7 +82,10 @@ impl MemoryConfig {
                     enabled: ast.enabled.unwrap_or(true),
                     max_file_bytes: ast.max_file_bytes.unwrap_or(2_097_152),
                     max_files_per_request: ast.max_files_per_request.unwrap_or(200),
-                    max_matches_per_file: ast.max_matches_per_file.unwrap_or(2_000),
+                    max_matches_per_request: ast
+                        .max_matches_per_request
+                        .or(ast.max_matches_per_file)
+                        .unwrap_or(2_000),
                     max_capture_bytes: ast.max_capture_bytes.unwrap_or(4_096),
                 },
             },
@@ -241,7 +244,8 @@ fn write_memory_config(config: &MemoryConfig) -> Result<(), MemoryError> {
                 enabled: Some(config.code_intel.ast.enabled),
                 max_file_bytes: Some(config.code_intel.ast.max_file_bytes),
                 max_files_per_request: Some(config.code_intel.ast.max_files_per_request),
-                max_matches_per_file: Some(config.code_intel.ast.max_matches_per_file),
+                max_matches_per_request: Some(config.code_intel.ast.max_matches_per_request),
+                max_matches_per_file: None,
                 max_capture_bytes: Some(config.code_intel.ast.max_capture_bytes),
             }),
         }),
@@ -303,7 +307,8 @@ fn render_memory_init_config(repo_root: &Path) -> Result<String, MemoryError> {
                 enabled: Some(true),
                 max_file_bytes: Some(2_097_152),
                 max_files_per_request: Some(200),
-                max_matches_per_file: Some(2_000),
+                max_matches_per_request: Some(2_000),
+                max_matches_per_file: None,
                 max_capture_bytes: Some(4_096),
             }),
         }),
