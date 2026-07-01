@@ -22,7 +22,7 @@ pub const ISSUE_CAPSULE_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED ISSUE CAP
 pub const ISSUE_CAPSULE_END: &str = "<!-- END OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const TOPIC_DOC_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->";
 pub const TOPIC_DOC_END: &str = "<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->";
-const MEMORY_SCHEMA_VERSION: i64 = 2;
+const MEMORY_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -138,6 +138,9 @@ pub enum MemoryRecordKind {
     IssueCapsule,
     TopicDoc,
     CodeContext,
+    CodeSymbol,
+    CodeEdge,
+    CodeDiagnostic,
     RunSummary,
 }
 
@@ -236,6 +239,83 @@ pub trait CodeIntelIndex {
         scope_refs: &[KnowledgeScope],
         limit: usize,
     ) -> Result<Vec<CodeIntelArtifact>, MemoryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelPersistBatch {
+    pub repo_id: String,
+    pub commit_sha: Option<String>,
+    pub worktree_dirty: bool,
+    pub documents: Vec<CodeIntelDocumentInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelDocumentInput {
+    pub path: PathBuf,
+    pub language: String,
+    pub content_sha256: String,
+    pub parser_id: String,
+    pub parser_version: String,
+    pub query_pack_version: String,
+    pub byte_len: usize,
+    pub line_count: usize,
+    pub symbols: Vec<CodeIntelSymbolInput>,
+    pub edges: Vec<CodeIntelEdgeInput>,
+    pub diagnostics: Vec<CodeIntelDiagnosticInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelSymbolInput {
+    pub kind: String,
+    pub name: String,
+    pub signature: Option<String>,
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub selection_start_line: usize,
+    pub selection_end_line: usize,
+    pub snippet_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelEdgeInput {
+    pub edge_kind: String,
+    pub target_hint: Option<String>,
+    pub confidence: String,
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelDiagnosticInput {
+    pub kind: String,
+    pub severity: String,
+    pub message: String,
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelPersistReport {
+    pub parsed_files: usize,
+    pub persisted_documents: usize,
+    pub persisted_symbols: usize,
+    pub persisted_edges: usize,
+    pub persisted_diagnostics: usize,
+    pub stale_rows: usize,
+    pub skipped_files: Vec<String>,
+    pub diagnostics: Vec<String>,
 }
 
 pub trait FusionRetriever {

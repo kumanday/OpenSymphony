@@ -14,21 +14,26 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use crate::{
-    opensymphony_code_intel::CompositeCodeIntelProvider,
+    opensymphony_code_intel::{
+        AstDiagnosticKind, CaptureRecord, CompositeCodeIntelProvider, PROVIDER_NAME,
+        ParsedDocumentSummary, SourceLanguage, SymbolKind, parse_path,
+    },
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
-        ArchivePlan, CodeIntelArtifact, CodeIntelIndex, CommentEvidence, DocsSyncPlan,
-        IssueEvidence, IssueLinkEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind,
-        LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport,
-        MemoryScopeFilter, MemoryVisibility, SourceFile, archive_blocking_warning_count, brief,
-        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, plan_archive, plan_capture, plan_docs_sync, plan_memory_init,
-        refresh_memory_index, refresh_memory_index_from_okf, related_by_area_with_scope,
-        related_by_issue_with_scope, related_by_paths_with_scope, render_archive_plan,
-        render_capture_dry_run, search_with_scope, status_with_scope, write_capture_plan,
-        write_docs_sync_plan, write_memory_init_plan,
+        ArchivePlan, CodeIntelArtifact, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
+        CodeIntelEdgeInput, CodeIntelIndex, CodeIntelPersistBatch, CodeIntelSymbolInput,
+        CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence, IssueSelection,
+        KnowledgeScope, KnowledgeScopeKind, LintSeverity, MemoryConfig, MemoryContextOptions,
+        MemoryError, MemoryReindexReport, MemoryScopeFilter, MemorySourceRef, MemoryVisibility,
+        SourceFile, archive_blocking_warning_count, brief, context_for_issue_with_options,
+        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
+        lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
+        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
+        refresh_memory_index_from_okf, related_by_area_with_scope, related_by_issue_with_scope,
+        related_by_paths_with_scope, render_archive_plan, render_capture_dry_run,
+        search_with_scope, sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
+        write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -1964,11 +1969,54 @@ async fn call_memory_ingest_code_intel_tool(
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let limit = usize_arg(arguments, "limit", 10);
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
-    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    let persist = bool_arg(arguments, "persist");
+    let (artifacts, persist_report) = if persist {
+        let languages = normalized_string_set_args(arguments, &["languages"]);
+        let symbols = normalized_string_set_args(arguments, &["symbols"]);
+        let query_packs = string_set_args(
+            arguments,
+            &["queryPack", "queryPacks", "query_pack", "query_packs"],
+        );
+        let (artifacts, report) = code_intel_persist_artifacts_blocking(CodeIntelPersistRequest {
+            config: config.clone(),
+            scope: scope.clone(),
+            paths,
+            scope_refs,
+            limit,
+            languages,
+            symbols,
+            query_packs,
+        })
+        .await?;
+        (artifacts, Some(report))
+    } else {
+        let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+        let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+        (artifacts, None)
+    };
+    let (parsed_files, persisted_rows, stale_rows, skipped_files, diagnostics) =
+        if let Some(report) = persist_report {
+            (
+                report.parsed_files,
+                report.persisted_documents
+                    + report.persisted_symbols
+                    + report.persisted_edges
+                    + report.persisted_diagnostics,
+                report.stale_rows,
+                report.skipped_files,
+                report.diagnostics,
+            )
+        } else {
+            (0, 0, 0, Vec::new(), Vec::new())
+        };
     Ok(json!({
-        "persisted": false,
+        "persisted": persist,
+        "parsedFiles": parsed_files,
+        "persistedRows": persisted_rows,
+        "staleRows": stale_rows,
+        "skippedFiles": skipped_files,
+        "diagnostics": diagnostics,
         "artifactCount": artifacts.len(),
         "artifacts": artifacts.into_iter().map(|artifact| json!({
             "provider": artifact.provider,
@@ -1983,6 +2031,445 @@ async fn call_memory_ingest_code_intel_tool(
             })).collect::<Vec<_>>()
         })).collect::<Vec<_>>()
     }))
+}
+
+struct CodeIntelPersistencePlan {
+    artifacts: Vec<CodeIntelArtifact>,
+    documents: Vec<CodeIntelDocumentInput>,
+    skipped_files: Vec<String>,
+    diagnostics: Vec<String>,
+}
+
+struct CodeIntelPersistRequest {
+    config: MemoryConfig,
+    scope: MemoryScopeFilter,
+    paths: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    limit: usize,
+    languages: BTreeSet<String>,
+    symbols: BTreeSet<String>,
+    query_packs: BTreeSet<String>,
+}
+
+async fn code_intel_persist_artifacts_blocking(
+    request: CodeIntelPersistRequest,
+) -> Result<
+    (
+        Vec<CodeIntelArtifact>,
+        crate::opensymphony_memory::CodeIntelPersistReport,
+    ),
+    MemoryError,
+> {
+    tokio::task::spawn_blocking(move || {
+        let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+        let plan = code_intel_documents_for_persistence(&request)?;
+        let mut report = persist_code_intel_documents(
+            &request.config,
+            CodeIntelPersistBatch {
+                repo_id: repo_id_for_code_intel(&request.config, &request.scope),
+                commit_sha: git_commit_sha_for_repo(&repo_root),
+                worktree_dirty: git_worktree_dirty(&repo_root),
+                documents: plan.documents,
+            },
+        )?;
+        report.skipped_files = plan.skipped_files;
+        report.diagnostics = plan.diagnostics;
+        Ok((plan.artifacts, report))
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "code-intelligence persistence task failed: {error}"
+        ))
+    })?
+}
+
+fn code_intel_documents_for_persistence(
+    request: &CodeIntelPersistRequest,
+) -> Result<CodeIntelPersistencePlan, MemoryError> {
+    let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+    let mut artifacts = Vec::new();
+    let mut documents = Vec::new();
+    let mut skipped_files = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut parsed_files = 0usize;
+    let mut query_runs = 0usize;
+    let mut remaining_symbols = request.limit;
+    let commit_sha = git_commit_sha_for_repo(&repo_root);
+    for path in &request.paths {
+        let resolved = repo_existing_path_from_path(&request.config, path)?;
+        let relative = resolved
+            .strip_prefix(&repo_root)
+            .map_err(|_| MemoryError::PathOutsideRepo {
+                path: resolved.clone(),
+                repo_root: repo_root.clone(),
+            })?
+            .to_path_buf();
+        let relative_display = relative.to_string_lossy().to_string();
+        let Some(language) = crate::opensymphony_code_intel::detect_language(&relative) else {
+            skipped_files.push(format!("{relative_display}: unsupported language"));
+            continue;
+        };
+        let language_id = source_language_id(language);
+        if !request.languages.is_empty() && !request.languages.contains(language_id) {
+            skipped_files.push(format!(
+                "{relative_display}: language `{language_id}` not selected"
+            ));
+            continue;
+        }
+        let source = fs::read_to_string(&resolved).map_err(|source| MemoryError::ReadFile {
+            path: resolved.clone(),
+            source,
+        })?;
+        let summary = match parse_path(&relative, &source) {
+            Ok(summary) => summary,
+            Err(error) => {
+                skipped_files.push(format!("{relative_display}: parse failed"));
+                diagnostics.push(format!("{relative_display}: {error}"));
+                continue;
+            }
+        };
+        if !request.query_packs.is_empty()
+            && !request.query_packs.contains(&summary.versions.query_pack)
+        {
+            skipped_files.push(format!(
+                "{relative_display}: query pack `{}` not selected",
+                summary.versions.query_pack
+            ));
+            continue;
+        }
+        for diagnostic in &summary.diagnostics {
+            diagnostics.push(format!(
+                "{relative_display}: {} at {}",
+                diagnostic.node_kind, diagnostic.rendered_span
+            ));
+        }
+        parsed_files += 1;
+        query_runs += 1;
+        let (summary_artifacts, used_symbols) = code_intel_artifacts_for_summary(
+            &summary,
+            &relative,
+            &relative_display,
+            &request.scope_refs,
+            commit_sha.clone(),
+            &request.symbols,
+            remaining_symbols,
+        );
+        remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
+        artifacts.extend(summary_artifacts);
+        documents.push(code_intel_document_input(
+            relative,
+            source,
+            summary,
+            &request.symbols,
+            used_symbols,
+        ));
+    }
+    artifacts.push(code_intel_trace_artifact(
+        &request.scope_refs,
+        parsed_files,
+        query_runs,
+        &skipped_files,
+    ));
+    Ok(CodeIntelPersistencePlan {
+        artifacts,
+        documents,
+        skipped_files,
+        diagnostics,
+    })
+}
+
+fn code_intel_artifacts_for_summary(
+    summary: &ParsedDocumentSummary,
+    relative_path: &Path,
+    relative_display: &str,
+    scope_refs: &[KnowledgeScope],
+    commit_sha: Option<String>,
+    symbols: &BTreeSet<String>,
+    symbol_limit: usize,
+) -> (Vec<CodeIntelArtifact>, usize) {
+    let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
+    let mut artifacts = vec![CodeIntelArtifact {
+        provider: summary.versions.provider.clone(),
+        kind: "ast-summary".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: vec![MemorySourceRef {
+            kind: "path".to_string(),
+            id: relative_display.to_string(),
+            url: None,
+        }],
+        path: Some(relative_path.to_path_buf()),
+        commit_sha: commit_sha.clone(),
+        title: relative_display.to_string(),
+        summary: format!(
+            "- Language: {}\n- Content hash: sha256:{}\n- Parser: {} ({}, {})\n- Query pack: {}\n- Diagnostics: {diagnostic_summary}",
+            source_language_id(summary.source.language),
+            summary.source.sha256,
+            summary.versions.provider,
+            summary.versions.grammar,
+            summary.versions.tree_sitter,
+            summary.versions.query_pack,
+        ),
+    }];
+
+    let selected_symbols = summary
+        .symbols
+        .iter()
+        .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
+        .take(symbol_limit)
+        .collect::<Vec<_>>();
+
+    if selected_symbols.is_empty() {
+        return (artifacts, 0);
+    }
+
+    let used_symbols = selected_symbols.len();
+    let rendered_symbols = selected_symbols
+        .iter()
+        .map(|symbol| {
+            format!(
+                "- {} `{}` at {}:{}",
+                symbol_kind_id(&symbol.kind),
+                symbol.name,
+                relative_display,
+                symbol.rendered_span
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    artifacts.push(CodeIntelArtifact {
+        provider: PROVIDER_NAME.to_string(),
+        kind: "ast-symbols".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: selected_symbols
+            .iter()
+            .map(|symbol| MemorySourceRef {
+                kind: "code-symbol".to_string(),
+                id: format!("{relative_display}:{}", symbol.rendered_span),
+                url: None,
+            })
+            .collect(),
+        path: Some(relative_path.to_path_buf()),
+        commit_sha,
+        title: format!("Symbols in {relative_display}"),
+        summary: rendered_symbols,
+    });
+    (artifacts, used_symbols)
+}
+
+fn diagnostics_summary(diagnostics: &[crate::opensymphony_code_intel::AstDiagnostic]) -> String {
+    let errors = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == AstDiagnosticKind::Error)
+        .count();
+    let missing = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == AstDiagnosticKind::Missing)
+        .count();
+    format!("{errors} ERROR, {missing} MISSING")
+}
+
+fn code_intel_trace_artifact(
+    scope_refs: &[KnowledgeScope],
+    parsed_files: usize,
+    query_runs: usize,
+    skipped_files: &[String],
+) -> CodeIntelArtifact {
+    let fallback = if skipped_files.is_empty() {
+        "fallback: CodebaseAnalyzer not used".to_string()
+    } else {
+        format!(
+            "fallback: CodebaseAnalyzer not used in persistent ingest ({})",
+            skipped_files.join("; ")
+        )
+    };
+    CodeIntelArtifact {
+        provider: "composite-code-intel".to_string(),
+        kind: "trace".to_string(),
+        scope_refs: scope_refs.to_vec(),
+        source_refs: Vec::new(),
+        path: None,
+        commit_sha: None,
+        title: "Code-intelligence trace".to_string(),
+        summary: format!(
+            "- parse: parsed {parsed_files} file(s)\n- query: ran {query_runs} Tree-sitter query pack(s)\n- {fallback}"
+        ),
+    }
+}
+
+fn code_intel_document_input(
+    path: PathBuf,
+    source: String,
+    summary: ParsedDocumentSummary,
+    symbols: &BTreeSet<String>,
+    symbol_limit: usize,
+) -> CodeIntelDocumentInput {
+    let language = source_language_id(summary.source.language).to_string();
+    let parser_version = format!(
+        "{}:{}",
+        summary.versions.grammar, summary.versions.tree_sitter
+    );
+    CodeIntelDocumentInput {
+        path,
+        language,
+        content_sha256: summary.source.sha256.clone(),
+        parser_id: summary.versions.provider.clone(),
+        parser_version: parser_version.clone(),
+        query_pack_version: summary.versions.query_pack.clone(),
+        byte_len: summary.source.bytes,
+        line_count: source.lines().count(),
+        symbols: summary
+            .symbols
+            .iter()
+            .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
+            .take(symbol_limit)
+            .map(|symbol| {
+                let snippet = source
+                    .get(symbol.span.start_byte..symbol.span.end_byte)
+                    .unwrap_or(symbol.name.as_str());
+                CodeIntelSymbolInput {
+                    kind: symbol_kind_id(&symbol.kind).to_string(),
+                    name: symbol.name.clone(),
+                    signature: None,
+                    start_line: symbol.span.start_line,
+                    start_col: symbol.span.start_column,
+                    end_line: symbol.span.end_line,
+                    end_col: symbol.span.end_column,
+                    start_byte: symbol.span.start_byte,
+                    end_byte: symbol.span.end_byte,
+                    selection_start_line: symbol.span.start_line,
+                    selection_end_line: symbol.span.end_line,
+                    snippet_sha256: sha256_hex(snippet),
+                }
+            })
+            .collect(),
+        edges: summary
+            .captures
+            .iter()
+            .filter_map(code_intel_edge_input)
+            .collect(),
+        diagnostics: summary
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let (kind, severity) = match diagnostic.kind {
+                    AstDiagnosticKind::Error => ("error", "error"),
+                    AstDiagnosticKind::Missing => ("missing", "warning"),
+                };
+                CodeIntelDiagnosticInput {
+                    kind: kind.to_string(),
+                    severity: severity.to_string(),
+                    message: format!("{} parse diagnostic", diagnostic.node_kind),
+                    start_line: diagnostic.span.start_line,
+                    start_col: diagnostic.span.start_column,
+                    end_line: diagnostic.span.end_line,
+                    end_col: diagnostic.span.end_column,
+                    start_byte: diagnostic.span.start_byte,
+                    end_byte: diagnostic.span.end_byte,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn code_intel_edge_input(capture: &CaptureRecord) -> Option<CodeIntelEdgeInput> {
+    if !matches!(
+        capture.capture_name.split('.').next(),
+        Some("reference" | "import" | "export" | "test")
+    ) {
+        return None;
+    }
+    Some(CodeIntelEdgeInput {
+        edge_kind: capture.capture_name.clone(),
+        target_hint: Some(capture.text.clone()),
+        confidence: format!("query_pack:{}", capture.query_name),
+        start_line: capture.span.start_line,
+        start_col: capture.span.start_column,
+        end_line: capture.span.end_line,
+        end_col: capture.span.end_column,
+        start_byte: capture.span.start_byte,
+        end_byte: capture.span.end_byte,
+    })
+}
+
+fn string_set_args(arguments: &Value, keys: &[&str]) -> BTreeSet<String> {
+    keys.iter()
+        .flat_map(|key| string_list_arg(arguments, key))
+        .collect()
+}
+
+fn normalized_string_set_args(arguments: &Value, keys: &[&str]) -> BTreeSet<String> {
+    keys.iter()
+        .flat_map(|key| string_list_arg(arguments, key))
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
+fn repo_id_for_code_intel(config: &MemoryConfig, scope: &MemoryScopeFilter) -> String {
+    scope.repo.clone().unwrap_or_else(|| {
+        config
+            .repo_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repo")
+            .to_string()
+    })
+}
+
+fn git_commit_sha_for_repo(repo_root: &Path) -> Option<String> {
+    let output = process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_worktree_dirty(repo_root: &Path) -> bool {
+    process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(repo_root)
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+fn source_language_id(language: SourceLanguage) -> &'static str {
+    match language {
+        SourceLanguage::Rust => "rust",
+        SourceLanguage::TypeScript => "typescript",
+        SourceLanguage::Tsx => "tsx",
+        SourceLanguage::JavaScript => "javascript",
+        SourceLanguage::Jsx => "jsx",
+        SourceLanguage::Python => "python",
+        SourceLanguage::Json => "json",
+        SourceLanguage::Yaml => "yaml",
+        SourceLanguage::Toml => "toml",
+        SourceLanguage::Markdown => "markdown",
+    }
+}
+
+fn symbol_kind_id(kind: &SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Module => "module",
+        SymbolKind::Class => "class",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Type => "type",
+        SymbolKind::Function => "function",
+        SymbolKind::Method => "method",
+        SymbolKind::Constructor => "constructor",
+        SymbolKind::Field => "field",
+        SymbolKind::Variable => "variable",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Test => "test",
+        SymbolKind::Document => "document",
+    }
 }
 
 fn mcp_text(text: String) -> Value {
@@ -2289,7 +2776,7 @@ fn resolve_code_intel_repo(
     repo: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let Some(repo) = repo.and_then(non_empty) else {
-        return Ok(config.repo_root.clone());
+        return repo_existing_path(config, ".");
     };
     let resolved = repo_existing_path(config, &repo)?;
     if !resolved.is_dir() {
@@ -3521,13 +4008,19 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, authorize_memory_request, call_memory_tool, context_source_from_mcp,
-        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
+        MemoryServerAuth, authorize_memory_request, call_memory_ingest_code_intel_tool,
+        call_memory_tool, context_source_from_mcp, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_intel_repo, trim_auto_memory_status_log,
     };
-    use crate::opensymphony_memory::{MemoryConfig, MemoryError};
+    use crate::opensymphony_memory::{
+        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
+        CodeIntelPersistBatch, CodeIntelSymbolInput, MemoryConfig, MemoryError,
+        persist_code_intel_documents,
+    };
     use axum::http::{HeaderMap, HeaderValue, header};
+    use duckdb::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -3569,6 +4062,14 @@ mod tests {
             method: "tools/call".to_string(),
             params: json!({ "name": "memory.export_okf" }),
         };
+        let persistent_code_ingest_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "memory.ingest_code_intel",
+                "arguments": { "persist": true }
+            }),
+        };
 
         assert_eq!(
             required_access_for_request(&read_request),
@@ -3582,6 +4083,500 @@ mod tests {
             required_access_for_request(&okf_export_request),
             MemoryServerAccess::Admin
         );
+        assert_eq!(
+            required_access_for_request(&persistent_code_ingest_request),
+            MemoryServerAccess::Admin
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_persists_structured_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "use std::fmt::Debug;\npub fn answer() -> u8 { helper() }\nfn helper() -> u8 { 42 }\n",
+        )
+        .expect("valid source");
+        std::fs::write(repo.path().join("src/bad.rs"), "pub fn broken( {\n").expect("bad source");
+        std::fs::write(repo.path().join("notes.txt"), "not code\n").expect("notes source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src/lib.rs", "src/bad.rs", "notes.txt"],
+                "persist": true,
+                "limit": 20
+            }),
+        )
+        .await
+        .expect("ingest succeeds");
+
+        assert_eq!(result["persisted"], true);
+        assert_eq!(result["parsedFiles"], 2);
+        assert!(result["persistedRows"].as_u64().expect("rows") > 2);
+        assert!(
+            result["skippedFiles"][0]
+                .as_str()
+                .expect("skipped file")
+                .contains("unsupported language")
+        );
+        assert!(
+            result["diagnostics"][0]
+                .as_str()
+                .expect("diagnostic")
+                .contains("src/bad.rs")
+        );
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 2);
+        assert!(count_rows(&connection, "code_symbols", "current") > 0);
+        assert!(count_rows(&connection, "code_edges", "current") > 0);
+        assert!(count_rows(&connection, "code_diagnostics", "current") > 0);
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_defaults_to_artifacts_without_persistence() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src/lib.rs"],
+                "limit": 20
+            }),
+        )
+        .await
+        .expect("ingest succeeds");
+
+        assert_eq!(result["persisted"], false);
+        assert!(result["artifactCount"].as_u64().expect("artifacts") > 0);
+        assert!(
+            !repo
+                .path()
+                .join(".opensymphony/memory/memory.duckdb")
+                .exists(),
+            "non-persistent ingest should not create the DuckDB index"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_limit_caps_persisted_symbols() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn one() -> u8 { 1 }\npub fn two() -> u8 { 2 }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src/lib.rs"],
+                "persist": true,
+                "limit": 1
+            }),
+        )
+        .await
+        .expect("ingest succeeds");
+
+        assert_eq!(result["persisted"], true);
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_stales_content_and_query_pack_changes() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        let source_path = repo.path().join("src/lib.rs");
+        std::fs::write(&source_path, "pub fn answer() -> u8 { 42 }\n").expect("source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src/lib.rs"],
+                "persist": true
+            }),
+        )
+        .await
+        .expect("initial ingest");
+        std::fs::write(&source_path, "pub fn answer() -> u8 { 43 }\n").expect("edited source");
+        let edited = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src/lib.rs"],
+                "persist": true
+            }),
+        )
+        .await
+        .expect("edited ingest");
+        assert!(edited["staleRows"].as_u64().expect("stale rows") > 0);
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        let (content_sha256, parser_version): (String, String) = connection
+            .query_row(
+                "SELECT content_sha256, parser_version FROM code_documents WHERE freshness = 'current' AND path = 'src/lib.rs' LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current document");
+        drop(connection);
+
+        let report = persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: repo
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("repo")
+                    .to_string(),
+                commit_sha: None,
+                worktree_dirty: false,
+                documents: vec![CodeIntelDocumentInput {
+                    path: "src/lib.rs".into(),
+                    language: "rust".to_string(),
+                    content_sha256,
+                    parser_id: "tree-sitter".to_string(),
+                    parser_version,
+                    query_pack_version: "rust-query-pack-v999".to_string(),
+                    byte_len: 28,
+                    line_count: 1,
+                    symbols: Vec::new(),
+                    edges: Vec::new(),
+                    diagnostics: Vec::new(),
+                }],
+            },
+        )
+        .expect("manual query-pack persist");
+        assert!(
+            report.stale_rows > 0,
+            "query-pack version drift should mark prior rows stale"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert!(count_rows(&connection, "code_documents", "stale") >= 2);
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+    }
+
+    #[test]
+    fn code_intel_dirty_worktree_freshness_is_consistent_for_child_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let clean_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("old".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        persist_code_intel_documents(&config, clean_batch).expect("clean persist");
+
+        let dirty_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("new".to_string()),
+            worktree_dirty: true,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        let report =
+            persist_code_intel_documents(&config, dirty_batch).expect("dirty same-content persist");
+        assert_eq!(
+            report.stale_rows, 0,
+            "dirty reingest carve-out should apply to parent and child rows"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_edges", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 0);
+    }
+
+    #[test]
+    fn code_intel_clean_commit_only_reingest_does_not_report_stale_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let first_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("old".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        persist_code_intel_documents(&config, first_batch).expect("first persist");
+
+        let second_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("new".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        let report = persist_code_intel_documents(&config, second_batch)
+            .expect("same artifact, new commit persist");
+        assert_eq!(
+            report.stale_rows, 0,
+            "commit-only reingest should replace provenance without reporting phantom stale rows"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_documents", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_symbols", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_edges", "stale"), 0);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 0);
+    }
+
+    #[test]
+    fn code_intel_parser_version_drift_keeps_stale_child_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let first_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("same".to_string()),
+            worktree_dirty: false,
+            documents: vec![sample_code_intel_document("hash-a", "pack-a")],
+        };
+        persist_code_intel_documents(&config, first_batch).expect("first persist");
+
+        let mut changed_parser = sample_code_intel_document("hash-a", "pack-a");
+        changed_parser.parser_version = "tree-sitter-rust:0.27.0".to_string();
+        let second_batch = CodeIntelPersistBatch {
+            repo_id: "repo".to_string(),
+            commit_sha: Some("same".to_string()),
+            worktree_dirty: false,
+            documents: vec![changed_parser],
+        };
+        let report =
+            persist_code_intel_documents(&config, second_batch).expect("parser drift persist");
+        assert!(
+            report.stale_rows > 0,
+            "parser-version drift should report stale rows"
+        );
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_documents", "stale"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "stale"), 1);
+        assert_eq!(count_rows(&connection, "code_edges", "stale"), 1);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "stale"), 1);
+    }
+
+    #[test]
+    fn code_intel_diagnostic_severity_tracks_diagnostic_kind() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.diagnostics = vec![
+            CodeIntelDiagnosticInput {
+                kind: "error".to_string(),
+                severity: "error".to_string(),
+                message: "ERROR parse diagnostic".to_string(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 5,
+                start_byte: 0,
+                end_byte: 5,
+            },
+            CodeIntelDiagnosticInput {
+                kind: "missing".to_string(),
+                severity: "warning".to_string(),
+                message: "MISSING parse diagnostic".to_string(),
+                start_line: 2,
+                start_col: 0,
+                end_line: 2,
+                end_col: 5,
+                start_byte: 6,
+                end_byte: 11,
+            },
+        ];
+
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("same".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist diagnostics");
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        let severities = connection
+            .prepare("SELECT kind, severity FROM code_diagnostics ORDER BY kind")
+            .expect("prepare diagnostics")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query diagnostics")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("diagnostics rows");
+        assert_eq!(
+            severities,
+            vec![
+                ("error".to_string(), "error".to_string()),
+                ("missing".to_string(), "warning".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn code_intel_same_line_edges_and_diagnostics_keep_distinct_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.edges = vec![
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("answer".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 6,
+                start_byte: 0,
+                end_byte: 6,
+            },
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("answer".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 1,
+                start_col: 8,
+                end_line: 1,
+                end_col: 14,
+                start_byte: 8,
+                end_byte: 14,
+            },
+        ];
+        document.diagnostics = vec![
+            CodeIntelDiagnosticInput {
+                kind: "missing".to_string(),
+                severity: "warning".to_string(),
+                message: "MISSING parse diagnostic".to_string(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 1,
+                start_byte: 0,
+                end_byte: 1,
+            },
+            CodeIntelDiagnosticInput {
+                kind: "missing".to_string(),
+                severity: "warning".to_string(),
+                message: "MISSING parse diagnostic".to_string(),
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 3,
+                start_byte: 2,
+                end_byte: 3,
+            },
+        ];
+
+        let report = persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("same".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist same-line records");
+        assert_eq!(report.persisted_edges, 2);
+        assert_eq!(report.persisted_diagnostics, 2);
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_edges", "current"), 2);
+        assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 2);
+    }
+
+    fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
+        CodeIntelDocumentInput {
+            path: "src/lib.rs".into(),
+            language: "rust".to_string(),
+            content_sha256: hash.to_string(),
+            parser_id: "tree-sitter".to_string(),
+            parser_version: "tree-sitter-rust:0.26.9".to_string(),
+            query_pack_version: query_pack.to_string(),
+            byte_len: 24,
+            line_count: 1,
+            symbols: vec![CodeIntelSymbolInput {
+                kind: "function".to_string(),
+                name: "answer".to_string(),
+                signature: None,
+                start_line: 1,
+                start_col: 1,
+                end_line: 1,
+                end_col: 12,
+                start_byte: 0,
+                end_byte: 12,
+                selection_start_line: 1,
+                selection_end_line: 1,
+                snippet_sha256: "snippet".to_string(),
+            }],
+            edges: vec![CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("answer".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 1,
+                start_col: 1,
+                end_line: 1,
+                end_col: 7,
+                start_byte: 0,
+                end_byte: 6,
+            }],
+            diagnostics: vec![CodeIntelDiagnosticInput {
+                kind: "error".to_string(),
+                severity: "error".to_string(),
+                message: "ERROR parse diagnostic".to_string(),
+                start_line: 1,
+                start_col: 1,
+                end_line: 1,
+                end_col: 7,
+                start_byte: 0,
+                end_byte: 6,
+            }],
+        }
+    }
+
+    fn count_rows(connection: &Connection, table: &str, freshness: &str) -> i64 {
+        connection
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE freshness = ?"),
+                params![freshness],
+                |row| row.get(0),
+            )
+            .expect("row count")
     }
 
     #[tokio::test]

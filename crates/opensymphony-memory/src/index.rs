@@ -373,8 +373,396 @@ CREATE TABLE IF NOT EXISTS doc_memory_links (
   issue_key TEXT NOT NULL,
   visibility TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_documents (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_id TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  byte_len BIGINT NOT NULL,
+  line_count BIGINT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
+);
+CREATE TABLE IF NOT EXISTS code_symbols (
+  symbol_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  container_symbol_id TEXT,
+  signature TEXT,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  selection_start_line BIGINT NOT NULL,
+  selection_end_line BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  snippet_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS code_edges (
+  edge_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  edge_kind TEXT NOT NULL,
+  source_symbol_id TEXT,
+  target_symbol_id TEXT,
+  target_hint TEXT,
+  confidence TEXT NOT NULL,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS code_diagnostics (
+  diagnostic_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  message TEXT NOT NULL,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL
+);
+ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
+UPDATE code_symbols SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
+UPDATE code_symbols SET parser_version = '' WHERE parser_version IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
+UPDATE code_edges SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
+UPDATE code_edges SET start_col = 0 WHERE start_col IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS end_col BIGINT DEFAULT 0;
+UPDATE code_edges SET end_col = 0 WHERE end_col IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS start_byte BIGINT DEFAULT 0;
+UPDATE code_edges SET start_byte = 0 WHERE start_byte IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
+UPDATE code_edges SET end_byte = 0 WHERE end_byte IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
+UPDATE code_edges SET parser_version = '' WHERE parser_version IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
+UPDATE code_diagnostics SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET start_col = 0 WHERE start_col IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_col BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET end_col = 0 WHERE end_col IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS start_byte BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET start_byte = 0 WHERE start_byte IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
+UPDATE code_diagnostics SET end_byte = 0 WHERE end_byte IS NULL;
+ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
+UPDATE code_diagnostics SET parser_version = '' WHERE parser_version IS NULL;
+CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
+CREATE INDEX IF NOT EXISTS idx_code_symbols_path ON code_symbols(path);
+CREATE INDEX IF NOT EXISTS idx_code_symbols_kind ON code_symbols(kind);
+CREATE INDEX IF NOT EXISTS idx_code_edges_source ON code_edges(source_symbol_id);
+CREATE INDEX IF NOT EXISTS idx_code_edges_target ON code_edges(target_symbol_id);
+CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 "#,
     ))
+}
+
+pub fn persist_code_intel_documents(
+    config: &MemoryConfig,
+    batch: CodeIntelPersistBatch,
+) -> Result<CodeIntelPersistReport, MemoryError> {
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let indexed_at = Utc::now().to_rfc3339();
+    let mut report = CodeIntelPersistReport {
+        parsed_files: batch.documents.len(),
+        persisted_documents: 0,
+        persisted_symbols: 0,
+        persisted_edges: 0,
+        persisted_diagnostics: 0,
+        stale_rows: 0,
+        skipped_files: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+
+    for document in batch.documents {
+        let path = document.path.to_string_lossy().to_string();
+        report.stale_rows += stale_code_rows(
+            &transaction,
+            &CodeFreshnessKey {
+                repo_id: &batch.repo_id,
+                path: &path,
+                content_sha256: &document.content_sha256,
+                parser_version: &document.parser_version,
+                query_pack_version: &document.query_pack_version,
+            },
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    batch.repo_id,
+                    batch.commit_sha,
+                    batch.worktree_dirty,
+                    path,
+                    document.language,
+                    document.content_sha256,
+                    document.parser_id,
+                    document.parser_version,
+                    document.query_pack_version,
+                    document.byte_len as i64,
+                    document.line_count as i64,
+                    indexed_at,
+                    MemoryFreshness::Current.as_str(),
+                ],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        report.persisted_documents += 1;
+
+        for symbol in &document.symbols {
+            let symbol_id = code_row_id(&[
+                &batch.repo_id,
+                &path,
+                &document.content_sha256,
+                &document.parser_version,
+                &document.query_pack_version,
+                &symbol.kind,
+                &symbol.name,
+                &symbol.start_line.to_string(),
+                &symbol.start_col.to_string(),
+                &symbol.end_line.to_string(),
+                &symbol.end_col.to_string(),
+            ]);
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_symbols (symbol_id, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        symbol_id,
+                        batch.repo_id,
+                        batch.commit_sha,
+                        batch.worktree_dirty,
+                        path,
+                        document.language,
+                        symbol.kind,
+                        symbol.name,
+                        Option::<String>::None,
+                        symbol.signature,
+                        symbol.start_line as i64,
+                        symbol.start_col as i64,
+                        symbol.end_line as i64,
+                        symbol.end_col as i64,
+                        symbol.start_byte as i64,
+                        symbol.end_byte as i64,
+                        symbol.selection_start_line as i64,
+                        symbol.selection_end_line as i64,
+                        document.content_sha256,
+                        symbol.snippet_sha256,
+                        document.parser_version,
+                        document.query_pack_version,
+                        indexed_at,
+                        MemoryFreshness::Current.as_str(),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            report.persisted_symbols += 1;
+        }
+
+        for edge in &document.edges {
+            let edge_id = code_row_id(&[
+                &batch.repo_id,
+                &path,
+                &document.content_sha256,
+                &document.parser_version,
+                &document.query_pack_version,
+                &edge.edge_kind,
+                edge.target_hint.as_deref().unwrap_or(""),
+                &edge.start_line.to_string(),
+                &edge.start_col.to_string(),
+                &edge.end_line.to_string(),
+                &edge.end_col.to_string(),
+                &edge.start_byte.to_string(),
+                &edge.end_byte.to_string(),
+            ]);
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, target_symbol_id, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        edge_id,
+                        batch.repo_id,
+                        batch.commit_sha,
+                        batch.worktree_dirty,
+                        path,
+                        document.language,
+                        edge.edge_kind,
+                        Option::<String>::None,
+                        Option::<String>::None,
+                        edge.target_hint,
+                        edge.confidence,
+                        edge.start_line as i64,
+                        edge.start_col as i64,
+                        edge.end_line as i64,
+                        edge.end_col as i64,
+                        edge.start_byte as i64,
+                        edge.end_byte as i64,
+                        document.content_sha256,
+                        document.parser_version,
+                        document.query_pack_version,
+                        indexed_at,
+                        MemoryFreshness::Current.as_str(),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            report.persisted_edges += 1;
+        }
+
+        for diagnostic in &document.diagnostics {
+            let diagnostic_id = code_row_id(&[
+                &batch.repo_id,
+                &path,
+                &document.content_sha256,
+                &document.parser_version,
+                &document.query_pack_version,
+                &diagnostic.kind,
+                &diagnostic.message,
+                &diagnostic.start_line.to_string(),
+                &diagnostic.start_col.to_string(),
+                &diagnostic.end_line.to_string(),
+                &diagnostic.end_col.to_string(),
+                &diagnostic.start_byte.to_string(),
+                &diagnostic.end_byte.to_string(),
+            ]);
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        diagnostic_id,
+                        batch.repo_id,
+                        batch.commit_sha,
+                        batch.worktree_dirty,
+                        path,
+                        document.language,
+                        diagnostic.kind,
+                        diagnostic.severity,
+                        diagnostic.message,
+                        diagnostic.start_line as i64,
+                        diagnostic.start_col as i64,
+                        diagnostic.end_line as i64,
+                        diagnostic.end_col as i64,
+                        diagnostic.start_byte as i64,
+                        diagnostic.end_byte as i64,
+                        document.content_sha256,
+                        document.parser_version,
+                        document.query_pack_version,
+                        indexed_at,
+                        MemoryFreshness::Current.as_str(),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            report.persisted_diagnostics += 1;
+        }
+    }
+
+    transaction
+        .commit()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(report)
+}
+
+struct CodeFreshnessKey<'a> {
+    repo_id: &'a str,
+    path: &'a str,
+    content_sha256: &'a str,
+    parser_version: &'a str,
+    query_pack_version: &'a str,
+}
+
+fn stale_code_rows(
+    connection: &Connection,
+    key: &CodeFreshnessKey<'_>,
+) -> Result<usize, duckdb::Error> {
+    let mut stale_rows = 0;
+    stale_rows += connection.execute(
+        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    Ok(stale_rows)
+}
+
+fn code_row_id(parts: &[&str]) -> String {
+    sha256_hex(&parts.join("\u{1f}"))
 }
 
 fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, MemoryError> {
@@ -967,7 +1355,7 @@ fn okf_index_freshness(concept: &OkfConcept) -> MemoryFreshness {
     }
 }
 
-fn sha256_hex(contents: &str) -> String {
+pub fn sha256_hex(contents: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(contents.as_bytes());
     let digest = hasher.finalize();
