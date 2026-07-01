@@ -15,8 +15,11 @@ use tokio::task::JoinHandle;
 
 use crate::{
     opensymphony_code_intel::{
-        AstDiagnosticKind, CaptureRecord, CompositeCodeIntelProvider, PROVIDER_NAME,
-        ParsedDocumentSummary, SourceLanguage, SymbolKind, parse_path,
+        AstDiagnosticKind, CaptureRecord, CompositeCodeIntelProvider,
+        JAVASCRIPT_QUERY_PACK_VERSION, JSX_QUERY_PACK_VERSION, PROVIDER_NAME,
+        PYTHON_QUERY_PACK_VERSION, ParsedDocumentSummary, RUST_QUERY_PACK_VERSION, SourceLanguage,
+        SymbolKind, TREE_SITTER_VERSION, TSX_QUERY_PACK_VERSION, TYPESCRIPT_QUERY_PACK_VERSION,
+        parse_path, run_ad_hoc_query,
     },
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
@@ -45,6 +48,15 @@ use crate::{
 
 const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
+const AST_MCP_TOOL_NAMES: &[&str] = &[
+    "code.ast.status",
+    "code.ast.outline",
+    "code.ast.symbols",
+    "code.ast.references",
+    "code.ast.query",
+    "code.ast.context",
+    "code.ast.diagnostics",
+];
 
 #[derive(Debug, Args)]
 pub struct MemoryArgs {
@@ -1522,9 +1534,11 @@ async fn memory_server_mcp(
     headers: axum::http::HeaderMap,
     axum::Json(request): axum::Json<MemoryMcpRequest>,
 ) -> (axum::http::StatusCode, axum::Json<Value>) {
-    if let Err(response) =
-        authorize_memory_request(&headers, &state.auth, required_access_for_request(&request))
-    {
+    if let Err(response) = authorize_memory_request(
+        &headers,
+        &state.auth,
+        required_access_for_request(&request, &state.auth),
+    ) {
         return response;
     }
     let id = request.id.clone();
@@ -1535,7 +1549,7 @@ async fn memory_server_mcp(
             "capabilities": { "tools": {} }
         })),
         "tools/list" => Ok(json!({
-            "tools": memory_tool_descriptors()
+            "tools": memory_tool_descriptors(&state.config, &state.auth)
         })),
         "tools/call" => match tokio::time::timeout(
             MEMORY_MCP_TOOL_TIMEOUT,
@@ -1570,13 +1584,16 @@ async fn memory_server_mcp(
     }
 }
 
-fn required_access_for_request(request: &MemoryMcpRequest) -> MemoryServerAccess {
+fn required_access_for_request(
+    request: &MemoryMcpRequest,
+    auth: &MemoryServerAuth,
+) -> MemoryServerAccess {
     if request.method == "tools/call"
         && request
             .params
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(is_admin_memory_tool)
+            .is_some_and(|name| required_access_for_tool(name, auth) == MemoryServerAccess::Admin)
     {
         MemoryServerAccess::Admin
     } else {
@@ -1584,8 +1601,8 @@ fn required_access_for_request(request: &MemoryMcpRequest) -> MemoryServerAccess
     }
 }
 
-fn memory_tool_descriptors() -> Vec<Value> {
-    vec![
+fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Vec<Value> {
+    let mut tools = vec![
         json!({ "name": "memory.context", "description": "Build a pre-implementation memory context bundle", "access": "read" }),
         json!({ "name": "memory.search", "description": "Search captured issue memory", "access": "read" }),
         json!({ "name": "memory.related", "description": "Find related issue memory by issue, area, or paths", "access": "read" }),
@@ -1599,7 +1616,20 @@ fn memory_tool_descriptors() -> Vec<Value> {
         json!({ "name": "memory.export_okf", "description": "Export an OKF memory bundle", "access": "admin" }),
         json!({ "name": "memory.import_okf", "description": "Import an OKF memory bundle", "access": "admin" }),
         json!({ "name": "memory.ingest_code_intel", "description": "Generate code-intelligence artifacts for future ingestion", "access": "admin" }),
-    ]
+    ];
+    if ast_tools_enabled(config) {
+        tools.extend(AST_MCP_TOOL_NAMES.iter().map(|name| {
+            json!({
+                "name": name,
+                "description": "Read-only Tree-sitter AST code intelligence",
+                "access": match required_access_for_tool(name, auth) {
+                    MemoryServerAccess::Read => "read",
+                    MemoryServerAccess::Admin => "admin",
+                }
+            })
+        }));
+    }
+    tools
 }
 
 fn is_admin_memory_tool(name: &str) -> bool {
@@ -1613,6 +1643,20 @@ fn is_admin_memory_tool(name: &str) -> bool {
             | "memory.import_okf"
             | "memory.ingest_code_intel"
     )
+}
+
+fn required_access_for_tool(name: &str, auth: &MemoryServerAuth) -> MemoryServerAccess {
+    if is_admin_memory_tool(name)
+        || (name == "code.ast.query" && non_empty_str(auth.admin_token.as_deref()).is_some())
+    {
+        MemoryServerAccess::Admin
+    } else {
+        MemoryServerAccess::Read
+    }
+}
+
+fn ast_tools_enabled(config: &MemoryConfig) -> bool {
+    config.code_intel.enabled && config.code_intel.ast.enabled
 }
 
 fn authorize_memory_request(
@@ -1705,6 +1749,11 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
         .and_then(Value::as_str)
         .ok_or_else(|| MemoryError::InvalidInput("tools/call requires params.name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
+        return Err(MemoryError::InvalidInput(
+            "AST code-intelligence tools are disabled".to_string(),
+        ));
+    }
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
@@ -1800,6 +1849,17 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
                 })).collect::<Vec<_>>()
             }))
         }
+        "code.ast.status" => call_code_ast_status_tool(config),
+        "code.ast.outline" => call_code_ast_outline_tool(config.clone(), arguments.clone()).await,
+        "code.ast.symbols" => call_code_ast_symbols_tool(config.clone(), arguments.clone()).await,
+        "code.ast.references" => {
+            call_code_ast_references_tool(config.clone(), arguments.clone()).await
+        }
+        "code.ast.query" => call_code_ast_query_tool(config.clone(), arguments.clone()).await,
+        "code.ast.context" => call_code_ast_context_tool(config, &arguments).await,
+        "code.ast.diagnostics" => {
+            call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
+        }
         "memory.capture" => call_memory_capture_tool(config, &arguments).await,
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
@@ -1811,6 +1871,563 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
             "unsupported memory tool `{other}`"
         ))),
     }
+}
+
+struct AstDocument {
+    display: String,
+    source: String,
+    summary: ParsedDocumentSummary,
+}
+
+fn call_code_ast_status_tool(config: &MemoryConfig) -> Result<Value, MemoryError> {
+    let _ = resolve_code_intel_repo(config, None)?;
+    Ok(json!({
+        "provider": "tree-sitter-ast",
+        "available": true,
+        "languages": ast_language_ids(),
+        "parserVersion": TREE_SITTER_VERSION,
+        "queryPackVersions": ast_query_pack_versions(),
+        "limits": ast_limits_json(config)
+    }))
+}
+
+async fn call_code_ast_outline_tool(
+    config: MemoryConfig,
+    arguments: Value,
+) -> Result<Value, MemoryError> {
+    ast_mcp_tool_blocking("code.ast.outline", move || {
+        let documents = ast_documents(&config, &arguments)?;
+        let limit = ast_limit(&config, &arguments);
+        let mut remaining = limit;
+        let mut truncated = false;
+        let mut response_documents = Vec::new();
+        for document in &documents {
+            let selected_symbols = document
+                .summary
+                .symbols
+                .iter()
+                .take(remaining)
+                .map(|symbol| json!({
+                    "kind": symbol_kind_id(&symbol.kind),
+                    "name": symbol.name,
+                    "span": span_json(&symbol.span),
+                    "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
+                    "parserVersion": symbol.parser_version,
+                    "queryPackVersion": symbol.query_pack_version
+                }))
+                .collect::<Vec<_>>();
+            remaining = remaining.saturating_sub(selected_symbols.len());
+            truncated |= document.summary.symbols.len() > selected_symbols.len();
+            response_documents.push(json!({
+                "path": document.display,
+                "language": document.summary.source.language.id(),
+                "contentSha256": document.summary.source.sha256,
+                "parserVersion": parser_version_string(&document.summary),
+                "queryPackVersion": document.summary.versions.query_pack,
+                "symbols": selected_symbols,
+                "diagnostics": diagnostics_json(&document.summary)
+            }));
+        }
+        Ok(json!({
+            "documents": response_documents,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, truncated)
+        }))
+    })
+    .await
+}
+
+async fn call_code_ast_symbols_tool(
+    config: MemoryConfig,
+    arguments: Value,
+) -> Result<Value, MemoryError> {
+    ast_mcp_tool_blocking("code.ast.symbols", move || {
+        let query =
+            optional_string_arg(&arguments, "query").map(|value| value.to_ascii_lowercase());
+        let kinds = normalized_string_set_args(&arguments, &["kinds"]);
+        let limit = ast_limit(&config, &arguments);
+        let mut symbols = Vec::new();
+        let documents = ast_documents(&config, &arguments)?;
+        for document in &documents {
+            for symbol in document.summary.symbols.iter().filter(|symbol| {
+                query
+                    .as_ref()
+                    .is_none_or(|query| symbol.name.to_ascii_lowercase().contains(query))
+                    && (kinds.is_empty() || kinds.contains(symbol_kind_id(&symbol.kind)))
+            }) {
+                if symbols.len() >= limit {
+                    break;
+                }
+                symbols.push(json!({
+                    "id": format!("{}:{}:{}", document.display, symbol.name, symbol.rendered_span),
+                    "kind": symbol_kind_id(&symbol.kind),
+                    "name": symbol.name,
+                    "path": document.display,
+                    "span": span_json(&symbol.span),
+                    "selectionSpan": line_span_json(symbol.span.start_line, symbol.span.end_line),
+                    "source": source_json(&document.summary)
+                }));
+            }
+            if symbols.len() >= limit {
+                break;
+            }
+        }
+        Ok(json!({
+            "symbols": symbols,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, symbols.len() >= limit)
+        }))
+    })
+    .await
+}
+
+async fn call_code_ast_references_tool(
+    config: MemoryConfig,
+    arguments: Value,
+) -> Result<Value, MemoryError> {
+    ast_mcp_tool_blocking("code.ast.references", move || {
+        let symbol = required_string_arg(&arguments, "symbol")?;
+        let limit = ast_limit(&config, &arguments);
+        let mut references = Vec::new();
+        let documents = ast_documents(&config, &arguments)?;
+        for document in &documents {
+            for capture in document
+                .summary
+                .captures
+                .iter()
+                .filter(|capture| capture.capture_name.starts_with("reference."))
+                .filter(|capture| capture_matches_symbol(&capture.text, &symbol))
+            {
+                if references.len() >= limit {
+                    break;
+                }
+                let (snippet, truncated) =
+                    truncate_capture(&capture.text, config.code_intel.ast.max_capture_bytes);
+                references.push(json!({
+                    "kind": capture.capture_name,
+                    "path": document.display,
+                    "span": span_json(&capture.span),
+                    "snippet": snippet,
+                    "truncated": truncated,
+                    "source": source_json(&document.summary)
+                }));
+            }
+            if references.len() >= limit {
+                break;
+            }
+        }
+        Ok(json!({
+            "references": references,
+            "confidence": "syntactic",
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, references.len() >= limit)
+        }))
+    })
+    .await
+}
+
+async fn call_code_ast_query_tool(
+    config: MemoryConfig,
+    arguments: Value,
+) -> Result<Value, MemoryError> {
+    ast_mcp_tool_blocking("code.ast.query", move || {
+        let language = required_string_arg(&arguments, "language")?.to_ascii_lowercase();
+        let language = SourceLanguage::from_id(&language).ok_or_else(|| {
+            MemoryError::InvalidInput(format!("unsupported AST query language `{language}`"))
+        })?;
+        if !language.supports_ast_queries() {
+            return Err(MemoryError::InvalidInput(format!(
+                "language `{}` does not support Tree-sitter ad hoc queries",
+                language.id()
+            )));
+        }
+        let query = required_string_arg(&arguments, "query")?;
+        let limit = ast_limit(&config, &arguments);
+        let documents = ast_documents(&config, &arguments)?;
+        let mut matches = Vec::new();
+        for document in documents
+            .iter()
+            .filter(|document| document.summary.source.language == language)
+        {
+            let query_matches = run_ad_hoc_query(language, &document.source, &query, limit)
+                .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+            for query_match in query_matches {
+                if matches.len() >= limit {
+                    break;
+                }
+                matches.push(json!({
+                    "path": document.display,
+                    "captures": query_match.captures.iter().map(|capture| {
+                        let (text, truncated) = truncate_capture(
+                            &capture.text,
+                            config.code_intel.ast.max_capture_bytes,
+                        );
+                        json!({
+                            "name": capture.capture_name,
+                            "text": text,
+                            "truncated": truncated,
+                            "span": span_json(&capture.span)
+                        })
+                    }).collect::<Vec<_>>(),
+                    "source": source_json(&document.summary)
+                }));
+            }
+            if matches.len() >= limit {
+                break;
+            }
+        }
+        Ok(json!({
+            "matches": matches,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, matches.len() >= limit)
+        }))
+    })
+    .await
+}
+
+async fn call_code_ast_context_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let scope = scope_filter_from_mcp(arguments, true);
+    let paths = ast_path_args(arguments)?;
+    let limit = ast_limit(config, arguments);
+    let symbol_kinds = normalized_string_set_args(arguments, &["symbols"]);
+    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let scope_refs = scope_refs_for_context(&scope, &paths);
+    let artifacts = code_intel_artifacts_with_symbol_kinds_blocking(
+        repo_root,
+        paths,
+        scope_refs,
+        limit,
+        symbol_kinds,
+    )
+    .await?;
+    let trace = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "trace")
+        .flat_map(|artifact| artifact.summary.lines().map(str::to_string))
+        .collect::<Vec<_>>();
+    let mut markdown = String::from("## Structural Context\n\n");
+    append_code_intel_artifacts(config, &mut markdown, artifacts);
+    Ok(json!({ "markdown": markdown, "trace": trace }))
+}
+
+async fn call_code_ast_diagnostics_tool(
+    config: MemoryConfig,
+    arguments: Value,
+) -> Result<Value, MemoryError> {
+    ast_mcp_tool_blocking("code.ast.diagnostics", move || {
+        let documents = ast_documents(&config, &arguments)?;
+        let limit = ast_limit(&config, &arguments);
+        let mut diagnostics = Vec::new();
+        for document in &documents {
+            for diagnostic in &document.summary.diagnostics {
+                if diagnostics.len() >= limit {
+                    break;
+                }
+                diagnostics.push(json!({
+                    "path": document.display,
+                    "kind": diagnostic_kind_id(&diagnostic.kind),
+                    "nodeKind": diagnostic.node_kind,
+                    "span": span_json(&diagnostic.span),
+                    "source": source_json(&document.summary)
+                }));
+            }
+            if diagnostics.len() >= limit {
+                break;
+            }
+        }
+        let truncated = documents
+            .iter()
+            .map(|document| document.summary.diagnostics.len())
+            .sum::<usize>()
+            > diagnostics.len();
+        Ok(json!({
+            "diagnostics": diagnostics,
+            "limit": limit,
+            "trace": ast_trace_json(&config, &documents, truncated)
+        }))
+    })
+    .await
+}
+
+async fn ast_mcp_tool_blocking<F>(tool_name: &'static str, task: F) -> Result<Value, MemoryError>
+where
+    F: FnOnce() -> Result<Value, MemoryError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task).await.map_err(|error| {
+        MemoryError::InvalidInput(format!("{tool_name} analysis task failed: {error}"))
+    })?
+}
+
+fn ast_documents(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Vec<AstDocument>, MemoryError> {
+    let scope = scope_filter_from_mcp(arguments, false);
+    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let paths = ast_path_args(arguments)?;
+    let mut files = Vec::new();
+    for path in paths {
+        collect_ast_files(
+            &repo_root,
+            &path,
+            config.code_intel.ast.max_files_per_request,
+            &mut files,
+        )?;
+    }
+    let mut documents = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&repo_root)
+            .map_err(|_| MemoryError::PathOutsideRepo {
+                path: path.clone(),
+                repo_root: repo_root.clone(),
+            })?
+            .to_path_buf();
+        let metadata = fs::metadata(&path).map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.len() > config.code_intel.ast.max_file_bytes {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} exceeds AST max_file_bytes {}",
+                relative.display(),
+                config.code_intel.ast.max_file_bytes
+            )));
+        }
+        let source = fs::read_to_string(&path).map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        let summary = parse_path(&relative, &source)
+            .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+        documents.push(AstDocument {
+            display: relative.display().to_string(),
+            source,
+            summary,
+        });
+    }
+    Ok(documents)
+}
+
+fn ast_path_args(arguments: &Value) -> Result<Vec<PathBuf>, MemoryError> {
+    let paths = string_list_arg(arguments, "paths")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Err(MemoryError::InvalidInput(
+            "code.ast tools require at least one path".to_string(),
+        ));
+    }
+    Ok(paths)
+}
+
+fn collect_ast_files(
+    repo_root: &Path,
+    path: &Path,
+    max_files: usize,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), MemoryError> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|source| MemoryError::ResolvePath {
+            path: candidate.clone(),
+            source,
+        })?;
+    if !resolved.starts_with(repo_root) {
+        return Err(MemoryError::PathOutsideRepo {
+            path: resolved,
+            repo_root: repo_root.to_path_buf(),
+        });
+    }
+    if resolved.is_file() {
+        if ast_file_is_supported(repo_root, &resolved)? && files.len() < max_files {
+            files.push(resolved);
+        }
+        return Ok(());
+    }
+    if !resolved.is_dir() {
+        return Ok(());
+    }
+    if files.len() >= max_files {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(&resolved)
+        .map_err(|source| MemoryError::ReadFile {
+            path: resolved.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::ReadFile {
+            path: resolved.clone(),
+            source,
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        if files.len() >= max_files {
+            break;
+        }
+        let file_type = entry.file_type().map_err(|source| MemoryError::ReadFile {
+            path: entry.path(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            collect_ast_files(repo_root, &entry.path(), max_files, files)?;
+        } else if file_type.is_file() && ast_file_is_supported(repo_root, &entry.path())? {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn ast_file_is_supported(repo_root: &Path, path: &Path) -> Result<bool, MemoryError> {
+    let relative = path
+        .strip_prefix(repo_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: path.to_path_buf(),
+            repo_root: repo_root.to_path_buf(),
+        })?;
+    Ok(crate::opensymphony_code_intel::detect_language(relative).is_some())
+}
+
+fn capture_matches_symbol(capture_text: &str, symbol: &str) -> bool {
+    capture_text.match_indices(symbol).any(|(start, value)| {
+        let end = start + value.len();
+        let before = capture_text[..start].chars().next_back();
+        let after = capture_text[end..].chars().next();
+        before.is_none_or(|value| !is_identifier_char(value))
+            && after.is_none_or(|value| !is_identifier_char(value))
+    })
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value == '_' || value.is_alphanumeric()
+}
+
+fn ast_limit(config: &MemoryConfig, arguments: &Value) -> usize {
+    usize_arg(arguments, "limit", 50).min(config.code_intel.ast.max_matches_per_request)
+}
+
+fn ast_language_ids() -> Vec<&'static str> {
+    vec!["rust", "typescript", "tsx", "javascript", "jsx", "python"]
+}
+
+fn ast_query_pack_versions() -> Value {
+    json!({
+        "rust": RUST_QUERY_PACK_VERSION,
+        "typescript": TYPESCRIPT_QUERY_PACK_VERSION,
+        "tsx": TSX_QUERY_PACK_VERSION,
+        "javascript": JAVASCRIPT_QUERY_PACK_VERSION,
+        "jsx": JSX_QUERY_PACK_VERSION,
+        "python": PYTHON_QUERY_PACK_VERSION
+    })
+}
+
+fn ast_limits_json(config: &MemoryConfig) -> Value {
+    json!({
+        "maxFileBytes": config.code_intel.ast.max_file_bytes,
+        "maxFilesPerRequest": config.code_intel.ast.max_files_per_request,
+        "maxMatchesPerRequest": config.code_intel.ast.max_matches_per_request,
+        "maxCaptureBytes": config.code_intel.ast.max_capture_bytes
+    })
+}
+
+fn ast_trace_json(
+    config: &MemoryConfig,
+    documents: &[AstDocument],
+    truncated: bool,
+) -> Vec<String> {
+    let mut trace = vec![
+        format!("parsed {} file(s)", documents.len()),
+        format!(
+            "max files per request {}",
+            config.code_intel.ast.max_files_per_request
+        ),
+        format!(
+            "max matches per request {}",
+            config.code_intel.ast.max_matches_per_request
+        ),
+    ];
+    if truncated {
+        trace.push("truncated by limit".to_string());
+    }
+    trace.extend(documents.iter().map(|document| {
+        format!(
+            "{} lines {}-{} parser {} query-pack {} content sha256:{}",
+            document.display,
+            1,
+            document.source.lines().count().max(1),
+            parser_version_string(&document.summary),
+            document.summary.versions.query_pack,
+            document.summary.source.sha256
+        )
+    }));
+    trace
+}
+
+fn source_json(summary: &ParsedDocumentSummary) -> Value {
+    json!({
+        "contentSha256": summary.source.sha256,
+        "parserVersion": parser_version_string(summary),
+        "queryPackVersion": summary.versions.query_pack
+    })
+}
+
+fn parser_version_string(summary: &ParsedDocumentSummary) -> String {
+    format!(
+        "{}:{}",
+        summary.versions.grammar, summary.versions.tree_sitter
+    )
+}
+
+fn diagnostics_json(summary: &ParsedDocumentSummary) -> Vec<Value> {
+    summary
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            json!({
+                "kind": diagnostic_kind_id(&diagnostic.kind),
+                "nodeKind": diagnostic.node_kind,
+                "span": span_json(&diagnostic.span)
+            })
+        })
+        .collect()
+}
+
+fn span_json(span: &crate::opensymphony_code_intel::SourceSpan) -> Value {
+    json!({
+        "startLine": span.start_line,
+        "startColumn": span.start_column,
+        "endLine": span.end_line,
+        "endColumn": span.end_column,
+        "startByte": span.start_byte,
+        "endByte": span.end_byte
+    })
+}
+
+fn line_span_json(start_line: usize, end_line: usize) -> Value {
+    json!({ "startLine": start_line, "endLine": end_line })
+}
+
+fn truncate_capture(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let end = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    (text[..end].to_string(), true)
 }
 
 async fn call_memory_capture_tool(
@@ -2472,6 +3089,13 @@ fn symbol_kind_id(kind: &SymbolKind) -> &'static str {
     }
 }
 
+fn diagnostic_kind_id(kind: &AstDiagnosticKind) -> &'static str {
+    match kind {
+        AstDiagnosticKind::Error => "error",
+        AstDiagnosticKind::Missing => "missing",
+    }
+}
+
 fn mcp_text(text: String) -> Value {
     json!({ "content": [{ "type": "text", "text": text }] })
 }
@@ -2730,6 +3354,27 @@ async fn code_intel_artifacts_blocking(
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
         CompositeCodeIntelProvider::new(repo_root).code_context(&paths, &scope_refs, limit)
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("code-intelligence analysis task failed: {error}"))
+    })?
+}
+
+async fn code_intel_artifacts_with_symbol_kinds_blocking(
+    repo_root: PathBuf,
+    paths: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    limit: usize,
+    symbol_kinds: BTreeSet<String>,
+) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    tokio::task::spawn_blocking(move || {
+        CompositeCodeIntelProvider::new(repo_root).code_context_with_symbol_kinds(
+            &paths,
+            &scope_refs,
+            limit,
+            &symbol_kinds,
+        )
     })
     .await
     .map_err(|error| {
@@ -4008,11 +4653,11 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, authorize_memory_request, call_memory_ingest_code_intel_tool,
-        call_memory_tool, context_source_from_mcp, memory_server_health_payload,
-        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_intel_repo, trim_auto_memory_status_log,
+        MemoryServerAuth, RUST_QUERY_PACK_VERSION, authorize_memory_request,
+        call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
@@ -4025,8 +4670,10 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn mcp_tool_list_exposes_context_and_admin_tools_without_code_context() {
-        let names = memory_tool_descriptors()
+    fn mcp_tool_list_exposes_context_admin_and_ast_tools_when_enabled() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let names = memory_tool_descriptors(&config, &MemoryServerAuth::default())
             .into_iter()
             .filter_map(|tool| {
                 tool.get("name")
@@ -4041,8 +4688,78 @@ mod tests {
         assert!(names.contains(&"memory.reindex".to_string()));
         assert!(names.contains(&"memory.export_okf".to_string()));
         assert!(names.contains(&"memory.import_okf".to_string()));
-        assert!(!names.iter().any(|name| name.contains("code_context")));
-        assert!(!names.iter().any(|name| name.contains("code-context")));
+        assert!(names.contains(&"code.ast.status".to_string()));
+        assert!(names.contains(&"code.ast.outline".to_string()));
+        assert!(names.contains(&"code.ast.symbols".to_string()));
+        assert!(names.contains(&"code.ast.references".to_string()));
+        assert!(names.contains(&"code.ast.query".to_string()));
+        assert!(names.contains(&"code.ast.context".to_string()));
+        assert!(names.contains(&"code.ast.diagnostics".to_string()));
+    }
+
+    #[test]
+    fn mcp_tool_list_hides_ast_tools_when_code_intel_disabled() {
+        let repo = TempDir::new().expect("temp repo");
+        let config_path = repo.path().join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  enabled: false\n  ast:\n    enabled: true\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(repo.path(), Some(&config_path)).expect("memory config");
+        let names = memory_tool_descriptors(&config, &MemoryServerAuth::default())
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"memory.context".to_string()));
+        assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
+
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  enabled: true\n  ast:\n    enabled: false\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(repo.path(), Some(&config_path)).expect("memory config");
+        let names = memory_tool_descriptors(&config, &MemoryServerAuth::default())
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"memory.context".to_string()));
+        assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
+    }
+
+    #[test]
+    fn mcp_tool_list_marks_ast_query_admin_when_admin_token_is_configured() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let tools = memory_tool_descriptors(
+            &config,
+            &MemoryServerAuth {
+                read_token: Some("read-token".to_string()),
+                admin_token: Some("admin-token".to_string()),
+            },
+        );
+        let query_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "code.ast.query")
+            .expect("query tool");
+        let outline_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "code.ast.outline")
+            .expect("outline tool");
+
+        assert_eq!(query_tool["access"], "admin");
+        assert_eq!(outline_tool["access"], "read");
     }
 
     #[test]
@@ -4072,19 +4789,51 @@ mod tests {
         };
 
         assert_eq!(
-            required_access_for_request(&read_request),
+            required_access_for_request(&read_request, &MemoryServerAuth::default()),
             MemoryServerAccess::Read
         );
         assert_eq!(
-            required_access_for_request(&admin_request),
+            required_access_for_request(&admin_request, &MemoryServerAuth::default()),
             MemoryServerAccess::Admin
         );
         assert_eq!(
-            required_access_for_request(&okf_export_request),
+            required_access_for_request(&okf_export_request, &MemoryServerAuth::default()),
             MemoryServerAccess::Admin
         );
         assert_eq!(
-            required_access_for_request(&persistent_code_ingest_request),
+            required_access_for_request(
+                &persistent_code_ingest_request,
+                &MemoryServerAuth::default()
+            ),
+            MemoryServerAccess::Admin
+        );
+
+        let ast_outline_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "code.ast.outline" }),
+        };
+        let ast_query_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "code.ast.query" }),
+        };
+        assert_eq!(
+            required_access_for_request(&ast_outline_request, &MemoryServerAuth::default()),
+            MemoryServerAccess::Read
+        );
+        assert_eq!(
+            required_access_for_request(&ast_query_request, &MemoryServerAuth::default()),
+            MemoryServerAccess::Read
+        );
+        assert_eq!(
+            required_access_for_request(
+                &ast_query_request,
+                &MemoryServerAuth {
+                    read_token: Some("read-token".to_string()),
+                    admin_token: Some("admin-token".to_string()),
+                },
+            ),
             MemoryServerAccess::Admin
         );
     }
@@ -4688,6 +5437,543 @@ Public memory concept.
         assert!(text.contains("ast-summary: src/lib.rs"));
         assert!(text.contains("function `answer`"));
         assert!(text.contains("fallback: CodebaseAnalyzer not used"));
+    }
+
+    #[tokio::test]
+    async fn code_ast_status_returns_provider_versions_and_limits() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let status = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": {}
+            }),
+        )
+        .await
+        .expect("status");
+
+        assert_eq!(status["provider"], "tree-sitter-ast");
+        assert_eq!(status["available"], true);
+        assert!(
+            status["languages"]
+                .as_array()
+                .expect("languages")
+                .iter()
+                .any(|language| language == "rust")
+        );
+        assert_eq!(status["queryPackVersions"]["rust"], RUST_QUERY_PACK_VERSION);
+        assert_eq!(status["limits"]["maxMatchesPerRequest"], 2000);
+    }
+
+    #[tokio::test]
+    async fn code_ast_context_returns_markdown_and_trace() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "pub struct Thing {\n    value: u8,\n}\npub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let context = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.context",
+                "arguments": { "paths": ["src/lib.rs"], "symbols": ["struct"], "limit": 5 }
+            }),
+        )
+        .await
+        .expect("context");
+
+        assert!(
+            context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("## Structural Context")
+        );
+        assert!(
+            context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("struct `Thing`")
+        );
+        assert!(
+            !context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("function `answer`")
+        );
+        assert!(
+            context["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line
+                    .as_str()
+                    .expect("trace line")
+                    .contains("fallback: CodebaseAnalyzer not used"))
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_outline_symbols_and_query_return_source_citations() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "pub fn answer() -> u8 { helper() }\nfn helper() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let outline = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "paths": ["src/lib.rs"], "limit": 1 }
+            }),
+        )
+        .await
+        .expect("outline");
+        assert_eq!(outline["documents"][0]["path"], "src/lib.rs");
+        assert_eq!(outline["documents"][0]["language"], "rust");
+        assert!(outline["documents"][0]["contentSha256"].as_str().is_some());
+        assert!(
+            outline["documents"][0]["parserVersion"]
+                .as_str()
+                .expect("parser version")
+                .contains("tree-sitter-rust")
+        );
+        assert!(
+            outline["documents"][0]["queryPackVersion"]
+                .as_str()
+                .expect("query pack")
+                .starts_with("rust-query-pack")
+        );
+        assert_eq!(
+            outline["documents"][0]["symbols"][0]["span"]["startLine"],
+            1
+        );
+        assert_eq!(outline["limit"], 1);
+        assert!(
+            outline["trace"]
+                .as_array()
+                .expect("outline trace")
+                .iter()
+                .any(|line| line == "truncated by limit")
+        );
+
+        let symbols = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": {
+                    "paths": ["src/lib.rs"],
+                    "query": "answer",
+                    "kinds": ["function"],
+                    "limit": 10
+                }
+            }),
+        )
+        .await
+        .expect("symbols");
+        assert_eq!(symbols["symbols"][0]["name"], "answer");
+        assert_eq!(
+            symbols["symbols"][0]["source"]["queryPackVersion"],
+            RUST_QUERY_PACK_VERSION
+        );
+        assert!(
+            symbols["trace"]
+                .as_array()
+                .expect("symbols trace")
+                .iter()
+                .any(|line| line.as_str().expect("trace line").contains("src/lib.rs"))
+        );
+
+        let query = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.query",
+                "arguments": {
+                    "paths": ["src/lib.rs"],
+                    "language": "rust",
+                    "query": "(function_item name: (identifier) @definition.function)",
+                    "limit": 1
+                }
+            }),
+        )
+        .await
+        .expect("query");
+        assert_eq!(query["matches"].as_array().expect("matches").len(), 1);
+        assert_eq!(query["matches"][0]["captures"][0]["text"], "answer");
+        assert_eq!(query["matches"][0]["captures"][0]["span"]["startLine"], 1);
+        assert!(
+            query["matches"][0]["source"]["contentSha256"]
+                .as_str()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_references_returns_span_and_source_citation() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "fn helper() {}\nfn myhelper() {}\npub fn answer() { helper(); myhelper(); }\n",
+        )
+        .expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_capture_bytes: 3\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let references = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.references",
+                "arguments": { "paths": ["src/lib.rs"], "symbol": "helper" }
+            }),
+        )
+        .await
+        .expect("references");
+        assert_eq!(
+            references["references"]
+                .as_array()
+                .expect("references")
+                .len(),
+            1
+        );
+        let first = &references["references"][0];
+
+        assert_eq!(first["path"], "src/lib.rs");
+        assert_eq!(first["kind"], "reference.call");
+        assert_eq!(first["span"]["startLine"], 3);
+        assert_eq!(first["snippet"], "hel");
+        assert_eq!(first["truncated"], true);
+        assert!(first["source"]["contentSha256"].as_str().is_some());
+        assert_eq!(first["source"]["queryPackVersion"], RUST_QUERY_PACK_VERSION);
+        assert!(
+            references["trace"]
+                .as_array()
+                .expect("references trace")
+                .iter()
+                .any(|line| line.as_str().expect("trace line").contains("src/lib.rs"))
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_diagnostics_returns_parser_diagnostics_with_source() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn broken( {\n").expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let diagnostics = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.diagnostics",
+                "arguments": { "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect("diagnostics");
+        let first = &diagnostics["diagnostics"][0];
+
+        assert_eq!(first["path"], "src/lib.rs");
+        assert!(
+            matches!(
+                first["kind"].as_str().expect("diagnostic kind"),
+                "error" | "missing"
+            ),
+            "diagnostic kind should use the serialized AST diagnostic vocabulary"
+        );
+        assert!(first["span"]["startLine"].as_u64().expect("line") >= 1);
+        assert!(first["source"]["contentSha256"].as_str().is_some());
+        assert_eq!(first["source"]["queryPackVersion"], RUST_QUERY_PACK_VERSION);
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_enforce_configured_match_limits() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(
+            repo_root.join("src/lib.rs"),
+            "pub fn one() -> u8 { 1 }\npub fn two() -> u8 { 2 }\n",
+        )
+        .expect("source");
+        std::fs::write(
+            repo_root.join("src/more.rs"),
+            "pub fn three() -> u8 { 3 }\npub fn four() -> u8 { 4 }\n",
+        )
+        .expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_matches_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let symbols = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src/lib.rs"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("symbols");
+
+        assert_eq!(symbols["symbols"].as_array().expect("symbols").len(), 1);
+        assert_eq!(symbols["limit"], 1);
+
+        let outline = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("outline");
+        let outline_symbol_count = outline["documents"]
+            .as_array()
+            .expect("documents")
+            .iter()
+            .map(|document| document["symbols"].as_array().expect("symbols").len())
+            .sum::<usize>();
+        assert_eq!(outline_symbol_count, 1);
+        assert_eq!(outline["limit"], 1);
+        assert!(
+            outline["trace"]
+                .as_array()
+                .expect("outline trace")
+                .iter()
+                .any(|line| line == "truncated by limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_diagnostics_enforces_request_limit() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/bad.rs"), "pub fn broken( {\n").expect("source");
+        std::fs::write(repo_root.join("src/worse.rs"), "pub fn worse( {\n").expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_matches_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let diagnostics = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.diagnostics",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("diagnostics");
+
+        assert_eq!(
+            diagnostics["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .len(),
+            1
+        );
+        assert_eq!(diagnostics["limit"], 1);
+        assert!(
+            diagnostics["trace"]
+                .as_array()
+                .expect("diagnostics trace")
+                .iter()
+                .any(|line| line == "truncated by limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_file_limit_counts_supported_source_files() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/aaa.bin"), b"notes").expect("notes");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_files_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let symbols = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src"], "limit": 10 }
+            }),
+        )
+        .await
+        .expect("symbols");
+
+        assert_eq!(symbols["symbols"][0]["name"], "answer");
+        assert!(
+            symbols["trace"]
+                .as_array()
+                .expect("trace")
+                .iter()
+                .any(|line| line.as_str().expect("trace line").contains("parsed 1 file"))
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_query_truncates_large_captures() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_capture_bytes: 3\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let query = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.query",
+                "arguments": {
+                    "paths": ["src/lib.rs"],
+                    "language": "rust",
+                    "query": "(function_item name: (identifier) @definition.function)"
+                }
+            }),
+        )
+        .await
+        .expect("query");
+
+        assert_eq!(query["matches"][0]["captures"][0]["text"], "ans");
+        assert_eq!(query["matches"][0]["captures"][0]["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn code_ast_query_accepts_custom_capture_names() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let query = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.query",
+                "arguments": {
+                    "paths": ["src/lib.rs"],
+                    "language": "rust",
+                    "query": "(function_item name: (identifier) @my_capture)"
+                }
+            }),
+        )
+        .await
+        .expect("query");
+
+        assert_eq!(query["matches"][0]["captures"][0]["name"], "my_capture");
+        assert_eq!(query["matches"][0]["captures"][0]["text"], "answer");
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_reject_paths_outside_repo() {
+        let repo = TempDir::new().expect("temp repo");
+        let outside = TempDir::new().expect("outside repo");
+        let outside_path = outside.path().join("lib.rs");
+        std::fs::write(&outside_path, "pub fn outside() {}\n").expect("outside source");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "paths": [outside_path] }
+            }),
+        )
+        .await
+        .expect_err("outside path should fail");
+
+        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_validate_all_requested_paths_before_budget_skip() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let outside = TempDir::new().expect("outside repo");
+        let outside_path = outside.path().join("lib.rs");
+        std::fs::write(&outside_path, "pub fn outside() {}\n").expect("outside source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(
+            &config_path,
+            "code_intel:\n  ast:\n    max_files_per_request: 1\n",
+        )
+        .expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.symbols",
+                "arguments": { "paths": ["src", outside_path] }
+            }),
+        )
+        .await
+        .expect_err("outside path should fail even after file budget is full");
+
+        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[tokio::test]
+    async fn code_ast_tool_calls_fail_when_disabled() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        std::fs::create_dir_all(repo_root.join("src")).expect("src dir");
+        std::fs::write(repo_root.join("src/lib.rs"), "pub fn answer() {}\n").expect("source");
+        let config_path = repo_root.join("opensymphony-memory.yaml");
+        std::fs::write(&config_path, "code_intel:\n  ast:\n    enabled: false\n").expect("config");
+        let config = MemoryConfig::load(&repo_root, Some(&config_path)).expect("config");
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect_err("disabled AST tools should fail");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("AST code-intelligence tools are disabled")));
     }
 
     #[test]

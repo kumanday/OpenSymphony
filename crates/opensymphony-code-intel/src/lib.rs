@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
@@ -196,7 +196,7 @@ pub enum SourceLanguage {
 }
 
 impl SourceLanguage {
-    fn id(self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
             SourceLanguage::Rust => "rust",
             SourceLanguage::TypeScript => "typescript",
@@ -209,6 +209,26 @@ impl SourceLanguage {
             SourceLanguage::Toml => "toml",
             SourceLanguage::Markdown => "markdown",
         }
+    }
+
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "rust" => Some(SourceLanguage::Rust),
+            "typescript" => Some(SourceLanguage::TypeScript),
+            "tsx" => Some(SourceLanguage::Tsx),
+            "javascript" => Some(SourceLanguage::JavaScript),
+            "jsx" => Some(SourceLanguage::Jsx),
+            "python" => Some(SourceLanguage::Python),
+            "json" => Some(SourceLanguage::Json),
+            "yaml" => Some(SourceLanguage::Yaml),
+            "toml" => Some(SourceLanguage::Toml),
+            "markdown" => Some(SourceLanguage::Markdown),
+            _ => None,
+        }
+    }
+
+    pub fn supports_ast_queries(self) -> bool {
+        !self.is_lightweight()
     }
 
     fn display_name(self) -> &'static str {
@@ -327,6 +347,11 @@ pub struct CaptureRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdHocQueryMatch {
+    pub captures: Vec<CaptureRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AstDiagnosticKind {
@@ -437,6 +462,17 @@ impl AstCodeIntelProvider {
         scope_refs: &[KnowledgeScope],
         limit: usize,
     ) -> Result<AstCodeIntelReport, MemoryError> {
+        let symbol_kinds = BTreeSet::new();
+        self.code_context_report_with_symbols(paths, scope_refs, limit, &symbol_kinds)
+    }
+
+    fn code_context_report_with_symbols(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+        symbol_kinds: &BTreeSet<String>,
+    ) -> Result<AstCodeIntelReport, MemoryError> {
         let repo_root = self.canonical_root()?;
         let commit_sha = git_commit_sha(&repo_root);
         let mut report = AstCodeIntelReport::default();
@@ -503,6 +539,7 @@ impl AstCodeIntelProvider {
                 scope_refs,
                 commit_sha.clone(),
                 remaining_symbols,
+                symbol_kinds,
             );
             remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
             report.used_symbols += used_symbols;
@@ -688,6 +725,44 @@ impl CompositeCodeIntelProvider {
             fallback: CodebaseAnalyzer::new(root),
         }
     }
+
+    pub fn code_context_with_symbol_kinds(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+        symbol_kinds: &BTreeSet<String>,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        let mut report =
+            self.ast
+                .code_context_report_with_symbols(paths, scope_refs, limit, symbol_kinds)?;
+        let use_fallback = !report.fallback_reasons.is_empty();
+        let mut artifacts = std::mem::take(&mut report.artifacts);
+        let fallback_paths = if paths.is_empty() {
+            paths
+        } else {
+            &report.fallback_paths
+        };
+        let has_fallback_target = paths.is_empty() || !fallback_paths.is_empty();
+        let fallback_limit = limit.saturating_sub(report.used_symbols);
+        let mut fallback_used = false;
+
+        if use_fallback && has_fallback_target {
+            artifacts.extend(self.fallback.code_context(
+                fallback_paths,
+                scope_refs,
+                fallback_limit,
+            )?);
+            fallback_used = true;
+        }
+        let trace = report.trace_artifact(
+            scope_refs,
+            "composite-code-intel",
+            report.composite_fallback(fallback_used),
+        );
+        artifacts.push(trace);
+        Ok(artifacts)
+    }
 }
 
 impl CodeIntelIndex for CompositeCodeIntelProvider {
@@ -792,6 +867,7 @@ fn ast_artifacts_for_summary(
     scope_refs: &[KnowledgeScope],
     commit_sha: Option<String>,
     symbol_limit: usize,
+    symbol_kinds: &BTreeSet<String>,
 ) -> (Vec<CodeIntelArtifact>, usize) {
     let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
     let mut artifacts = vec![CodeIntelArtifact {
@@ -819,11 +895,20 @@ fn ast_artifacts_for_summary(
 
     if !summary.symbols.is_empty() && symbol_limit > 0 {
         let max_symbols = symbol_limit;
-        let used_symbols = summary.symbols.len().min(max_symbols);
-        let symbols = summary
+        let selected_symbols = summary
             .symbols
             .iter()
+            .filter(|symbol| {
+                symbol_kinds.is_empty() || symbol_kinds.contains(symbol_kind_label(&symbol.kind))
+            })
             .take(max_symbols)
+            .collect::<Vec<_>>();
+        let used_symbols = selected_symbols.len();
+        if selected_symbols.is_empty() {
+            return (artifacts, 0);
+        }
+        let symbols = selected_symbols
+            .iter()
             .map(|symbol| {
                 format!(
                     "- {} `{}` at {}:{}",
@@ -839,10 +924,8 @@ fn ast_artifacts_for_summary(
             provider: PROVIDER_NAME.to_string(),
             kind: "ast-symbols".to_string(),
             scope_refs: scope_refs.to_vec(),
-            source_refs: summary
-                .symbols
+            source_refs: selected_symbols
                 .iter()
-                .take(max_symbols)
                 .map(|symbol| MemorySourceRef {
                     kind: "code-symbol".to_string(),
                     id: format!("{relative_display}:{}", symbol.rendered_span),
@@ -1007,6 +1090,55 @@ pub fn parse_source(
     })
 }
 
+pub fn run_ad_hoc_query(
+    language: SourceLanguage,
+    source: &str,
+    query_source: &str,
+    limit: usize,
+) -> Result<Vec<AdHocQueryMatch>, CodeIntelError> {
+    if !language.supports_ast_queries() {
+        return Err(CodeIntelError::UnsupportedLanguage {
+            path: language.id().to_string(),
+        });
+    }
+    let config = language_config(language);
+    let parser_language = (config.parser)();
+    let mut parser = Parser::new();
+    parser.set_language(&parser_language)?;
+    let tree = parser.parse(source, None).ok_or(CodeIntelError::Parse)?;
+    let query =
+        Query::new(&parser_language, query_source).map_err(|source| CodeIntelError::Query {
+            query_name: "ad_hoc".to_string(),
+            source,
+        })?;
+
+    let mut results = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(query_match) = matches.next() {
+        if results.len() >= limit {
+            break;
+        }
+        let captures = query_match
+            .captures
+            .iter()
+            .map(|capture| {
+                let span = one_based_span(capture.node);
+                let rendered_span = span.render();
+                Ok(CaptureRecord {
+                    query_name: "ad_hoc".to_string(),
+                    capture_name: query.capture_names()[capture.index as usize].to_string(),
+                    text: capture.node.utf8_text(source.as_bytes())?.to_string(),
+                    span,
+                    rendered_span,
+                })
+            })
+            .collect::<Result<Vec<_>, CodeIntelError>>()?;
+        results.push(AdHocQueryMatch { captures });
+    }
+    Ok(results)
+}
+
 fn language_config(language: SourceLanguage) -> LanguageConfig {
     match language {
         SourceLanguage::Rust => LanguageConfig {
@@ -1127,7 +1259,7 @@ fn compile_query<'a>(
         query_name: asset.name.to_string(),
         source,
     })?;
-    validate_capture_names(asset, &query, metadata)?;
+    validate_capture_names(asset.name, &query, metadata)?;
     Ok(CompiledQuery {
         asset,
         query,
@@ -1136,20 +1268,20 @@ fn compile_query<'a>(
 }
 
 fn validate_capture_names(
-    asset: QueryAsset,
+    query_name: &str,
     query: &Query,
     metadata: &QueryPackMetadata,
 ) -> Result<(), CodeIntelError> {
     for capture_name in query.capture_names().iter().copied() {
         if !STANDARD_CAPTURE_NAMES.contains(&capture_name) {
             return Err(CodeIntelError::NonstandardCapture {
-                query_name: asset.name.to_string(),
+                query_name: query_name.to_string(),
                 capture_name: capture_name.to_string(),
             });
         }
         if !metadata.captures.contains_key(capture_name) {
             return Err(CodeIntelError::UndocumentedCapture {
-                query_name: asset.name.to_string(),
+                query_name: query_name.to_string(),
                 capture_name: capture_name.to_string(),
             });
         }

@@ -71,8 +71,24 @@ impl MemoryConfig {
             );
         }
 
+        let code_intel = parsed.code_intel.unwrap_or_default();
+        let ast = code_intel.ast.unwrap_or_default();
+
         Ok(Self {
             enabled: parsed.enabled.unwrap_or(true),
+            code_intel: CodeIntelConfig {
+                enabled: code_intel.enabled.unwrap_or(true),
+                ast: AstCodeIntelConfig {
+                    enabled: ast.enabled.unwrap_or(true),
+                    max_file_bytes: ast.max_file_bytes.unwrap_or(2_097_152),
+                    max_files_per_request: ast.max_files_per_request.unwrap_or(200),
+                    max_matches_per_request: ast
+                        .max_matches_per_request
+                        .or(ast.max_matches_per_file)
+                        .unwrap_or(2_000),
+                    max_capture_bytes: ast.max_capture_bytes.unwrap_or(4_096),
+                },
+            },
             config_path: resolved_config_path,
             repo_root,
             memory_root,
@@ -222,6 +238,17 @@ fn write_memory_config(config: &MemoryConfig) -> Result<(), MemoryError> {
     }
     let file = MemoryConfigFile {
         enabled: Some(config.enabled),
+        code_intel: Some(CodeIntelConfigFile {
+            enabled: Some(config.code_intel.enabled),
+            ast: Some(AstCodeIntelConfigFile {
+                enabled: Some(config.code_intel.ast.enabled),
+                max_file_bytes: Some(config.code_intel.ast.max_file_bytes),
+                max_files_per_request: Some(config.code_intel.ast.max_files_per_request),
+                max_matches_per_request: Some(config.code_intel.ast.max_matches_per_request),
+                max_matches_per_file: None,
+                max_capture_bytes: Some(config.code_intel.ast.max_capture_bytes),
+            }),
+        }),
         memory_root: Some(PathBuf::from(path_relative_to(
             &config.repo_root,
             &config.memory_root,
@@ -274,6 +301,17 @@ fn render_memory_init_config(repo_root: &Path) -> Result<String, MemoryError> {
         );
     }
     let config = MemoryConfigFile {
+        code_intel: Some(CodeIntelConfigFile {
+            enabled: Some(true),
+            ast: Some(AstCodeIntelConfigFile {
+                enabled: Some(true),
+                max_file_bytes: Some(2_097_152),
+                max_files_per_request: Some(200),
+                max_matches_per_request: Some(2_000),
+                max_matches_per_file: None,
+                max_capture_bytes: Some(4_096),
+            }),
+        }),
         memory_root: Some(PathBuf::from(DEFAULT_MEMORY_ROOT)),
         visibility: Some(MemoryVisibility::Private),
         index_path: Some(PathBuf::from(format!(
