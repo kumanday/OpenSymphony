@@ -42,15 +42,22 @@ GitHub repository.
 
 2. In Codex settings, install the Codex GitHub app and grant it access to the
    repository (or organization).
-3. Enable **Code review** for the repository.
-4. Turn on **Automatic reviews** so every newly opened PR gets an initial
+3. Create a **Codex cloud environment** for the repository: Codex settings →
+   **Environments** → **Create environment**, then select the repo. This is
+   the "Codex cloud set up for the repository" prerequisite in OpenAI's docs —
+   until an environment exists, Codex responds to PRs with
+   *"To use Codex here, create an environment for this repo"* instead of
+   reviewing. For review-only use the defaults are fine (universal container
+   image, no setup script, internet off during the agent phase).
+4. Enable **Code review** for the repository.
+5. Turn on **Automatic reviews** so every newly opened PR gets an initial
    review without any agent action. Re-reviews after follow-up pushes are
    requested by the agent per `WORKFLOW.md` (an exact `@codex review`
    comment), so each fix round still gets reviewed.
-5. Keep review guidance current. Codex applies the `## Review guidelines`
+6. Keep review guidance current. Codex applies the `## Review guidelines`
    section of the closest `AGENTS.md`; `opensymphony init` seeds that section
    and the fuller `.agents/skills/custom-codereview-guide.md` it points to.
-6. Verify: open a trivial test PR. Codex should react with 👀 within about a
+7. Verify: open a trivial test PR. Codex should react with 👀 within about a
    minute and post a standard GitHub review. Then push a follow-up commit and
    comment `@codex review` to confirm re-review works.
 
@@ -110,6 +117,10 @@ GitHub repository.
 
 ## Troubleshooting
 
+- **Codex comments "To use Codex here, create an environment for this repo"**:
+  the GitHub app is installed but the repository has no Codex cloud
+  environment. Create one (setup step 3), then re-trigger with an exact
+  `@codex review` comment.
 - **No review, no error**: usually stale connector state — disconnect and
   reconnect the GitHub connector in Codex settings.
 - **Reviews report limit reached while the dashboard shows quota**: the wrong
