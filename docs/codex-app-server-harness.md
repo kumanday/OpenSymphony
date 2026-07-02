@@ -534,6 +534,16 @@ Remaining follow-up work:
 - COE-482: TUI Codex Token Usage Accounting
 - COE-483: Codex Event Content Summaries
 - COE-484: Desktop Live Snapshot And Run Detail Refresh
+- COE-486: Harness Interrupt Contract And Run Diagnostics
+- COE-487: Desktop Run Detail TUI Parity
+- COE-488: Lazy Desktop Launcher Command
+- COE-489: OpenHands Agent-Server Interrupt Adapter
+- COE-490: Codex App-Server Turn Interrupt Adapter
+- COE-491: Desktop Run Detail Action Wiring And Cleanup
+- COE-492: Merging Supersedes Human Review Polling
+- COE-493: Desktop Operations Integration Hardening
+- COE-504: Linear Polling And Rate-Limit Recovery
+- COE-505: Add scheduler-side Codex stdio interrupt channel
 
 ## Source refs
 
@@ -556,5 +566,15 @@ Remaining follow-up work:
 - COE-482
 - COE-483
 - COE-484
+- COE-486
+- COE-487
+- COE-488
+- COE-489
+- COE-490
+- COE-491
+- COE-492
+- COE-493
+- COE-504
+- COE-505
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

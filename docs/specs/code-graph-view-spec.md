@@ -12,12 +12,14 @@ Post-read action: implement the Code Graph as a third graph surface in the share
 
 ## 1. Summary
 
-The Code Graph is the human-facing view over the code-intelligence substrate that already ships in `crates/opensymphony-code-intel` and the `code_*` DuckDB tables. It renders tree-sitter-derived structure — files, symbols, and the `contains`/`imports`/`calls`/`references`/`tests` edges between them — inside the same graph pane, renderer, and inspector discipline that the Knowledge Graph established.
+The Code Graph is the human-facing view over the code-intelligence substrate that already ships in `crates/opensymphony-code-intel` and the `code_*` DuckDB tables. It renders tree-sitter-derived structure — files, symbols, and the `contains`/`imports`/`calls`/`references`/`tests` edges between them — inside the same graph surface, renderer, and inspector discipline that the Knowledge Graph established, mounted as the full-width hero of a reworked workspace layout (section 6.1).
 
 It has two top-level modes:
 
-- **Query mode** is the default and the primary interaction. The operator enters the graph through a symbol, a file, or a run's diff, and sees only the relevant subgraph: the symbol's neighborhood, a file's containment tree, or the delta a run produced with its blast radius. The anchor use case is diff-driven: click a line in a run's Diff pane, land on the enclosing symbol's neighborhood, and see callers, callees, imports, tests, diagnostics, and cross-links into memory and the work graph.
-- **Atlas mode** is the global view: the whole indexed repository, community/directory-aggregated first, for free-form exploration and as the demonstration surface. It is one mode among several, never the default entry.
+- **Query mode** renders a scoped working set: a symbol's neighborhood, a file's containment tree, or the delta a run produced with its blast radius. It is the anticipated primary workflow because reviews start here: click a changed region in a run's Diff pane, land on the enclosing symbol's neighborhood, and see callers, callees, imports, tests, diagnostics, and cross-links into memory and the work graph.
+- **Atlas mode** renders the whole indexed repository, community/directory-aggregated first with expand-on-demand. It is the landing view when the operator opens the Code Graph directly, and the surface for free-form structural exploration.
+
+The modes are peers: they differ in how they are entered (section 6.3) and how much of the graph they load at once (section 6.5), not in rank.
 
 The value proposition is answering recurring operator questions — *what does this change touch, what calls this, what tests cover this, what did we decide about this before* — not aesthetics or spatial memory. Confidence honesty is a core requirement: tree-sitter without type resolution produces mostly `syntactic` edges in dynamic languages, and every edge's confidence must be a visible channel, never overstated.
 
@@ -38,7 +40,7 @@ Rendering and client infrastructure (shipped, OSYM-820–826 complete):
 
 - `@opensymphony/graph` (`packages/graph`) provides `GraphState`/`graphReducer`, mode/filter/search/selection/deep-link state, and transport-agnostic adapters: `createHttpGraphAdapter` (gateway/memory server), `createTauriNativeGraphAdapter`, `createFixtureGraphAdapter`, plus a worker-based `createGraphLayoutAdapter` with synchronous fallback.
 - `packages/ui-core/src/knowledge-graph-renderer.ts` implements the Three.js (^0.171.0) renderer: 2.5D orthographic camera, instanced node geometry, batched edge line geometry, LOD labels (80-label budget), nearest-node picking, and a 2D-canvas fallback. Layouts are custom (force, hierarchical, radial neighborhood, timeline) with progressive community aggregation for large force layouts. The OSYM-821 dependency evaluation resolved to custom layout code plus server-computed communities; the Code Graph consumes this outcome and must not run a second evaluation.
-- The left graph pane in `packages/ui-core/src/app-shell.ts` has a segmented `data-graph-view` toggle (`Task Graph` / `Knowledge Graph`) with `selectGraphPaneView()`; adding a third entry is a registration change, not an architecture change.
+- The left graph pane in `packages/ui-core/src/app-shell.ts` has a segmented `data-graph-view` toggle (`Task Graph` / `Knowledge Graph`) with `selectGraphPaneView()`; adding a third entry is a registration change. The workspace geometry around the graph pane is reworked by this spec (section 6.1).
 - Desktop reads graph data through Tauri native commands (`memory_bundles`, `memory_graph`, `memory_concept_detail`, `memory_communities`, `memory_search` in `apps/desktop/src-tauri/src/commands.rs`), selected over loopback HTTP by `createDesktopGraphAdapter`.
 
 Run Detail diff pipeline (shipped):
@@ -94,7 +96,7 @@ The operator has Run Detail open on an issue and wants to answer:
 - Which tests relate to the changed symbols, and did the run touch them?
 - What did we previously decide or record about this area?
 
-Flow: Diff pane line click → Code Graph Query mode (neighborhood of the enclosing symbol, diff overlay active) → inspector shows signature, freshness, diagnostics, issue and memory chips.
+Flow: visible symbol affordance in the Diff pane → the graph hero switches to Code Graph Query mode (neighborhood of the enclosing symbol, diff overlay active) while Run Detail and the Inspector stay put → the detail surfaces show signature, freshness, diagnostics, issue and memory chips.
 
 ### 5.2 Human exploring a codebase
 
@@ -117,32 +119,59 @@ The graph adds no agent surface, but it renders the same records the agent recei
 
 ## 6. Product Shape
 
-### 6.1 Mounting
+### 6.1 Workspace layout prerequisite: graph as hero
 
-The Code Graph mounts in the existing left graph pane as a third segmented-toggle entry: `Task Graph` / `Knowledge Graph` / `Code Graph` (`data-graph-view="code"`). This resolves Knowledge Graph spec Open Question 2: code-intelligence nodes get their own surface and are not mixed into the memory graph by default; the graphs connect through inspector chips and deep links instead.
+The current dashboard stacks a Status card, a Connection card, and a Model Configuration section above a three-column workspace (graph pane / Run Detail / Inspector at roughly 48/26/26). Three columns are too cramped for each column's content, and a third graph surface would make that worse. This spec therefore depends on a workspace shell rework that all three graph surfaces benefit from:
 
-The run-detail Inspector stays scoped to Diff and Activity. Selecting nodes in the Code Graph must not disturb Run Detail or Inspector state (the OSYM-824 acceptance criterion applies verbatim). Pane sizing continues to use the existing resizer state.
+- **Status strip.** The Status pane compacts into a one-to-two-row top-bar component between the `OpenSymphony Desktop` identifier (upper left) and the `Dashboard` / `Planning` tabs; the metric tiles (running, retry queue, token counters) become inline compact stats.
+- **Event log mini-view.** The event ticks (`snapshot_published` and friends) become a compact two-line scrollable region to the left of the `Connected` badge in the upper right, expandable to a large modal for the full log.
+- **Model Configuration** collapses to a gear icon in the top bar, expandable to a large modal.
+- **Graph hero.** The graph surface becomes a full-width hero section directly under the top bar, with the `Task Graph` / `Knowledge Graph` / `Code Graph` segmented toggle in its toolbar.
+- **Two lower columns.** Below the hero, two resizable columns replace the previous three, each half-width by default. Column content is registered per graph surface (6.4).
 
-### 6.2 Modes
+The shell rework is Phase 0 (section 15) and is deliberately independent of the Code Graph backend: it ships against the existing Task and Knowledge graphs before any code-graph data exists.
 
-Two top-level modes, with Query mode subdivided by entry shape:
+### 6.2 Mounting
 
-| Mode | Sub-view | Purpose | Entry | Default? |
-| --- | --- | --- | --- | --- |
-| Query | Neighborhood | Symbol-centric N-hop view (default depth 1, max 2) | Diff-pane click, search result, inspector chip, deep link | Yes — default mode |
-| Query | File | Containment tree of one file or directory plus its import boundary | File row click in Diff pane or Atlas drill-in | — |
-| Query | Diff | Neighborhood/File view with the run's delta overlay active (section 10) | Run Detail summary strip, or automatic when entered from a run's diff | Auto in run context |
-| Atlas | — | Whole-repo, aggregated overview; expand-on-demand | Toggle, repo picker, marketing/demo | Only mode that loads the full graph, always aggregated first |
+The Code Graph is the third segmented-toggle entry in the hero toolbar: `Task Graph` / `Knowledge Graph` / `Code Graph` (`data-graph-view="code"`). This resolves Knowledge Graph spec Open Question 2: code-intelligence nodes get their own surface and are not mixed into the memory graph by default; the graphs connect through inspector chips and deep links instead.
 
-Tests emphasis is a filter preset available in every Query sub-view (highlights `tests` edges and test-kind symbols for the current selection), not a separate mode.
+Each surface retains its own mode, selection, and filter state for the session. Toggling away and back restores exactly where the operator left off — this is the primary back-navigation mechanism (11.2). Selecting nodes in the Code Graph must not disturb Run Detail or Inspector state (the OSYM-824 acceptance criterion, restated for the new geometry).
+
+### 6.3 Modes
+
+Two top-level modes. They are peers: Query mode is the anticipated primary workflow because reviews start from diffs; Atlas is the natural landing for direct exploration. Neither is subordinate — they differ in how they are entered and how much of the graph they load.
+
+| Mode | Sub-view | Working set | Entered by |
+| --- | --- | --- | --- |
+| Atlas | — | Whole repo, community/directory-aggregated, expand-on-demand | Opening the Code Graph directly with no restorable prior state; repo picker; deep link |
+| Query | Neighborhood | Symbol-centric N-hop view (default depth 1, max 2) | Diff-pane symbol affordance, search result, inspector chip, Atlas drill-in, deep link |
+| Query | File | Containment tree of one file or directory plus its import boundary | File header action in the Diff pane, Atlas drill-in, deep link |
+| Query | Diff | Neighborhood or File view with the run's delta overlay active (section 10) | Diff-pane navigation from a run, Run Detail summary strip, deep link |
+
+Opening the Code Graph with restorable prior state resumes that state; otherwise it lands on Atlas for the active repo (or the repo picker when several are indexed). Entering through a diff affordance, search hit, or chip lands directly in the corresponding Query sub-view.
+
+Tests emphasis is a filter preset available in every mode (highlights `tests` edges and test-kind symbols for the current selection), not a separate mode.
 
 Mode names map onto the shared `GraphMode` machinery in `@opensymphony/graph`; the code surface registers `atlas`, `neighborhood`, `file`, and `diff` and reuses the existing layout-kind mapping (`graphLayoutKindForMode`) with the presets in section 9.2.
 
-### 6.3 Query-scoped principle
+### 6.4 Lower-column content per surface
 
-The default entry into the Code Graph is always a scoped query — a symbol, a file, a diff, or a search hit. The full-repo Atlas is opt-in. This is the scale posture (section 14) and the product posture: code graphs at repository scale are 10–100× larger than memory graphs, and rendered subgraphs stay small because entry is scoped. Sourcetrail's destination-app failure mode is the cautionary tale; the Code Graph is workflow-attached, not a destination.
+The two columns below the hero are registered per surface:
 
-### 6.4 Repository scope
+| Hero surface | Context | Left column | Right column |
+| --- | --- | --- | --- |
+| Task Graph | always | Run Detail | Inspector (Diff / Activity) |
+| Code Graph | entered from a run's diff (Query/Diff) | Run Detail (unchanged) | Inspector (unchanged, Diff tab) |
+| Code Graph | standalone (Atlas, or Query via search/chip/deep link) | Structure list: neighborhood or community members of the current selection; doubles as the accessibility list fallback (section 13) | Symbol/file detail: the inspector content of 11.3, with room for source-linked snippets |
+| Knowledge Graph | standalone | Neighborhood node list (planned) | Concept content rendering (planned) |
+
+The run-entered Code Graph row is the load-bearing one: when the operator activates a diff affordance, only the hero changes (Task Graph → Code Graph with the Query context applied); Run Detail and the Inspector keep their columns and state, so the operator reads the code neighborhood directly above the diff they came from. The Knowledge Graph row records the shell contract this spec introduces; iterating the KG columns themselves (capsule content rendering, memory-node coverage) is adjacent work outside this spec's scope.
+
+### 6.5 Scope discipline
+
+Rendered working sets stay small by construction: neighborhoods are tens-to-hundreds of nodes, File mode is bounded by file size, and Atlas loads aggregated because repository-scale code graphs are 10–100× larger than memory graphs — a scale posture (section 14), not a ranking of modes. Atlas expansion is incremental: expanding a community or directory issues a scoped follow-up request rather than ever rendering the raw full graph. Sourcetrail's destination-app failure mode is the cautionary tale the Query entry points avoid; the Code Graph is workflow-attached first, and Atlas gives it a first-class global map rather than a hairball.
+
+### 6.6 Repository scope
 
 v1 targets the single active workspace repository per run (the current schema has no multi-repo runs). Atlas mode operates on any repo present in `code_documents`, selected through a repo picker fed by the repos endpoint. Indexing is explicit: an unindexed repo shows an "Index repository" action that triggers batch ingest with progress, then a `code_graph_updated` event refreshes the pane. Run-scoped views index the touched files on demand against the run worktree.
 
@@ -429,8 +458,12 @@ GET /api/v1/runs/{run_id}/code/diff-overlay
 
 1. Run Detail Diff pane renders per-file diffs (exists today).
 2. When code intel is enabled and the file's language is supported, the client fetches the run-scoped outline for the selected file once (`/api/v1/runs/{run_id}/code/outline`) and resolves affordances locally: each rendered `DiffLine` with a new-file line number maps to the innermost symbol whose span contains it. Line-level containment is the honest v1 affordance — no token parsing in the client. Deletion-only regions map to the nearest containing symbol in the head outline, or the file node when none exists.
-3. Affordance rendering: contained lines get a gutter affordance and hover state naming the enclosing symbol (`fn renderFileDiff`); the diff header gets an "Open in Code Graph" action targeting File mode.
-4. Click navigates the left pane to Code Graph → Query/Neighborhood centered on that `symbol_key`, with the run's diff overlay active, via the shared deep-link mechanism. Run Detail and the Inspector do not change state.
+3. Affordance rendering — visible, compact, bounded:
+   - A small graph glyph renders in the diff gutter at the first changed line of each distinct enclosing symbol region, so the operator can see the affordance exists without hovering, and the glyph count stays small (one per symbol region, not one per line).
+   - Hovering any contained line highlights its symbol region, names the enclosing symbol (`fn renderFileDiff`), and exposes the same glyph on that line.
+   - Right-click on a contained line offers `Open symbol in Code Graph` as a secondary path; the file header row gets an `Open file in Code Graph` action targeting File mode.
+   - Glyphs are keyboard-focusable and labeled (section 13). When code intel is unavailable for the file, no glyphs render and the diff is unchanged.
+4. Activating an affordance switches the hero surface to Code Graph → Query/Neighborhood centered on that `symbol_key`, with the run's diff overlay active, via the shared deep-link mechanism. Only the hero changes: Run Detail and the Inspector keep their columns and state (section 6.4), so the neighborhood renders directly above the diff it came from.
 5. Freshness correctness: the outline is parsed from the same worktree state the diff pane shows. If only base-commit records are available (worktree gone, hosted mode), symbols render with explicit `stale` markers per the AST freshness policy — rendered, never hidden.
 
 The server-side symbol-at-position endpoint (span-containment query over `code_symbols`) is the eventual precise path and is deferred; the outline contract makes it unnecessary for v1 because per-file symbol counts are small.
@@ -441,6 +474,7 @@ The server-side symbol-at-position endpoint (span-containment query over `code_s
 - Search covers symbol names, file paths, and signatures within the active repo, backed by the existing name/path indexes; results open Neighborhood.
 - Deep links extend the shipped app-history mechanism with a surface discriminator and code state: `{surface: "code", repo_id, mode, symbol_key?, path?, run_id?, depth, filters}`. A shared deep link with the same snapshot cursor reproduces the same layout (deterministic seed).
 - History: mode/selection/filter changes push app history exactly as the Knowledge Graph does.
+- Returning: each surface's session state persists (section 6.2), so clicking `Task Graph` restores the prior task selection exactly. When the Code Graph was entered from a run's diff, its toolbar additionally shows an entry-context chip (for example `from COE-505 · AGENTS.md`) that returns to the Task Graph surface in one click.
 
 ### 11.3 Inspector
 
@@ -475,7 +509,8 @@ The Code Graph enforces the same boundary discipline as memory retrieval, with c
 Parity with the Knowledge Graph requirements, code-flavored:
 
 - Keyboard selection and navigation across visible nodes; predictable focus order between toolbar, canvas, inspector, and list fallback.
-- Searchable list/table fallback for every mode, including Diff mode (delta table: symbol, status, path, blast-radius flag) — the summary-strip numbers must be reachable without the canvas.
+- Searchable list/table fallback for every mode, including Diff mode (delta table: symbol, status, path, blast-radius flag) — the summary-strip numbers must be reachable without the canvas. In the standalone Code Graph layout the structure-list column (section 6.4) is this fallback, permanently visible rather than toggled.
+- Diff gutter glyphs are keyboard-focusable buttons whose accessible names include the target symbol (`Open renderFileDiff in Code Graph`).
 - Screen-reader summaries announce mode, repo, selection, active filters, overlay status, and truncation.
 - Confidence and delta status are never encoded by color alone: line style carries confidence; icons/badges carry delta status and diagnostics.
 - Reduced-motion mode stops layout animation after initial stabilization.
@@ -497,6 +532,12 @@ Rendered-subgraph tiers reuse the KG targets; code-specific budgets added becaus
 
 Phases are dependency-ordered; each is sized to decompose into standard task packages during planning, which happens after this spec is reviewed. Section references identify the requirements each phase implements.
 
+### Phase 0: Workspace Shell Layout (prerequisite)
+
+- Status pane compaction into the top-bar status strip; event-log mini-view with a full-log modal; Model Configuration gear and modal (section 6.1).
+- Full-width graph hero with the surface toggle in its toolbar; two resizable half-width lower columns with per-surface content registration (section 6.4); per-surface session-state persistence across toggles (section 6.2).
+- Ships against the existing Task and Knowledge graphs with no code-graph data dependency.
+
 ### Phase 1: Symbol Identity And Code Graph Contracts
 
 - Container-chain extraction in `opensymphony-code-intel` during ingest.
@@ -505,7 +546,7 @@ Phases are dependency-ordered; each is sized to decompose into standard task pac
 - Neighborhood traversal and span-containment queries over the existing tables.
 - `code_graph.ts` DTO module, `/api/v1/code/*` and run-scoped gateway routes, the `code_graph_updated` event, Tauri native-command mirrors, and boundary visibility/redaction (section 8).
 
-Everything downstream depends on this phase.
+Phases 2–4 depend on this phase, and on Phase 0 for anything user-facing; Phase 0 and Phase 1 are independent of each other and can proceed in parallel.
 
 ### Phase 2: Pane MVP With Atlas And Neighborhood
 
@@ -528,16 +569,20 @@ Everything downstream depends on this phase.
 - Read model: neighborhood traversal correctness and bounds; edge-target resolution (exact vs syntactic vs unresolved) on fixtures; directory-community aggregation; stale exclusion and `include_stale` marking.
 - Contracts: DTO schema-version checks; visibility filtering; path-redaction (no absolute paths in any response); truncation reporting; `code_graph_updated` cursor monotonicity; native-command/HTTP parity on identical fixtures.
 - Diff overlay: added/removed/modified classification fixtures; blast-radius traversal with confidence tags; `unanalyzed_files` completeness; merge-base agreement with the diff pane; summary-strip numbers equal DTO numbers.
-- Anchor flow: outline fetch and line-containment resolution unit tests; click → neighborhood deep link; Run Detail/Inspector state untouched (OSYM-824 regression); stale-marker rendering when worktree records are unavailable.
+- Anchor flow: outline fetch and line-containment resolution unit tests; affordance activation → neighborhood deep link; Run Detail/Inspector state untouched (OSYM-824 regression); stale-marker rendering when worktree records are unavailable.
+- Shell layout: hero and two-column registration per surface; status strip, event-log modal, and model-configuration modal render; per-surface state restoration on toggle round-trips (Task → Code → Task keeps the task selection; Code keeps mode/selection/filters); column resize persistence.
+- Affordances: one gutter glyph per enclosing symbol region; keyboard focus and accessible names; right-click path; no glyphs when code intel is unavailable for the file.
 - Rendering: confidence/kind channel styling snapshots; overlay styling; layout-preset determinism per seed; edge-filter reducer behavior; WebGL nonblank and canvas-fallback checks web + desktop.
 - Accessibility: keyboard navigation, list fallback per mode including delta table, screen-reader summaries, non-color confidence encoding, reduced motion.
 - Scale: fixture tiers of section 14 within budget; aggregated atlas at reference scale; no unaggregated full-graph render path reachable from Atlas entry.
 
 ## 17. Acceptance Criteria
 
-- A third `Code Graph` toggle entry renders Atlas and Query modes in web and Tauri desktop through the same DTOs, with fixture, HTTP, and native adapters.
+- The `Code Graph` entry in the graph hero's toggle renders Atlas and Query modes in web and Tauri desktop through the same DTOs, with fixture, HTTP, and native adapters.
+- The workspace shell rework ships: compacted top-bar status strip with an expandable event-log modal, model-configuration gear modal, full-width graph hero, and two resizable half-width columns with per-surface content registration.
+- Opening the Code Graph directly lands on Atlas (or restores prior session state); toggling between graph surfaces restores each surface's prior mode, selection, and filters.
 - Atlas opens aggregated for an indexed repo, expands on demand, and never renders an unaggregated full repository graph by default.
-- From a run's Diff pane, clicking a changed region opens the enclosing symbol's neighborhood with the diff overlay active, in two interactions or fewer, without disturbing Run Detail or Inspector state.
+- From a run's Diff pane, a visible symbol affordance switches the hero to the enclosing symbol's neighborhood with the diff overlay active, in two interactions or fewer, while Run Detail and the Inspector keep their columns and state.
 - Every rendered edge visibly encodes confidence; every rendered node visibly encodes freshness; both are filterable; color is never the only channel.
 - The Run Detail summary strip shows symbols added/removed/modified, blast radius, and new diagnostics matching the overlay DTO, and degrades gracefully when code intel is unavailable.
 - Deep links with `symbol_key` survive commits that shift lines but do not rename/move the symbol.
@@ -554,6 +599,7 @@ Everything downstream depends on this phase.
 5. Should Atlas offer an "index automatically on first open" convenience for the active workspace repo, or stay strictly explicit? Strictly explicit in v1; revisit with usage.
 6. Multi-repo runs: the run schema is single-workspace today. When multi-repo lands, do run-scoped code endpoints take a repo discriminator, or does the run own an ordered repo list?
 7. When a type-resolution provider (LSP/SCIP-style) later promotes `syntactic` edges to `exact`, should promoted edges be re-persisted or overlaid at read time? Schema supports either; decide with that provider's spec.
+8. Standalone Code Graph lower columns: the structure-list / detail split (section 6.4) is the starting composition. After Phase 2 usage, revisit whether the left column should also offer community membership or recent overlay deltas touching the selection.
 
 ## 19. References
 

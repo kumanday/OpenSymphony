@@ -649,6 +649,7 @@ areas:
       - area:documentation
       - area:operations
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M12.6: Tree-sitter Code Intelligence'
   duckdb:
     title: Duckdb
@@ -1653,6 +1654,7 @@ areas:
       - area:tests
       - area:threejs
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
   security:
@@ -1850,6 +1852,7 @@ areas:
       - area:tests
       - area:threejs
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
   threejs:
