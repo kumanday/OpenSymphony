@@ -462,7 +462,12 @@ Live test scenarios:
 
 ## Current model
 
-- COE-493 contributed: PR #163: Route gateway cancels to harness interrupts (merge `aaba950`)
+- COE-253 contributed: PR #19: COE-253: OpenHands Runtime Adapter (merge `911b0b4`)
+- COE-256 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-261 contributed: PR #83: Add memory init and mapped docs sync
+- COE-262 contributed: PR #34: COE-262: Harden OpenHands REST client contract (merge `0e2be26`)
+- COE-265 contributed: PR #36: COE-265: WebSocket event stream, reconciliation, and recovery (merge `d78a8ce`)
+- COE-266 contributed: PR #40: Implement issue session runner (merge `326361f`)
 
 ## Important invariants
 
@@ -479,10 +484,82 @@ Live test scenarios:
 
 ## Recent changes
 
+- COE-253: OpenHands Runtime Adapter
+- COE-256: Validation and Local Operations
+- COE-261: Local agent-server supervisor
+- COE-262: REST client and conversation contract
+- COE-265: WebSocket event stream, reconciliation, and recovery
+- COE-266: Issue session runner
+- COE-272: Fake OpenHands server and protocol contract suite
+- COE-273: Live local end-to-end suite
+- COE-274: CLI packaging, doctor, and local operations docs
+- COE-275: Remote agent-server mode and auth hardening
+- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
+- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
+- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
+- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+- COE-382: Add supply-chain and security audits to CI
+- COE-383: Decompose oversized session and TUI modules into focused submodules
+- COE-384: Expand error-path tests for Linear client and workspace hooks
+- COE-385: Resolve runtime tracking TODO in OpenHands session runner
+- COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
+- COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-399: Linear Read Coverage And Task Graph Cache
+- COE-400: OpenHands Event Normalization And Runtime Mirror
+- COE-405: Linear Milestone, Issue, And Sub-Issue Mutations
+- COE-411: Task Graph Editor And Runtime Overlay UI
+- COE-412: Runtime Timeline And Terminal/Log Association
+- COE-414: Diff, Validation, Approval, And Run Action Views
+- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
+- COE-435: Long-running run observability fixtures and client-facing diagnostics
+- COE-486: Harness Interrupt Contract And Run Diagnostics
+- COE-487: Desktop Run Detail TUI Parity
+- COE-488: Lazy Desktop Launcher Command
+- COE-489: OpenHands Agent-Server Interrupt Adapter
+- COE-490: Codex App-Server Turn Interrupt Adapter
+- COE-491: Desktop Run Detail Action Wiring And Cleanup
+- COE-492: Merging Supersedes Human Review Polling
 - COE-493: Desktop Operations Integration Hardening
+- COE-504: Linear Polling And Rate-Limit Recovery
 
 ## Source refs
 
+- COE-253
+- COE-256
+- COE-261
+- COE-262
+- COE-265
+- COE-266
+- COE-272
+- COE-273
+- COE-274
+- COE-275
+- COE-280
+- COE-281
+- COE-282
+- COE-294
+- COE-382
+- COE-383
+- COE-384
+- COE-385
+- COE-386
+- COE-387
+- COE-399
+- COE-400
+- COE-405
+- COE-411
+- COE-412
+- COE-414
+- COE-434
+- COE-435
+- COE-486
+- COE-487
+- COE-488
+- COE-489
+- COE-490
+- COE-491
+- COE-492
 - COE-493
+- COE-504
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

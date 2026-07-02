@@ -213,10 +213,12 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Current model
 
-- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
-- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
-- COE-473 contributed: No merged PR source was matched during capture.
+- COE-254 contributed: PR #6: COE-254: bootstrap tracker, workspace, and orchestration core
+- COE-263 contributed: PR #35: COE-263: Implement workspace manager and lifecycle hooks (merge `2693eea`)
+- COE-264 contributed: PR #33: COE-264: Linear read adapter and issue normalization (merge `45cca3c`)
+- COE-267 contributed: PR #83: Add memory init and mapped docs sync
+- COE-268 contributed: PR #43: Implement orchestrator scheduler retries and reconciliation (merge `2ad73ad`)
+- COE-270 contributed: PR #39: COE-270: add deterministic workspace context artifacts (merge `3a90eea`)
 
 ## Important invariants
 
@@ -233,16 +235,48 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Recent changes
 
+- COE-254: Tracker, Workspaces, and Orchestration
+- COE-263: Workspace manager and lifecycle hooks
+- COE-264: Linear read adapter and issue normalization
+- COE-267: Linear MCP write surface
+- COE-268: Orchestrator scheduler, retries, and reconciliation
+- COE-270: Repository harness and generated context artifacts
+- COE-277: Implement hierarchy-aware task selection
 - COE-401: Web App Entry And Deployment Modes
 - COE-407: Browser Transport And Remote Stream Protocols
 - COE-419: Hosted Auth Placeholders And Web Parity
 - COE-473: Desktop task graph dependency and run detail parity
+- COE-486: Harness Interrupt Contract And Run Diagnostics
+- COE-487: Desktop Run Detail TUI Parity
+- COE-488: Lazy Desktop Launcher Command
+- COE-489: OpenHands Agent-Server Interrupt Adapter
+- COE-490: Codex App-Server Turn Interrupt Adapter
+- COE-491: Desktop Run Detail Action Wiring And Cleanup
+- COE-492: Merging Supersedes Human Review Polling
+- COE-493: Desktop Operations Integration Hardening
+- COE-504: Linear Polling And Rate-Limit Recovery
 
 ## Source refs
 
+- COE-254
+- COE-263
+- COE-264
+- COE-267
+- COE-268
+- COE-270
+- COE-277
 - COE-401
 - COE-407
 - COE-419
 - COE-473
+- COE-486
+- COE-487
+- COE-488
+- COE-489
+- COE-490
+- COE-491
+- COE-492
+- COE-493
+- COE-504
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
