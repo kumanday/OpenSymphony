@@ -1,9 +1,9 @@
 control_plane:
   bind: 127.0.0.1:2468
 
-openhands:
-  tool_dir: ~/.opensymphony/openhands-server
-
 memory:
   auto_capture: true
   auto_archive: false
+
+openhands:
+  tool_dir: ~/.opensymphony/openhands-server
