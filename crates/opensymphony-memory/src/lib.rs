@@ -209,9 +209,129 @@ pub struct ProviderStatus {
 }
 
 pub use crate::opensymphony_code_intel::{
-    CodeIntelArtifact, CodeIntelError, CodeIntelProvider as CodeIntelIndex, CodeIntelScope,
-    CodeIntelScopeKind, CodeIntelSourceRef,
+    CodeIntelArtifact as ProviderCodeIntelArtifact, CodeIntelError, CodeIntelProvider,
+    CodeIntelScope, CodeIntelScopeKind, CodeIntelSourceRef,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelArtifact {
+    pub provider: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_refs: Vec<KnowledgeScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<MemorySourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+impl From<ProviderCodeIntelArtifact> for CodeIntelArtifact {
+    fn from(artifact: ProviderCodeIntelArtifact) -> Self {
+        Self {
+            provider: artifact.provider,
+            kind: artifact.kind,
+            scope_refs: artifact.scope_refs.into_iter().map(Into::into).collect(),
+            source_refs: artifact.source_refs.into_iter().map(Into::into).collect(),
+            path: artifact.path,
+            commit_sha: artifact.commit_sha,
+            title: artifact.title,
+            summary: artifact.summary,
+        }
+    }
+}
+
+impl From<CodeIntelArtifact> for ProviderCodeIntelArtifact {
+    fn from(artifact: CodeIntelArtifact) -> Self {
+        Self {
+            provider: artifact.provider,
+            kind: artifact.kind,
+            scope_refs: artifact.scope_refs.into_iter().map(Into::into).collect(),
+            source_refs: artifact.source_refs.into_iter().map(Into::into).collect(),
+            path: artifact.path,
+            commit_sha: artifact.commit_sha,
+            title: artifact.title,
+            summary: artifact.summary,
+        }
+    }
+}
+
+impl From<CodeIntelScopeKind> for KnowledgeScopeKind {
+    fn from(kind: CodeIntelScopeKind) -> Self {
+        match kind {
+            CodeIntelScopeKind::LocalInstance => Self::LocalInstance,
+            CodeIntelScopeKind::Organization => Self::Organization,
+            CodeIntelScopeKind::ProjectSet => Self::ProjectSet,
+            CodeIntelScopeKind::Project => Self::Project,
+            CodeIntelScopeKind::Milestone => Self::Milestone,
+            CodeIntelScopeKind::WorkItem => Self::WorkItem,
+            CodeIntelScopeKind::Repository => Self::Repository,
+            CodeIntelScopeKind::CodePath => Self::CodePath,
+            CodeIntelScopeKind::Area => Self::Area,
+        }
+    }
+}
+
+impl From<KnowledgeScopeKind> for CodeIntelScopeKind {
+    fn from(kind: KnowledgeScopeKind) -> Self {
+        match kind {
+            KnowledgeScopeKind::LocalInstance => Self::LocalInstance,
+            KnowledgeScopeKind::Organization => Self::Organization,
+            KnowledgeScopeKind::ProjectSet => Self::ProjectSet,
+            KnowledgeScopeKind::Project => Self::Project,
+            KnowledgeScopeKind::Milestone => Self::Milestone,
+            KnowledgeScopeKind::WorkItem => Self::WorkItem,
+            KnowledgeScopeKind::Repository => Self::Repository,
+            KnowledgeScopeKind::CodePath => Self::CodePath,
+            KnowledgeScopeKind::Area => Self::Area,
+        }
+    }
+}
+
+impl From<CodeIntelScope> for KnowledgeScope {
+    fn from(scope: CodeIntelScope) -> Self {
+        Self {
+            kind: scope.kind.into(),
+            id: scope.id,
+            label: scope.label,
+        }
+    }
+}
+
+impl From<KnowledgeScope> for CodeIntelScope {
+    fn from(scope: KnowledgeScope) -> Self {
+        Self {
+            kind: scope.kind.into(),
+            id: scope.id,
+            label: scope.label,
+        }
+    }
+}
+
+impl From<CodeIntelSourceRef> for MemorySourceRef {
+    fn from(source_ref: CodeIntelSourceRef) -> Self {
+        Self {
+            kind: source_ref.kind,
+            id: source_ref.id,
+            url: source_ref.url,
+        }
+    }
+}
+
+impl From<MemorySourceRef> for CodeIntelSourceRef {
+    fn from(source_ref: MemorySourceRef) -> Self {
+        Self {
+            kind: source_ref.kind,
+            id: source_ref.id,
+            url: source_ref.url,
+        }
+    }
+}
 
 pub trait MemoryCatalog {
     fn provider_status(&self) -> ProviderStatus;
@@ -232,6 +352,56 @@ pub trait VectorIndex {
         scope_refs: &[KnowledgeScope],
         limit: usize,
     ) -> Result<Vec<SearchResult>, MemoryError>;
+}
+
+pub trait CodeIntelIndex {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CodeIntelProviderAdapter<P> {
+    provider: P,
+}
+
+impl<P> CodeIntelProviderAdapter<P> {
+    pub fn new(provider: P) -> Self {
+        Self { provider }
+    }
+
+    pub fn provider(&self) -> &P {
+        &self.provider
+    }
+
+    pub fn into_inner(self) -> P {
+        self.provider
+    }
+}
+
+impl<P> CodeIntelIndex for CodeIntelProviderAdapter<P>
+where
+    P: CodeIntelProvider,
+{
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        let provider_scope_refs = scope_refs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        self.provider
+            .code_context(paths, &provider_scope_refs, limit)
+            .map(|artifacts| artifacts.into_iter().map(Into::into).collect())
+            .map_err(MemoryError::from)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,9 +511,9 @@ impl CodeIntelIndex for NoopCodeIntelIndex {
     fn code_context(
         &self,
         _paths: &[PathBuf],
-        _scope_refs: &[CodeIntelScope],
+        _scope_refs: &[KnowledgeScope],
         _limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
         Ok(Vec::new())
     }
 }
@@ -912,6 +1082,86 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct EchoCodeIntelProvider;
+
+    impl CodeIntelProvider for EchoCodeIntelProvider {
+        fn code_context(
+            &self,
+            paths: &[PathBuf],
+            scope_refs: &[CodeIntelScope],
+            limit: usize,
+        ) -> Result<Vec<ProviderCodeIntelArtifact>, CodeIntelError> {
+            assert_eq!(
+                paths,
+                &[PathBuf::from("crates/opensymphony-memory/src/lib.rs")]
+            );
+            assert_eq!(limit, 7);
+            Ok(vec![ProviderCodeIntelArtifact {
+                provider: "echo".to_string(),
+                kind: "summary".to_string(),
+                scope_refs: scope_refs.to_vec(),
+                source_refs: vec![CodeIntelSourceRef {
+                    kind: "path".to_string(),
+                    id: "crates/opensymphony-memory/src/lib.rs".to_string(),
+                    url: None,
+                }],
+                path: Some(PathBuf::from("crates/opensymphony-memory/src/lib.rs")),
+                commit_sha: Some("abc123".to_string()),
+                title: "Memory boundary".to_string(),
+                summary: "Adapter converted provider artifacts into memory artifacts.".to_string(),
+            }])
+        }
+    }
+
+    #[test]
+    fn code_intel_provider_adapter_preserves_memory_index_contract() {
+        let adapter = CodeIntelProviderAdapter::new(EchoCodeIntelProvider);
+        let scope = KnowledgeScope {
+            kind: KnowledgeScopeKind::WorkItem,
+            id: "COE-506".to_string(),
+            label: Some("Trait inversion".to_string()),
+        };
+
+        let artifacts = adapter
+            .code_context(
+                &[PathBuf::from("crates/opensymphony-memory/src/lib.rs")],
+                std::slice::from_ref(&scope),
+                7,
+            )
+            .expect("adapter should convert provider output");
+
+        assert_eq!(artifacts.len(), 1);
+        let artifact = &artifacts[0];
+        assert_eq!(artifact.provider, "echo");
+        assert_eq!(artifact.scope_refs, vec![scope]);
+        assert_eq!(
+            artifact.source_refs,
+            vec![MemorySourceRef {
+                kind: "path".to_string(),
+                id: "crates/opensymphony-memory/src/lib.rs".to_string(),
+                url: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn noop_code_intel_index_keeps_memory_contract() {
+        let artifacts = NoopCodeIntelIndex
+            .code_context(
+                &[],
+                &[KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: "repo".to_string(),
+                    label: None,
+                }],
+                1,
+            )
+            .expect("noop index should not fail");
+
+        assert!(artifacts.is_empty());
+    }
 
     #[test]
     fn ensure_memory_initialized_creates_config_and_gitignore_policy_once() {

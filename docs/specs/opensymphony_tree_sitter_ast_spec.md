@@ -52,7 +52,7 @@ Implication: OpenSymphony can use Tree-sitter for fast, language-aware, range-ci
 The current OpenSymphony repository already has the right seams:
 
 - Packaging is flat, but subsystem boundaries are explicit. The root crate includes internal module trees through `#[path = "../crates/.../src/lib.rs"]` declarations.
-- `opensymphony_code_intel` owns `CodeIntelArtifact`, `CodeIntelProvider`, and rendered code-intelligence scope/source-reference types; `opensymphony_memory` consumes and may re-export them for compatibility.
+- `opensymphony_code_intel` owns `CodeIntelArtifact`, `CodeIntelProvider`, and rendered code-intelligence scope/source-reference types; `opensymphony_memory` keeps the legacy `CodeIntelIndex`/`CodeIntelArtifact` surface as a compatibility adapter.
 - `opensymphony_cli` already supports `memory context --include-code-intel`.
 - The memory MCP server already lists `memory.context`, `memory.search`, `memory.related`, `memory.docs`, and an admin `memory.ingest_code_intel` capability.
 - The current `CodebaseAnalyzer` is useful for high-level repository summaries, packages, build systems, integration signals, conventions, and risks, but it does not parse ASTs, symbols, references, or syntax diagnostics.
@@ -150,7 +150,7 @@ Implementation note: pin exact versions in `Cargo.lock` and prefer crates mainta
 
 ### 5.2 Provider model
 
-The rendered context provider trait lives in `opensymphony_code_intel`. `opensymphony_memory` consumes and may re-export this contract for compatibility, but AST and composite providers do not import memory internals.
+The rendered context provider trait lives in `opensymphony_code_intel`. `opensymphony_memory` keeps a compatibility adapter for the legacy `CodeIntelIndex` surface, but AST and composite providers do not import memory internals.
 
 ```rust
 pub trait CodeIntelProvider: Send + Sync {
@@ -1250,8 +1250,9 @@ Changes:
 1. Extend memory record kinds for code symbols, edges, and diagnostics.
 2. Add DuckDB migrations for code-intelligence tables.
 3. Add freshness helpers for code records.
-4. Consume/re-export `opensymphony_code_intel::CodeIntelProvider` and
-   `CodeIntelArtifact` for compatibility instead of owning the provider trait.
+4. Consume `opensymphony_code_intel::CodeIntelProvider` through a memory-local
+   compatibility adapter instead of requiring providers to import memory
+   internals.
 5. Convert `CodeIntelError` into `MemoryError` only at memory integration
    boundaries.
 
