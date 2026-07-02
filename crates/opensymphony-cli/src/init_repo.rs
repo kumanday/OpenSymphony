@@ -1900,7 +1900,7 @@ where
         "2. In Codex settings, install the Codex GitHub app for {repo_label}."
     ))?;
     ui.line(format!(
-        "3. Create a Codex cloud environment for {repo_label} (Codex settings -> Environments -> Create environment). Code review needs no custom setup; the default universal image works. Without an environment, Codex only comments \"To use Codex here, create an environment for this repo\" instead of reviewing."
+        "3. Create a Codex cloud environment for {repo_label} at https://chatgpt.com/codex/cloud/settings/environments. Code review needs no custom setup; the default universal image works. Without an environment, Codex only comments \"To use Codex here, create an environment for this repo\" instead of reviewing."
     ))?;
     ui.line(format!(
         "4. Enable Code review for {repo_label} and turn on automatic reviews so every newly opened PR gets an initial review."

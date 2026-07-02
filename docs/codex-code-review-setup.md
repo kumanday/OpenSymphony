@@ -42,8 +42,9 @@ GitHub repository.
 
 2. In Codex settings, install the Codex GitHub app and grant it access to the
    repository (or organization).
-3. Create a **Codex cloud environment** for the repository: Codex settings →
-   **Environments** → **Create environment**, then select the repo. This is
+3. Create a **Codex cloud environment** for the repository at
+   <https://chatgpt.com/codex/cloud/settings/environments> (**Create
+   environment**, then select the repo). This is
    the "Codex cloud set up for the repository" prerequisite in OpenAI's docs —
    until an environment exists, Codex responds to PRs with
    *"To use Codex here, create an environment for this repo"* instead of
