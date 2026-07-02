@@ -10,7 +10,7 @@ Primary consumer: OpenSymphony agents through memory and MCP context surfaces
 
 OpenSymphony should integrate Tree-sitter as the structural parsing layer for its code intelligence suite. The integration should turn repository source files into queryable, source-cited, freshness-aware syntax artifacts that agents can use to navigate definitions, references, imports, calls, tests, and syntax boundaries during planning and implementation.
 
-The best fit is an internal module tree named `opensymphony_code_intel`, compiled into the existing single `opensymphony` package. The module should expose an `AstCodeIntelProvider` that implements and extends the existing `CodeIntelIndex` contract. It should replace the current heuristic-only `CodebaseAnalyzer` path for `memory.context --include-code-intel`, while preserving compatibility by keeping the current analyzer as a fallback and repository-summary provider.
+The best fit is an internal module tree named `opensymphony_code_intel`, compiled into the existing single `opensymphony` package. The module exposes an `AstCodeIntelProvider` that implements the code-intelligence-owned `CodeIntelProvider` contract. It replaces the current heuristic-only `CodebaseAnalyzer` path for `memory.context --include-code-intel`, while preserving compatibility by keeping the current analyzer as a fallback and repository-summary provider.
 
 The first production slice should be read-only and agent-facing:
 
@@ -52,7 +52,7 @@ Implication: OpenSymphony can use Tree-sitter for fast, language-aware, range-ci
 The current OpenSymphony repository already has the right seams:
 
 - Packaging is flat, but subsystem boundaries are explicit. The root crate includes internal module trees through `#[path = "../crates/.../src/lib.rs"]` declarations.
-- `opensymphony_memory` already defines `CodeIntelArtifact` and `CodeIntelIndex`.
+- `opensymphony_code_intel` owns `CodeIntelArtifact`, `CodeIntelProvider`, and rendered code-intelligence scope/source-reference types; `opensymphony_memory` keeps the legacy `CodeIntelIndex`/`CodeIntelArtifact` surface as a compatibility adapter.
 - `opensymphony_cli` already supports `memory context --include-code-intel`.
 - The memory MCP server already lists `memory.context`, `memory.search`, `memory.related`, `memory.docs`, and an admin `memory.ingest_code_intel` capability.
 - The current `CodebaseAnalyzer` is useful for high-level repository summaries, packages, build systems, integration signals, conventions, and risks, but it does not parse ASTs, symbols, references, or syntax diagnostics.
@@ -74,7 +74,7 @@ Implication: Tree-sitter should be introduced as a provider upgrade behind exist
 
 1. Add a Rust module tree `crates/opensymphony-code-intel` and expose it through `src/lib.rs` as `opensymphony_code_intel`.
 2. Keep parser loading trusted by default. Built-in grammar crates are allowed. Repo-supplied native parser code is disabled unless explicitly configured by an operator.
-3. Reuse the current `CodeIntelIndex` trait for initial compatibility, then add a richer provider trait for AST-specific operations.
+3. Preserve the current `memory.context` output contract while keeping rendered provider trait ownership in `opensymphony_code_intel`.
 4. Preserve current CLI and MCP contracts where possible.
 5. Add tests for query packs, source spans, freshness, concurrency, malformed code, generated files, and memory-context integration.
 6. Keep the current `CodebaseAnalyzer` as a fallback, summary source, and planning-stage repository analyzer.
@@ -150,57 +150,26 @@ Implementation note: pin exact versions in `Cargo.lock` and prefer crates mainta
 
 ### 5.2 Provider model
 
-Add a richer provider trait in `opensymphony_code_intel` and adapt it to `opensymphony_memory::CodeIntelIndex`.
+The rendered context provider trait lives in `opensymphony_code_intel`. `opensymphony_memory` keeps a compatibility adapter for the legacy `CodeIntelIndex` surface, but AST and composite providers do not import memory internals.
 
 ```rust
 pub trait CodeIntelProvider: Send + Sync {
-    fn status(&self) -> CodeIntelProviderStatus;
-
-    fn repository_summary(
-        &self,
-        request: RepositorySummaryRequest,
-    ) -> Result<RepositorySummary, CodeIntelError>;
-
-    fn ast_context(
-        &self,
-        request: AstContextRequest,
-    ) -> Result<AstContextBundle, CodeIntelError>;
-
-    fn symbols(
-        &self,
-        request: SymbolQueryRequest,
-    ) -> Result<Vec<SymbolRecord>, CodeIntelError>;
-
-    fn references(
-        &self,
-        request: ReferenceQueryRequest,
-    ) -> Result<Vec<ReferenceRecord>, CodeIntelError>;
-
-    fn structural_query(
-        &self,
-        request: StructuralQueryRequest,
-    ) -> Result<Vec<StructuralMatch>, CodeIntelError>;
-
-    fn ingest(
-        &self,
-        request: IngestRequest,
-    ) -> Result<IngestReport, CodeIntelError>;
-}
-```
-
-Add an adapter:
-
-```rust
-impl opensymphony_memory::CodeIntelIndex for AstCodeIntelProvider {
     fn code_context(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
-        // Build AstContextRequest, map structural evidence into CodeIntelArtifact.
-    }
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError>;
 }
+```
+
+`AstCodeIntelProvider`, `CompositeCodeIntelProvider`, and the
+`CodebaseAnalyzer` repository-summary fallback implement this trait:
+
+```rust
+impl CodeIntelProvider for AstCodeIntelProvider { /* ... */ }
+impl CodeIntelProvider for CompositeCodeIntelProvider { /* ... */ }
+impl CodeIntelProvider for CodebaseAnalyzer { /* ... */ }
 ```
 
 ### 5.3 Provider composition
@@ -450,7 +419,7 @@ Support embedded and injected languages through query packs and included ranges:
 
 ### 8.1 Query file conventions
 
-Each language query pack should contain separate files by purpose:
+Each language query pack should be organized by query purpose:
 
 ```text
 definitions.scm
@@ -463,6 +432,13 @@ diagnostics.scm
 locals.scm
 injections.scm
 ```
+
+Grammar variants may compose shared base assets instead of duplicating identical
+purpose files. Keep variant-specific behavior, such as JSX/TSX injections, in
+explicit variant-owned query files and keep metadata versioned per language.
+When a shared asset changes, bump the query-pack version for every language whose
+effective pack includes that asset, including variants that inherit shared
+diagnostics.
 
 Each pack also needs metadata:
 
@@ -1281,8 +1257,11 @@ Changes:
 1. Extend memory record kinds for code symbols, edges, and diagnostics.
 2. Add DuckDB migrations for code-intelligence tables.
 3. Add freshness helpers for code records.
-4. Keep `CodeIntelIndex` for compatibility.
-5. Add optional richer provider trait imports only where needed to avoid tight coupling.
+4. Consume `opensymphony_code_intel::CodeIntelProvider` through a memory-local
+   compatibility adapter instead of requiring providers to import memory
+   internals.
+5. Convert `CodeIntelError` into `MemoryError` only at memory integration
+   boundaries.
 
 ### 15.2 `opensymphony_cli`
 
@@ -1357,7 +1336,7 @@ Acceptance criteria:
 
 Deliverables:
 
-- `AstCodeIntelProvider` implements `CodeIntelIndex`.
+- `AstCodeIntelProvider` implements `CodeIntelProvider`.
 - `CompositeCodeIntelProvider` uses AST first and `CodebaseAnalyzer` fallback.
 - `opensymphony memory context --include-code-intel` prints structural evidence.
 - Path containment and file-size limits are enforced.
@@ -1571,7 +1550,7 @@ Treat memory and code intelligence as context. Current source files and tests re
 ### Related edges
 
 - `run_context` -> `append_code_intel_context` with confidence `syntactic`
-- `append_code_intel_context` -> `CodeIntelIndex::code_context` with confidence `syntactic`
+- `append_code_intel_context` -> `CodeIntelProvider::code_context` with confidence `syntactic`
 
 ### Diagnostics
 
@@ -1587,12 +1566,11 @@ Treat memory and code intelligence as context. Current source files and tests re
 
 ## 22. Open decisions
 
-1. Whether `opensymphony_code_intel` should own all code-intelligence provider traits or whether richer traits should live in `opensymphony_memory`.
-2. Whether ad hoc Tree-sitter queries should be available to read-token local agents or only to admin/operator tools.
-3. Whether to support WASM grammar loading in hosted mode after a separate sandboxing review.
-4. How aggressively to persist snippets. Default should be metadata and hashes, with snippets rendered on demand from local files.
-5. Whether to use a filesystem watcher for local desktop mode or rely on lazy hash validation.
-6. How much call-graph inference to expose before LSP or compiler-backed providers are added.
+1. Whether ad hoc Tree-sitter queries should be available to read-token local agents or only to admin/operator tools.
+2. Whether to support WASM grammar loading in hosted mode after a separate sandboxing review.
+3. How aggressively to persist snippets. Default should be metadata and hashes, with snippets rendered on demand from local files.
+4. Whether to use a filesystem watcher for local desktop mode or rely on lazy hash validation.
+5. How much call-graph inference to expose before LSP or compiler-backed providers are added.
 7. Whether generated public docs should include AST source snippets or only path and line references.
 
 ## 23. Acceptance criteria for V1

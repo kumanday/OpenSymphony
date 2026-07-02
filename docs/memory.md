@@ -429,6 +429,10 @@ languages, parser diagnostics, oversized files, and calls without requested
 paths use the existing `CodebaseAnalyzer` repository-summary fallback; mixed
 supported and unsupported requests can include both AST artifacts and fallback
 artifacts. The trace section records parse/query counts and the fallback reason.
+The rendered artifact/provider contract is owned by `opensymphony_code_intel`;
+memory keeps the legacy `CodeIntelIndex` and `CodeIntelArtifact` surface as an
+adapter around that provider contract instead of requiring code-intelligence
+providers to import memory internals.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.
