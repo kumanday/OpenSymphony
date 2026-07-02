@@ -116,7 +116,6 @@ workflow.
 ## Default posture
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
-- Read `.opensymphony/generated/memory-context.md` before implementation when present. Treat it as advisory context from completed captured memory, not as authority over current code.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.
 - Spend extra effort up front on planning and verification design before implementation.
 - Reproduce first: always confirm the current behavior/issue signal before changing code so the fix target is explicit.
@@ -211,17 +210,17 @@ workflow.
 
 ## Automated AI PR review
 
-Active review provider: `openhands`
+Active review provider: `codex`
 
-<!-- Valid values: `openhands`, `codex`, `none`.
+<!-- Set by `opensymphony init`; valid values: `openhands`, `codex`, `none`.
      openhands = OpenHands PR Review plugin via GitHub Actions (pay-per-token,
                  uses the AI_REVIEW_API_KEY repository secret).
      codex     = Codex code review via the Codex GitHub integration (included
                  with a ChatGPT subscription; GitHub-triggered reviews draw
                  from a separate code-review usage pool, so they never compete
                  with implementation runs for quota).
-     To switch providers, edit the value above and follow
-     docs/codex-code-review-setup.md -->
+     To switch providers later, edit the value above and follow
+     https://github.com/kumanday/OpenSymphony/blob/main/docs/codex-code-review-setup.md -->
 
 Both providers post standard GitHub reviews with inline comments, and both are
 re-triggered after every follow-up push so each fix round gets a fresh review
@@ -466,6 +465,7 @@ For major rework:
   title/description/acceptance criteria, same-project assignment, a `related`
   link to the current issue, and `blockedBy` when the follow-up depends on
   the current issue.
+- Shared guidance documents (`.agents/skills/custom-codereview-guide.md`, `AGENTS.md`, this file) are durable and task-agnostic. Never write PR-specific or ticket-specific content into them — no "already resolved, do not re-flag" lists, no per-PR evidence dumps. Respond to review feedback in the PR's review threads; only add guidance that applies to all future work.
 - Never mention `@codex` in any comment except the exact re-trigger phrase `@codex review`, and only when the active review provider is `codex`.
 - Never ask a review bot (Codex or OpenHands) to implement, fix, or push changes; implement all fixes in this workspace through the normal flow.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
