@@ -11,7 +11,7 @@ last_memory_sync: 2026-07-02T03:46:15.378630+00:00
 
 ## Current model
 
-- COE-503 contributed: PR #175: feat(code-intel): harden AST limits and docs (merge `c6241a9`)
+- COE-508 contributed: PR #180: Cache code-intel parser and query-pack setup (merge `aa26dfc`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-07-02T03:46:15.378630+00:00
 
 ## Recent changes
 
-- COE-503: Code Intelligence Performance Docs And Hardening
+- COE-508: Cache code-intel parsers and compiled query packs
 
 ## Source refs
 
-- COE-503
+- COE-508
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
