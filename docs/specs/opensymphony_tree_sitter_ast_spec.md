@@ -450,7 +450,7 @@ Support embedded and injected languages through query packs and included ranges:
 
 ### 8.1 Query file conventions
 
-Each language query pack should contain separate files by purpose:
+Each language query pack should be organized by query purpose:
 
 ```text
 definitions.scm
@@ -463,6 +463,10 @@ diagnostics.scm
 locals.scm
 injections.scm
 ```
+
+Grammar variants may compose shared base assets instead of duplicating identical
+purpose files. Keep variant-specific behavior, such as JSX/TSX injections, in
+explicit variant-owned query files and keep metadata versioned per language.
 
 Each pack also needs metadata:
 

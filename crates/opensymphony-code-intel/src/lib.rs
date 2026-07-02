@@ -93,7 +93,9 @@ const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "injection.language",
 ];
 
-const RUST_QUERIES: &[QueryAsset] = &[
+const NO_VARIANT_QUERIES: &[QueryAsset] = &[];
+
+const RUST_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/rust/definitions.scm"),
@@ -102,13 +104,14 @@ const RUST_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("calls", include_str!("../queries/rust/calls.scm")),
     QueryAsset::new("docs", include_str!("../queries/rust/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/rust/locals.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/rust/diagnostics.scm"),
-    ),
 ];
 
-const TYPESCRIPT_QUERIES: &[QueryAsset] = &[
+const RUST_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/rust/diagnostics.scm"),
+)];
+
+const TYPESCRIPT_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/typescript/definitions.scm"),
@@ -118,34 +121,24 @@ const TYPESCRIPT_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("tests", include_str!("../queries/typescript/tests.scm")),
     QueryAsset::new("docs", include_str!("../queries/typescript/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/typescript/locals.scm")),
-    QueryAsset::new(
-        "injections",
-        include_str!("../queries/typescript/injections.scm"),
-    ),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/typescript/diagnostics.scm"),
-    ),
 ];
 
-const TSX_QUERIES: &[QueryAsset] = &[
-    QueryAsset::new(
-        "definitions",
-        include_str!("../queries/tsx/definitions.scm"),
-    ),
-    QueryAsset::new("imports", include_str!("../queries/tsx/imports.scm")),
-    QueryAsset::new("calls", include_str!("../queries/tsx/calls.scm")),
-    QueryAsset::new("tests", include_str!("../queries/tsx/tests.scm")),
-    QueryAsset::new("docs", include_str!("../queries/tsx/docs.scm")),
-    QueryAsset::new("locals", include_str!("../queries/tsx/locals.scm")),
-    QueryAsset::new("injections", include_str!("../queries/tsx/injections.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/tsx/diagnostics.scm"),
-    ),
-];
+const TYPESCRIPT_INJECTION_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "injections",
+    include_str!("../queries/typescript/injections.scm"),
+)];
 
-const JAVASCRIPT_QUERIES: &[QueryAsset] = &[
+const TSX_INJECTION_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "injections",
+    include_str!("../queries/tsx/injections.scm"),
+)];
+
+const TYPESCRIPT_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/typescript/diagnostics.scm"),
+)];
+
+const JAVASCRIPT_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/javascript/definitions.scm"),
@@ -155,30 +148,19 @@ const JAVASCRIPT_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("tests", include_str!("../queries/javascript/tests.scm")),
     QueryAsset::new("docs", include_str!("../queries/javascript/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/javascript/locals.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/javascript/diagnostics.scm"),
-    ),
 ];
 
-const JSX_QUERIES: &[QueryAsset] = &[
-    QueryAsset::new(
-        "definitions",
-        include_str!("../queries/jsx/definitions.scm"),
-    ),
-    QueryAsset::new("imports", include_str!("../queries/jsx/imports.scm")),
-    QueryAsset::new("calls", include_str!("../queries/jsx/calls.scm")),
-    QueryAsset::new("tests", include_str!("../queries/jsx/tests.scm")),
-    QueryAsset::new("docs", include_str!("../queries/jsx/docs.scm")),
-    QueryAsset::new("locals", include_str!("../queries/jsx/locals.scm")),
-    QueryAsset::new("injections", include_str!("../queries/jsx/injections.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/jsx/diagnostics.scm"),
-    ),
-];
+const JSX_INJECTION_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "injections",
+    include_str!("../queries/jsx/injections.scm"),
+)];
 
-const PYTHON_QUERIES: &[QueryAsset] = &[
+const JAVASCRIPT_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/javascript/diagnostics.scm"),
+)];
+
+const PYTHON_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/python/definitions.scm"),
@@ -187,11 +169,12 @@ const PYTHON_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("calls", include_str!("../queries/python/calls.scm")),
     QueryAsset::new("docs", include_str!("../queries/python/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/python/locals.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/python/diagnostics.scm"),
-    ),
 ];
+
+const PYTHON_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/python/diagnostics.scm"),
+)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -453,7 +436,9 @@ struct LanguageConfig {
     grammar_version: &'static str,
     query_pack_version: &'static str,
     metadata: &'static str,
-    queries: &'static [QueryAsset],
+    shared_queries: &'static [QueryAsset],
+    variant_queries: &'static [QueryAsset],
+    diagnostic_queries: &'static [QueryAsset],
     parser: fn() -> Language,
 }
 
@@ -1183,7 +1168,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: RUST_GRAMMAR_VERSION,
             query_pack_version: RUST_QUERY_PACK_VERSION,
             metadata: RUST_METADATA,
-            queries: RUST_QUERIES,
+            shared_queries: RUST_SHARED_QUERIES,
+            variant_queries: NO_VARIANT_QUERIES,
+            diagnostic_queries: RUST_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_rust::LANGUAGE.into(),
         },
         SourceLanguage::TypeScript => LanguageConfig {
@@ -1192,7 +1179,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: TYPESCRIPT_GRAMMAR_VERSION,
             query_pack_version: TYPESCRIPT_QUERY_PACK_VERSION,
             metadata: TYPESCRIPT_METADATA,
-            queries: TYPESCRIPT_QUERIES,
+            shared_queries: TYPESCRIPT_SHARED_QUERIES,
+            variant_queries: TYPESCRIPT_INJECTION_QUERIES,
+            diagnostic_queries: TYPESCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         },
         SourceLanguage::Tsx => LanguageConfig {
@@ -1201,7 +1190,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: TYPESCRIPT_GRAMMAR_VERSION,
             query_pack_version: TSX_QUERY_PACK_VERSION,
             metadata: TSX_METADATA,
-            queries: TSX_QUERIES,
+            shared_queries: TYPESCRIPT_SHARED_QUERIES,
+            variant_queries: TSX_INJECTION_QUERIES,
+            diagnostic_queries: TYPESCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_typescript::LANGUAGE_TSX.into(),
         },
         SourceLanguage::JavaScript => LanguageConfig {
@@ -1210,7 +1201,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: JAVASCRIPT_GRAMMAR_VERSION,
             query_pack_version: JAVASCRIPT_QUERY_PACK_VERSION,
             metadata: JAVASCRIPT_METADATA,
-            queries: JAVASCRIPT_QUERIES,
+            shared_queries: JAVASCRIPT_SHARED_QUERIES,
+            variant_queries: NO_VARIANT_QUERIES,
+            diagnostic_queries: JAVASCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_javascript::LANGUAGE.into(),
         },
         SourceLanguage::Jsx => LanguageConfig {
@@ -1219,7 +1212,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: JAVASCRIPT_GRAMMAR_VERSION,
             query_pack_version: JSX_QUERY_PACK_VERSION,
             metadata: JSX_METADATA,
-            queries: JSX_QUERIES,
+            shared_queries: JAVASCRIPT_SHARED_QUERIES,
+            variant_queries: JSX_INJECTION_QUERIES,
+            diagnostic_queries: JAVASCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_javascript::LANGUAGE.into(),
         },
         SourceLanguage::Python => LanguageConfig {
@@ -1228,7 +1223,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: PYTHON_GRAMMAR_VERSION,
             query_pack_version: PYTHON_QUERY_PACK_VERSION,
             metadata: PYTHON_METADATA,
-            queries: PYTHON_QUERIES,
+            shared_queries: PYTHON_SHARED_QUERIES,
+            variant_queries: NO_VARIANT_QUERIES,
+            diagnostic_queries: PYTHON_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_python::LANGUAGE.into(),
         },
         _ => unreachable!("lightweight languages do not have tree-sitter configs"),
@@ -1280,8 +1277,10 @@ fn compile_query_pack<'a>(
     metadata: &'a QueryPackMetadata,
 ) -> Result<Vec<CompiledQuery<'a>>, CodeIntelError> {
     config
-        .queries
+        .shared_queries
         .iter()
+        .chain(config.variant_queries.iter())
+        .chain(config.diagnostic_queries.iter())
         .map(|asset| compile_query(*asset, language, metadata))
         .collect()
 }
@@ -1942,6 +1941,51 @@ mod tests {
     }
 
     #[test]
+    fn grammar_variants_reuse_base_assets_and_keep_injections_explicit() {
+        let typescript = language_config(SourceLanguage::TypeScript);
+        let tsx = language_config(SourceLanguage::Tsx);
+        assert!(std::ptr::eq(
+            typescript.shared_queries.as_ptr(),
+            tsx.shared_queries.as_ptr()
+        ));
+        assert!(std::ptr::eq(
+            typescript.diagnostic_queries.as_ptr(),
+            tsx.diagnostic_queries.as_ptr()
+        ));
+        assert_eq!(
+            query_asset_names(typescript.shared_queries),
+            vec!["definitions", "imports", "calls", "tests", "docs", "locals"]
+        );
+        assert_eq!(typescript.variant_queries.len(), 1);
+        assert_eq!(tsx.variant_queries.len(), 1);
+        assert_eq!(
+            typescript.variant_queries[0].source.trim(),
+            "(template_string) @injection.content"
+        );
+        assert_eq!(
+            tsx.variant_queries[0].source.trim(),
+            "(jsx_element) @injection.content"
+        );
+
+        let javascript = language_config(SourceLanguage::JavaScript);
+        let jsx = language_config(SourceLanguage::Jsx);
+        assert!(std::ptr::eq(
+            javascript.shared_queries.as_ptr(),
+            jsx.shared_queries.as_ptr()
+        ));
+        assert!(std::ptr::eq(
+            javascript.diagnostic_queries.as_ptr(),
+            jsx.diagnostic_queries.as_ptr()
+        ));
+        assert!(javascript.variant_queries.is_empty());
+        assert_eq!(jsx.variant_queries.len(), 1);
+        assert_eq!(
+            jsx.variant_queries[0].source.trim(),
+            "(jsx_element) @injection.content"
+        );
+    }
+
+    #[test]
     fn invalid_node_type_fails_query_validation() {
         let config = language_config(SourceLanguage::Rust);
         let metadata = load_metadata(config).expect("metadata loads");
@@ -1950,6 +1994,23 @@ mod tests {
 
         let Err(error) = compile_query(query, &language, &metadata) else {
             panic!("invalid node type fails");
+        };
+
+        assert!(matches!(error, CodeIntelError::Query { .. }));
+    }
+
+    #[test]
+    fn invalid_field_fails_query_validation() {
+        let config = language_config(SourceLanguage::Rust);
+        let metadata = load_metadata(config).expect("metadata loads");
+        let language = (config.parser)();
+        let query = QueryAsset::new(
+            "invalid",
+            "(function_item not_a_real_field: (identifier) @definition.function)",
+        );
+
+        let Err(error) = compile_query(query, &language, &metadata) else {
+            panic!("invalid field fails");
         };
 
         assert!(matches!(error, CodeIntelError::Query { .. }));
@@ -2321,6 +2382,10 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn query_asset_names(assets: &[QueryAsset]) -> Vec<&'static str> {
+        assets.iter().map(|asset| asset.name).collect()
     }
 
     fn assert_capture(summary: &ParsedDocumentSummary, capture_name: &str, text: &str) {
