@@ -36,6 +36,7 @@ apps/desktop/src-tauri/gen/
 
 # Codex-specific instructions for local use
 .codex
+.claude/
 .opensymphony*
 !.opensymphony/
 .opensymphony/*

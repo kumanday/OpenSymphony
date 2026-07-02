@@ -4235,7 +4235,7 @@ function appShellStyles(): string {
     .os-knowledge-toolbar span { color: #667788; font-size: 12px; }
     .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
     .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
-    .os-knowledge-stage { position: relative; height: clamp(260px, 38vh, 460px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
+    .os-knowledge-stage { position: relative; height: clamp(260px, 38vh, 460px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #e7ebef; }
     .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
     .os-knowledge-labels { position: absolute; inset: 0; pointer-events: none; }
     .os-kg-label { position: absolute; transform: translate(-50%, calc(-100% - 10px)); max-width: min(180px, 42%); min-height: 24px; padding: 3px 7px; border-color: rgba(57, 112, 143, 0.28); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); }
@@ -4498,9 +4498,15 @@ function appShellStyles(): string {
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
       .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-run-meta-row span, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
-      .os-knowledge-stage, .os-kg-list li { background: #111820; border-color: #2a3440; }
+      .os-knowledge-stage { background: #e7ebef; border-color: #2a3440; }
+      .os-kg-list li, .os-kg-inspector { background: #111820; border-color: #2a3440; }
       .os-kg-label { background: rgba(17, 24, 32, 0.92); color: #d9e2ea; border-color: #2a3440; }
+      .os-kg-label.is-selected { background: rgba(47, 32, 23, 0.95); color: #fed7aa; border-color: #fb923c; box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.22), 0 8px 18px rgba(0, 0, 0, 0.2); }
+      .os-kg-list li.is-selected { background: #2a2118; border-color: #fb923c; box-shadow: inset 3px 0 0 rgba(251, 146, 60, 0.95); }
       .os-kg-list button { color: #d9e2ea; }
+      .os-kg-list li.is-selected button, .os-kg-inspector h3, .os-kg-inspector dd { color: #f2f7fb; }
+      .os-kg-list li.is-selected span { color: #fdba74; }
+      .os-kg-inspector dt, .os-kg-inspector p { color: #94a3b3; }
       .os-run-meta-row code { color: #d9e2ea; }
       .os-run-meta-row a { color: #8bd0e6; }
       .os-run-meta-row em { color: #94a3b3; }

@@ -13,6 +13,8 @@ type ScheduledDraw = {
 
 const scheduledCanvasDraws = new WeakMap<HTMLCanvasElement, ScheduledDraw>();
 const maxVisibleGraphLabels = 80;
+const graphSurfaceColor = "#e7ebef";
+const graphSurfaceColorInt = 0xe7ebef;
 
 export interface KnowledgeGraphSurface {
   snapshot: MemoryGraphSnapshot | null;
@@ -388,7 +390,7 @@ function drawThree(
       state.camera.updateProjectionMatrix();
       state.viewportKey = viewportKey;
     }
-    state.renderer.setClearColor(0xf8fafc, 1);
+    state.renderer.setClearColor(graphSurfaceColorInt, 1);
     state.renderer.clear(true, true, true);
     syncGraphObjects(state, layout, selectedNodeIds);
     state.graph.scale.set(view.scale, view.scale, 1);
@@ -529,7 +531,7 @@ function drawCanvas2d(
   if (!ctx) return;
   const ratio = canvas.width / Number.parseFloat(canvas.style.width || String(canvas.width));
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.fillStyle = "#f8fafc";
+  ctx.fillStyle = graphSurfaceColor;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const selected = new Set(selectedNodeIds);
   const byId = new Map(layout.nodes.map((node) => [node.nodeId, node]));
