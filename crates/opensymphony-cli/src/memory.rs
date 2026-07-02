@@ -15,7 +15,8 @@ use tokio::task::JoinHandle;
 
 use crate::{
     opensymphony_code_intel::{
-        AstDiagnosticKind, CaptureRecord, CompositeCodeIntelProvider,
+        AstDiagnosticKind, CaptureRecord, CodeIntelArtifact, CodeIntelProvider, CodeIntelScope,
+        CodeIntelScopeKind, CodeIntelSourceRef, CompositeCodeIntelProvider,
         JAVASCRIPT_QUERY_PACK_VERSION, JSX_QUERY_PACK_VERSION, PROVIDER_NAME,
         PYTHON_QUERY_PACK_VERSION, ParsedDocumentSummary, RUST_QUERY_PACK_VERSION, SourceLanguage,
         SymbolKind, TREE_SITTER_VERSION, TSX_QUERY_PACK_VERSION, TYPESCRIPT_QUERY_PACK_VERSION,
@@ -24,12 +25,11 @@ use crate::{
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
-        ArchivePlan, CodeIntelArtifact, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
-        CodeIntelEdgeInput, CodeIntelIndex, CodeIntelPersistBatch, CodeIntelSymbolInput,
-        CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence, IssueSelection,
-        KnowledgeScope, KnowledgeScopeKind, LintSeverity, MemoryConfig, MemoryContextOptions,
-        MemoryError, MemoryReindexReport, MemoryScopeFilter, MemorySourceRef, MemoryVisibility,
-        SourceFile, archive_blocking_warning_count, brief, context_for_issue_with_options,
+        ArchivePlan, CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
+        CodeIntelPersistBatch, CodeIntelSymbolInput, CommentEvidence, DocsSyncPlan, IssueEvidence,
+        IssueLinkEvidence, IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions,
+        MemoryError, MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
+        archive_blocking_warning_count, brief, context_for_issue_with_options,
         docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
         lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
         plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
@@ -2692,7 +2692,7 @@ struct CodeIntelPersistRequest {
     config: MemoryConfig,
     scope: MemoryScopeFilter,
     paths: Vec<PathBuf>,
-    scope_refs: Vec<KnowledgeScope>,
+    scope_refs: Vec<CodeIntelScope>,
     limit: usize,
     languages: BTreeSet<String>,
     symbols: BTreeSet<String>,
@@ -2831,7 +2831,7 @@ fn code_intel_artifacts_for_summary(
     summary: &ParsedDocumentSummary,
     relative_path: &Path,
     relative_display: &str,
-    scope_refs: &[KnowledgeScope],
+    scope_refs: &[CodeIntelScope],
     commit_sha: Option<String>,
     symbols: &BTreeSet<String>,
     symbol_limit: usize,
@@ -2841,7 +2841,7 @@ fn code_intel_artifacts_for_summary(
         provider: summary.versions.provider.clone(),
         kind: "ast-summary".to_string(),
         scope_refs: scope_refs.to_vec(),
-        source_refs: vec![MemorySourceRef {
+        source_refs: vec![CodeIntelSourceRef {
             kind: "path".to_string(),
             id: relative_display.to_string(),
             url: None,
@@ -2891,7 +2891,7 @@ fn code_intel_artifacts_for_summary(
         scope_refs: scope_refs.to_vec(),
         source_refs: selected_symbols
             .iter()
-            .map(|symbol| MemorySourceRef {
+            .map(|symbol| CodeIntelSourceRef {
                 kind: "code-symbol".to_string(),
                 id: format!("{relative_display}:{}", symbol.rendered_span),
                 url: None,
@@ -2918,7 +2918,7 @@ fn diagnostics_summary(diagnostics: &[crate::opensymphony_code_intel::AstDiagnos
 }
 
 fn code_intel_trace_artifact(
-    scope_refs: &[KnowledgeScope],
+    scope_refs: &[CodeIntelScope],
     parsed_files: usize,
     query_runs: usize,
     skipped_files: &[String],
@@ -3380,7 +3380,7 @@ async fn append_code_intel_context_blocking(
 async fn code_intel_artifacts_blocking(
     repo_root: PathBuf,
     paths: Vec<PathBuf>,
-    scope_refs: Vec<KnowledgeScope>,
+    scope_refs: Vec<CodeIntelScope>,
     limit: usize,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
@@ -3390,12 +3390,13 @@ async fn code_intel_artifacts_blocking(
     .map_err(|error| {
         MemoryError::InvalidInput(format!("code-intelligence analysis task failed: {error}"))
     })?
+    .map_err(MemoryError::from)
 }
 
 async fn code_intel_artifacts_with_symbol_kinds_blocking(
     repo_root: PathBuf,
     paths: Vec<PathBuf>,
-    scope_refs: Vec<KnowledgeScope>,
+    scope_refs: Vec<CodeIntelScope>,
     limit: usize,
     symbol_kinds: BTreeSet<String>,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
@@ -3411,6 +3412,7 @@ async fn code_intel_artifacts_with_symbol_kinds_blocking(
     .map_err(|error| {
         MemoryError::InvalidInput(format!("code-intelligence analysis task failed: {error}"))
     })?
+    .map_err(MemoryError::from)
 }
 
 fn append_code_intel_artifacts(
@@ -3464,37 +3466,37 @@ fn resolve_code_intel_repo(
     Ok(resolved)
 }
 
-fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<KnowledgeScope> {
+fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<CodeIntelScope> {
     let mut refs = Vec::new();
     push_scope_ref(
         &mut refs,
-        KnowledgeScopeKind::ProjectSet,
+        CodeIntelScopeKind::ProjectSet,
         scope.project_set.as_deref(),
     );
     push_scope_ref(
         &mut refs,
-        KnowledgeScopeKind::Project,
+        CodeIntelScopeKind::Project,
         scope.project.as_deref(),
     );
     push_scope_ref(
         &mut refs,
-        KnowledgeScopeKind::Milestone,
+        CodeIntelScopeKind::Milestone,
         scope.milestone.as_deref(),
     );
     push_scope_ref(
         &mut refs,
-        KnowledgeScopeKind::WorkItem,
+        CodeIntelScopeKind::WorkItem,
         scope.issue.as_deref(),
     );
     push_scope_ref(
         &mut refs,
-        KnowledgeScopeKind::Repository,
+        CodeIntelScopeKind::Repository,
         scope.repo.as_deref(),
     );
-    push_scope_ref(&mut refs, KnowledgeScopeKind::Area, scope.area.as_deref());
+    push_scope_ref(&mut refs, CodeIntelScopeKind::Area, scope.area.as_deref());
     for path in paths {
-        refs.push(KnowledgeScope {
-            kind: KnowledgeScopeKind::CodePath,
+        refs.push(CodeIntelScope {
+            kind: CodeIntelScopeKind::CodePath,
             id: path.display().to_string(),
             label: None,
         });
@@ -3502,9 +3504,9 @@ fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<K
     refs
 }
 
-fn push_scope_ref(refs: &mut Vec<KnowledgeScope>, kind: KnowledgeScopeKind, id: Option<&str>) {
+fn push_scope_ref(refs: &mut Vec<CodeIntelScope>, kind: CodeIntelScopeKind, id: Option<&str>) {
     if let Some(id) = id.and_then(non_empty) {
-        refs.push(KnowledgeScope {
+        refs.push(CodeIntelScope {
             kind,
             id,
             label: None,
