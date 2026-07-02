@@ -467,6 +467,9 @@ injections.scm
 Grammar variants may compose shared base assets instead of duplicating identical
 purpose files. Keep variant-specific behavior, such as JSX/TSX injections, in
 explicit variant-owned query files and keep metadata versioned per language.
+When a shared asset changes, bump the query-pack version for every language whose
+effective pack includes that asset, including variants that inherit shared
+diagnostics.
 
 Each pack also needs metadata:
 

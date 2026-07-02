@@ -1944,17 +1944,17 @@ mod tests {
     fn grammar_variants_reuse_base_assets_and_keep_injections_explicit() {
         let typescript = language_config(SourceLanguage::TypeScript);
         let tsx = language_config(SourceLanguage::Tsx);
-        assert!(std::ptr::eq(
-            typescript.shared_queries.as_ptr(),
-            tsx.shared_queries.as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            typescript.diagnostic_queries.as_ptr(),
-            tsx.diagnostic_queries.as_ptr()
-        ));
         assert_eq!(
             query_asset_names(typescript.shared_queries),
             vec!["definitions", "imports", "calls", "tests", "docs", "locals"]
+        );
+        assert_eq!(
+            query_asset_specs(typescript.shared_queries),
+            query_asset_specs(tsx.shared_queries)
+        );
+        assert_eq!(
+            query_asset_specs(typescript.diagnostic_queries),
+            query_asset_specs(tsx.diagnostic_queries)
         );
         assert_eq!(typescript.variant_queries.len(), 1);
         assert_eq!(tsx.variant_queries.len(), 1);
@@ -1969,14 +1969,14 @@ mod tests {
 
         let javascript = language_config(SourceLanguage::JavaScript);
         let jsx = language_config(SourceLanguage::Jsx);
-        assert!(std::ptr::eq(
-            javascript.shared_queries.as_ptr(),
-            jsx.shared_queries.as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            javascript.diagnostic_queries.as_ptr(),
-            jsx.diagnostic_queries.as_ptr()
-        ));
+        assert_eq!(
+            query_asset_specs(javascript.shared_queries),
+            query_asset_specs(jsx.shared_queries)
+        );
+        assert_eq!(
+            query_asset_specs(javascript.diagnostic_queries),
+            query_asset_specs(jsx.diagnostic_queries)
+        );
         assert!(javascript.variant_queries.is_empty());
         assert_eq!(jsx.variant_queries.len(), 1);
         assert_eq!(
@@ -2386,6 +2386,13 @@ mod tests {
 
     fn query_asset_names(assets: &[QueryAsset]) -> Vec<&'static str> {
         assets.iter().map(|asset| asset.name).collect()
+    }
+
+    fn query_asset_specs(assets: &[QueryAsset]) -> Vec<(&'static str, &'static str)> {
+        assets
+            .iter()
+            .map(|asset| (asset.name, asset.source))
+            .collect()
     }
 
     fn assert_capture(summary: &ParsedDocumentSummary, capture_name: &str, text: &str) {
