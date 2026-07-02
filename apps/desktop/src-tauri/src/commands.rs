@@ -929,6 +929,27 @@ async fn gateway_get_json(
     Ok(value)
 }
 
+fn path_with_query(path: &str, params: &[String]) -> String {
+    if params.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", params.join("&"))
+    }
+}
+
+fn push_query_param(params: &mut Vec<String>, key: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    params.push(format!("{key}={}", urlencoding::encode(value)));
+}
+
+fn push_query_param_value<T: ToString>(params: &mut Vec<String>, key: &str, value: Option<T>) {
+    if let Some(value) = value {
+        params.push(format!("{key}={}", urlencoding::encode(&value.to_string())));
+    }
+}
+
 /// Request to attach to a local gateway instance.
 #[derive(Debug, Deserialize)]
 pub struct AttachGatewayRequest {
@@ -977,6 +998,95 @@ pub async fn dashboard_snapshot(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
 ) -> CommandResult<serde_json::Value> {
     gateway_get_json(state, "/api/v1/dashboard/snapshot").await
+}
+
+/// List memory graph bundles through the active gateway.
+#[command]
+pub async fn memory_bundles(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    visibility: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "visibility", visibility.as_deref());
+    let path = path_with_query("/api/v1/memory/bundles", &params);
+    gateway_get_json(state, &path).await
+}
+
+/// Get a memory graph snapshot for a bundle through the active gateway.
+#[command]
+pub async fn memory_graph(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    bundle_id: String,
+    visibility: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "visibility", visibility.as_deref());
+    let path = path_with_query(
+        &format!(
+            "/api/v1/memory/bundles/{}/graph",
+            urlencoding::encode(&bundle_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Get a memory graph concept detail through the active gateway.
+#[command]
+pub async fn memory_concept_detail(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    bundle_id: String,
+    concept_id: String,
+    visibility: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "visibility", visibility.as_deref());
+    let path = path_with_query(
+        &format!(
+            "/api/v1/memory/bundles/{}/concepts/{}",
+            urlencoding::encode(&bundle_id),
+            urlencoding::encode(&concept_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Get memory graph communities through the active gateway.
+#[command]
+pub async fn memory_communities(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    bundle_id: String,
+    visibility: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "visibility", visibility.as_deref());
+    let path = path_with_query(
+        &format!(
+            "/api/v1/memory/bundles/{}/communities",
+            urlencoding::encode(&bundle_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Search memory graph concepts through the active gateway.
+#[command]
+pub async fn memory_search(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    query: String,
+    limit: Option<u64>,
+    bundle_id: Option<String>,
+    visibility: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "query", Some(&query));
+    push_query_param_value(&mut params, "limit", limit);
+    push_query_param(&mut params, "bundle_id", bundle_id.as_deref());
+    push_query_param(&mut params, "visibility", visibility.as_deref());
+    let path = path_with_query("/api/v1/memory/search", &params);
+    gateway_get_json(state, &path).await
 }
 
 /// Get task graph for a project.
@@ -1388,6 +1498,24 @@ mod tests {
             "loopback_http"
         );
         assert_eq!(gateway_profile_for_url("https://example.com"), "websocket");
+    }
+
+    #[test]
+    fn memory_graph_query_helpers_encode_non_empty_values() {
+        let mut params = Vec::new();
+        push_query_param(&mut params, "visibility", Some(" all_accessible "));
+        push_query_param(&mut params, "bundle_id", Some("local default"));
+        push_query_param(&mut params, "empty", Some(" "));
+        push_query_param_value(&mut params, "limit", Some(5_u64));
+
+        assert_eq!(
+            path_with_query("/api/v1/memory/search", &params),
+            "/api/v1/memory/search?visibility=all_accessible&bundle_id=local%20default&limit=5"
+        );
+        assert_eq!(
+            path_with_query("/api/v1/memory/bundles", &[]),
+            "/api/v1/memory/bundles"
+        );
     }
 
     #[tokio::test]

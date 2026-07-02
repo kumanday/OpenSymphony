@@ -8,6 +8,11 @@ import {
 import {
   createGatewayGraphAdapter,
   createTauriNativeGraphAdapter,
+  type MemoryBundleList,
+  type MemoryCommunityList,
+  type MemoryConceptDetail,
+  type MemoryGraphSnapshot,
+  type MemorySearchResponse,
   type NativeGraphApi,
 } from "@opensymphony/graph";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
@@ -26,15 +31,19 @@ import {
 
 const DEFAULT_GATEWAY_URL = "http://127.0.0.1:2468";
 
+type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
 export function createDesktopGraphAdapter(gatewayUrl = DEFAULT_GATEWAY_URL) {
+  const invoke = getTauriInvoke();
+  if (invoke) {
+    return createDesktopNativeGraphAdapter(createDesktopNativeGraphApi(invoke));
+  }
   return createGatewayGraphAdapter(gatewayUrl);
 }
 
 export function createDesktopNativeGraphAdapter(api: NativeGraphApi) {
   return createTauriNativeGraphAdapter(api);
 }
-
-type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 interface TauriGlobal {
   invoke?: TauriInvoke;
@@ -72,6 +81,35 @@ type NativeSettingValue =
   | { type: "Text"; value: string }
   | { type: "Flag"; value: boolean }
   | { type: "Number"; value: number };
+
+function createDesktopNativeGraphApi(invoke: TauriInvoke): NativeGraphApi {
+  return {
+    listBundles: () => invoke<MemoryBundleList>("memory_bundles", { visibility: null }),
+    getGraphSnapshot: (bundleId, options) =>
+      invoke<MemoryGraphSnapshot>("memory_graph", {
+        bundleId,
+        visibility: options?.visibility ?? null,
+      }),
+    getConceptDetail: (bundleId, conceptId, options) =>
+      invoke<MemoryConceptDetail>("memory_concept_detail", {
+        bundleId,
+        conceptId,
+        visibility: options?.visibility ?? null,
+      }),
+    getCommunities: (bundleId, options) =>
+      invoke<MemoryCommunityList>("memory_communities", {
+        bundleId,
+        visibility: options?.visibility ?? null,
+      }),
+    search: (query, options) =>
+      invoke<MemorySearchResponse>("memory_search", {
+        query,
+        limit: options?.limit ?? null,
+        bundleId: options?.bundleId ?? null,
+        visibility: options?.visibility ?? null,
+      }),
+  };
+}
 
 export interface TauriTransportAdapter extends ActionCapableTransport {
   attach(): Promise<void>;
