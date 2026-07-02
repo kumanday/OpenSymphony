@@ -1,0 +1,51 @@
+{
+  "issues": [
+    {
+      "id": "10002",
+      "key": "OSYM-2",
+      "fields": {
+        "summary": "Normalize tracker payloads",
+        "description": null,
+        "status": {
+          "id": "1",
+          "name": "To Do",
+          "statusCategory": { "id": 2, "key": "new", "name": "To Do" }
+        },
+        "priority": null,
+        "labels": [],
+        "created": "2024-05-03T09:15:00.000+0000",
+        "updated": "2024-05-03T09:15:00.000+0000",
+        "project": { "id": "20000", "key": "OSYM", "name": "OpenSymphony" },
+        "parent": {
+          "id": "10001",
+          "key": "OSYM-1",
+          "fields": {
+            "summary": "Bootstrap the orchestrator",
+            "status": { "id": "3", "name": "In Progress", "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } }
+          }
+        },
+        "subtasks": [
+          {
+            "id": "10022",
+            "key": "OSYM-22",
+            "fields": {
+              "summary": "Write fixtures",
+              "status": { "id": "6", "name": "Done", "statusCategory": { "id": 3, "key": "done", "name": "Done" } }
+            }
+          },
+          {
+            "id": "10021",
+            "key": "OSYM-21",
+            "fields": {
+              "summary": "Write serde types",
+              "status": { "id": "1", "name": "To Do", "statusCategory": { "id": 2, "key": "new", "name": "To Do" } }
+            }
+          }
+        ],
+        "issuelinks": [],
+        "fixVersions": []
+      }
+    }
+  ],
+  "isLast": true
+}

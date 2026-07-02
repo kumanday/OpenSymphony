@@ -1,0 +1,62 @@
+{
+  "comments": [
+    {
+      "id": "50001",
+      "body": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "heading",
+            "attrs": { "level": 2 },
+            "content": [{ "type": "text", "text": "Agent Harness Workpad" }]
+          },
+          {
+            "type": "paragraph",
+            "content": [{ "type": "text", "text": "Resume from step 3." }]
+          }
+        ]
+      },
+      "created": "2024-05-03T08:00:00.000+0000",
+      "updated": "2024-05-03T08:00:00.000+0000"
+    },
+    {
+      "id": "50002",
+      "body": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [{ "type": "text", "text": "Just a status update, no marker." }]
+          }
+        ]
+      },
+      "created": "2024-05-04T08:00:00.000+0000",
+      "updated": "2024-05-04T08:00:00.000+0000"
+    },
+    {
+      "id": "50003",
+      "body": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "heading",
+            "attrs": { "level": 2 },
+            "content": [{ "type": "text", "text": "Agent Harness Workpad" }]
+          },
+          {
+            "type": "paragraph",
+            "content": [{ "type": "text", "text": "Resume from step 5." }]
+          }
+        ]
+      },
+      "created": "2024-05-05T08:00:00.000+0000",
+      "updated": "2024-05-05T08:00:00.000+0000"
+    }
+  ],
+  "startAt": 0,
+  "maxResults": 50,
+  "total": 3
+}

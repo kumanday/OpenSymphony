@@ -20,6 +20,9 @@ use crate::opensymphony_domain::{
     NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
     TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
+use crate::opensymphony_jira::{
+    JiraClient, JiraConfig, JiraError, WorkpadComment as JiraWorkpadComment,
+};
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
     ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest, IssueSessionError,
@@ -34,7 +37,9 @@ use crate::opensymphony_orchestrator::{
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend,
 };
-use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
+use crate::opensymphony_workflow::{
+    Environment, ProcessEnvironment, ResolvedWorkflow, TrackerKind,
+};
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
     RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
@@ -102,7 +107,83 @@ enum LaunchReport {
 }
 
 pub(super) struct RuntimeTrackerBackend {
-    client: LinearClient,
+    client: RuntimeTrackerClient,
+}
+
+/// Tracker client selected by `tracker.kind` in the workflow front matter.
+pub(super) enum RuntimeTrackerClient {
+    Linear(LinearClient),
+    Jira(JiraClient),
+}
+
+#[derive(Debug, Error)]
+pub(super) enum RuntimeTrackerError {
+    #[error(transparent)]
+    Linear(#[from] LinearError),
+    #[error(transparent)]
+    Jira(#[from] JiraError),
+}
+
+impl RuntimeTrackerError {
+    pub(super) fn category(&self) -> TrackerErrorCategory {
+        match self {
+            Self::Linear(error) => error.category(),
+            Self::Jira(error) => error.category(),
+        }
+    }
+
+    pub(super) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Linear(error) => error.retry_after(),
+            Self::Jira(error) => error.retry_after(),
+        }
+    }
+}
+
+impl RuntimeTrackerClient {
+    pub(super) async fn candidate_issues(&self) -> Result<Vec<TrackerIssue>, RuntimeTrackerError> {
+        match self {
+            Self::Linear(client) => Ok(client.candidate_issues().await?),
+            Self::Jira(client) => Ok(client.candidate_issues().await?),
+        }
+    }
+
+    async fn candidate_issue_summaries(
+        &self,
+    ) -> Result<Vec<TrackerIssueSummary>, RuntimeTrackerError> {
+        match self {
+            Self::Linear(client) => Ok(client.candidate_issue_summaries().await?),
+            Self::Jira(client) => Ok(client.candidate_issue_summaries().await?),
+        }
+    }
+
+    async fn terminal_issues(&self) -> Result<Vec<TrackerIssue>, RuntimeTrackerError> {
+        match self {
+            Self::Linear(client) => Ok(client.terminal_issues().await?),
+            Self::Jira(client) => Ok(client.terminal_issues().await?),
+        }
+    }
+
+    async fn project_issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, RuntimeTrackerError> {
+        match self {
+            Self::Linear(client) => Ok(client.project_issues_by_identifiers(identifiers).await?),
+            Self::Jira(client) => Ok(client.project_issues_by_identifiers(identifiers).await?),
+        }
+    }
+
+    async fn issue_states_by_ids(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<crate::opensymphony_domain::TrackerIssueStateSnapshot>, RuntimeTrackerError>
+    {
+        match self {
+            Self::Linear(client) => Ok(client.issue_states_by_ids(issue_ids).await?),
+            Self::Jira(client) => Ok(client.issue_states_by_ids(issue_ids).await?),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -194,6 +275,10 @@ struct LinearWorkpadCommentSource {
     client: LinearClient,
 }
 
+struct JiraWorkpadCommentSource {
+    client: JiraClient,
+}
+
 #[derive(Clone, Debug, Default)]
 struct OverlayEnvironment {
     overrides: BTreeMap<String, String>,
@@ -218,6 +303,20 @@ impl WorkpadCommentSource for LinearWorkpadCommentSource {
             .fetch_workpad_comment(issue_id)
             .await
             .map(|comment| comment.map(workpad_comment_from_linear))
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
+impl WorkpadCommentSource for JiraWorkpadCommentSource {
+    async fn fetch_workpad_comment(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<SessionWorkpadComment>, String> {
+        self.client
+            .fetch_workpad_comment(issue_id)
+            .await
+            .map(|comment| comment.map(workpad_comment_from_jira))
             .map_err(|error| error.to_string())
     }
 }
@@ -272,7 +371,37 @@ pub(super) fn build_linear_client(
     LinearClient::new(config)
 }
 
+pub(super) fn build_jira_client(workflow: &ResolvedWorkflow) -> Result<JiraClient, JiraError> {
+    let tracker = &workflow.config.tracker;
+    let mut config = JiraConfig::new(
+        tracker.endpoint.clone(),
+        tracker.api_key.clone(),
+        tracker.project_slug.clone(),
+    );
+    config.auth_email = tracker.auth_email.clone();
+    config.active_states = tracker.active_states.clone();
+    config.terminal_states = tracker.terminal_states.clone();
+    JiraClient::new(config)
+}
+
+pub(super) fn build_tracker_client(
+    workflow: &ResolvedWorkflow,
+) -> Result<RuntimeTrackerClient, RuntimeTrackerError> {
+    match workflow.config.tracker.kind {
+        TrackerKind::Linear => Ok(RuntimeTrackerClient::Linear(build_linear_client(workflow)?)),
+        TrackerKind::Jira => Ok(RuntimeTrackerClient::Jira(build_jira_client(workflow)?)),
+    }
+}
+
 fn workpad_comment_from_linear(comment: WorkpadComment) -> SessionWorkpadComment {
+    SessionWorkpadComment {
+        id: comment.id,
+        body: comment.body,
+        updated_at: comment.updated_at,
+    }
+}
+
+fn workpad_comment_from_jira(comment: JiraWorkpadComment) -> SessionWorkpadComment {
     SessionWorkpadComment {
         id: comment.id,
         body: comment.body,
@@ -282,9 +411,9 @@ fn workpad_comment_from_linear(comment: WorkpadComment) -> SessionWorkpadComment
 
 pub(super) fn build_tracker_backend(
     workflow: &ResolvedWorkflow,
-) -> Result<RuntimeTrackerBackend, LinearError> {
+) -> Result<RuntimeTrackerBackend, RuntimeTrackerError> {
     Ok(RuntimeTrackerBackend {
-        client: build_linear_client(workflow)?,
+        client: build_tracker_client(workflow)?,
     })
 }
 
@@ -575,7 +704,7 @@ pub(super) async fn build_runtime_transport(
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
-    type Error = LinearError;
+    type Error = RuntimeTrackerError;
 
     async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.candidate_issues().await
@@ -817,15 +946,18 @@ impl RuntimeWorkerBackend {
         worker_env: BTreeMap<String, String>,
     ) -> Self {
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
-        let workpad_comment_source = match build_linear_client(&workflow) {
-            Ok(client) => {
+        let workpad_comment_source = match build_tracker_client(&workflow) {
+            Ok(RuntimeTrackerClient::Linear(client)) => {
                 Some(Arc::new(LinearWorkpadCommentSource { client })
                     as Arc<dyn WorkpadCommentSource>)
+            }
+            Ok(RuntimeTrackerClient::Jira(client)) => {
+                Some(Arc::new(JiraWorkpadCommentSource { client }) as Arc<dyn WorkpadCommentSource>)
             }
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "failed to build the Linear workpad comment source; config-drift rehydrate prompts will fall back to workspace-only recovery"
+                    "failed to build the tracker workpad comment source; config-drift rehydrate prompts will fall back to workspace-only recovery"
                 );
                 None
             }

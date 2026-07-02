@@ -4407,6 +4407,11 @@ fn linear_client_from_workflow(
         .map_err(|error| {
             MemoryError::InvalidInput(format!("failed to resolve workflow: {error}"))
         })?;
+    if resolved.config.tracker.kind != crate::opensymphony_workflow::TrackerKind::Linear {
+        return Err(MemoryError::InvalidInput(
+            "memory tracker sources require `tracker.kind: linear`; Jira workspaces are not yet supported by the memory commands".to_string(),
+        ));
+    }
     let mut linear_config = LinearConfig::new(
         resolved.config.tracker.api_key,
         resolved.config.tracker.project_slug,

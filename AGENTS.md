@@ -109,6 +109,7 @@ Preferred crate and trait boundaries:
 - `opensymphony-workflow`
 - `opensymphony-workspace`
 - `opensymphony-linear`
+- `opensymphony-jira`
 - `opensymphony-openhands`
 - `opensymphony-codex`
 - `opensymphony-orchestrator`

@@ -1,5 +1,8 @@
 # Linear and Tools
 
+Linear is the default tracker. Jira is also supported for the orchestrator run
+loop via `tracker.kind: jira`; see [jira.md](jira.md).
+
 ## 1. Boundary
 
 OpenSymphony uses Linear in two different ways:
@@ -13,8 +16,9 @@ Scheduler correctness must never depend on agent-side ticket writes succeeding.
 
 ## 2. Orchestrator read adapter
 
-The internal `opensymphony_linear` module is the only tracker adapter used by
-the daemon.
+The internal `opensymphony_linear` module is the tracker adapter used by the
+daemon when `tracker.kind` is `linear` (the `opensymphony_jira` module fills
+the same role for Jira workspaces).
 
 It is responsible for:
 
@@ -29,7 +33,7 @@ It is responsible for:
 
 Current workflow contract:
 
-- `tracker.kind` must be `linear`
+- `tracker.kind` must be `linear` (use `jira` for Jira workspaces)
 - `tracker.project_slug` stores Linear `Project.slugId`
 - `LINEAR_API_KEY` must be available when Linear mode is enabled
 - if `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are both present,

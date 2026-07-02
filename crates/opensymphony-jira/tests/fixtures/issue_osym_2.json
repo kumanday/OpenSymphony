@@ -1,0 +1,22 @@
+{
+  "id": "10002",
+  "key": "OSYM-2",
+  "fields": {
+    "summary": "Normalize tracker payloads",
+    "description": null,
+    "status": {
+      "id": "1",
+      "name": "To Do",
+      "statusCategory": { "id": 2, "key": "new", "name": "To Do" }
+    },
+    "priority": { "id": "3", "name": "Medium" },
+    "labels": ["backend"],
+    "created": "2024-05-03T09:15:00.000+0000",
+    "updated": "2024-05-03T09:15:00.000+0000",
+    "project": { "id": "20000", "key": "OSYM", "name": "OpenSymphony" },
+    "parent": null,
+    "subtasks": [],
+    "issuelinks": [],
+    "fixVersions": []
+  }
+}

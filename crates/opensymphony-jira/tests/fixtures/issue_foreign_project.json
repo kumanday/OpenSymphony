@@ -1,0 +1,22 @@
+{
+  "id": "77001",
+  "key": "OTHER-1",
+  "fields": {
+    "summary": "Issue from another project",
+    "description": null,
+    "status": {
+      "id": "1",
+      "name": "To Do",
+      "statusCategory": { "id": 2, "key": "new", "name": "To Do" }
+    },
+    "priority": null,
+    "labels": [],
+    "created": "2024-05-03T09:15:00.000+0000",
+    "updated": "2024-05-03T09:15:00.000+0000",
+    "project": { "id": "90000", "key": "OTHER", "name": "Other Project" },
+    "parent": null,
+    "subtasks": [],
+    "issuelinks": [],
+    "fixVersions": []
+  }
+}

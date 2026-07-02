@@ -1,0 +1,28 @@
+{
+  "issues": [
+    {
+      "id": "10001",
+      "key": "OSYM-1",
+      "fields": {
+        "status": {
+          "id": "3",
+          "name": "In Progress",
+          "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+        },
+        "updated": "2024-05-02T11:30:00.000+0000"
+      }
+    },
+    {
+      "id": "10002",
+      "key": "OSYM-2",
+      "fields": {
+        "status": {
+          "id": "6",
+          "name": "Done",
+          "statusCategory": { "id": 3, "key": "done", "name": "Done" }
+        },
+        "updated": "2024-05-04T16:45:00.000+0000"
+      }
+    }
+  ]
+}

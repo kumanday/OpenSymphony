@@ -138,9 +138,12 @@ impl TrackerIssueStateKind {
     pub fn from_tracker_type(value: impl AsRef<str>) -> Self {
         match value.as_ref().trim().to_ascii_lowercase().as_str() {
             "backlog" => Self::Backlog,
-            "unstarted" => Self::Unstarted,
-            "started" => Self::Started,
-            "completed" => Self::Completed,
+            // "new" is Jira's "To Do" status-category key.
+            "unstarted" | "new" => Self::Unstarted,
+            // "indeterminate" is Jira's "In Progress" status-category key.
+            "started" | "indeterminate" => Self::Started,
+            // "done" is Jira's terminal status-category key.
+            "completed" | "done" => Self::Completed,
             "canceled" => Self::Canceled,
             "triage" | "triaged" => Self::Triage,
             other => Self::Unknown(other.to_string()),

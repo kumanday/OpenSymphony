@@ -74,6 +74,7 @@ pub struct TrackerFrontMatter {
     pub kind: Option<String>,
     pub endpoint: Option<String>,
     pub api_key: Option<String>,
+    pub auth_email: Option<String>,
     pub project_slug: Option<String>,
     pub active_states: Option<Vec<String>>,
     pub terminal_states: Option<Vec<String>>,
@@ -272,6 +273,7 @@ pub struct WorkflowExtensions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackerKind {
     Linear,
+    Jira,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +281,9 @@ pub struct TrackerConfig {
     pub kind: TrackerKind,
     pub endpoint: String,
     pub api_key: String,
+    /// Atlassian account email for Jira Cloud basic auth; always `None` for
+    /// Linear.
+    pub auth_email: Option<String>,
     pub project_slug: String,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,

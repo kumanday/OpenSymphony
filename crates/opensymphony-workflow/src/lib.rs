@@ -342,6 +342,131 @@ tracker:
     }
 
     #[test]
+    fn resolves_jira_tracker_with_env_credentials() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: jira
+  endpoint: https://acme.atlassian.net
+  project_slug: OSYM
+  active_states:
+    - To Do
+    - In Progress
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("JIRA_API_TOKEN", "jira-token"),
+            ("JIRA_EMAIL", "bot@example.com"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert!(matches!(resolved.config.tracker.kind, TrackerKind::Jira));
+        assert_eq!(
+            resolved.config.tracker.endpoint,
+            "https://acme.atlassian.net"
+        );
+        assert_eq!(resolved.config.tracker.api_key, "jira-token");
+        assert_eq!(
+            resolved.config.tracker.auth_email.as_deref(),
+            Some("bot@example.com")
+        );
+        assert_eq!(resolved.config.tracker.project_slug, "OSYM");
+    }
+
+    #[test]
+    fn jira_auth_email_is_optional_for_bearer_tokens() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: jira
+  endpoint: https://jira.internal.example.com
+  project_slug: OSYM
+  active_states:
+    - To Do
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("JIRA_API_TOKEN", "personal-access-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert!(matches!(resolved.config.tracker.kind, TrackerKind::Jira));
+        assert_eq!(resolved.config.tracker.auth_email, None);
+    }
+
+    #[test]
+    fn jira_tracker_requires_an_endpoint() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: jira
+  project_slug: OSYM
+  active_states:
+    - To Do
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("JIRA_API_TOKEN", "jira-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("jira workflows must configure tracker.endpoint");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "tracker.endpoint"
+            }
+        ));
+    }
+
+    #[test]
+    fn linear_tracker_leaves_auth_email_unset() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("JIRA_EMAIL", "bot@example.com"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(resolved.config.tracker.auth_email, None);
+    }
+
+    #[test]
     fn resolves_defaults_and_openhands_extension() {
         let workflow = WorkflowDefinition::parse(
             r#"---

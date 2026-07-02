@@ -12,6 +12,8 @@ pub mod opensymphony_domain;
 pub mod opensymphony_gateway;
 #[path = "../crates/opensymphony-gateway-schema/src/lib.rs"]
 pub mod opensymphony_gateway_schema;
+#[path = "../crates/opensymphony-jira/src/lib.rs"]
+pub mod opensymphony_jira;
 #[path = "../crates/opensymphony-linear/src/lib.rs"]
 pub mod opensymphony_linear;
 #[path = "../crates/opensymphony-memory/src/lib.rs"]

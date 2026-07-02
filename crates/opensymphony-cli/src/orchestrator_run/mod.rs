@@ -13,7 +13,6 @@ use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker, TimestampMs};
 use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_gateway_schema::event_journal::{EventActor, EventKind, EventRecord};
-use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::{OpenHandsError, TransportConfig};
 use crate::opensymphony_orchestrator::{
     IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
@@ -33,9 +32,9 @@ use tracing::{info, warn};
 
 use self::{
     backends::{
-        ManagedLocalPreparation, RuntimeWorkerBackend, RuntimeWorkspaceBackend,
-        build_linear_client, build_runtime_transport, build_tracker_backend,
-        build_workspace_manager_config, prepare_active_conversation_store,
+        ManagedLocalPreparation, RuntimeTrackerClient, RuntimeTrackerError, RuntimeWorkerBackend,
+        RuntimeWorkspaceBackend, build_runtime_transport, build_tracker_backend,
+        build_tracker_client, build_workspace_manager_config, prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{
@@ -97,7 +96,7 @@ enum RunCommandError {
     )]
     MissingMemoryConfig { path: PathBuf },
     #[error("failed to build tracker client: {0}")]
-    Tracker(#[from] LinearError),
+    Tracker(#[from] RuntimeTrackerError),
     #[error("failed to create workspace manager: {0}")]
     WorkspaceManager(#[from] WorkspaceError),
     #[error("failed to prepare OpenHands transport: {0}")]
@@ -739,18 +738,23 @@ fn record_auto_capture_recent_event(
 fn build_optional_task_graph_client(
     workflow: &crate::opensymphony_workflow::ResolvedWorkflow,
 ) -> Option<Arc<dyn LinearTaskGraphClient>> {
-    optional_task_graph_client(build_linear_client(workflow))
+    optional_task_graph_client(build_tracker_client(workflow))
 }
 
 fn optional_task_graph_client(
-    client: Result<crate::opensymphony_linear::LinearClient, LinearError>,
+    client: Result<RuntimeTrackerClient, RuntimeTrackerError>,
 ) -> Option<Arc<dyn LinearTaskGraphClient>> {
     match client {
-        Ok(client) => Some(Arc::new(client) as Arc<dyn LinearTaskGraphClient>),
+        Ok(RuntimeTrackerClient::Linear(client)) => {
+            Some(Arc::new(client) as Arc<dyn LinearTaskGraphClient>)
+        }
+        Ok(RuntimeTrackerClient::Jira(client)) => {
+            Some(Arc::new(client) as Arc<dyn LinearTaskGraphClient>)
+        }
         Err(error) => {
             warn!(
                 %error,
-                "Linear task graph reader unavailable; task graph endpoint will return 503"
+                "tracker task graph reader unavailable; task graph endpoint will return 503"
             );
             None
         }
@@ -813,6 +817,7 @@ pub(super) fn now_timestamp() -> TimestampMs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opensymphony_linear::LinearError;
     use crate::opensymphony_memory::MemoryError;
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
@@ -821,8 +826,8 @@ mod tests {
 
     #[test]
     fn optional_task_graph_client_returns_none_when_linear_reader_is_unavailable() {
-        let client = optional_task_graph_client(Err(LinearError::InvalidConfiguration(
-            "missing task graph config".to_owned(),
+        let client = optional_task_graph_client(Err(RuntimeTrackerError::Linear(
+            LinearError::InvalidConfiguration("missing task graph config".to_owned()),
         )));
 
         assert!(

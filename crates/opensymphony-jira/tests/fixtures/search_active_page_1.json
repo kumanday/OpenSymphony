@@ -1,0 +1,73 @@
+{
+  "issues": [
+    {
+      "id": "10001",
+      "key": "OSYM-1",
+      "fields": {
+        "summary": "Bootstrap the orchestrator",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [{ "type": "text", "text": "Stand up the scheduler loop." }]
+            }
+          ]
+        },
+        "status": {
+          "id": "3",
+          "name": "In Progress",
+          "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+        },
+        "priority": { "id": "1", "name": "Highest" },
+        "labels": ["urgent", "backend", "backend"],
+        "created": "2024-05-01T10:00:00.000+0000",
+        "updated": "2024-05-02T11:30:00.000+0000",
+        "project": { "id": "20000", "key": "OSYM", "name": "OpenSymphony" },
+        "parent": null,
+        "subtasks": [],
+        "issuelinks": [
+          {
+            "id": "30001",
+            "type": { "id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+            "inwardIssue": {
+              "id": "10009",
+              "key": "OSYM-9",
+              "fields": {
+                "summary": "Provision credentials",
+                "status": { "id": "6", "name": "Done", "statusCategory": { "id": 3, "key": "done", "name": "Done" } }
+              }
+            }
+          },
+          {
+            "id": "30002",
+            "type": { "id": "10003", "name": "Relates", "inward": "relates to", "outward": "relates to" },
+            "inwardIssue": {
+              "id": "10007",
+              "key": "OSYM-7",
+              "fields": {
+                "summary": "Related work",
+                "status": { "id": "1", "name": "To Do", "statusCategory": { "id": 2, "key": "new", "name": "To Do" } }
+              }
+            }
+          },
+          {
+            "id": "30003",
+            "type": { "id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+            "outwardIssue": {
+              "id": "10011",
+              "key": "OSYM-11",
+              "fields": {
+                "summary": "Downstream work",
+                "status": { "id": "1", "name": "To Do", "statusCategory": { "id": 2, "key": "new", "name": "To Do" } }
+              }
+            }
+          }
+        ],
+        "fixVersions": [{ "id": "40000", "name": "Milestone 1", "released": false }]
+      }
+    }
+  ],
+  "nextPageToken": "PAGE-2"
+}

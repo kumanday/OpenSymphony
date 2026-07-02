@@ -137,6 +137,18 @@ impl LinearTaskGraphClient for crate::opensymphony_linear::LinearClient {
     }
 }
 
+#[async_trait]
+impl LinearTaskGraphClient for crate::opensymphony_jira::JiraClient {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        self.project_issues_by_identifiers(identifiers)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 fn stream_error_from_journal_error(err: &JournalError, cursor_sequence: u64) -> StreamError {
     match err {
         JournalError::InvalidCursor { .. } => StreamError::cursor_not_found(cursor_sequence),

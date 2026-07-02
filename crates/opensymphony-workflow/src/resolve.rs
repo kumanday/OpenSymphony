@@ -85,6 +85,7 @@ fn resolve_tracker<E: Environment>(
 ) -> Result<TrackerConfig, WorkflowConfigError> {
     let kind = match normalize_optional_literal(&tracker.kind) {
         Some(kind) if kind.eq_ignore_ascii_case("linear") => TrackerKind::Linear,
+        Some(kind) if kind.eq_ignore_ascii_case("jira") => TrackerKind::Jira,
         Some(kind) => return Err(WorkflowConfigError::UnsupportedTrackerKind { kind }),
         None => {
             return Err(WorkflowConfigError::MissingRequiredField {
@@ -93,19 +94,29 @@ fn resolve_tracker<E: Environment>(
         }
     };
 
-    let endpoint = resolve_string_or_default(
-        tracker.endpoint.as_deref(),
-        env,
-        "tracker.endpoint",
-        DEFAULT_LINEAR_ENDPOINT,
-    )?;
+    let endpoint = match kind {
+        TrackerKind::Linear => resolve_string_or_default(
+            tracker.endpoint.as_deref(),
+            env,
+            "tracker.endpoint",
+            DEFAULT_LINEAR_ENDPOINT,
+        )?,
+        // Jira endpoints are per-site (https://<site>.atlassian.net), so
+        // there is no sensible default.
+        TrackerKind::Jira => {
+            let configured = require_literal(tracker.endpoint.as_deref(), "tracker.endpoint")?;
+            resolve_string(&configured, env, "tracker.endpoint")?
+        }
+    };
     let project_slug = require_literal(tracker.project_slug.as_deref(), "tracker.project_slug")?;
-    let api_key = resolve_tracker_api_key(tracker, env)?;
+    let api_key = resolve_tracker_api_key(kind, tracker, env)?;
+    let auth_email = resolve_tracker_auth_email(kind, tracker, env)?;
 
     Ok(TrackerConfig {
         kind,
         endpoint,
         api_key,
+        auth_email,
         project_slug,
         active_states: resolve_state_list(
             tracker.active_states.as_deref(),
@@ -119,6 +130,7 @@ fn resolve_tracker<E: Environment>(
 }
 
 fn resolve_tracker_api_key<E: Environment>(
+    kind: TrackerKind,
     tracker: &TrackerFrontMatter,
     env: &E,
 ) -> Result<String, WorkflowConfigError> {
@@ -127,11 +139,33 @@ fn resolve_tracker_api_key<E: Environment>(
         return resolve_string(&configured, env, "tracker.api_key");
     }
 
-    env.get("LINEAR_API_KEY")
+    let fallback_variable = match kind {
+        TrackerKind::Linear => "LINEAR_API_KEY",
+        TrackerKind::Jira => "JIRA_API_TOKEN",
+    };
+    env.get(fallback_variable)
         .and_then(normalize_optional_owned)
         .ok_or(WorkflowConfigError::MissingRequiredField {
             field: "tracker.api_key",
         })
+}
+
+fn resolve_tracker_auth_email<E: Environment>(
+    kind: TrackerKind,
+    tracker: &TrackerFrontMatter,
+    env: &E,
+) -> Result<Option<String>, WorkflowConfigError> {
+    if kind != TrackerKind::Jira {
+        return Ok(None);
+    }
+
+    if let Some(configured) = normalize_optional_literal(&tracker.auth_email) {
+        return resolve_string(&configured, env, "tracker.auth_email").map(Some);
+    }
+
+    // Optional: without an email the token is sent as a bearer token, which
+    // Jira Data Center personal access tokens accept.
+    Ok(env.get("JIRA_EMAIL").and_then(normalize_optional_owned))
 }
 
 fn resolve_polling(polling: &PollingFrontMatter) -> Result<PollingConfig, WorkflowConfigError> {

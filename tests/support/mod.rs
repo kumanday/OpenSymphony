@@ -18,6 +18,10 @@ pub mod opensymphony_gateway_schema {
     pub use opensymphony::opensymphony_gateway_schema::*;
 }
 
+pub mod opensymphony_jira {
+    pub use opensymphony::opensymphony_jira::*;
+}
+
 pub mod opensymphony_linear {
     pub use opensymphony::opensymphony_linear::*;
 }
