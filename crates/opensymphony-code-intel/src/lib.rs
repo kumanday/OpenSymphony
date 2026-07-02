@@ -10,16 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
-// TODO(COE-506): invert this adapter so memory consumes a code-intel owned
-// provider trait after the AST integration is stable.
-// COE-499 keeps the existing memory CodeIntelIndex contract so memory.context
-// gains AST evidence without adding a new public tool surface.
-use crate::{
-    opensymphony_memory::{
-        CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
-    },
-    opensymphony_planning::CodebaseAnalyzer,
-};
+// Rendered code-intelligence context is owned here so memory can consume it
+// without the AST provider importing memory internals.
+use crate::opensymphony_planning::CodebaseAnalyzer;
 
 pub const PROVIDER_NAME: &str = "tree-sitter";
 pub const TREE_SITTER_VERSION: &str = "0.26.9";
@@ -59,6 +52,63 @@ const JAVASCRIPT_METADATA: &str = include_str!("../queries/javascript/metadata.t
 const JSX_METADATA: &str = include_str!("../queries/jsx/metadata.toml");
 const PYTHON_METADATA: &str = include_str!("../queries/python/metadata.toml");
 const DEFAULT_MAX_FILE_BYTES: u64 = 2_097_152;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIntelScopeKind {
+    LocalInstance,
+    Organization,
+    ProjectSet,
+    Project,
+    Milestone,
+    WorkItem,
+    Repository,
+    CodePath,
+    Area,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelScope {
+    pub kind: CodeIntelScopeKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelSourceRef {
+    pub kind: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelArtifact {
+    pub provider: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_refs: Vec<CodeIntelScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<CodeIntelSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+pub trait CodeIntelProvider {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[CodeIntelScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError>;
+}
 
 const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "definition.module",
@@ -384,8 +434,18 @@ pub struct AstDiagnostic {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CodeIntelError {
+    #[error("{0}")]
+    InvalidInput(String),
     #[error("unsupported source language for {path}")]
     UnsupportedLanguage { path: String },
+    #[error("failed to resolve {path}: {source}")]
+    ResolvePath {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path} is outside the repository root {repo_root}")]
+    PathOutsideRepo { path: PathBuf, repo_root: PathBuf },
     #[error("failed to load parser: {0}")]
     Language(#[from] tree_sitter::LanguageError),
     #[error("failed to parse source")]
@@ -473,9 +533,9 @@ impl AstCodeIntelProvider {
     fn code_context_report(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<AstCodeIntelReport, MemoryError> {
+    ) -> Result<AstCodeIntelReport, CodeIntelError> {
         let symbol_kinds = BTreeSet::new();
         self.code_context_report_with_symbols(paths, scope_refs, limit, &symbol_kinds)
     }
@@ -483,10 +543,10 @@ impl AstCodeIntelProvider {
     fn code_context_report_with_symbols(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
         symbol_kinds: &BTreeSet<String>,
-    ) -> Result<AstCodeIntelReport, MemoryError> {
+    ) -> Result<AstCodeIntelReport, CodeIntelError> {
         let repo_root = self.canonical_root()?;
         let commit_sha = git_commit_sha(&repo_root);
         let mut report = AstCodeIntelReport::default();
@@ -641,10 +701,10 @@ impl AstCodeIntelProvider {
         }
     }
 
-    fn canonical_root(&self) -> Result<PathBuf, MemoryError> {
+    fn canonical_root(&self) -> Result<PathBuf, CodeIntelError> {
         self.root
             .canonicalize()
-            .map_err(|source| MemoryError::ResolvePath {
+            .map_err(|source| CodeIntelError::ResolvePath {
                 path: self.root.clone(),
                 source,
             })
@@ -654,14 +714,14 @@ impl AstCodeIntelProvider {
         &self,
         repo_root: &Path,
         path: &Path,
-    ) -> Result<Option<PathBuf>, MemoryError> {
+    ) -> Result<Option<PathBuf>, CodeIntelError> {
         let candidate = requested_candidate(repo_root, path);
         let resolved = match candidate.canonicalize() {
             Ok(resolved) => resolved,
             Err(source) if source.kind() == ErrorKind::NotFound => {
                 let normalized = normalize_lexical(&candidate);
                 if !normalized.starts_with(repo_root) {
-                    return Err(MemoryError::PathOutsideRepo {
+                    return Err(CodeIntelError::PathOutsideRepo {
                         path: normalized,
                         repo_root: repo_root.to_path_buf(),
                     });
@@ -669,14 +729,14 @@ impl AstCodeIntelProvider {
                 return Ok(None);
             }
             Err(source) => {
-                return Err(MemoryError::ResolvePath {
+                return Err(CodeIntelError::ResolvePath {
                     path: candidate.clone(),
                     source,
                 });
             }
         };
         if !resolved.starts_with(repo_root) {
-            return Err(MemoryError::PathOutsideRepo {
+            return Err(CodeIntelError::PathOutsideRepo {
                 path: resolved,
                 repo_root: repo_root.to_path_buf(),
             });
@@ -688,10 +748,10 @@ impl AstCodeIntelProvider {
         &self,
         repo_root: &Path,
         path: &Path,
-    ) -> Result<PathBuf, MemoryError> {
+    ) -> Result<PathBuf, CodeIntelError> {
         let candidate = normalize_lexical(&requested_candidate(repo_root, path));
         if !candidate.starts_with(repo_root) {
-            return Err(MemoryError::PathOutsideRepo {
+            return Err(CodeIntelError::PathOutsideRepo {
                 path: candidate.clone(),
                 repo_root: repo_root.to_path_buf(),
             });
@@ -733,13 +793,13 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     normalized
 }
 
-impl CodeIntelIndex for AstCodeIntelProvider {
+impl CodeIntelProvider for AstCodeIntelProvider {
     fn code_context(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let report = self.code_context_report(paths, scope_refs, limit)?;
         let trace = report.trace_artifact(scope_refs, PROVIDER_NAME, report.ast_only_fallback());
         let mut artifacts = report.artifacts;
@@ -765,10 +825,10 @@ impl CompositeCodeIntelProvider {
     pub fn code_context_with_symbol_kinds(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
         symbol_kinds: &BTreeSet<String>,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let mut report =
             self.ast
                 .code_context_report_with_symbols(paths, scope_refs, limit, symbol_kinds)?;
@@ -801,13 +861,13 @@ impl CompositeCodeIntelProvider {
     }
 }
 
-impl CodeIntelIndex for CompositeCodeIntelProvider {
+impl CodeIntelProvider for CompositeCodeIntelProvider {
     fn code_context(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let mut report = self.ast.code_context_report(paths, scope_refs, limit)?;
         let use_fallback = !report.fallback_reasons.is_empty();
         let mut artifacts = std::mem::take(&mut report.artifacts);
@@ -851,7 +911,7 @@ struct AstCodeIntelReport {
 impl AstCodeIntelReport {
     fn trace_artifact(
         &self,
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         provider: &str,
         fallback: String,
     ) -> CodeIntelArtifact {
@@ -900,7 +960,7 @@ fn ast_artifacts_for_summary(
     summary: ParsedDocumentSummary,
     relative_path: &Path,
     relative_display: &str,
-    scope_refs: &[KnowledgeScope],
+    scope_refs: &[CodeIntelScope],
     commit_sha: Option<String>,
     symbol_limit: usize,
     symbol_kinds: &BTreeSet<String>,
@@ -910,7 +970,7 @@ fn ast_artifacts_for_summary(
         provider: PROVIDER_NAME.to_string(),
         kind: "ast-summary".to_string(),
         scope_refs: scope_refs.to_vec(),
-        source_refs: vec![MemorySourceRef {
+        source_refs: vec![CodeIntelSourceRef {
             kind: "path".to_string(),
             id: relative_display.to_string(),
             url: None,
@@ -962,7 +1022,7 @@ fn ast_artifacts_for_summary(
             scope_refs: scope_refs.to_vec(),
             source_refs: selected_symbols
                 .iter()
-                .map(|symbol| MemorySourceRef {
+                .map(|symbol| CodeIntelSourceRef {
                     kind: "code-symbol".to_string(),
                     id: format!("{relative_display}:{}", symbol.rendered_span),
                     url: None,
@@ -1864,7 +1924,6 @@ fn source_span_for_text(source: &str) -> SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opensymphony_memory::CodeIntelIndex;
     use tempfile::TempDir;
 
     const RUST_COMPLETE: &str = include_str!("../fixtures/rust/complete.rs");
@@ -2528,7 +2587,7 @@ mod tests {
             .code_context(&[PathBuf::from("src/outside.rs")], &[], 20)
             .expect_err("outside symlink should be rejected");
 
-        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+        assert!(matches!(error, CodeIntelError::PathOutsideRepo { .. }));
     }
 
     #[test]

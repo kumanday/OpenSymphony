@@ -87,6 +87,19 @@ pub enum MemoryError {
     },
 }
 
+impl From<CodeIntelError> for MemoryError {
+    fn from(error: CodeIntelError) -> Self {
+        match error {
+            CodeIntelError::InvalidInput(message) => Self::InvalidInput(message),
+            CodeIntelError::ResolvePath { path, source } => Self::ResolvePath { path, source },
+            CodeIntelError::PathOutsideRepo { path, repo_root } => {
+                Self::PathOutsideRepo { path, repo_root }
+            }
+            error => Self::InvalidInput(error.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryVisibility {
@@ -193,23 +206,10 @@ pub struct ProviderStatus {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeIntelArtifact {
-    pub provider: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scope_refs: Vec<KnowledgeScope>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_refs: Vec<MemorySourceRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit_sha: Option<String>,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub summary: String,
-}
+pub use crate::opensymphony_code_intel::{
+    CodeIntelArtifact, CodeIntelError, CodeIntelProvider as CodeIntelIndex, CodeIntelScope,
+    CodeIntelScopeKind, CodeIntelSourceRef,
+};
 
 pub trait MemoryCatalog {
     fn provider_status(&self) -> ProviderStatus;
@@ -230,15 +230,6 @@ pub trait VectorIndex {
         scope_refs: &[KnowledgeScope],
         limit: usize,
     ) -> Result<Vec<SearchResult>, MemoryError>;
-}
-
-pub trait CodeIntelIndex {
-    fn code_context(
-        &self,
-        paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
-        limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,9 +339,9 @@ impl CodeIntelIndex for NoopCodeIntelIndex {
     fn code_context(
         &self,
         _paths: &[PathBuf],
-        _scope_refs: &[KnowledgeScope],
+        _scope_refs: &[CodeIntelScope],
         _limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         Ok(Vec::new())
     }
 }
