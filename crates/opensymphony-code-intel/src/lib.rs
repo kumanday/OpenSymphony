@@ -101,7 +101,7 @@ pub struct CodeIntelArtifact {
     pub summary: String,
 }
 
-pub trait CodeIntelProvider {
+pub trait CodeIntelProvider: Send + Sync {
     fn code_context(
         &self,
         paths: &[PathBuf],

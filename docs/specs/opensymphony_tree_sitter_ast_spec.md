@@ -153,7 +153,7 @@ Implementation note: pin exact versions in `Cargo.lock` and prefer crates mainta
 The rendered context provider trait lives in `opensymphony_code_intel`. `opensymphony_memory` consumes and may re-export this contract for compatibility, but AST and composite providers do not import memory internals.
 
 ```rust
-pub trait CodeIntelProvider {
+pub trait CodeIntelProvider: Send + Sync {
     fn code_context(
         &self,
         paths: &[PathBuf],

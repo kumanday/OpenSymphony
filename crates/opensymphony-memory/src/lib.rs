@@ -85,6 +85,8 @@ pub enum MemoryError {
         source: Box<MemoryError>,
         cleanup: Box<MemoryError>,
     },
+    #[error("code-intelligence operation failed: {0}")]
+    CodeIntel(#[source] CodeIntelError),
 }
 
 impl From<CodeIntelError> for MemoryError {
@@ -95,7 +97,7 @@ impl From<CodeIntelError> for MemoryError {
             CodeIntelError::PathOutsideRepo { path, repo_root } => {
                 Self::PathOutsideRepo { path, repo_root }
             }
-            error => Self::InvalidInput(error.to_string()),
+            error => Self::CodeIntel(error),
         }
     }
 }

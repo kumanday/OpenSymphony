@@ -32,8 +32,9 @@ cannot supply native grammar binaries.
 `CodeIntelProvider`, `CodeIntelArtifact`, `CodeIntelScope`, and
 `CodeIntelSourceRef`. `opensymphony_memory` may consume and re-export those types
 for compatibility and convert provider errors into `MemoryError`, but AST and
-composite providers do not import memory internals. `CodebaseAnalyzer`
-implements the same provider trait as the repository-summary fallback.
+composite providers do not import memory internals. The provider trait is
+`Send + Sync` for async actor use. `CodebaseAnalyzer` implements the same
+provider trait as the repository-summary fallback.
 
 ## Freshness
 
