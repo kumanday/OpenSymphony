@@ -6,8 +6,8 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::opensymphony_memory::{
-    CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
+use crate::opensymphony_code_intel::{
+    CodeIntelArtifact, CodeIntelError, CodeIntelProvider, CodeIntelScope, CodeIntelSourceRef,
 };
 
 /// Result of scanning a repository for structural analysis.
@@ -183,15 +183,15 @@ impl CodebaseAnalyzer {
     }
 }
 
-impl CodeIntelIndex for CodebaseAnalyzer {
+impl CodeIntelProvider for CodebaseAnalyzer {
     fn code_context(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let analysis = self.analyze().map_err(|error| {
-            MemoryError::InvalidInput(format!("codebase analysis failed: {error}"))
+            CodeIntelError::InvalidInput(format!("codebase analysis failed: {error}"))
         })?;
         let requested_paths = paths
             .iter()
@@ -214,7 +214,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "package".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: vec![MemorySourceRef {
+                source_refs: vec![CodeIntelSourceRef {
                     kind: "path".to_string(),
                     id: package.relative_path.clone(),
                     url: None,
@@ -243,7 +243,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "convention".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: vec![MemorySourceRef {
+                source_refs: vec![CodeIntelSourceRef {
                     kind: "path".to_string(),
                     id: convention.evidence_path.clone(),
                     url: None,
@@ -260,7 +260,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "repository-summary".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: vec![MemorySourceRef {
+                source_refs: vec![CodeIntelSourceRef {
                     kind: "codebase-analysis".to_string(),
                     id: analysis.root_path.clone(),
                     url: None,

@@ -195,9 +195,11 @@ AST evidence and fallback trace visibility without changing the public
 keep path containment, file/match/capture limits, parser/query-pack/source
 citations, and trace output intact. `code.ast.query` is local read-only by
 default and becomes admin-gated whenever a memory admin token is configured.
-The current `opensymphony_code_intel` adapter still implements
-`opensymphony_memory::CodeIntelIndex`; keep that bridge narrow until a follow-up
-inverts trait ownership into the code-intelligence module.
+The rendered code-intelligence provider trait and provider artifact types live in
+`opensymphony_code_intel`; memory keeps its legacy `CodeIntelIndex` and
+`CodeIntelArtifact` compatibility surface as an adapter around the provider
+contract and converts provider errors for `memory.context`, but AST/composite
+providers must not import memory internals.
 
 ### Separate Symphony hooks from OpenHands hooks
 
