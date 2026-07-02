@@ -788,8 +788,11 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
     Some(NormalizedCodexEvent {
         kind,
         method,
-        thread_id: string_param(&params, "threadId"),
-        turn_id: string_param(&params, "turnId"),
+        thread_id: string_param(&params, "threadId")
+            .or_else(|| nested_string_param(&params, &["turn", "threadId"])),
+        turn_id: string_param(&params, "turnId")
+            .or_else(|| nested_string_param(&params, &["turn", "id"]))
+            .or_else(|| nested_string_param(&params, &["turn", "turnId"])),
         item_id: string_param(&params, "itemId"),
         message_delta: string_param(&params, "delta"),
         token_usage: codex_token_usage(&params),
@@ -1342,11 +1345,11 @@ fn thread_status_kind(event: &NormalizedCodexEvent) -> EventKind {
 }
 
 pub fn turn_status(event: &NormalizedCodexEvent) -> Option<String> {
-    event
-        .raw
-        .get("params")?
-        .get("status")?
-        .as_str()
+    let params = event.raw.get("params")?;
+    params
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("turn")?.get("status")?.as_str())
         .map(str::trim)
         .filter(|status| !status.is_empty())
         .map(str::to_ascii_lowercase)

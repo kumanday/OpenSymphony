@@ -2654,11 +2654,14 @@ mod tests {
             "method": "turn/completed",
             "params": {
                 "threadId": "thread-1",
-                "turnId": "turn-1",
-                "status": "Interrupted"
+                "turn": {
+                    "id": "turn-1",
+                    "status": "Interrupted"
+                }
             }
         }))
         .expect("notification should normalize");
+        assert_eq!(event.turn_id.as_deref(), Some("turn-1"));
 
         let outcome = codex_terminal_outcome(&event).expect("interrupted turn is terminal");
         assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
@@ -4511,7 +4514,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"turn/interrupt"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"status":"accepted"}}}}\n' "$id"
-      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1","status":"interrupted"}}}}\n'
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-1","status":"interrupted"}}}}}}\n'
       exit 0
       ;;
   esac
