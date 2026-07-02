@@ -646,7 +646,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.children.length).toBe(0);
   });
 
-  it("keeps dark-mode tabs and changed-file rows readable", async () => {
+  it("keeps dark-mode tabs, changed-file rows, and graph selections readable", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -669,6 +669,10 @@ describe("OpenSymphonyApp mount", () => {
     );
     expect(styleText).toContain(".os-changed-file .os-file-path");
     expect(styleText).toContain(".os-changed-file .os-file-stats");
+    expect(styleText).toContain(".os-knowledge-stage { background: #e7ebef;");
+    expect(styleText).toContain(".os-kg-label.is-selected");
+    expect(styleText).toContain(".os-kg-list li.is-selected");
+    expect(styleText).toContain(".os-kg-inspector dt, .os-kg-inspector p");
 
     await handle.destroy();
   });
@@ -781,6 +785,7 @@ describe("OpenSymphonyApp mount", () => {
 
     const originalGetContext = HTMLCanvasElement.prototype.getContext;
     const originalConsoleError = console.error;
+    const fillStyles: string[] = [];
     const consoleError = jest.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       const first = args[0];
       const message = first instanceof Error ? first.message : String(first);
@@ -805,7 +810,9 @@ describe("OpenSymphonyApp mount", () => {
         stroke: jest.fn(),
         arc: jest.fn(),
         fill: jest.fn(),
-        set fillStyle(_value: string) {},
+        set fillStyle(value: string) {
+          fillStyles.push(value);
+        },
         set strokeStyle(_value: string) {},
         set lineWidth(_value: number) {},
         set globalAlpha(_value: number) {},
@@ -818,6 +825,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
       expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
       expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
+      expect(fillStyles).toContain("#e7ebef");
       expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
       expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain(`${fixtureGraphSnapshot.nodes.length} nodes`);
       const fallbackButtons = Array.from(root.querySelectorAll<HTMLButtonElement>(".os-kg-list [data-kg-node-id]"));
