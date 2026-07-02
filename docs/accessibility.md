@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: orchestrator
+area: accessibility
 visibility: public
-last_memory_sync: 2026-06-28T00:03:32.416917+00:00
+last_memory_sync: 2026-07-02T03:46:15.369986+00:00
 ---
 
-# Orchestrator
+# Accessibility
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

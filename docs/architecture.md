@@ -275,12 +275,7 @@ Notable removals:
 
 ## Current model
 
-- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
-- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
-- COE-408 contributed: PR #129: Add harness adapter capability discovery (merge `96345e3`)
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
-- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
-- COE-425 contributed: PR #132: feat(openhands): add subscription credential adapter (merge `93cea67`)
+- COE-503 contributed: PR #175: feat(code-intel): harden AST limits and docs (merge `c6241a9`)
 
 ## Important invariants
 
@@ -297,40 +292,10 @@ Notable removals:
 
 ## Recent changes
 
-- COE-401: Web App Entry And Deployment Modes
-- COE-407: Browser Transport And Remote Stream Protocols
-- COE-408: Harness Adapter And Capability Model
-- COE-419: Hosted Auth Placeholders And Web Parity
-- COE-423: Model And Credential Settings
-- COE-425: OpenHands Subscription Credential Adapter
-- COE-426: Codex App-Server Prototype And Benchmarks
-- COE-428: Model Configuration UI And Routing Metadata
-- COE-429: Codex Approvals And Cross-Harness Routing
-- COE-452: DuckDB Prebuilt Developer Build Mode
-- COE-453: Non-Interactive Init For Automation
-- COE-473: Desktop task graph dependency and run detail parity
-- COE-475: ChatGPT OAuth For Codex Harness
-- COE-476: Codex Production Harness Enablement
-- COE-478: Harden model profile storage and validation follow-ups
-- COE-479: Codex Debug Session Resume
+- COE-503: Code Intelligence Performance Docs And Hardening
 
 ## Source refs
 
-- COE-401
-- COE-407
-- COE-408
-- COE-419
-- COE-423
-- COE-425
-- COE-426
-- COE-428
-- COE-429
-- COE-452
-- COE-453
-- COE-473
-- COE-475
-- COE-476
-- COE-478
-- COE-479
+- COE-503
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
