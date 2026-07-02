@@ -147,6 +147,7 @@ pub(super) struct RuntimeWorkerBackend {
     worker_env: BTreeMap<String, String>,
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
+    codex_interrupts: CodexInterruptRegistry,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
@@ -154,6 +155,8 @@ pub(super) struct RuntimeWorkerBackend {
 }
 
 type CodexSchemaValidatorCache = Arc<AsyncMutex<HashMap<String, CodexAppServerSchemaValidator>>>;
+type CodexInterruptRegistry = Arc<Mutex<HashMap<String, Arc<AsyncMutex<CodexInterruptChannel>>>>>;
+type CodexInterruptResponseRegistry = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), String>>>>>;
 
 struct ActiveWorkerTask {
     handle: JoinHandle<()>,
@@ -170,6 +173,21 @@ struct SchedulerObserver {
     worker_id: String,
     launch_tx: Option<oneshot::Sender<LaunchReport>>,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
+}
+
+struct CodexInterruptChannel {
+    stdin: ChildStdin,
+    session: CodexJsonRpcSession,
+    schema_validator: CodexAppServerSchemaValidator,
+    thread_id: String,
+    turn_id: String,
+    responses: CodexInterruptResponseRegistry,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+}
+
+struct CodexInterruptRegistration {
+    registry: CodexInterruptRegistry,
+    thread_id: String,
 }
 
 struct LinearWorkpadCommentSource {
@@ -822,6 +840,7 @@ impl RuntimeWorkerBackend {
             worker_env,
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
+            codex_interrupts: Arc::new(Mutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -874,6 +893,7 @@ impl RuntimeWorkerBackend {
         let codex_bin = self.codex_bin.clone();
         let worker_env = self.worker_env.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
+        let codex_interrupts = Arc::clone(&self.codex_interrupts);
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
@@ -950,6 +970,7 @@ impl RuntimeWorkerBackend {
                     &workflow,
                     &codex_bin,
                     &codex_schema_validators,
+                    &codex_interrupts,
                     &updates_tx,
                     &mut launch_tx,
                     &worker_env,
@@ -1183,6 +1204,7 @@ async fn run_codex_stdio_issue(
     workflow: &ResolvedWorkflow,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
+    codex_interrupts: &CodexInterruptRegistry,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
@@ -1196,6 +1218,7 @@ async fn run_codex_stdio_issue(
         workflow,
         codex_bin,
         codex_schema_validators,
+        codex_interrupts,
         updates_tx,
         launch_tx,
         worker_env,
@@ -1270,6 +1293,7 @@ async fn try_run_codex_stdio_issue(
     workflow: &ResolvedWorkflow,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
+    codex_interrupts: &CodexInterruptRegistry,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
@@ -1304,7 +1328,8 @@ async fn try_run_codex_stdio_issue(
     )));
     let mut reader = BufReader::new(stdout).lines();
     let mut session = adapter.session();
-    let mut pending_terminal = None;
+    let mut read_state = CodexReadState::default();
+    let interrupt_responses = Arc::new(Mutex::new(HashMap::new()));
 
     let initialize = session.initialize();
     write_codex_request(
@@ -1322,7 +1347,7 @@ async fn try_run_codex_stdio_issue(
         &run.worker_id.to_string(),
         issue,
         run,
-        &mut pending_terminal,
+        &mut read_state,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
@@ -1361,7 +1386,7 @@ async fn try_run_codex_stdio_issue(
         &run.worker_id.to_string(),
         issue,
         run,
-        &mut pending_terminal,
+        &mut read_state,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
@@ -1370,11 +1395,6 @@ async fn try_run_codex_stdio_issue(
     write_codex_conversation_manifest(workspace_manager, workspace, issue, &conversation_id, route)
         .await
         .map_err(|error| with_codex_stderr(error.to_string(), &stderr_tail))?;
-    if let Some(sender) = launch_tx.take() {
-        let _ = sender.send(LaunchReport::Conversation(Box::new(
-            codex_conversation_metadata(conversation_id.clone(), route),
-        )));
-    }
     let turn_start = adapter
         .start_issue_turn_request(
             &mut session,
@@ -1392,17 +1412,50 @@ async fn try_run_codex_stdio_issue(
         &stderr_tail,
     )
     .await?;
-    read_response_line(
+    let turn_start_response = read_response_line(
         &mut reader,
         turn_start.request.id,
         updates_tx,
         &run.worker_id.to_string(),
         issue,
         run,
-        &mut pending_terminal,
+        &mut read_state,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let turn_id = match codex_turn_id_from_start_response(&turn_start_response)
+        .or_else(|| read_state.pending_turn_id.take())
+    {
+        Some(turn_id) => turn_id,
+        None => read_until_codex_turn_id(
+            &mut reader,
+            updates_tx,
+            &run.worker_id.to_string(),
+            issue,
+            run,
+            &mut read_state,
+        )
+        .await
+        .map_err(|error| with_codex_stderr(error, &stderr_tail))?,
+    };
+    let _interrupt_registration = register_codex_interrupt_channel(
+        codex_interrupts,
+        conversation_id.clone(),
+        CodexInterruptChannel {
+            stdin,
+            session,
+            schema_validator,
+            thread_id: conversation_id.clone(),
+            turn_id: turn_id.clone(),
+            responses: Arc::clone(&interrupt_responses),
+            stderr_tail: Arc::clone(&stderr_tail),
+        },
+    )?;
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Conversation(Box::new(
+            codex_conversation_metadata(conversation_id.clone(), route),
+        )));
+    }
 
     let terminal = read_until_codex_terminal(
         &mut reader,
@@ -1410,7 +1463,8 @@ async fn try_run_codex_stdio_issue(
         &run.worker_id.to_string(),
         issue,
         run,
-        &mut pending_terminal,
+        &mut read_state,
+        &interrupt_responses,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
@@ -1584,7 +1638,121 @@ async fn write_codex_request(
                 format!("failed to write Codex {request_name} request: {source}"),
                 stderr_tail,
             )
-        })
+        })?;
+    stdin.flush().await.map_err(|source| {
+        with_codex_stderr(
+            format!("failed to flush Codex {request_name} request: {source}"),
+            stderr_tail,
+        )
+    })
+}
+
+async fn send_codex_stdio_interrupt(
+    registry: &CodexInterruptRegistry,
+    command: &crate::opensymphony_domain::HarnessInterruptCommand,
+) -> Result<WorkerInterruptAcknowledgement, CliWorkerError> {
+    let thread_id = command.conversation_id.as_str();
+    let channel = registry
+        .lock()
+        .map_err(|_| {
+            CliWorkerError::InterruptFailed("Codex interrupt registry lock poisoned".to_string())
+        })?
+        .get(thread_id)
+        .cloned();
+    let Some(channel) = channel else {
+        return Err(CliWorkerError::InterruptFailed(format!(
+            "Codex stdio worker for thread `{thread_id}` does not have an active turn interrupt channel"
+        )));
+    };
+
+    let mut channel = channel.lock().await;
+    let detail = channel
+        .send_interrupt()
+        .await
+        .map_err(CliWorkerError::InterruptFailed)?;
+    Ok(WorkerInterruptAcknowledgement {
+        accepted: true,
+        detail: Some(detail),
+    })
+}
+
+impl CodexInterruptChannel {
+    async fn send_interrupt(&mut self) -> Result<String, String> {
+        let request = self.session.request(
+            "turn/interrupt",
+            serde_json::json!({
+                "threadId": &self.thread_id,
+                "turnId": &self.turn_id,
+            }),
+        );
+        let request_id = request.id;
+        let (response_tx, response_rx) = oneshot::channel();
+        self.insert_response_waiter(request_id, response_tx)?;
+        write_codex_request(
+            &mut self.stdin,
+            &self.schema_validator,
+            &request,
+            "turn/interrupt",
+            &self.stderr_tail,
+        )
+        .await
+        .inspect_err(|_| self.remove_response_waiter(request_id))?;
+        let response = timeout(CODEX_RESPONSE_TIMEOUT, response_rx)
+            .await
+            .map_err(|_| {
+                self.remove_response_waiter(request_id);
+                format!("timed out waiting for Codex interrupt response id {request_id}")
+            })?
+            .map_err(|_| {
+                format!("Codex interrupt response channel closed for request id {request_id}")
+            })?;
+        response?;
+        Ok(format!(
+            "Codex interrupt acknowledged with `turn/interrupt` for thread `{}` turn `{}` (request id {request_id})",
+            self.thread_id, self.turn_id
+        ))
+    }
+
+    fn insert_response_waiter(
+        &self,
+        request_id: u64,
+        sender: oneshot::Sender<Result<(), String>>,
+    ) -> Result<(), String> {
+        self.responses
+            .lock()
+            .map_err(|_| "Codex interrupt response registry lock poisoned".to_string())?
+            .insert(request_id, sender);
+        Ok(())
+    }
+
+    fn remove_response_waiter(&self, request_id: u64) {
+        if let Ok(mut responses) = self.responses.lock() {
+            responses.remove(&request_id);
+        }
+    }
+}
+
+fn register_codex_interrupt_channel(
+    registry: &CodexInterruptRegistry,
+    thread_id: String,
+    channel: CodexInterruptChannel,
+) -> Result<CodexInterruptRegistration, String> {
+    registry
+        .lock()
+        .map_err(|_| "Codex interrupt registry lock poisoned".to_string())?
+        .insert(thread_id.clone(), Arc::new(AsyncMutex::new(channel)));
+    Ok(CodexInterruptRegistration {
+        registry: Arc::clone(registry),
+        thread_id,
+    })
+}
+
+impl Drop for CodexInterruptRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.remove(&self.thread_id);
+        }
+    }
 }
 
 struct AbortOnDrop<T> {
@@ -1637,8 +1805,62 @@ fn codex_thread_id_from_start_response(value: &serde_json::Value) -> Result<Stri
             format!(
                 "Codex thread/start response missing non-empty threadId/thread_id or thread.id: {value}"
             )
-        })?;
+    })?;
     Ok(thread_id.to_string())
+}
+
+fn codex_turn_id_from_start_response(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("turnId")
+                .or_else(|| result.get("turn_id"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    result
+                        .get("turn")
+                        .and_then(|turn| {
+                            turn.get("id")
+                                .or_else(|| turn.get("turnId"))
+                                .or_else(|| turn.get("turn_id"))
+                        })
+                        .and_then(serde_json::Value::as_str)
+                })
+        })
+        .filter(|turn_id| !turn_id.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+async fn read_until_codex_turn_id(
+    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    read_state: &mut CodexReadState,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + CODEX_RESPONSE_TIMEOUT;
+    loop {
+        let line = timeout_at(deadline, reader.next_line())
+            .await
+            .map_err(|_| "timed out waiting for Codex turn id after turn/start".to_string())?
+            .map_err(|source| format!("failed reading Codex stdout: {source}"))?
+            .ok_or("Codex stdout closed before reporting turn id")?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|source| format!("invalid Codex JSON: {source}"))?;
+        let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value) else {
+            continue;
+        };
+        if read_state.pending_terminal.is_none()
+            && let Some(outcome) = codex_terminal_outcome(&event)
+        {
+            read_state.pending_terminal = Some(outcome);
+        }
+        if let Some(turn_id) = event.turn_id.filter(|turn_id| !turn_id.trim().is_empty()) {
+            return Ok(turn_id);
+        }
+    }
 }
 
 async fn drain_codex_stderr(
@@ -1691,6 +1913,12 @@ struct CodexTerminalOutcome {
     status: RunStatus,
 }
 
+#[derive(Debug, Default)]
+struct CodexReadState {
+    pending_terminal: Option<CodexTerminalOutcome>,
+    pending_turn_id: Option<String>,
+}
+
 async fn read_response_line(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     request_id: u64,
@@ -1698,7 +1926,7 @@ async fn read_response_line(
     worker_id: &str,
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
-    pending_terminal: &mut Option<CodexTerminalOutcome>,
+    read_state: &mut CodexReadState,
 ) -> Result<serde_json::Value, String> {
     let deadline = tokio::time::Instant::now() + CODEX_RESPONSE_TIMEOUT;
     loop {
@@ -1713,11 +1941,13 @@ async fn read_response_line(
             reject_codex_json_rpc_error(request_id, &value)?;
             return Ok(value);
         }
-        if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
-            && pending_terminal.is_none()
-            && let Some(outcome) = codex_terminal_outcome(&event)
-        {
-            *pending_terminal = Some(outcome);
+        if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value) {
+            capture_codex_turn_id(&event, &mut read_state.pending_turn_id);
+            if read_state.pending_terminal.is_none()
+                && let Some(outcome) = codex_terminal_outcome(&event)
+            {
+                read_state.pending_terminal = Some(outcome);
+            }
         }
     }
 }
@@ -1727,6 +1957,12 @@ fn codex_response_id_matches(value: &serde_json::Value, request_id: u64) -> bool
         return false;
     };
     id.as_u64() == Some(request_id) || id.as_str().is_some_and(|id| id == request_id.to_string())
+}
+
+fn codex_response_id(value: &serde_json::Value) -> Option<u64> {
+    let id = value.get("id")?;
+    id.as_u64()
+        .or_else(|| id.as_str().and_then(|id| id.parse().ok()))
 }
 
 fn reject_codex_json_rpc_error(request_id: u64, value: &serde_json::Value) -> Result<(), String> {
@@ -1744,15 +1980,54 @@ fn reject_codex_json_rpc_error(request_id: u64, value: &serde_json::Value) -> Re
     ))
 }
 
+fn capture_codex_turn_id(event: &NormalizedCodexEvent, pending_turn_id: &mut Option<String>) {
+    if pending_turn_id.is_some() {
+        return;
+    }
+    if let Some(turn_id) = event
+        .turn_id
+        .as_deref()
+        .filter(|turn_id| !turn_id.trim().is_empty())
+    {
+        *pending_turn_id = Some(turn_id.to_string());
+    }
+}
+
+fn complete_codex_interrupt_response(
+    responses: &CodexInterruptResponseRegistry,
+    value: &serde_json::Value,
+) -> bool {
+    let Some(response_id) = codex_response_id(value) else {
+        return false;
+    };
+    let sender = responses
+        .lock()
+        .ok()
+        .and_then(|mut responses| responses.remove(&response_id));
+    if let Some(sender) = sender {
+        let _ = sender.send(reject_codex_json_rpc_error(response_id, value));
+    }
+    true
+}
+
+fn codex_interrupt_response_pending(responses: &CodexInterruptResponseRegistry) -> bool {
+    responses
+        .lock()
+        .is_ok_and(|responses| !responses.is_empty())
+}
+
 async fn read_until_codex_terminal(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     worker_id: &str,
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
-    pending_terminal: &mut Option<CodexTerminalOutcome>,
+    read_state: &mut CodexReadState,
+    interrupt_responses: &CodexInterruptResponseRegistry,
 ) -> Result<CodexTerminalOutcome, String> {
-    if let Some(outcome) = pending_terminal.take() {
+    if !codex_interrupt_response_pending(interrupt_responses)
+        && let Some(outcome) = read_state.pending_terminal.take()
+    {
         return Ok(outcome);
     }
 
@@ -1764,9 +2039,21 @@ async fn read_until_codex_terminal(
             .ok_or("Codex stdout closed before terminal notification")?;
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|source| format!("invalid Codex JSON: {source}"))?;
+        if complete_codex_interrupt_response(interrupt_responses, &value) {
+            if !codex_interrupt_response_pending(interrupt_responses)
+                && let Some(outcome) = read_state.pending_terminal.take()
+            {
+                return Ok(outcome);
+            }
+            continue;
+        }
         if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
             && let Some(outcome) = codex_terminal_outcome(&event)
         {
+            if codex_interrupt_response_pending(interrupt_responses) {
+                read_state.pending_terminal.get_or_insert(outcome);
+                continue;
+            }
             return Ok(outcome);
         }
     }
@@ -2156,10 +2443,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         command: crate::opensymphony_domain::HarnessInterruptCommand,
     ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
         if command.harness_kind == CODEX_APP_SERVER_KIND {
-            return Err(CliWorkerError::InterruptFailed(
-                "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
-                    .to_string(),
-            ));
+            return send_codex_stdio_interrupt(&self.codex_interrupts, &command).await;
         }
         if command.harness_kind != OPENHANDS_AGENT_SERVER_KIND {
             return Err(CliWorkerError::InterruptFailed(format!(
@@ -2338,6 +2622,10 @@ mod tests {
         Arc::new(AsyncMutex::new(HashMap::new()))
     }
 
+    fn empty_codex_interrupt_registry() -> CodexInterruptRegistry {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
     fn sample_conversation_manifest(conversation_id: &str) -> IssueConversationManifest {
         let now = chrono::Utc::now();
         IssueConversationManifest {
@@ -2383,11 +2671,14 @@ mod tests {
             "method": "turn/completed",
             "params": {
                 "threadId": "thread-1",
-                "turnId": "turn-1",
-                "status": "Interrupted"
+                "turn": {
+                    "id": "turn-1",
+                    "status": "Interrupted"
+                }
             }
         }))
         .expect("notification should normalize");
+        assert_eq!(event.turn_id.as_deref(), Some("turn-1"));
 
         let outcome = codex_terminal_outcome(&event).expect("interrupted turn is terminal");
         assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
@@ -2800,6 +3091,7 @@ mod tests {
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
         let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -2813,6 +3105,7 @@ mod tests {
                 .to_str()
                 .expect("fake codex path should be utf-8"),
             &codex_schema_validators,
+            &codex_interrupts,
             &updates_tx,
             &mut launch_tx,
             &BTreeMap::new(),
@@ -2870,6 +3163,314 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn codex_stdio_worker_accepts_scheduler_interrupt_for_active_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-interrupt", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-interrupt").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-interrupt.log");
+        let fake_codex = tempdir.path().join("fake-codex-interrupt");
+        write_fake_codex_interruptible_child(&fake_codex, &log_path);
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+        let worker_codex_interrupts = Arc::clone(&codex_interrupts);
+        let fake_codex_path = fake_codex
+            .to_str()
+            .expect("fake codex path should be utf-8")
+            .to_string();
+
+        let worker = tokio::spawn(async move {
+            let outcome = run_codex_stdio_issue(
+                &route,
+                &workspace_manager,
+                &ensured.handle,
+                &mut run_manifest,
+                &issue,
+                &run,
+                &workflow,
+                &fake_codex_path,
+                &codex_schema_validators,
+                &worker_codex_interrupts,
+                &updates_tx,
+                &mut launch_tx,
+                &BTreeMap::new(),
+            )
+            .await;
+            (outcome, run_manifest.status)
+        });
+
+        let launch = timeout(Duration::from_secs(5), launch_rx)
+            .await
+            .expect("launch should not time out")
+            .expect("launch sender should stay alive");
+        assert!(matches!(
+            launch,
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+
+        let acknowledgement = send_codex_stdio_interrupt(
+            &codex_interrupts,
+            &HarnessInterruptCommand {
+                run_id: "COE-505".to_string(),
+                issue_id: IssueId::new("issue-codex-interrupt").expect("issue id should be valid"),
+                harness_kind: CODEX_APP_SERVER_KIND.to_string(),
+                conversation_id: ConversationId::new("fake-thread")
+                    .expect("thread id should be valid"),
+                turn_id: None,
+                reason: HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
+            },
+        )
+        .await
+        .expect("active Codex stdio interrupt should be accepted");
+        assert!(acknowledgement.accepted);
+        assert!(
+            acknowledgement
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("turn `turn-1`"))
+        );
+
+        let (outcome, status) = timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("worker should finish after interrupt")
+            .expect("worker task should not panic");
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(status, RunStatus::Cancelled);
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains("\"method\":\"turn/interrupt\""));
+        assert!(log.contains("\"threadId\":\"fake-thread\""));
+        assert!(log.contains("\"turnId\":\"turn-1\""));
+        assert!(
+            std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
+                matches!(
+                    update,
+                    WorkerUpdate::RuntimeEvent {
+                        event_kind: Some(kind),
+                        summary: Some(summary),
+                        ..
+                    } if kind == "codex.turn/completed"
+                        && summary.contains("Codex turn interrupted turn-1")
+                )
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_rejects_scheduler_interrupt_error_response() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-interrupt-error", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-interrupt-error").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-interrupt-error.log");
+        let fake_codex = tempdir.path().join("fake-codex-interrupt-error");
+        write_fake_codex_interrupt_error_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+        let worker_codex_interrupts = Arc::clone(&codex_interrupts);
+        let fake_codex_path = fake_codex
+            .to_str()
+            .expect("fake codex path should be utf-8")
+            .to_string();
+
+        let worker = tokio::spawn(async move {
+            let outcome = run_codex_stdio_issue(
+                &route,
+                &workspace_manager,
+                &ensured.handle,
+                &mut run_manifest,
+                &issue,
+                &run,
+                &workflow,
+                &fake_codex_path,
+                &codex_schema_validators,
+                &worker_codex_interrupts,
+                &updates_tx,
+                &mut launch_tx,
+                &BTreeMap::new(),
+            )
+            .await;
+            (outcome, run_manifest.status)
+        });
+
+        let launch = timeout(Duration::from_secs(5), launch_rx)
+            .await
+            .expect("launch should not time out")
+            .expect("launch sender should stay alive");
+        assert!(matches!(
+            launch,
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+
+        let error = send_codex_stdio_interrupt(
+            &codex_interrupts,
+            &HarnessInterruptCommand {
+                run_id: "COE-505".to_string(),
+                issue_id: IssueId::new("issue-codex-interrupt").expect("issue id should be valid"),
+                harness_kind: CODEX_APP_SERVER_KIND.to_string(),
+                conversation_id: ConversationId::new("fake-thread")
+                    .expect("thread id should be valid"),
+                turn_id: None,
+                reason: HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
+            },
+        )
+        .await
+        .expect_err("Codex interrupt JSON-RPC error should reject acknowledgement");
+        assert!(error.to_string().contains("fake interrupt rejected"));
+
+        let (outcome, status) = timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("worker should finish after fake terminal event")
+            .expect("worker task should not panic");
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(status, RunStatus::Succeeded);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_keeps_turn_id_seen_before_start_response() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-turn-id-before-response", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-turn-id-before-response")
+                .expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir
+            .path()
+            .join("fake-codex-turn-id-before-response.log");
+        let fake_codex = tempdir.path().join("fake-codex-turn-id-before-response");
+        write_fake_codex_turn_id_before_response_child(&fake_codex, &log_path);
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        let launch = launch_rx
+            .await
+            .expect("launch report should be sent before terminal completion");
+        assert!(matches!(
+            launch,
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        assert!(
+            std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
+                matches!(
+                    update,
+                    WorkerUpdate::RuntimeEvent {
+                        event_kind: Some(kind),
+                        summary: Some(summary),
+                        ..
+                    } if kind == "codex.turn/started"
+                        && summary.contains("turn-pre-response")
+                )
+            }),
+            "pre-response turn/started notification should be forwarded and retained"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn codex_stdio_worker_keeps_terminal_notification_seen_before_start_response() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
@@ -2905,6 +3506,7 @@ mod tests {
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
         let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -2918,6 +3520,7 @@ mod tests {
                 .to_str()
                 .expect("fake codex path should be utf-8"),
             &codex_schema_validators,
+            &codex_interrupts,
             &updates_tx,
             &mut launch_tx,
             &BTreeMap::new(),
@@ -2983,6 +3586,7 @@ mod tests {
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
         let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -2996,6 +3600,7 @@ mod tests {
                 .to_str()
                 .expect("fake codex error path should be utf-8"),
             &codex_schema_validators,
+            &codex_interrupts,
             &updates_tx,
             &mut launch_tx,
             &BTreeMap::new(),
@@ -3060,6 +3665,7 @@ mod tests {
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
         let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -3073,6 +3679,7 @@ mod tests {
                 .to_str()
                 .expect("fake codex error path should be utf-8"),
             &codex_schema_validators,
+            &codex_interrupts,
             &updates_tx,
             &mut launch_tx,
             &BTreeMap::new(),
@@ -3669,7 +4276,7 @@ Run the scheduler.
     }
 
     #[tokio::test]
-    async fn codex_scheduler_interrupt_reports_unavailable_stdio_channel() {
+    async fn codex_scheduler_interrupt_reports_missing_active_stdio_channel() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
         fs::create_dir_all(&workspace_root).expect("workspace root should be created");
@@ -3699,11 +4306,11 @@ Run the scheduler.
                 expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
             })
             .await
-            .expect_err("Codex stdio scheduler interrupt should be explicitly unavailable");
+            .expect_err("Codex stdio scheduler interrupt without a live channel should fail");
 
         assert!(
             error.to_string().contains(
-                "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
+                "Codex stdio worker for thread `thread-1` does not have an active turn interrupt channel"
             )
         );
     }
@@ -3850,7 +4457,7 @@ Run the scheduler.
         }
     }
 
-    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"oneOf":[{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize"]},"params":{"type":"object"}}},{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["thread/start"]},"params":{"type":"object","required":["approvalPolicy","cwd","sandbox"],"properties":{"approvalPolicy":{"enum":["never"]},"cwd":{"type":"string"},"sandbox":{"enum":["danger-full-access"]}}}}},{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["turn/start"]},"params":{"type":"object","required":["approvalPolicy","cwd","input","sandboxPolicy","threadId"],"properties":{"approvalPolicy":{"enum":["never"]},"cwd":{"type":"string"},"input":{"type":"array"},"sandboxPolicy":{"type":"object","required":["type"],"properties":{"type":{"enum":["dangerFullAccess"]}},"additionalProperties":false},"threadId":{"type":"string"}}}}}]}}}"#;
+    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
 
     #[cfg(unix)]
     fn write_fake_codex_child(path: &Path, log_path: &Path) {
@@ -3882,6 +4489,136 @@ while IFS= read -r line; do
     *'"method":"turn/start"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
       printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_interruptible_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/interrupt"'*)
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-1","status":"interrupted"}}}}}}\n'
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"status":"accepted"}}}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_interrupt_error_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/interrupt"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32000,"message":"fake interrupt rejected"}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1","status":"completed"}}}}\n'
+      exit 0
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_turn_id_before_response_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"fake-thread","turnId":"turn-pre-response"}}}}\n'
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"items":[],"status":"inProgress"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","status":"completed"}}}}\n'
+      exit 0
       ;;
   esac
 done

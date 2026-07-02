@@ -7,13 +7,13 @@ use std::{
 use crate::opensymphony_domain::{
     ComponentHealthSnapshot, ConversationMetadata, DaemonSnapshot, DurationMs,
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
-    HealthStatus, IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef,
-    IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
-    ReleaseReason, RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt,
-    RuntimeUsageTotals, SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory,
-    TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
-    TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceRecord,
+    HarnessInterruptStatus, HealthStatus, IdentifierError, IssueExecution, IssueId,
+    IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
+    OrchestratorSnapshot, ReleaseReason, RetryCalculationError, RetryEntry, RetryPolicy,
+    RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
+    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef,
+    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
+    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -1696,13 +1696,10 @@ where
             None => IssueExecution::new(issue.clone(), observed_at),
         };
 
-        // Do not reopen executions that were released due to terminal worker outcomes
-        // (Detached/CancelFailed). These represent runs that could not be safely stopped
-        // and reopening them would duplicate still-active work.
-        let was_terminal_outcome = matches!(
-            execution.last_worker_outcome().map(|o| o.outcome),
-            Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
-        );
+        // Do not reopen executions that were released due to terminal worker outcomes.
+        // These represent either runs that could not be safely stopped or explicit
+        // operator cancels, so reopening would duplicate or restart unwanted work.
+        let was_terminal_outcome = terminal_worker_outcome_prevents_reopen(&execution);
         let mut execution =
             if execution.status() == SchedulerStatus::Released && !was_terminal_outcome {
                 execution.reopen(observed_at)?
@@ -1779,8 +1776,9 @@ where
         }
 
         // Detached and CancelFailed are terminal outcomes: release the execution instead of
-        // queuing a retry. The underlying OpenHands run may still be active and retrying
-        // would duplicate work.
+        // queuing a retry. Acknowledged operator cancels are also terminal from the
+        // scheduler's perspective for completed or cancelled outcomes because retrying
+        // would restart work the operator explicitly stopped.
         if matches!(
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
@@ -1790,6 +1788,16 @@ where
                     execution,
                     observed_at,
                     ReleaseReason::TrackerInactive,
+                    Some(outcome),
+                )
+                .await;
+        }
+        if acknowledged_operator_cancel_terminal(&execution, &outcome) {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Cancelled,
                     Some(outcome),
                 )
                 .await;
@@ -2161,6 +2169,31 @@ fn retry_reason_for_outcome(outcome: WorkerOutcomeKind) -> Option<RetryReason> {
         // the underlying OpenHands run may still be active and retrying would duplicate work.
         WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => None,
     }
+}
+
+fn acknowledged_operator_cancel_terminal(
+    execution: &IssueExecution,
+    outcome: &WorkerOutcomeRecord,
+) -> bool {
+    matches!(
+        outcome.outcome,
+        WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Cancelled
+    ) && execution.interrupt().is_some_and(|interrupt| {
+        interrupt.status == HarnessInterruptStatus::Acknowledged
+            && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
+            && interrupt.command.expected_next_state == HarnessInterruptExpectedNextState::Paused
+    })
+}
+
+fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
+    matches!(
+        execution
+            .last_worker_outcome()
+            .map(|outcome| outcome.outcome),
+        Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
+    ) || execution
+        .last_worker_outcome()
+        .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
 }
 
 fn tracker_merging_interrupt_cancelled(
