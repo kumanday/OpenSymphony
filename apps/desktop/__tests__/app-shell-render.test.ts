@@ -26,6 +26,7 @@ import { MockGatewayTransport } from "@opensymphony/api-client";
 import { createModelProfile } from "@opensymphony/gateway-schema";
 import { createFixtureGraphAdapter } from "@opensymphony/graph";
 import {
+  createDesktopGraphAdapter,
   createDesktopModelProfileController,
   createDesktopProfileController,
   createDesktopTransport,
@@ -411,6 +412,99 @@ describe("desktop app shell render", () => {
       { command: "run_diffs", args: { runId: "run-1", filePath: "src/config.ts" } },
       { command: "run_validation", args: { runId: "run-1" } },
       { command: "run_approvals", args: { runId: "run-1" } },
+    ]);
+  });
+
+  it("uses native Tauri commands for desktop graph reads", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          switch (command) {
+            case "memory_bundles":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                bundles: [{
+                  id: "local-default",
+                  title: "OpenSymphony Memory",
+                  okf_version: "0.1",
+                  visibility: "private",
+                  concept_count: 1,
+                }],
+              };
+            case "memory_graph":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                bundle_id: args?.bundleId,
+                cursor: { sequence: 1, partition: "memory-graph:local-default" },
+                nodes: [],
+                edges: [],
+                communities: [],
+                metrics: {
+                  orphan_count: 0,
+                  broken_link_count: 0,
+                  stale_concept_count: 0,
+                  warning_count: 0,
+                },
+                filters_applied: [],
+                generated_at: "2026-07-02T00:00:00Z",
+              };
+            case "memory_concept_detail":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                bundle_id: args?.bundleId,
+                concept_id: args?.conceptId,
+                title: "COE-465",
+                visibility: "public",
+                body_markdown: "",
+                links: [],
+                source_refs: [],
+              };
+            case "memory_communities":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                bundle_id: args?.bundleId,
+                communities: [],
+              };
+            case "memory_search":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                query: args?.query,
+                bundle_id: args?.bundleId,
+                results: [],
+              };
+            default:
+              throw new Error(`unexpected command ${command}`);
+          }
+        },
+      },
+    };
+
+    const graphAdapter = createDesktopGraphAdapter("http://127.0.0.1:2468");
+
+    await graphAdapter.listBundles();
+    await graphAdapter.getGraphSnapshot("local-default", { visibility: "all_accessible" });
+    await graphAdapter.getConceptDetail("local-default", "issues/COE-465", { visibility: "public" });
+    await graphAdapter.getCommunities("local-default");
+    await graphAdapter.search("graph", {
+      limit: 5,
+      bundleId: "local-default",
+      visibility: "all_accessible",
+    });
+
+    expect(calls).toEqual([
+      { command: "memory_bundles", args: { visibility: null } },
+      { command: "memory_graph", args: { bundleId: "local-default", visibility: "all_accessible" } },
+      {
+        command: "memory_concept_detail",
+        args: { bundleId: "local-default", conceptId: "issues/COE-465", visibility: "public" },
+      },
+      { command: "memory_communities", args: { bundleId: "local-default", visibility: null } },
+      {
+        command: "memory_search",
+        args: { query: "graph", limit: 5, bundleId: "local-default", visibility: "all_accessible" },
+      },
     ]);
   });
 

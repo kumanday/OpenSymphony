@@ -62,6 +62,11 @@ pub fn run() {
             // COE-410: Gateway local stream transport commands
             commands::attach_gateway,
             commands::dashboard_snapshot,
+            commands::memory_bundles,
+            commands::memory_graph,
+            commands::memory_concept_detail,
+            commands::memory_communities,
+            commands::memory_search,
             commands::task_graph,
             commands::run_detail,
             commands::run_files,
