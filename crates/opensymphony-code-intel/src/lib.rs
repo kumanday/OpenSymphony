@@ -1,14 +1,16 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap},
     fs,
     io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 // Rendered code-intelligence context is owned here so memory can consume it
 // without the AST provider importing memory internals.
@@ -142,6 +144,12 @@ const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "injection.content",
     "injection.language",
 ];
+
+static QUERY_PACK_CACHE: OnceLock<QueryPackCache> = OnceLock::new();
+
+thread_local! {
+    static PARSER_CACHE: RefCell<HashMap<SourceLanguage, Parser>> = RefCell::new(HashMap::new());
+}
 
 const NO_VARIANT_QUERIES: &[QueryAsset] = &[];
 
@@ -456,6 +464,8 @@ pub enum CodeIntelError {
         query_name: String,
         capture_name: String,
     },
+    #[error("query pack cache lock was poisoned")]
+    QueryPackCachePoisoned,
     #[error("captured text is not utf-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 }
@@ -483,10 +493,38 @@ impl QueryAsset {
     }
 }
 
-struct CompiledQuery<'a> {
+struct CompiledQueryPack {
+    version: String,
+    queries: Vec<CompiledQuery>,
+}
+
+struct CompiledQuery {
     asset: QueryAsset,
     query: Query,
-    metadata: &'a QueryPackMetadata,
+}
+
+#[derive(Default)]
+struct QueryPackCache {
+    rust: Mutex<Option<Arc<CompiledQueryPack>>>,
+    typescript: Mutex<Option<Arc<CompiledQueryPack>>>,
+    tsx: Mutex<Option<Arc<CompiledQueryPack>>>,
+    javascript: Mutex<Option<Arc<CompiledQueryPack>>>,
+    jsx: Mutex<Option<Arc<CompiledQueryPack>>>,
+    python: Mutex<Option<Arc<CompiledQueryPack>>>,
+}
+
+impl QueryPackCache {
+    fn slot(&self, language: SourceLanguage) -> &Mutex<Option<Arc<CompiledQueryPack>>> {
+        match language {
+            SourceLanguage::Rust => &self.rust,
+            SourceLanguage::TypeScript => &self.typescript,
+            SourceLanguage::Tsx => &self.tsx,
+            SourceLanguage::JavaScript => &self.javascript,
+            SourceLanguage::Jsx => &self.jsx,
+            SourceLanguage::Python => &self.python,
+            _ => unreachable!("lightweight languages do not have query packs"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1142,13 +1180,10 @@ pub fn parse_source(
 
     let config = language_config(language);
     let parser_language = (config.parser)();
-    let mut parser = Parser::new();
-    parser.set_language(&parser_language)?;
-    let tree = parser.parse(source, None).ok_or(CodeIntelError::Parse)?;
+    let query_pack = cached_query_pack(config, &parser_language)?;
+    let tree = parse_with_cached_parser(language, &parser_language, source)?;
     let root = tree.root_node();
-    let metadata = load_metadata(config)?;
-    let queries = compile_query_pack(config, &parser_language, &metadata)?;
-    let (symbols, captures) = run_query_pack(&queries, language, root, source.as_bytes())?;
+    let (symbols, captures) = run_query_pack(&query_pack, language, root, source.as_bytes())?;
 
     Ok(ParsedDocumentSummary {
         source: SourceIdentity {
@@ -1161,7 +1196,7 @@ pub fn parse_source(
             provider: PROVIDER_NAME.to_string(),
             tree_sitter: TREE_SITTER_VERSION.to_string(),
             grammar: format!("{}-{}", config.grammar_crate, config.grammar_version),
-            query_pack: metadata.version.clone(),
+            query_pack: query_pack.version.clone(),
         },
         root_kind: root.kind().to_string(),
         has_errors: root.has_error(),
@@ -1331,35 +1366,79 @@ fn metadata_matches(expected: &str, actual: &str, language: &str) -> Result<(), 
     }
 }
 
-fn compile_query_pack<'a>(
+fn cached_query_pack(
     config: LanguageConfig,
     language: &Language,
-    metadata: &'a QueryPackMetadata,
-) -> Result<Vec<CompiledQuery<'a>>, CodeIntelError> {
-    config
+) -> Result<Arc<CompiledQueryPack>, CodeIntelError> {
+    let cache = QUERY_PACK_CACHE.get_or_init(QueryPackCache::default);
+    let slot = cache.slot(config.language);
+    let mut query_pack = slot
+        .lock()
+        .map_err(|_| CodeIntelError::QueryPackCachePoisoned)?;
+
+    if let Some(query_pack) = query_pack.as_ref() {
+        return Ok(Arc::clone(query_pack));
+    }
+
+    let compiled = Arc::new(compile_query_pack(config, language)?);
+    *query_pack = Some(Arc::clone(&compiled));
+    Ok(compiled)
+}
+
+fn parse_with_cached_parser(
+    language: SourceLanguage,
+    parser_language: &Language,
+    source: &str,
+) -> Result<Tree, CodeIntelError> {
+    PARSER_CACHE.with(|cache| {
+        let mut parsers = cache.borrow_mut();
+        let parser = if let Some(parser) = parsers.get_mut(&language) {
+            parser
+        } else {
+            let mut parser = Parser::new();
+            parser.set_language(parser_language)?;
+            parsers.insert(language, parser);
+            parsers
+                .get_mut(&language)
+                .expect("parser was inserted for language")
+        };
+
+        // Parser is mutable and not shared across threads. Reusing one parser per
+        // language per thread avoids setup cost while passing `None` keeps each
+        // document parse isolated from incremental parse state.
+        parser.parse(source, None).ok_or(CodeIntelError::Parse)
+    })
+}
+
+fn compile_query_pack(
+    config: LanguageConfig,
+    language: &Language,
+) -> Result<CompiledQueryPack, CodeIntelError> {
+    let metadata = load_metadata(config)?;
+    let queries = config
         .shared_queries
         .iter()
         .chain(config.variant_queries.iter())
         .chain(config.diagnostic_queries.iter())
-        .map(|asset| compile_query(*asset, language, metadata))
-        .collect()
+        .map(|asset| compile_query(*asset, language, &metadata))
+        .collect::<Result<Vec<_>, CodeIntelError>>()?;
+    Ok(CompiledQueryPack {
+        version: metadata.version,
+        queries,
+    })
 }
 
-fn compile_query<'a>(
+fn compile_query(
     asset: QueryAsset,
     language: &Language,
-    metadata: &'a QueryPackMetadata,
-) -> Result<CompiledQuery<'a>, CodeIntelError> {
+    metadata: &QueryPackMetadata,
+) -> Result<CompiledQuery, CodeIntelError> {
     let query = Query::new(language, asset.source).map_err(|source| CodeIntelError::Query {
         query_name: asset.name.to_string(),
         source,
     })?;
     validate_capture_names(asset.name, &query, metadata)?;
-    Ok(CompiledQuery {
-        asset,
-        query,
-        metadata,
-    })
+    Ok(CompiledQuery { asset, query })
 }
 
 fn validate_capture_names(
@@ -1385,7 +1464,7 @@ fn validate_capture_names(
 }
 
 fn run_query_pack(
-    queries: &[CompiledQuery<'_>],
+    query_pack: &CompiledQueryPack,
     language: SourceLanguage,
     root: Node<'_>,
     source: &[u8],
@@ -1393,7 +1472,7 @@ fn run_query_pack(
     let mut symbols = Vec::new();
     let mut captures = Vec::new();
 
-    for compiled in queries {
+    for compiled in &query_pack.queries {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&compiled.query, root, source);
         while let Some(query_match) = matches.next() {
@@ -1418,7 +1497,7 @@ fn run_query_pack(
                         span: span.clone(),
                         rendered_span: rendered_span.clone(),
                         parser_version: TREE_SITTER_VERSION.to_string(),
-                        query_pack_version: compiled.metadata.version.clone(),
+                        query_pack_version: query_pack.version.clone(),
                     });
                 }
 
@@ -1952,6 +2031,14 @@ mod tests {
     const RUST_DOC_FILTER: &str =
         "/// Real docs\nfn documented() {}\n// Ordinary comment\nfn plain() {}\n";
 
+    fn clear_parser_cache_for_current_thread() {
+        PARSER_CACHE.with(|cache| cache.borrow_mut().clear());
+    }
+
+    fn parser_cache_len_for_current_thread() -> usize {
+        PARSER_CACHE.with(|cache| cache.borrow().len())
+    }
+
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
         assert_eq!(detect_language("src/lib.rs"), Some(SourceLanguage::Rust));
@@ -1993,10 +2080,42 @@ mod tests {
             SourceLanguage::Python,
         ] {
             let config = language_config(language);
-            let metadata = load_metadata(config).expect("metadata loads");
             let parser_language = (config.parser)();
-            compile_query_pack(config, &parser_language, &metadata).expect("queries compile");
+            compile_query_pack(config, &parser_language).expect("queries compile");
         }
+    }
+
+    #[test]
+    fn compiled_query_packs_are_cached_per_language() {
+        let config = language_config(SourceLanguage::Rust);
+        let parser_language = (config.parser)();
+
+        let first = cached_query_pack(config, &parser_language).expect("first query pack");
+        let second = cached_query_pack(config, &parser_language).expect("second query pack");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn parsers_are_reused_per_thread_per_language() {
+        clear_parser_cache_for_current_thread();
+
+        parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/complete.rs")),
+            RUST_COMPLETE,
+        )
+        .expect("first rust parse");
+        assert_eq!(parser_cache_len_for_current_thread(), 1);
+
+        parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/complete.rs")),
+            RUST_COMPLETE,
+        )
+        .expect("second rust parse");
+        assert_eq!(parser_cache_len_for_current_thread(), 1);
+
+        parse_path("fixtures/typescript/imports.ts", TS_IMPORTS).expect("typescript parses");
+        assert_eq!(parser_cache_len_for_current_thread(), 2);
     }
 
     #[test]
