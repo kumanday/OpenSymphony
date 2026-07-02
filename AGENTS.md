@@ -364,12 +364,19 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 
 ## AI PR Review Overlay
 
-This repository uses an automated AI PR review system via OpenHands.
+This repository uses an automated AI PR review system. The active provider is
+recorded under `Automated AI PR review` in `WORKFLOW.md`: the OpenHands PR
+Review plugin (current) or Codex code review (see
+`docs/codex-code-review-setup.md`).
 
 ### How it works
 
-- The `.github/workflows/ai-pr-review.yml` workflow runs on PR events
-- It uses the OpenHands PR review plugin with repository-specific guidance
+- OpenHands provider: the `.github/workflows/ai-pr-review.yml` workflow runs
+  on PR events using the OpenHands PR review plugin with repository-specific
+  guidance
+- Codex provider: the Codex GitHub integration reviews PRs on open and on an
+  exact `@codex review` comment, applying the `## Review guidelines` guidance
+  in the closest `AGENTS.md`
 - Reviews focus on correctness, security, and maintainability
 - The AI reviewer is **advisory only** and does not count as a human approval
 
@@ -395,10 +402,15 @@ Substantive PRs should include an `Evidence` section showing:
 
 ### Triggering review
 
-The AI review runs automatically on:
+With the OpenHands provider, the AI review runs automatically on:
 - PR opened (non-draft, same-repo)
 - PR synchronized (new commits)
 - PR marked ready for review
 - `review-this` label added
 
 To manually retrigger, add the `review-this` label.
+
+With the Codex provider, the initial review runs automatically on PR open;
+retrigger by posting a comment that is exactly `@codex review`. Never mention
+`@codex` with any other text (it starts a cloud task billed to general Codex
+usage, outside the orchestration), and never ask Codex to fix or push changes.

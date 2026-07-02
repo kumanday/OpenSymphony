@@ -117,8 +117,10 @@ echo "**DO NOT MERGE** - the user reviews and merges."
 
 ## Review Handling
 
-This repo uses the OpenHands PR Review plugin for automated reviews. Reviews
-post as inline comments on specific lines of code.
+This repo uses an automated AI review provider configured under
+`Automated AI PR review` in `WORKFLOW.md`: either the OpenHands PR Review
+plugin (GitHub Actions) or Codex code review (Codex GitHub integration).
+Reviews post as inline comments on specific lines of code.
 
 Before inspecting GitHub review comments, fetch the latest Linear issue comments
 with `.agents/skills/linear/queries/issue_comments.graphql`. Treat unresolved,
@@ -127,8 +129,10 @@ has no new GitHub comments.
 
 ### AI Review Comments
 
-AI reviews are posted by GitHub Actions with `openhands-review` as the job name.
-They are advisory only and do not count as required approvals.
+AI reviews are posted by GitHub Actions with `openhands-review` as the job
+name (openhands provider) or by the Codex connector bot
+(`chatgpt-codex-connector`, codex provider). They are advisory only and do not
+count as required approvals.
 
 To address AI review feedback:
 1. Read the inline comment on the specific line
@@ -136,7 +140,14 @@ To address AI review feedback:
    is correct), or push back (disagree with reasoning)
 3. Reply inline to the review comment explaining your action
 4. If accepting, implement the fix, commit, and push
-5. Optionally re-trigger AI review by adding the `review-this` label
+5. After pushing follow-up commits, re-trigger AI review per the active
+   provider: add the `review-this` label (openhands) or post a comment that is
+   exactly `@codex review` (codex)
+
+Never ask the review bot to make code changes. In particular, never mention
+`@codex` with any text other than the exact phrase `@codex review`; other
+mentions start a Codex cloud task that bills general Codex usage and edits
+code outside this workspace.
 
 Use the explicit review-comment reply endpoint for inline AI review threads:
 
