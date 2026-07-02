@@ -26,6 +26,17 @@ code_intel:
 The AST provider only loads built-in pinned grammar crates. Target repositories
 cannot supply native grammar binaries.
 
+## Provider Boundary
+
+`opensymphony_code_intel` owns the rendered provider contract:
+`CodeIntelProvider`, `CodeIntelArtifact`, `CodeIntelScope`, and
+`CodeIntelSourceRef`. `opensymphony_memory` keeps its legacy `CodeIntelIndex`
+and `CodeIntelArtifact` compatibility surface as an adapter around that contract
+and converts provider errors into `MemoryError`, but AST and composite providers
+do not import memory internals. The provider trait is `Send + Sync` for async
+actor use. `CodebaseAnalyzer` implements the same provider trait as the
+repository-summary fallback.
+
 ## Freshness
 
 AST context is generated from the current worktree. Rendered artifacts include

@@ -1,25 +1,20 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap},
     fs,
     io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
-// TODO(COE-506): invert this adapter so memory consumes a code-intel owned
-// provider trait after the AST integration is stable.
-// COE-499 keeps the existing memory CodeIntelIndex contract so memory.context
-// gains AST evidence without adding a new public tool surface.
-use crate::{
-    opensymphony_memory::{
-        CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
-    },
-    opensymphony_planning::CodebaseAnalyzer,
-};
+// Rendered code-intelligence context is owned here so memory can consume it
+// without the AST provider importing memory internals.
+use crate::opensymphony_planning::CodebaseAnalyzer;
 
 pub const PROVIDER_NAME: &str = "tree-sitter";
 pub const TREE_SITTER_VERSION: &str = "0.26.9";
@@ -60,6 +55,63 @@ const JSX_METADATA: &str = include_str!("../queries/jsx/metadata.toml");
 const PYTHON_METADATA: &str = include_str!("../queries/python/metadata.toml");
 const DEFAULT_MAX_FILE_BYTES: u64 = 2_097_152;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIntelScopeKind {
+    LocalInstance,
+    Organization,
+    ProjectSet,
+    Project,
+    Milestone,
+    WorkItem,
+    Repository,
+    CodePath,
+    Area,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelScope {
+    pub kind: CodeIntelScopeKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelSourceRef {
+    pub kind: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelArtifact {
+    pub provider: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_refs: Vec<CodeIntelScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<CodeIntelSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+pub trait CodeIntelProvider: Send + Sync {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[CodeIntelScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError>;
+}
+
 const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "definition.module",
     "definition.class",
@@ -93,7 +145,15 @@ const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "injection.language",
 ];
 
-const RUST_QUERIES: &[QueryAsset] = &[
+static QUERY_PACK_CACHE: OnceLock<QueryPackCache> = OnceLock::new();
+
+thread_local! {
+    static PARSER_CACHE: RefCell<HashMap<SourceLanguage, Parser>> = RefCell::new(HashMap::new());
+}
+
+const NO_VARIANT_QUERIES: &[QueryAsset] = &[];
+
+const RUST_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/rust/definitions.scm"),
@@ -102,13 +162,14 @@ const RUST_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("calls", include_str!("../queries/rust/calls.scm")),
     QueryAsset::new("docs", include_str!("../queries/rust/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/rust/locals.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/rust/diagnostics.scm"),
-    ),
 ];
 
-const TYPESCRIPT_QUERIES: &[QueryAsset] = &[
+const RUST_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/rust/diagnostics.scm"),
+)];
+
+const TYPESCRIPT_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/typescript/definitions.scm"),
@@ -118,34 +179,24 @@ const TYPESCRIPT_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("tests", include_str!("../queries/typescript/tests.scm")),
     QueryAsset::new("docs", include_str!("../queries/typescript/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/typescript/locals.scm")),
-    QueryAsset::new(
-        "injections",
-        include_str!("../queries/typescript/injections.scm"),
-    ),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/typescript/diagnostics.scm"),
-    ),
 ];
 
-const TSX_QUERIES: &[QueryAsset] = &[
-    QueryAsset::new(
-        "definitions",
-        include_str!("../queries/tsx/definitions.scm"),
-    ),
-    QueryAsset::new("imports", include_str!("../queries/tsx/imports.scm")),
-    QueryAsset::new("calls", include_str!("../queries/tsx/calls.scm")),
-    QueryAsset::new("tests", include_str!("../queries/tsx/tests.scm")),
-    QueryAsset::new("docs", include_str!("../queries/tsx/docs.scm")),
-    QueryAsset::new("locals", include_str!("../queries/tsx/locals.scm")),
-    QueryAsset::new("injections", include_str!("../queries/tsx/injections.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/tsx/diagnostics.scm"),
-    ),
-];
+const TYPESCRIPT_INJECTION_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "injections",
+    include_str!("../queries/typescript/injections.scm"),
+)];
 
-const JAVASCRIPT_QUERIES: &[QueryAsset] = &[
+const TSX_INJECTION_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "injections",
+    include_str!("../queries/tsx/injections.scm"),
+)];
+
+const TYPESCRIPT_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/typescript/diagnostics.scm"),
+)];
+
+const JAVASCRIPT_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/javascript/definitions.scm"),
@@ -155,30 +206,19 @@ const JAVASCRIPT_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("tests", include_str!("../queries/javascript/tests.scm")),
     QueryAsset::new("docs", include_str!("../queries/javascript/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/javascript/locals.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/javascript/diagnostics.scm"),
-    ),
 ];
 
-const JSX_QUERIES: &[QueryAsset] = &[
-    QueryAsset::new(
-        "definitions",
-        include_str!("../queries/jsx/definitions.scm"),
-    ),
-    QueryAsset::new("imports", include_str!("../queries/jsx/imports.scm")),
-    QueryAsset::new("calls", include_str!("../queries/jsx/calls.scm")),
-    QueryAsset::new("tests", include_str!("../queries/jsx/tests.scm")),
-    QueryAsset::new("docs", include_str!("../queries/jsx/docs.scm")),
-    QueryAsset::new("locals", include_str!("../queries/jsx/locals.scm")),
-    QueryAsset::new("injections", include_str!("../queries/jsx/injections.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/jsx/diagnostics.scm"),
-    ),
-];
+const JSX_INJECTION_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "injections",
+    include_str!("../queries/jsx/injections.scm"),
+)];
 
-const PYTHON_QUERIES: &[QueryAsset] = &[
+const JAVASCRIPT_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/javascript/diagnostics.scm"),
+)];
+
+const PYTHON_SHARED_QUERIES: &[QueryAsset] = &[
     QueryAsset::new(
         "definitions",
         include_str!("../queries/python/definitions.scm"),
@@ -187,11 +227,12 @@ const PYTHON_QUERIES: &[QueryAsset] = &[
     QueryAsset::new("calls", include_str!("../queries/python/calls.scm")),
     QueryAsset::new("docs", include_str!("../queries/python/docs.scm")),
     QueryAsset::new("locals", include_str!("../queries/python/locals.scm")),
-    QueryAsset::new(
-        "diagnostics",
-        include_str!("../queries/python/diagnostics.scm"),
-    ),
 ];
+
+const PYTHON_DIAGNOSTIC_QUERIES: &[QueryAsset] = &[QueryAsset::new(
+    "diagnostics",
+    include_str!("../queries/python/diagnostics.scm"),
+)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -384,8 +425,18 @@ pub struct AstDiagnostic {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CodeIntelError {
+    #[error("{0}")]
+    InvalidInput(String),
     #[error("unsupported source language for {path}")]
     UnsupportedLanguage { path: String },
+    #[error("failed to resolve {path}: {source}")]
+    ResolvePath {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path} is outside the repository root {repo_root}")]
+    PathOutsideRepo { path: PathBuf, repo_root: PathBuf },
     #[error("failed to load parser: {0}")]
     Language(#[from] tree_sitter::LanguageError),
     #[error("failed to parse source")]
@@ -413,6 +464,8 @@ pub enum CodeIntelError {
         query_name: String,
         capture_name: String,
     },
+    #[error("query pack cache lock was poisoned")]
+    QueryPackCachePoisoned,
     #[error("captured text is not utf-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 }
@@ -440,10 +493,38 @@ impl QueryAsset {
     }
 }
 
-struct CompiledQuery<'a> {
+struct CompiledQueryPack {
+    version: String,
+    queries: Vec<CompiledQuery>,
+}
+
+struct CompiledQuery {
     asset: QueryAsset,
     query: Query,
-    metadata: &'a QueryPackMetadata,
+}
+
+#[derive(Default)]
+struct QueryPackCache {
+    rust: Mutex<Option<Arc<CompiledQueryPack>>>,
+    typescript: Mutex<Option<Arc<CompiledQueryPack>>>,
+    tsx: Mutex<Option<Arc<CompiledQueryPack>>>,
+    javascript: Mutex<Option<Arc<CompiledQueryPack>>>,
+    jsx: Mutex<Option<Arc<CompiledQueryPack>>>,
+    python: Mutex<Option<Arc<CompiledQueryPack>>>,
+}
+
+impl QueryPackCache {
+    fn slot(&self, language: SourceLanguage) -> &Mutex<Option<Arc<CompiledQueryPack>>> {
+        match language {
+            SourceLanguage::Rust => &self.rust,
+            SourceLanguage::TypeScript => &self.typescript,
+            SourceLanguage::Tsx => &self.tsx,
+            SourceLanguage::JavaScript => &self.javascript,
+            SourceLanguage::Jsx => &self.jsx,
+            SourceLanguage::Python => &self.python,
+            _ => unreachable!("lightweight languages do not have query packs"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -453,7 +534,9 @@ struct LanguageConfig {
     grammar_version: &'static str,
     query_pack_version: &'static str,
     metadata: &'static str,
-    queries: &'static [QueryAsset],
+    shared_queries: &'static [QueryAsset],
+    variant_queries: &'static [QueryAsset],
+    diagnostic_queries: &'static [QueryAsset],
     parser: fn() -> Language,
 }
 
@@ -473,9 +556,9 @@ impl AstCodeIntelProvider {
     fn code_context_report(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<AstCodeIntelReport, MemoryError> {
+    ) -> Result<AstCodeIntelReport, CodeIntelError> {
         let symbol_kinds = BTreeSet::new();
         self.code_context_report_with_symbols(paths, scope_refs, limit, &symbol_kinds)
     }
@@ -483,10 +566,10 @@ impl AstCodeIntelProvider {
     fn code_context_report_with_symbols(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
         symbol_kinds: &BTreeSet<String>,
-    ) -> Result<AstCodeIntelReport, MemoryError> {
+    ) -> Result<AstCodeIntelReport, CodeIntelError> {
         let repo_root = self.canonical_root()?;
         let commit_sha = git_commit_sha(&repo_root);
         let mut report = AstCodeIntelReport::default();
@@ -641,10 +724,10 @@ impl AstCodeIntelProvider {
         }
     }
 
-    fn canonical_root(&self) -> Result<PathBuf, MemoryError> {
+    fn canonical_root(&self) -> Result<PathBuf, CodeIntelError> {
         self.root
             .canonicalize()
-            .map_err(|source| MemoryError::ResolvePath {
+            .map_err(|source| CodeIntelError::ResolvePath {
                 path: self.root.clone(),
                 source,
             })
@@ -654,14 +737,14 @@ impl AstCodeIntelProvider {
         &self,
         repo_root: &Path,
         path: &Path,
-    ) -> Result<Option<PathBuf>, MemoryError> {
+    ) -> Result<Option<PathBuf>, CodeIntelError> {
         let candidate = requested_candidate(repo_root, path);
         let resolved = match candidate.canonicalize() {
             Ok(resolved) => resolved,
             Err(source) if source.kind() == ErrorKind::NotFound => {
                 let normalized = normalize_lexical(&candidate);
                 if !normalized.starts_with(repo_root) {
-                    return Err(MemoryError::PathOutsideRepo {
+                    return Err(CodeIntelError::PathOutsideRepo {
                         path: normalized,
                         repo_root: repo_root.to_path_buf(),
                     });
@@ -669,14 +752,14 @@ impl AstCodeIntelProvider {
                 return Ok(None);
             }
             Err(source) => {
-                return Err(MemoryError::ResolvePath {
+                return Err(CodeIntelError::ResolvePath {
                     path: candidate.clone(),
                     source,
                 });
             }
         };
         if !resolved.starts_with(repo_root) {
-            return Err(MemoryError::PathOutsideRepo {
+            return Err(CodeIntelError::PathOutsideRepo {
                 path: resolved,
                 repo_root: repo_root.to_path_buf(),
             });
@@ -688,10 +771,10 @@ impl AstCodeIntelProvider {
         &self,
         repo_root: &Path,
         path: &Path,
-    ) -> Result<PathBuf, MemoryError> {
+    ) -> Result<PathBuf, CodeIntelError> {
         let candidate = normalize_lexical(&requested_candidate(repo_root, path));
         if !candidate.starts_with(repo_root) {
-            return Err(MemoryError::PathOutsideRepo {
+            return Err(CodeIntelError::PathOutsideRepo {
                 path: candidate.clone(),
                 repo_root: repo_root.to_path_buf(),
             });
@@ -733,13 +816,13 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     normalized
 }
 
-impl CodeIntelIndex for AstCodeIntelProvider {
+impl CodeIntelProvider for AstCodeIntelProvider {
     fn code_context(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let report = self.code_context_report(paths, scope_refs, limit)?;
         let trace = report.trace_artifact(scope_refs, PROVIDER_NAME, report.ast_only_fallback());
         let mut artifacts = report.artifacts;
@@ -765,10 +848,10 @@ impl CompositeCodeIntelProvider {
     pub fn code_context_with_symbol_kinds(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
         symbol_kinds: &BTreeSet<String>,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let mut report =
             self.ast
                 .code_context_report_with_symbols(paths, scope_refs, limit, symbol_kinds)?;
@@ -801,13 +884,13 @@ impl CompositeCodeIntelProvider {
     }
 }
 
-impl CodeIntelIndex for CompositeCodeIntelProvider {
+impl CodeIntelProvider for CompositeCodeIntelProvider {
     fn code_context(
         &self,
         paths: &[PathBuf],
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         limit: usize,
-    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    ) -> Result<Vec<CodeIntelArtifact>, CodeIntelError> {
         let mut report = self.ast.code_context_report(paths, scope_refs, limit)?;
         let use_fallback = !report.fallback_reasons.is_empty();
         let mut artifacts = std::mem::take(&mut report.artifacts);
@@ -851,7 +934,7 @@ struct AstCodeIntelReport {
 impl AstCodeIntelReport {
     fn trace_artifact(
         &self,
-        scope_refs: &[KnowledgeScope],
+        scope_refs: &[CodeIntelScope],
         provider: &str,
         fallback: String,
     ) -> CodeIntelArtifact {
@@ -900,7 +983,7 @@ fn ast_artifacts_for_summary(
     summary: ParsedDocumentSummary,
     relative_path: &Path,
     relative_display: &str,
-    scope_refs: &[KnowledgeScope],
+    scope_refs: &[CodeIntelScope],
     commit_sha: Option<String>,
     symbol_limit: usize,
     symbol_kinds: &BTreeSet<String>,
@@ -910,7 +993,7 @@ fn ast_artifacts_for_summary(
         provider: PROVIDER_NAME.to_string(),
         kind: "ast-summary".to_string(),
         scope_refs: scope_refs.to_vec(),
-        source_refs: vec![MemorySourceRef {
+        source_refs: vec![CodeIntelSourceRef {
             kind: "path".to_string(),
             id: relative_display.to_string(),
             url: None,
@@ -962,7 +1045,7 @@ fn ast_artifacts_for_summary(
             scope_refs: scope_refs.to_vec(),
             source_refs: selected_symbols
                 .iter()
-                .map(|symbol| MemorySourceRef {
+                .map(|symbol| CodeIntelSourceRef {
                     kind: "code-symbol".to_string(),
                     id: format!("{relative_display}:{}", symbol.rendered_span),
                     url: None,
@@ -1097,13 +1180,10 @@ pub fn parse_source(
 
     let config = language_config(language);
     let parser_language = (config.parser)();
-    let mut parser = Parser::new();
-    parser.set_language(&parser_language)?;
-    let tree = parser.parse(source, None).ok_or(CodeIntelError::Parse)?;
+    let query_pack = cached_query_pack(config, &parser_language)?;
+    let tree = parse_with_cached_parser(language, &parser_language, source)?;
     let root = tree.root_node();
-    let metadata = load_metadata(config)?;
-    let queries = compile_query_pack(config, &parser_language, &metadata)?;
-    let (symbols, captures) = run_query_pack(&queries, language, root, source.as_bytes())?;
+    let (symbols, captures) = run_query_pack(&query_pack, language, root, source.as_bytes())?;
 
     Ok(ParsedDocumentSummary {
         source: SourceIdentity {
@@ -1116,7 +1196,7 @@ pub fn parse_source(
             provider: PROVIDER_NAME.to_string(),
             tree_sitter: TREE_SITTER_VERSION.to_string(),
             grammar: format!("{}-{}", config.grammar_crate, config.grammar_version),
-            query_pack: metadata.version.clone(),
+            query_pack: query_pack.version.clone(),
         },
         root_kind: root.kind().to_string(),
         has_errors: root.has_error(),
@@ -1183,7 +1263,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: RUST_GRAMMAR_VERSION,
             query_pack_version: RUST_QUERY_PACK_VERSION,
             metadata: RUST_METADATA,
-            queries: RUST_QUERIES,
+            shared_queries: RUST_SHARED_QUERIES,
+            variant_queries: NO_VARIANT_QUERIES,
+            diagnostic_queries: RUST_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_rust::LANGUAGE.into(),
         },
         SourceLanguage::TypeScript => LanguageConfig {
@@ -1192,7 +1274,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: TYPESCRIPT_GRAMMAR_VERSION,
             query_pack_version: TYPESCRIPT_QUERY_PACK_VERSION,
             metadata: TYPESCRIPT_METADATA,
-            queries: TYPESCRIPT_QUERIES,
+            shared_queries: TYPESCRIPT_SHARED_QUERIES,
+            variant_queries: TYPESCRIPT_INJECTION_QUERIES,
+            diagnostic_queries: TYPESCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         },
         SourceLanguage::Tsx => LanguageConfig {
@@ -1201,7 +1285,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: TYPESCRIPT_GRAMMAR_VERSION,
             query_pack_version: TSX_QUERY_PACK_VERSION,
             metadata: TSX_METADATA,
-            queries: TSX_QUERIES,
+            shared_queries: TYPESCRIPT_SHARED_QUERIES,
+            variant_queries: TSX_INJECTION_QUERIES,
+            diagnostic_queries: TYPESCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_typescript::LANGUAGE_TSX.into(),
         },
         SourceLanguage::JavaScript => LanguageConfig {
@@ -1210,7 +1296,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: JAVASCRIPT_GRAMMAR_VERSION,
             query_pack_version: JAVASCRIPT_QUERY_PACK_VERSION,
             metadata: JAVASCRIPT_METADATA,
-            queries: JAVASCRIPT_QUERIES,
+            shared_queries: JAVASCRIPT_SHARED_QUERIES,
+            variant_queries: NO_VARIANT_QUERIES,
+            diagnostic_queries: JAVASCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_javascript::LANGUAGE.into(),
         },
         SourceLanguage::Jsx => LanguageConfig {
@@ -1219,7 +1307,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: JAVASCRIPT_GRAMMAR_VERSION,
             query_pack_version: JSX_QUERY_PACK_VERSION,
             metadata: JSX_METADATA,
-            queries: JSX_QUERIES,
+            shared_queries: JAVASCRIPT_SHARED_QUERIES,
+            variant_queries: JSX_INJECTION_QUERIES,
+            diagnostic_queries: JAVASCRIPT_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_javascript::LANGUAGE.into(),
         },
         SourceLanguage::Python => LanguageConfig {
@@ -1228,7 +1318,9 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             grammar_version: PYTHON_GRAMMAR_VERSION,
             query_pack_version: PYTHON_QUERY_PACK_VERSION,
             metadata: PYTHON_METADATA,
-            queries: PYTHON_QUERIES,
+            shared_queries: PYTHON_SHARED_QUERIES,
+            variant_queries: NO_VARIANT_QUERIES,
+            diagnostic_queries: PYTHON_DIAGNOSTIC_QUERIES,
             parser: || tree_sitter_python::LANGUAGE.into(),
         },
         _ => unreachable!("lightweight languages do not have tree-sitter configs"),
@@ -1274,33 +1366,79 @@ fn metadata_matches(expected: &str, actual: &str, language: &str) -> Result<(), 
     }
 }
 
-fn compile_query_pack<'a>(
+fn cached_query_pack(
     config: LanguageConfig,
     language: &Language,
-    metadata: &'a QueryPackMetadata,
-) -> Result<Vec<CompiledQuery<'a>>, CodeIntelError> {
-    config
-        .queries
-        .iter()
-        .map(|asset| compile_query(*asset, language, metadata))
-        .collect()
+) -> Result<Arc<CompiledQueryPack>, CodeIntelError> {
+    let cache = QUERY_PACK_CACHE.get_or_init(QueryPackCache::default);
+    let slot = cache.slot(config.language);
+    let mut query_pack = slot
+        .lock()
+        .map_err(|_| CodeIntelError::QueryPackCachePoisoned)?;
+
+    if let Some(query_pack) = query_pack.as_ref() {
+        return Ok(Arc::clone(query_pack));
+    }
+
+    let compiled = Arc::new(compile_query_pack(config, language)?);
+    *query_pack = Some(Arc::clone(&compiled));
+    Ok(compiled)
 }
 
-fn compile_query<'a>(
+fn parse_with_cached_parser(
+    language: SourceLanguage,
+    parser_language: &Language,
+    source: &str,
+) -> Result<Tree, CodeIntelError> {
+    PARSER_CACHE.with(|cache| {
+        let mut parsers = cache.borrow_mut();
+        let parser = if let Some(parser) = parsers.get_mut(&language) {
+            parser
+        } else {
+            let mut parser = Parser::new();
+            parser.set_language(parser_language)?;
+            parsers.insert(language, parser);
+            parsers
+                .get_mut(&language)
+                .expect("parser was inserted for language")
+        };
+
+        // Parser is mutable and not shared across threads. Reusing one parser per
+        // language per thread avoids setup cost while passing `None` keeps each
+        // document parse isolated from incremental parse state.
+        parser.parse(source, None).ok_or(CodeIntelError::Parse)
+    })
+}
+
+fn compile_query_pack(
+    config: LanguageConfig,
+    language: &Language,
+) -> Result<CompiledQueryPack, CodeIntelError> {
+    let metadata = load_metadata(config)?;
+    let queries = config
+        .shared_queries
+        .iter()
+        .chain(config.variant_queries.iter())
+        .chain(config.diagnostic_queries.iter())
+        .map(|asset| compile_query(*asset, language, &metadata))
+        .collect::<Result<Vec<_>, CodeIntelError>>()?;
+    Ok(CompiledQueryPack {
+        version: metadata.version,
+        queries,
+    })
+}
+
+fn compile_query(
     asset: QueryAsset,
     language: &Language,
-    metadata: &'a QueryPackMetadata,
-) -> Result<CompiledQuery<'a>, CodeIntelError> {
+    metadata: &QueryPackMetadata,
+) -> Result<CompiledQuery, CodeIntelError> {
     let query = Query::new(language, asset.source).map_err(|source| CodeIntelError::Query {
         query_name: asset.name.to_string(),
         source,
     })?;
     validate_capture_names(asset.name, &query, metadata)?;
-    Ok(CompiledQuery {
-        asset,
-        query,
-        metadata,
-    })
+    Ok(CompiledQuery { asset, query })
 }
 
 fn validate_capture_names(
@@ -1326,7 +1464,7 @@ fn validate_capture_names(
 }
 
 fn run_query_pack(
-    queries: &[CompiledQuery<'_>],
+    query_pack: &CompiledQueryPack,
     language: SourceLanguage,
     root: Node<'_>,
     source: &[u8],
@@ -1334,7 +1472,7 @@ fn run_query_pack(
     let mut symbols = Vec::new();
     let mut captures = Vec::new();
 
-    for compiled in queries {
+    for compiled in &query_pack.queries {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&compiled.query, root, source);
         while let Some(query_match) = matches.next() {
@@ -1359,7 +1497,7 @@ fn run_query_pack(
                         span: span.clone(),
                         rendered_span: rendered_span.clone(),
                         parser_version: TREE_SITTER_VERSION.to_string(),
-                        query_pack_version: compiled.metadata.version.clone(),
+                        query_pack_version: query_pack.version.clone(),
                     });
                 }
 
@@ -1864,7 +2002,6 @@ fn source_span_for_text(source: &str) -> SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opensymphony_memory::CodeIntelIndex;
     use tempfile::TempDir;
 
     const RUST_COMPLETE: &str = include_str!("../fixtures/rust/complete.rs");
@@ -1893,6 +2030,14 @@ mod tests {
     const RUST_EXTERN_SIGNATURE: &str = "extern \"C\" {\n    fn puts(message: *const i8) -> i32;\n}\n\ntrait Runnable {\n    fn run(&self);\n}\n";
     const RUST_DOC_FILTER: &str =
         "/// Real docs\nfn documented() {}\n// Ordinary comment\nfn plain() {}\n";
+
+    fn clear_parser_cache_for_current_thread() {
+        PARSER_CACHE.with(|cache| cache.borrow_mut().clear());
+    }
+
+    fn parser_cache_len_for_current_thread() -> usize {
+        PARSER_CACHE.with(|cache| cache.borrow().len())
+    }
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
@@ -1935,10 +2080,87 @@ mod tests {
             SourceLanguage::Python,
         ] {
             let config = language_config(language);
-            let metadata = load_metadata(config).expect("metadata loads");
             let parser_language = (config.parser)();
-            compile_query_pack(config, &parser_language, &metadata).expect("queries compile");
+            compile_query_pack(config, &parser_language).expect("queries compile");
         }
+    }
+
+    #[test]
+    fn compiled_query_packs_are_cached_per_language() {
+        let config = language_config(SourceLanguage::Rust);
+        let parser_language = (config.parser)();
+
+        let first = cached_query_pack(config, &parser_language).expect("first query pack");
+        let second = cached_query_pack(config, &parser_language).expect("second query pack");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn parsers_are_reused_per_thread_per_language() {
+        clear_parser_cache_for_current_thread();
+
+        parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/complete.rs")),
+            RUST_COMPLETE,
+        )
+        .expect("first rust parse");
+        assert_eq!(parser_cache_len_for_current_thread(), 1);
+
+        parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/complete.rs")),
+            RUST_COMPLETE,
+        )
+        .expect("second rust parse");
+        assert_eq!(parser_cache_len_for_current_thread(), 1);
+
+        parse_path("fixtures/typescript/imports.ts", TS_IMPORTS).expect("typescript parses");
+        assert_eq!(parser_cache_len_for_current_thread(), 2);
+    }
+
+    #[test]
+    fn grammar_variants_reuse_base_assets_and_keep_injections_explicit() {
+        let typescript = language_config(SourceLanguage::TypeScript);
+        let tsx = language_config(SourceLanguage::Tsx);
+        assert_eq!(
+            query_asset_names(typescript.shared_queries),
+            vec!["definitions", "imports", "calls", "tests", "docs", "locals"]
+        );
+        assert_eq!(
+            query_asset_specs(typescript.shared_queries),
+            query_asset_specs(tsx.shared_queries)
+        );
+        assert_eq!(
+            query_asset_specs(typescript.diagnostic_queries),
+            query_asset_specs(tsx.diagnostic_queries)
+        );
+        assert_eq!(typescript.variant_queries.len(), 1);
+        assert_eq!(tsx.variant_queries.len(), 1);
+        assert_eq!(
+            typescript.variant_queries[0].source.trim(),
+            "(template_string) @injection.content"
+        );
+        assert_eq!(
+            tsx.variant_queries[0].source.trim(),
+            "(jsx_element) @injection.content"
+        );
+
+        let javascript = language_config(SourceLanguage::JavaScript);
+        let jsx = language_config(SourceLanguage::Jsx);
+        assert_eq!(
+            query_asset_specs(javascript.shared_queries),
+            query_asset_specs(jsx.shared_queries)
+        );
+        assert_eq!(
+            query_asset_specs(javascript.diagnostic_queries),
+            query_asset_specs(jsx.diagnostic_queries)
+        );
+        assert!(javascript.variant_queries.is_empty());
+        assert_eq!(jsx.variant_queries.len(), 1);
+        assert_eq!(
+            jsx.variant_queries[0].source.trim(),
+            "(jsx_element) @injection.content"
+        );
     }
 
     #[test]
@@ -1950,6 +2172,23 @@ mod tests {
 
         let Err(error) = compile_query(query, &language, &metadata) else {
             panic!("invalid node type fails");
+        };
+
+        assert!(matches!(error, CodeIntelError::Query { .. }));
+    }
+
+    #[test]
+    fn invalid_field_fails_query_validation() {
+        let config = language_config(SourceLanguage::Rust);
+        let metadata = load_metadata(config).expect("metadata loads");
+        let language = (config.parser)();
+        let query = QueryAsset::new(
+            "invalid",
+            "(function_item not_a_real_field: (identifier) @definition.function)",
+        );
+
+        let Err(error) = compile_query(query, &language, &metadata) else {
+            panic!("invalid field fails");
         };
 
         assert!(matches!(error, CodeIntelError::Query { .. }));
@@ -2323,6 +2562,17 @@ mod tests {
             .collect()
     }
 
+    fn query_asset_names(assets: &[QueryAsset]) -> Vec<&'static str> {
+        assets.iter().map(|asset| asset.name).collect()
+    }
+
+    fn query_asset_specs(assets: &[QueryAsset]) -> Vec<(&'static str, &'static str)> {
+        assets
+            .iter()
+            .map(|asset| (asset.name, asset.source))
+            .collect()
+    }
+
     fn assert_capture(summary: &ParsedDocumentSummary, capture_name: &str, text: &str) {
         assert!(
             summary
@@ -2528,7 +2778,7 @@ mod tests {
             .code_context(&[PathBuf::from("src/outside.rs")], &[], 20)
             .expect_err("outside symlink should be rejected");
 
-        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+        assert!(matches!(error, CodeIntelError::PathOutsideRepo { .. }));
     }
 
     #[test]
