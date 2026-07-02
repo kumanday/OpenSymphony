@@ -95,8 +95,6 @@ const STANDARD_CAPTURE_NAMES: &[&str] = &[
     "injection.language",
 ];
 
-type QueryPackCache = Mutex<HashMap<SourceLanguage, Arc<CompiledQueryPack>>>;
-
 static QUERY_PACK_CACHE: OnceLock<QueryPackCache> = OnceLock::new();
 
 thread_local! {
@@ -460,6 +458,30 @@ struct CompiledQueryPack {
 struct CompiledQuery {
     asset: QueryAsset,
     query: Query,
+}
+
+#[derive(Default)]
+struct QueryPackCache {
+    rust: Mutex<Option<Arc<CompiledQueryPack>>>,
+    typescript: Mutex<Option<Arc<CompiledQueryPack>>>,
+    tsx: Mutex<Option<Arc<CompiledQueryPack>>>,
+    javascript: Mutex<Option<Arc<CompiledQueryPack>>>,
+    jsx: Mutex<Option<Arc<CompiledQueryPack>>>,
+    python: Mutex<Option<Arc<CompiledQueryPack>>>,
+}
+
+impl QueryPackCache {
+    fn slot(&self, language: SourceLanguage) -> &Mutex<Option<Arc<CompiledQueryPack>>> {
+        match language {
+            SourceLanguage::Rust => &self.rust,
+            SourceLanguage::TypeScript => &self.typescript,
+            SourceLanguage::Tsx => &self.tsx,
+            SourceLanguage::JavaScript => &self.javascript,
+            SourceLanguage::Jsx => &self.jsx,
+            SourceLanguage::Python => &self.python,
+            _ => unreachable!("lightweight languages do not have query packs"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1291,18 +1313,19 @@ fn cached_query_pack(
     config: LanguageConfig,
     language: &Language,
 ) -> Result<Arc<CompiledQueryPack>, CodeIntelError> {
-    let cache = QUERY_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
+    let cache = QUERY_PACK_CACHE.get_or_init(QueryPackCache::default);
+    let slot = cache.slot(config.language);
+    let mut query_pack = slot
         .lock()
         .map_err(|_| CodeIntelError::QueryPackCachePoisoned)?;
 
-    if let Some(query_pack) = cache.get(&config.language) {
+    if let Some(query_pack) = query_pack.as_ref() {
         return Ok(Arc::clone(query_pack));
     }
 
-    let query_pack = Arc::new(compile_query_pack(config, language)?);
-    cache.insert(config.language, Arc::clone(&query_pack));
-    Ok(query_pack)
+    let compiled = Arc::new(compile_query_pack(config, language)?);
+    *query_pack = Some(Arc::clone(&compiled));
+    Ok(compiled)
 }
 
 fn parse_with_cached_parser(
