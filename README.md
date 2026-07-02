@@ -1,6 +1,8 @@
 # OpenSymphony
 
-OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and can run issues through either the managed [OpenHands](https://github.com/OpenHands/OpenHands) agent-server or the local Codex app-server harness.
+OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) or [Jira](https://www.atlassian.com/software/jira) for issue tracking and can run issues through either the managed [OpenHands](https://github.com/OpenHands/OpenHands) agent-server or the local Codex app-server harness.
+
+This fork ([valeriikot/OpenSymphony](https://github.com/valeriikot/OpenSymphony)) adds Jira tracker support on top of upstream; see [Install From This Fork](#install-from-this-fork) and [docs/jira.md](docs/jira.md).
 
 ![OpenSymphony desktop app showing the task graph, run detail, changed files, and diff inspector](docs/images/opensymphony-app.png)
 
@@ -8,7 +10,7 @@ OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.co
 
 OpenSymphony automates software development workflows by:
 
-1. **Polling Linear** for issues in active states (Todo, In Progress, etc.)
+1. **Polling the issue tracker** (Linear or Jira) for issues in active states (Todo, In Progress, etc.)
 2. **Creating isolated workspaces** for each issue with lifecycle hooks
 3. **Dispatching AI agents** via OpenHands or Codex to work on issues autonomously
 4. **Managing retries, reconciliation, and cleanup** based on issue state changes
@@ -20,6 +22,7 @@ OpenSymphony automates software development workflows by:
 - **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
+- **Jira tracker support**: Run the orchestrator against Jira Cloud or Data Center with `tracker.kind: jira` (see [docs/jira.md](docs/jira.md))
 - **Conversation reuse policies**: Default per-issue reuse with optional fresh-per-run resets
 - **Harness selection**: Default OpenHands agent-server execution, plus local Codex app-server support for ChatGPT subscription-backed runs
 - **Tree-sitter code intelligence**: Local AST parsing, symbols, diagnostics, and source-cited structural context for agents
@@ -39,7 +42,7 @@ not separately published crates.
 ### Prerequisites
 
 - Rust toolchain (stable)
-- Linear API key (for tracker integration)
+- Linear API key or Jira API token (for tracker integration)
 - For OpenHands: Python 3.13.12 with `uv`, plus an LLM API key for an OpenAI-compatible/LiteLLM provider
 - For Codex: a Codex CLI with `app-server` support and a working ChatGPT login
 
@@ -50,6 +53,38 @@ For platform-specific Rust and Python/`uv` setup steps, see [Prerequisites](docs
 ```bash
 cargo install opensymphony
 ```
+
+### Install From This Fork
+
+The crates.io package tracks upstream. To get the features in this fork
+(such as Jira tracker support), install straight from the fork's git
+repository:
+
+```bash
+cargo install --git https://github.com/valeriikot/OpenSymphony --branch main opensymphony
+```
+
+To install from a specific feature branch before it lands on `main`, pass its
+name instead:
+
+```bash
+cargo install --git https://github.com/valeriikot/OpenSymphony --branch claude/jira-support-integration-wbgstn opensymphony
+```
+
+Or clone and build locally, which is the better path if you plan to modify the
+code:
+
+```bash
+git clone https://github.com/valeriikot/OpenSymphony.git
+cd OpenSymphony
+cargo install --path . --locked
+```
+
+All variants produce the same `opensymphony` binary; `cargo install` replaces
+any previously installed version, and you can switch back to the upstream
+release at any time with `cargo install opensymphony --force`. The
+`opensymphony install openhands` / `opensymphony update` steps below work the
+same regardless of where the binary came from.
 
 For OpenHands runs, install the pinned local OpenHands agent-server runtime:
 
@@ -77,14 +112,26 @@ When you run `opensymphony update` from a target-repo root that already has
 
 ### Common Environment
 
-Before running `opensymphony run`, add your Linear key to your shell startup
-file, such as `~/.zshrc` or `~/.bashrc`:
+Before running `opensymphony run`, add your tracker credentials to your shell
+startup file, such as `~/.zshrc` or `~/.bashrc`.
+
+For Linear (the default tracker):
 
 ```bash
 export LINEAR_API_KEY="lin_api_..."
 ```
 
 Use your real Linear API key for `LINEAR_API_KEY`.
+
+For Jira (`tracker.kind: jira` in the target repo's `WORKFLOW.md`):
+
+```bash
+export JIRA_API_TOKEN="your-api-token"
+export JIRA_EMAIL="you@example.com"   # Jira Cloud basic auth; omit for Data Center PATs
+```
+
+See [docs/jira.md](docs/jira.md) for the full Jira configuration contract,
+including the required `tracker.endpoint` site URL.
 
 ### OpenHands Runtime Environment
 
@@ -452,6 +499,7 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 
 - [Architecture](docs/architecture.md) - High-level design and component interactions
 - [Configuration](docs/configuration.md) - Target repo bootstrap and runtime config
+- [Jira Tracker](docs/jira.md) - Jira configuration, credentials, and current scope
 - [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
 - [Installer and Distribution Strategy](docs/installer-and-distribution.md) - Future signed installer shape and DuckDB packaging boundaries
 - [Operations](docs/operations.md) - Doctor, rehydration, diagnostics, and local ops
