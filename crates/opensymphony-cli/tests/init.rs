@@ -36,6 +36,10 @@ async fn init_copies_template_files_and_customizes_workflow() {
     let config = fs::read_to_string(repo.path().join("config.yaml")).expect("config should exist");
     assert!(workflow.contains("project_slug: \"demo-project\""));
     assert!(workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."));
+    assert!(
+        workflow.contains("Active review provider: `none`"),
+        "declining review setup should record provider `none`: {workflow}",
+    );
     assert!(config.contains("tool_dir: ~/.opensymphony/openhands-server"));
 
     assert!(
@@ -183,7 +187,7 @@ async fn init_non_interactive_succeeds_with_flags_and_closed_stdin() {
         "non-interactive init should skip commit/push without prompting: {stdout}",
     );
     assert!(
-        !stdout.contains("Also scaffold automated OpenHands AI PR review?"),
+        !stdout.contains("Configure automated AI PR code review"),
         "non-interactive init should not print prompt text: {stdout}",
     );
     assert!(
@@ -344,7 +348,7 @@ async fn init_can_scaffold_ai_pr_review_and_print_fallback_commands_when_gh_cann
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
 
     let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
-    write_stdin(&mut child, "yes\n\n\n\n\n\ndemo-project\nno\n").await;
+    write_stdin(&mut child, "openhands\n\n\n\n\n\ndemo-project\nno\n").await;
 
     let output = child
         .wait_with_output()
@@ -368,6 +372,12 @@ async fn init_can_scaffold_ai_pr_review_and_print_fallback_commands_when_gh_cann
             .join(".agents/skills/custom-codereview-guide.md")
             .is_file(),
         "starter review guide should be created"
+    );
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+    assert!(
+        workflow.contains("Active review provider: `openhands`"),
+        "openhands provider should be recorded in WORKFLOW.md: {workflow}",
     );
     assert!(
         !repo
@@ -471,6 +481,160 @@ async fn init_non_interactive_scaffolds_ai_review_from_flags() {
 }
 
 #[tokio::test]
+async fn init_interactive_codex_review_provider_skips_openhands_scaffolding() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
+    write_stdin(&mut child, "codex\ndemo-project\nno\n").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "codex review init should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".github/workflows/ai-pr-review.yml")
+            .exists(),
+        "codex provider should not scaffold the OpenHands Actions workflow"
+    );
+    assert!(
+        repo.path()
+            .join(".agents/skills/custom-codereview-guide.md")
+            .is_file(),
+        "codex provider should still write the shared review guide"
+    );
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+    assert!(
+        workflow.contains("Active review provider: `codex`"),
+        "codex provider should be recorded in WORKFLOW.md: {workflow}",
+    );
+    assert!(
+        stdout.contains("https://chatgpt.com/codex"),
+        "stdout should print the Codex setup checklist: {stdout}",
+    );
+    assert!(
+        stdout.contains("@codex review"),
+        "stdout should explain the re-review trigger comment: {stdout}",
+    );
+    assert!(
+        stdout.contains("separate code-review usage pool"),
+        "stdout should explain the separate review quota: {stdout}",
+    );
+    assert!(
+        !stdout.contains("gh variable set AI_REVIEW_MODEL_ID"),
+        "codex provider should not configure OpenHands Actions variables: {stdout}",
+    );
+    assert!(
+        !stdout.contains("Configure the default AI PR review provider"),
+        "codex provider should not prompt for OpenHands provider settings: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn init_non_interactive_codex_review_provider_from_flag() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child(
+        repo.path(),
+        server.base_url(),
+        &[
+            "--non-interactive",
+            "--review-provider",
+            "codex",
+            "--linear-project-slug",
+            "demo-project",
+        ],
+    );
+    write_stdin(&mut child, "").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "non-interactive codex init should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".github/workflows/ai-pr-review.yml")
+            .exists(),
+        "codex provider should not scaffold the OpenHands Actions workflow"
+    );
+    assert!(
+        repo.path()
+            .join(".agents/skills/custom-codereview-guide.md")
+            .is_file(),
+        "codex provider should still write the shared review guide"
+    );
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+    assert!(
+        workflow.contains("Active review provider: `codex`"),
+        "codex provider should be recorded in WORKFLOW.md: {workflow}",
+    );
+    assert!(
+        stdout.contains("https://chatgpt.com/codex"),
+        "stdout should print the Codex setup checklist: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn init_rejects_openhands_flags_with_codex_provider() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child(
+        repo.path(),
+        server.base_url(),
+        &[
+            "--non-interactive",
+            "--review-provider",
+            "codex",
+            "--ai-pr-review",
+        ],
+    );
+    write_stdin(&mut child, "").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "mixing codex provider with OpenHands flags should fail: {stdout}",
+    );
+    assert!(
+        stdout.contains("--review-provider openhands"),
+        "failure should explain the conflicting flags: {stdout}",
+    );
+    assert!(
+        !repo.path().join("WORKFLOW.md").exists(),
+        "failed validation should not write bootstrap files"
+    );
+}
+
+#[tokio::test]
 async fn init_can_scaffold_ai_pr_review_and_configure_github_with_gh() {
     let server = TemplateServer::start().await;
     let repo = TempDir::new().expect("temp repo should exist");
@@ -489,7 +653,11 @@ async fn init_can_scaffold_ai_pr_review_and_configure_github_with_gh() {
             ),
         ],
     );
-    write_stdin(&mut child, "yes\n\n\n\n\n\ndemo-project\nyes\nyes\nno\n").await;
+    write_stdin(
+        &mut child,
+        "openhands\n\n\n\n\n\ndemo-project\nyes\nyes\nno\n",
+    )
+    .await;
 
     let output = child
         .wait_with_output()
@@ -1075,6 +1243,10 @@ openhands:
       llm:
         model: ${LLM_MODEL}
 ---
+
+## Automated AI PR review
+
+Active review provider: `YOUR-REVIEW-PROVIDER`
 "#
             .to_string(),
         ),

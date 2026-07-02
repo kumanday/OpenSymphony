@@ -38,6 +38,10 @@ const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const AGENTS_EXAMPLE_PATH: &str = "AGENTS-example.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
 const WORKFLOW_GIT_REMOTE_PLACEHOLDER: &str = "https://github.com/YOUR-ORG/YOUR-REPO.git";
+const WORKFLOW_REVIEW_PROVIDER_PLACEHOLDER: &str = "YOUR-REVIEW-PROVIDER";
+const CODEX_CODE_REVIEW_SETUP_GUIDE_URL: &str =
+    "https://github.com/kumanday/OpenSymphony/blob/main/docs/codex-code-review-setup.md";
+const CODEX_CODE_REVIEW_DOCS_URL: &str = "https://developers.openai.com/codex/integrations/github";
 
 #[derive(Debug, Args, Clone, Default)]
 pub struct InitArgs {
@@ -48,7 +52,14 @@ pub struct InitArgs {
     non_interactive: bool,
     #[arg(
         long,
-        help = "Scaffold automated OpenHands AI PR review without prompting"
+        value_enum,
+        value_name = "PROVIDER",
+        help = "Automated PR review provider: openhands (GitHub Actions plugin, pay-per-token), codex (Codex code review via ChatGPT subscription), or none"
+    )]
+    review_provider: Option<ReviewProviderArg>,
+    #[arg(
+        long,
+        help = "Scaffold automated OpenHands AI PR review without prompting (same as --review-provider openhands)"
     )]
     ai_pr_review: bool,
     #[arg(
@@ -155,6 +166,23 @@ impl AiReviewProviderKindArg {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ReviewProviderArg {
+    Openhands,
+    Codex,
+    None,
+}
+
+impl ReviewProviderArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Openhands => "openhands",
+            Self::Codex => "codex",
+            Self::None => "none",
+        }
+    }
+}
+
 impl InitArgs {
     fn validate(&self) -> Result<(), InitCommandError> {
         let secret_sources = [
@@ -181,8 +209,28 @@ impl InitArgs {
                     .to_string(),
             ));
         }
+        if matches!(
+            self.review_provider,
+            Some(ReviewProviderArg::Codex | ReviewProviderArg::None)
+        ) && self.ai_pr_review_requested_by_flags()
+        {
+            return Err(InitCommandError::InvalidArgument(
+                "OpenHands review flags (--ai-pr-review, --configure-github, --ai-review-*) can only be used with --review-provider openhands"
+                    .to_string(),
+            ));
+        }
 
         Ok(())
+    }
+
+    fn resolved_review_provider_from_flags(&self) -> Option<ReviewProviderArg> {
+        if let Some(provider) = self.review_provider {
+            Some(provider)
+        } else if self.ai_pr_review_requested_by_flags() {
+            Some(ReviewProviderArg::Openhands)
+        } else {
+            None
+        }
     }
 
     fn ai_pr_review_requested_by_flags(&self) -> bool {
@@ -589,17 +637,14 @@ where
         "Initializing OpenSymphony files in {}",
         target_repo.display()
     ))?;
-    let enable_ai_pr_review = if args.ai_pr_review_requested_by_flags() {
-        true
+    let review_provider = if let Some(provider) = args.resolved_review_provider_from_flags() {
+        provider
     } else if args.non_interactive {
-        false
+        ReviewProviderArg::None
     } else {
-        prompt_yes_no(
-            ui,
-            "Also scaffold automated OpenHands AI PR review? [y/N]: ",
-            false,
-        )?
+        prompt_review_provider(ui)?
     };
+    let enable_ai_pr_review = review_provider == ReviewProviderArg::Openhands;
     let ai_review_config = if enable_ai_pr_review {
         Some(
             if args.non_interactive || args.ai_pr_review_requested_by_flags() {
@@ -623,6 +668,8 @@ where
     if ai_review_config.is_some() {
         fetched_assets
             .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
+    }
+    if review_provider != ReviewProviderArg::None {
         fetched_assets.extend(generated_ai_review_assets());
     }
     let mut planned_assets = plan_assets(&target_repo, fetched_assets)?;
@@ -696,6 +743,7 @@ where
             planned,
             git_remote_url(&git_remote),
             linear_project_slug.as_deref(),
+            review_provider,
         )?;
 
         match final_result {
@@ -754,6 +802,9 @@ where
 
     if let Some(config) = ai_review_config.as_ref() {
         handle_ai_pr_review_setup(ui, env_lookup, &target_repo, &git_remote, config, &args)?;
+    }
+    if review_provider == ReviewProviderArg::Codex {
+        handle_codex_review_setup(ui, &git_remote)?;
     }
 
     prompt_for_missing_llm_env(env_lookup, ui, &args)?;
@@ -1083,6 +1134,7 @@ fn apply_asset(
     planned: PlannedAsset,
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
+    review_provider: ReviewProviderArg,
 ) -> Result<AppliedChange, InitCommandError> {
     let existing = planned.existing.as_deref();
 
@@ -1091,6 +1143,7 @@ fn apply_asset(
         &planned.action,
         git_remote_url,
         linear_project_slug,
+        review_provider,
     ) else {
         return Ok(match planned.action {
             PlannedAction::Skip => AppliedChange::Skipped,
@@ -1141,18 +1194,23 @@ fn build_final_contents(
     action: &PlannedAction,
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
+    review_provider: ReviewProviderArg,
 ) -> Option<String> {
     match action {
         PlannedAction::Create | PlannedAction::Overwrite => Some(match asset.kind {
-            AssetKind::Workflow => {
-                customize_workflow(&asset.contents, git_remote_url, linear_project_slug)
-            }
+            AssetKind::Workflow => customize_workflow(
+                &asset.contents,
+                git_remote_url,
+                linear_project_slug,
+                review_provider,
+            ),
             _ => asset.contents.clone(),
         }),
         PlannedAction::CustomizeWorkflow => Some(customize_workflow(
             &asset.contents,
             git_remote_url,
             linear_project_slug,
+            review_provider,
         )),
         PlannedAction::Skip | PlannedAction::Unchanged => None,
         PlannedAction::Prompt => None,
@@ -1453,6 +1511,36 @@ where
     }
 }
 
+fn prompt_review_provider<R, W>(
+    ui: &mut PromptUi<R, W>,
+) -> Result<ReviewProviderArg, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    ui.blank_line()?;
+    ui.line("Configure automated AI PR code review for this repository?")?;
+    ui.line(
+        "  codex     - Codex code review via the Codex GitHub integration. Included with a ChatGPT subscription; GitHub-triggered reviews draw from a separate code-review usage pool, so they never compete with implementation runs for quota.",
+    )?;
+    ui.line(
+        "  openhands - OpenHands PR Review plugin via GitHub Actions. Pay-per-token with your own LLM API key.",
+    )?;
+    ui.line("  none      - skip automated PR review for now.")?;
+    loop {
+        let response = ui.prompt("Review provider [codex/openhands/none] (default none): ")?;
+        match response.trim().to_ascii_lowercase().as_str() {
+            "" | "none" | "skip" | "n" | "no" => return Ok(ReviewProviderArg::None),
+            "codex" => return Ok(ReviewProviderArg::Codex),
+            // `y`/`yes` preserved from the previous yes/no OpenHands prompt.
+            "openhands" | "y" | "yes" => return Ok(ReviewProviderArg::Openhands),
+            _ => {
+                ui.line("Please answer with `codex`, `openhands`, or `none`.")?;
+            }
+        }
+    }
+}
+
 fn prompt_ai_review_config<R, W>(
     ui: &mut PromptUi<R, W>,
 ) -> Result<AiReviewConfig, InitCommandError>
@@ -1609,6 +1697,7 @@ fn customize_workflow(
     template: &str,
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
+    review_provider: ReviewProviderArg,
 ) -> String {
     let mut customized = template.to_string();
 
@@ -1624,7 +1713,10 @@ fn customize_workflow(
             customized.replace(WORKFLOW_PROJECT_SLUG_PLACEHOLDER, &yaml_double_quote(slug));
     }
 
-    customized
+    customized.replace(
+        WORKFLOW_REVIEW_PROVIDER_PLACEHOLDER,
+        review_provider.as_str(),
+    )
 }
 
 fn comparable_text(value: &str) -> String {
@@ -1644,12 +1736,12 @@ fn custom_codereview_guide_contents() -> String {
 name: custom-codereview-guide
 description: |
   Repository-specific code review guidance for this project.
-  Update this file so OpenHands PR review focuses on the right risks.
+  Update this file so automated PR review focuses on the right risks.
 ---
 
 # Custom Code Review Guide
 
-OpenHands PR review will load this file when it is present. Replace this starter content with repository-specific expectations.
+Automated PR review reads this guidance: the OpenHands PR Review plugin loads this file directly, and Codex code review reaches it through the `## Review guidelines` section in `AGENTS.md`. Replace this starter content with repository-specific expectations.
 
 ## Default Priorities
 
@@ -1773,6 +1865,58 @@ where
     }
 
     print_ai_review_setup_links(ui)?;
+    Ok(())
+}
+
+fn handle_codex_review_setup<R, W>(
+    ui: &mut PromptUi<R, W>,
+    git_remote: &GitRemoteDetection,
+) -> Result<(), InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let repo_label = git_remote_url(git_remote)
+        .and_then(github_repo_slug_from_remote)
+        .map(|slug| format!("`{slug}`"))
+        .unwrap_or_else(|| "this repository".to_string());
+
+    ui.blank_line()?;
+    ui.line(
+        "Codex code review selected. Reviews run through the Codex GitHub integration using a ChatGPT subscription and draw from a separate code-review usage pool, so they never compete with agent implementation runs for quota.",
+    )?;
+    ui.line(
+        "No GitHub Actions workflow, repository secret, or `review-this` label is needed for this provider.",
+    )?;
+    ui.blank_line()?;
+    ui.line("Finish the one-time Codex setup in a browser:")?;
+    ui.line(
+        "1. Sign in at https://chatgpt.com/codex with the ChatGPT account that should fund reviews.",
+    )?;
+    ui.line(
+        "   If your GitHub identity is linked to more than one ChatGPT account (for example personal + a workspace), connect from the intended account last; the most recently connected account is used.",
+    )?;
+    ui.line(format!(
+        "2. In Codex settings, install the Codex GitHub app for {repo_label}."
+    ))?;
+    ui.line(format!(
+        "3. Create a Codex cloud environment for {repo_label} at https://chatgpt.com/codex/cloud/settings/environments. Code review needs no custom setup; the default universal image works. Without an environment, Codex only comments \"To use Codex here, create an environment for this repo\" instead of reviewing."
+    ))?;
+    ui.line(format!(
+        "4. Enable Code review for {repo_label} and turn on automatic reviews so every newly opened PR gets an initial review."
+    ))?;
+    ui.line(
+        "5. Keep review guidance current: Codex applies the `## Review guidelines` section in `AGENTS.md`, which points at `.agents/skills/custom-codereview-guide.md`.",
+    )?;
+    ui.line(
+        "6. Verify: open a test PR; Codex should react with 👀 and post a review. If nothing happens and no error appears, disconnect and reconnect the GitHub connector in Codex settings.",
+    )?;
+    ui.blank_line()?;
+    ui.line(
+        "`WORKFLOW.md` records `codex` as the active review provider: agents re-request review after every follow-up push by commenting exactly `@codex review`, and never ask Codex to make code changes.",
+    )?;
+    ui.line(format!("Setup guide: {CODEX_CODE_REVIEW_SETUP_GUIDE_URL}"))?;
+    ui.line(format!("Codex docs: {CODEX_CODE_REVIEW_DOCS_URL}"))?;
     Ok(())
 }
 
@@ -2217,10 +2361,11 @@ mod tests {
     use super::{
         AiReviewConfig, AiReviewProviderKindArg, DEFAULT_AI_REVIEW_MODEL_ID, DEFAULT_LLM_BASE_URL,
         DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS, GitRemoteDetection, InitArgs,
-        InitCommandError, PromptUi, comparable_text, custom_codereview_guide_contents,
-        customize_workflow, git_remote_url, github_repo_slug_from_remote,
-        normalize_github_repo_slug, prompt_ai_review_config, prompt_for_missing_llm_env,
-        prompt_yes_no, resolve_ai_review_secret, select_remote_name, shell_single_quote,
+        InitCommandError, PromptUi, ReviewProviderArg, comparable_text,
+        custom_codereview_guide_contents, customize_workflow, git_remote_url,
+        github_repo_slug_from_remote, normalize_github_repo_slug, prompt_ai_review_config,
+        prompt_for_missing_llm_env, prompt_review_provider, prompt_yes_no,
+        resolve_ai_review_secret, select_remote_name, shell_single_quote,
         template_fetch_timeout_from_env,
     };
 
@@ -2243,16 +2388,35 @@ hooks:
   after_create: |
     git clone --depth 1 https://github.com/YOUR-ORG/YOUR-REPO.git .
 ---
+
+Active review provider: `YOUR-REVIEW-PROVIDER`
 "#;
 
         let customized = customize_workflow(
             workflow,
             Some("git@github.com:kumanday/demo.git"),
             Some("demo-project"),
+            ReviewProviderArg::Openhands,
         );
 
         assert!(customized.contains("project_slug: \"demo-project\""));
         assert!(customized.contains("git clone --depth 1 'git@github.com:kumanday/demo.git' ."));
+        assert!(customized.contains("Active review provider: `openhands`"));
+    }
+
+    #[test]
+    fn customize_workflow_replaces_review_provider_for_codex_and_none() {
+        let workflow = "Active review provider: `YOUR-REVIEW-PROVIDER`\n";
+
+        let codex = customize_workflow(workflow, None, None, ReviewProviderArg::Codex);
+        assert!(codex.contains("Active review provider: `codex`"));
+
+        let none = customize_workflow(workflow, None, None, ReviewProviderArg::None);
+        assert!(none.contains("Active review provider: `none`"));
+
+        let without_placeholder =
+            customize_workflow("no marker here\n", None, None, ReviewProviderArg::Codex);
+        assert_eq!(without_placeholder, "no marker here\n");
     }
 
     #[test]
@@ -2270,6 +2434,7 @@ hooks:
             workflow,
             Some("https://github.com/example/demo.git"),
             Some("demo-project"),
+            ReviewProviderArg::None,
         );
 
         assert!(customized.contains("project_slug:    \"demo-project\""));
@@ -2600,6 +2765,79 @@ hooks:
                 if name == "LLM_API_KEY"
                     && flag == "--reuse-llm-api-key-for-ai-review-secret"
         ));
+    }
+
+    #[test]
+    fn prompt_review_provider_accepts_named_choices_and_default() {
+        for (input, expected) in [
+            (&b"codex\n"[..], ReviewProviderArg::Codex),
+            (&b"openhands\n"[..], ReviewProviderArg::Openhands),
+            (&b"none\n"[..], ReviewProviderArg::None),
+            (&b"\n"[..], ReviewProviderArg::None),
+            // Legacy answers from the previous yes/no OpenHands prompt.
+            (&b"yes\n"[..], ReviewProviderArg::Openhands),
+            (&b"n\n"[..], ReviewProviderArg::None),
+        ] {
+            let mut output = Vec::new();
+            let mut ui = PromptUi::new(input, &mut output);
+            let provider = prompt_review_provider(&mut ui).expect("prompt should succeed");
+            assert_eq!(provider, expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_review_provider_reprompts_on_invalid_answer() {
+        let mut output = Vec::new();
+        let mut ui = PromptUi::new(&b"copilot\ncodex\n"[..], &mut output);
+
+        let provider = prompt_review_provider(&mut ui).expect("prompt should succeed");
+
+        assert_eq!(provider, ReviewProviderArg::Codex);
+        let rendered = String::from_utf8(output).expect("prompt output should be utf-8");
+        assert!(rendered.contains("Please answer with `codex`, `openhands`, or `none`."));
+    }
+
+    #[test]
+    fn init_args_reject_openhands_flags_with_codex_provider() {
+        let args = InitArgs {
+            review_provider: Some(ReviewProviderArg::Codex),
+            ai_pr_review: true,
+            ..InitArgs::default()
+        };
+
+        let error = args.validate().expect_err("flag mix should be rejected");
+
+        assert!(matches!(
+            error,
+            InitCommandError::InvalidArgument(message)
+                if message.contains("--review-provider openhands")
+        ));
+    }
+
+    #[test]
+    fn review_provider_resolution_prefers_explicit_flag_then_openhands_flags() {
+        let explicit = InitArgs {
+            review_provider: Some(ReviewProviderArg::Codex),
+            ..InitArgs::default()
+        };
+        assert_eq!(
+            explicit.resolved_review_provider_from_flags(),
+            Some(ReviewProviderArg::Codex)
+        );
+
+        let legacy = InitArgs {
+            ai_pr_review: true,
+            ..InitArgs::default()
+        };
+        assert_eq!(
+            legacy.resolved_review_provider_from_flags(),
+            Some(ReviewProviderArg::Openhands)
+        );
+
+        assert_eq!(
+            InitArgs::default().resolved_review_provider_from_flags(),
+            None
+        );
     }
 
     #[test]
