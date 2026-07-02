@@ -464,8 +464,9 @@ After `turn/start` yields an active turn id, the runtime backend retains a live
 stdio interrupt channel for the running Codex child. Scheduler interrupts such
 as `operator_cancel` and `tracker_merging_supersedes_human_review` send
 `turn/interrupt` with the recorded Codex thread id and current turn id, then
-report the request acknowledgement or failure through the shared scheduler
-interrupt state. The channel is removed when the Codex run exits.
+wait for the matching JSON-RPC response before reporting acknowledgement or
+failure through the shared scheduler interrupt state. The channel is removed
+when the Codex run exits.
 
 Codex approval notifications are normalized into the shared approval-center
 contract, and the Codex adapter exposes the `approval/respond` request shape
