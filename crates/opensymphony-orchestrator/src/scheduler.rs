@@ -1777,8 +1777,8 @@ where
 
         // Detached and CancelFailed are terminal outcomes: release the execution instead of
         // queuing a retry. Acknowledged operator cancels are also terminal from the
-        // scheduler's perspective because retrying would restart work the operator
-        // explicitly stopped.
+        // scheduler's perspective for completed or cancelled outcomes because retrying
+        // would restart work the operator explicitly stopped.
         if matches!(
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
@@ -1792,7 +1792,7 @@ where
                 )
                 .await;
         }
-        if acknowledged_operator_cancelled(&execution, &outcome) {
+        if acknowledged_operator_cancel_terminal(&execution, &outcome) {
             return self
                 .release_finished_execution(
                     execution,
@@ -2171,17 +2171,18 @@ fn retry_reason_for_outcome(outcome: WorkerOutcomeKind) -> Option<RetryReason> {
     }
 }
 
-fn acknowledged_operator_cancelled(
+fn acknowledged_operator_cancel_terminal(
     execution: &IssueExecution,
     outcome: &WorkerOutcomeRecord,
 ) -> bool {
-    outcome.outcome == WorkerOutcomeKind::Cancelled
-        && execution.interrupt().is_some_and(|interrupt| {
-            interrupt.status == HarnessInterruptStatus::Acknowledged
-                && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
-                && interrupt.command.expected_next_state
-                    == HarnessInterruptExpectedNextState::Paused
-        })
+    matches!(
+        outcome.outcome,
+        WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Cancelled
+    ) && execution.interrupt().is_some_and(|interrupt| {
+        interrupt.status == HarnessInterruptStatus::Acknowledged
+            && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
+            && interrupt.command.expected_next_state == HarnessInterruptExpectedNextState::Paused
+    })
 }
 
 fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
@@ -2192,7 +2193,7 @@ fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
         Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
     ) || execution
         .last_worker_outcome()
-        .is_some_and(|outcome| acknowledged_operator_cancelled(execution, outcome))
+        .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
 }
 
 fn tracker_merging_interrupt_cancelled(

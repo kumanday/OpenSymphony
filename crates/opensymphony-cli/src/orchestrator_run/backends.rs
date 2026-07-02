@@ -2010,6 +2010,12 @@ fn complete_codex_interrupt_response(
     true
 }
 
+fn codex_interrupt_response_pending(responses: &CodexInterruptResponseRegistry) -> bool {
+    responses
+        .lock()
+        .is_ok_and(|responses| !responses.is_empty())
+}
+
 async fn read_until_codex_terminal(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
@@ -2019,7 +2025,9 @@ async fn read_until_codex_terminal(
     read_state: &mut CodexReadState,
     interrupt_responses: &CodexInterruptResponseRegistry,
 ) -> Result<CodexTerminalOutcome, String> {
-    if let Some(outcome) = read_state.pending_terminal.take() {
+    if !codex_interrupt_response_pending(interrupt_responses)
+        && let Some(outcome) = read_state.pending_terminal.take()
+    {
         return Ok(outcome);
     }
 
@@ -2032,11 +2040,20 @@ async fn read_until_codex_terminal(
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|source| format!("invalid Codex JSON: {source}"))?;
         if complete_codex_interrupt_response(interrupt_responses, &value) {
+            if !codex_interrupt_response_pending(interrupt_responses)
+                && let Some(outcome) = read_state.pending_terminal.take()
+            {
+                return Ok(outcome);
+            }
             continue;
         }
         if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
             && let Some(outcome) = codex_terminal_outcome(&event)
         {
+            if codex_interrupt_response_pending(interrupt_responses) {
+                read_state.pending_terminal.get_or_insert(outcome);
+                continue;
+            }
             return Ok(outcome);
         }
     }
@@ -4513,8 +4530,8 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
       ;;
     *'"method":"turn/interrupt"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"status":"accepted"}}}}\n' "$id"
       printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-1","status":"interrupted"}}}}}}\n'
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"status":"accepted"}}}}\n' "$id"
       exit 0
       ;;
   esac
