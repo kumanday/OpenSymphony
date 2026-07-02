@@ -186,6 +186,39 @@ async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_me
     terminate_child(&mut child).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn run_interrupts_active_codex_stdio_worker_when_tracker_reports_merging() {
+    let linear = MockLinearGraphqlServer::start_with_human_review_merging_transition().await;
+    let project = TempDir::new().expect("temp project should exist");
+    let bind_addr = reserve_socket_addr();
+    let fake_codex = project.path().join("fake-codex");
+    let log_path = project.path().join("fake-codex.log");
+
+    write_fake_codex_interruptible_child(&fake_codex, &log_path);
+    write_codex_merging_supersede_project_files(project.path(), linear.base_url(), bind_addr);
+    write_memory_config(project.path());
+
+    let mut child = spawn_run_child_with_codex_bin(
+        project.path(),
+        &[],
+        fake_codex
+            .to_str()
+            .expect("fake codex path should be utf-8"),
+    );
+
+    wait_for_codex_merging_interrupt_ack(&format!("http://{bind_addr}/api/v1/snapshot"))
+        .await
+        .expect("run command should acknowledge active Codex stdio interrupt after Merging");
+
+    let log = std::fs::read_to_string(&log_path).expect("fake Codex log should exist");
+    assert!(log.contains("\"method\":\"turn/interrupt\""));
+    assert!(log.contains("\"threadId\":\"fake-thread\""));
+    assert!(log.contains("\"turnId\":\"turn-1\""));
+
+    terminate_child(&mut child).await;
+}
+
 #[tokio::test]
 async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
     let openhands = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
@@ -301,6 +334,22 @@ Run the scheduler.
 }
 
 fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child {
+    spawn_run_child_configured(project_root, extra_args, None)
+}
+
+fn spawn_run_child_with_codex_bin(
+    project_root: &std::path::Path,
+    extra_args: &[&str],
+    codex_bin: &str,
+) -> Child {
+    spawn_run_child_configured(project_root, extra_args, Some(codex_bin))
+}
+
+fn spawn_run_child_configured(
+    project_root: &std::path::Path,
+    extra_args: &[&str],
+    codex_bin: Option<&str>,
+) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command
         .arg("run")
@@ -317,6 +366,9 @@ fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(codex_bin) = codex_bin {
+        command.env("OPENSYMPHONY_CODEX_BIN", codex_bin);
+    }
     command.spawn().expect("run command should spawn")
 }
 
@@ -363,6 +415,25 @@ fn write_merging_supersede_project_files(
         project_root.join("WORKFLOW.md"),
         format!(
             "---\ntracker:\n  kind: linear\n  endpoint: {linear_base_url}\n  project_slug: test-project\n  active_states:\n    - In Progress\n    - Human Review\n    - Merging\n  terminal_states:\n    - Done\nworkspace:\n  root: ./var/workspaces\npolling:\n  interval_ms: 50\nopenhands:\n  transport:\n    base_url: {openhands_base_url}\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n"
+        ),
+    )
+    .expect("workflow should be written");
+    std::fs::write(
+        project_root.join("config.yaml"),
+        format!("control_plane:\n  bind: {bind_addr}\nlinear:\n  enabled: false\n"),
+    )
+    .expect("config should be written");
+}
+
+fn write_codex_merging_supersede_project_files(
+    project_root: &std::path::Path,
+    linear_base_url: &str,
+    bind_addr: std::net::SocketAddr,
+) {
+    std::fs::write(
+        project_root.join("WORKFLOW.md"),
+        format!(
+            "---\ntracker:\n  kind: linear\n  endpoint: {linear_base_url}\n  project_slug: test-project\n  active_states:\n    - In Progress\n    - Human Review\n    - Merging\n  terminal_states:\n    - Done\nworkspace:\n  root: ./var/workspaces\npolling:\n  interval_ms: 50\nrouting:\n  harness: codex_app_server\n  model: gpt-5-codex-test\n  model_profile: codex-chatgpt-local-keychain\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:9\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n"
         ),
     )
     .expect("workflow should be written");
@@ -592,6 +663,24 @@ async fn wait_for_merging_supersede_event(url: &str) -> Result<Value, String> {
     ))
 }
 
+async fn wait_for_codex_merging_interrupt_ack(url: &str) -> Result<Value, String> {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(url).send().await
+            && response.status().is_success()
+            && let Ok(snapshot) = response.json::<Value>().await
+            && codex_merging_interrupt_ack_visible(&snapshot)
+        {
+            return Ok(snapshot);
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!(
+        "timed out waiting for Codex Merging interrupt acknowledgement at {url}"
+    ))
+}
+
 fn issue_runtime_state_visible(envelope: &Value, identifier: &str, state: &str) -> bool {
     envelope["snapshot"]["issues"]
         .as_array()
@@ -640,6 +729,30 @@ fn merging_supersede_event_visible(envelope: &Value) -> bool {
         })
 }
 
+fn codex_merging_interrupt_ack_visible(envelope: &Value) -> bool {
+    envelope["snapshot"]["issues"]
+        .as_array()
+        .and_then(|issues| issues.iter().find(|issue| issue["identifier"] == "COE-492"))
+        .is_some_and(|issue| {
+            issue["tracker_state"] == "Merging"
+                && issue["transport_target"] == "codex_app_server"
+                && issue["recent_events"].as_array().is_some_and(|events| {
+                    let requested = events.iter().any(|event| {
+                        event["kind"] == "scheduler.interrupt_requested"
+                            && event["payload"]["reason"]
+                                == "tracker_merging_supersedes_human_review"
+                    });
+                    let acknowledged = events.iter().any(|event| {
+                        event["kind"] == "scheduler.interrupt_acknowledged"
+                            && event["summary"]
+                                .as_str()
+                                .is_some_and(|summary| summary.contains("turn/interrupt"))
+                    });
+                    requested && acknowledged
+                })
+        })
+}
+
 fn route_decision_visible(envelope: &Value) -> bool {
     envelope["snapshot"]["issues"]
         .as_array()
@@ -667,6 +780,65 @@ async fn http_endpoint_ready(url: &str) -> bool {
 async fn terminate_child(child: &mut Child) {
     let _ = child.kill().await;
     let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
+
+#[cfg(unix)]
+fn write_fake_codex_interruptible_child(path: &std::path::Path, log_path: &std::path::Path) {
+    write_executable(
+        path,
+        &format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" >> "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/interrupt"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"status":"accepted"}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1","status":"interrupted"}}}}\n'
+      exit 0
+      ;;
+  esac
+done
+"#,
+            log = log_path.display(),
+            schema = FAKE_CODEX_SCHEMA
+        ),
+    );
+}
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, contents).expect("fake executable should be written");
+    let mut permissions = std::fs::metadata(path)
+        .expect("fake executable metadata should load")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("fake executable should be executable");
 }
 
 struct MockLinearGraphqlServer {
