@@ -53,6 +53,18 @@ export default defineConfig({
         __dirname,
         "../../packages/api-client/src/index.ts"
       ),
+      "@opensymphony/graph/worker-factory": resolve(
+        __dirname,
+        "../../packages/graph/src/worker-factory.ts"
+      ),
+      "@opensymphony/graph/layout-worker": resolve(
+        __dirname,
+        "../../packages/graph/src/layout-worker.ts"
+      ),
+      "@opensymphony/graph": resolve(
+        __dirname,
+        "../../packages/graph/src/index.ts"
+      ),
       "@opensymphony/ui-core": resolve(
         __dirname,
         "../../packages/ui-core/src/index.ts"
