@@ -78,20 +78,33 @@ It does not:
 - copy `.github/*` bootstrap files
 - delete repo-local extra skills that are not in the template tree
 
-Optional AI PR review scaffolding:
+Optional AI PR review scaffolding, controlled by the review provider choice
+(`--review-provider <openhands|codex|none>` or the interactive prompt):
 
-- `.github/workflows/ai-pr-review.yml`
-- `.agents/skills/custom-codereview-guide.md`
+- `openhands`: `.github/workflows/ai-pr-review.yml` and
+  `.agents/skills/custom-codereview-guide.md`
+- `codex`: `.agents/skills/custom-codereview-guide.md` only — reviews run
+  through the Codex GitHub integration with a ChatGPT subscription, so no
+  Actions workflow, secret, or label is scaffolded. `init` prints the
+  one-time browser setup checklist; see
+  [codex-code-review-setup.md](codex-code-review-setup.md).
+
+The chosen provider is recorded in `WORKFLOW.md` as
+`Active review provider:` under `## Automated AI PR review`, which tells
+agents how to re-trigger review after follow-up pushes (`review-this` label
+for openhands, an exact `@codex review` comment for codex).
 
 ## Labels
 
-If you enable AI PR review and `gh` is available with repository access,
-`opensymphony init` can create the `review-this` label for you. If automation is
-skipped, create it once per repository:
+If you choose the `openhands` review provider and `gh` is available with
+repository access, `opensymphony init` can create the `review-this` label for
+you. If automation is skipped, create it once per repository:
 
 ```bash
 gh label create "review-this" --description "Trigger AI PR review" --color "d73a4a" --force
 ```
+
+The `codex` provider does not use the `review-this` label.
 
 ## Review The Generated Workflow
 

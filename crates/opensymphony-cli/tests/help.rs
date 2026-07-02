@@ -81,6 +81,7 @@ fn init_help_explains_non_interactive_automation_flags() {
         "--non-interactive",
         "--linear-project-slug",
         "--conflict-policy",
+        "--review-provider",
         "--ai-pr-review",
         "--configure-github",
         "--commit-and-push",

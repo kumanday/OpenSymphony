@@ -209,6 +209,53 @@ workflow.
       - resulting `HEAD` short SHA.
 12. Compact context and proceed to execution.
 
+## Automated AI PR review
+
+Active review provider: `openhands`
+
+<!-- Valid values: `openhands`, `codex`, `none`.
+     openhands = OpenHands PR Review plugin via GitHub Actions (pay-per-token,
+                 uses the AI_REVIEW_API_KEY repository secret).
+     codex     = Codex code review via the Codex GitHub integration (included
+                 with a ChatGPT subscription; GitHub-triggered reviews draw
+                 from a separate code-review usage pool, so they never compete
+                 with implementation runs for quota).
+     To switch providers, edit the value above and follow
+     docs/codex-code-review-setup.md -->
+
+Both providers post standard GitHub reviews with inline comments, and both are
+re-triggered after every follow-up push so each fix round gets a fresh review
+pass. Treat findings from either provider identically under the PR feedback
+sweep protocol below.
+
+Whenever this workflow says "re-trigger AI review", perform the action that
+matches the active provider:
+
+- `openhands`: add the `review-this` label to the PR
+  (`gh pr edit <pr> --add-label review-this`).
+- `codex`: post a top-level PR comment whose entire body is exactly
+  `@codex review` (`gh pr comment <pr> --body '@codex review'`). Codex reacts
+  with 👀 and posts a fresh review.
+- `none`: skip re-trigger steps; only human and CI feedback apply.
+
+Never re-trigger at PR creation time for either provider: the initial review
+runs automatically when the PR is opened (`pull_request.opened` for
+`openhands`, automatic reviews for `codex`).
+
+Codex guardrails (mandatory whenever the active provider is `codex`):
+
+- The re-trigger phrase must be exactly `@codex review` with no other text.
+  Mentioning `@codex` with anything else starts a Codex cloud task that bills
+  against general Codex usage limits (not the separate code-review pool) and
+  operates outside this orchestration.
+- Never ask Codex to fix, implement, or push changes. All code changes happen
+  in this orchestrated workspace through the normal implementation flow; the
+  review bot only reviews.
+
+AI review comments are posted by `github-actions[bot]` (openhands, job name
+`openhands-review`) or by the Codex connector bot (`chatgpt-codex-connector`).
+Treat both as actionable AI feedback in the sweep protocol.
+
 ## PR feedback sweep protocol (required)
 
 When a ticket has an attached PR, run this protocol before moving to `Human Review`:
@@ -253,8 +300,8 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 5. Update the workpad plan/checklist to include each feedback item and its resolution status.
 6. Re-run validation after feedback-driven changes and push updates.
 7. Repeat this sweep until there are no outstanding actionable comments.
-8. If you pushed follow-up commits to an existing PR, add the `review-this` label after the push to re-trigger automated AI PR review.
-   - Do **not** add `review-this` when the PR is first created; the `pull_request.opened` event already triggers the initial AI review pass.
+8. If you pushed follow-up commits to an existing PR, re-trigger AI review after the push (see `Automated AI PR review`) so the new commits get a fresh review pass.
+   - Do **not** re-trigger when the PR is first created; the initial AI review pass already runs automatically on PR open.
 
 ## Blocked-access escape hatch (required behavior)
 
@@ -291,8 +338,8 @@ Use this only when completion is blocked by missing required tools or missing au
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
 8.  Attach the PR URL to the Linear issue through the repo-local `linear` skill using `attachmentLinkGitHubPR` (preferred) or `attachmentLinkURL` when the target is not a GitHub PR. This is REQUIRED - do not rely on mentioning the PR URL in comments alone. The PR must appear in the issue's Links/Attachments section.
     - Ensure the GitHub PR has label `symphony` (add it if missing).
-    - Do **not** add `review-this` when this push created the PR; the initial PR open already triggered AI review.
-    - If this push updated an existing PR with new commits, add `review-this` after the push to request a fresh AI review pass.
+    - Do **not** re-trigger AI review when this push created the PR; the PR open already triggered the initial review.
+    - If this push updated an existing PR with new commits, re-trigger AI review after the push (see `Automated AI PR review`) to request a fresh review pass.
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
@@ -332,7 +379,7 @@ Use this only when completion is blocked by missing required tools or missing au
    - a new top-level PR comment is actionable feedback
    - a failing required PR check is actionable feedback even if no human comment was left
 5. If any actionable feedback or failing required check is present, move the issue to `Rework` and follow the rework flow.
-   - Before leaving `Human Review` to address new feedback, remove any pre-existing `review-this` label from the PR so the next rerun request is an explicit new edge.
+   - Before leaving `Human Review` to address new feedback with the `openhands` provider, remove any pre-existing `review-this` label from the PR so the next rerun request is an explicit new edge. (With the `codex` provider there is nothing to clean up; each `@codex review` comment is a fresh request.)
    - Do not wait for an inline review comment when a Linear comment, top-level PR comment, or failing check already requires action.
 6. If approved, human moves the issue to `Merging`.
 7. When the issue is in `Merging`, first inspect the attached PR state.
@@ -368,7 +415,7 @@ For most code review feedback (addressing comments, small fixes, requested tweak
 5. Re-run validation/tests to ensure changes are correct.
    - Always inspect current PR checks (`gh pr view --json statusCheckRollup`) before declaring feedback addressed.
    - If any required check is failing, treat that as unfinished rework even if the latest review text is positive.
-6. After pushing follow-up commits to the existing PR, add the `review-this` label to re-trigger automated AI PR review.
+6. After pushing follow-up commits to the existing PR, re-trigger AI review (see `Automated AI PR review`) so the rework gets a fresh review pass.
 7. Move the issue back to `Human Review` once all feedback is addressed.
 
 **Preserve review history**: Keeping the same PR preserves all discussion context, review threads, and decision history. Reviewers can see incremental changes rather than starting from scratch.
@@ -390,7 +437,7 @@ For major rework:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
    - Create a new bootstrap `## Agent Harness Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
-6. Do **not** add `review-this` immediately after creating the new PR; the initial PR open already triggered automated AI review.
+6. Do **not** re-trigger AI review immediately after creating the new PR; the initial PR open already triggered the automated review.
 
 **Default assumption**: Treat `Rework` as minor feedback unless there is clear evidence that the approach is fundamentally broken. Preserve PR history and discussion context as the default behavior.
 
@@ -419,6 +466,8 @@ For major rework:
   title/description/acceptance criteria, same-project assignment, a `related`
   link to the current issue, and `blockedBy` when the follow-up depends on
   the current issue.
+- Never mention `@codex` in any comment except the exact re-trigger phrase `@codex review`, and only when the active review provider is `codex`.
+- Never ask a review bot (Codex or OpenHands) to implement, fix, or push changes; implement all fixes in this workspace through the normal flow.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
 - **Never merge or allow merge of a PR with outstanding critical feedback or failing checks.** This includes not moving to `Merging` if feedback sweep shows unresolved comments.
 - In `Human Review`, do not make changes; wait and poll.

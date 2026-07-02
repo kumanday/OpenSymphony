@@ -3,6 +3,12 @@
 This document covers the remaining human checks for the OpenHands PR review
 workflow.
 
+> **Using a ChatGPT subscription instead?** OpenSymphony also supports Codex
+> code review as the PR review provider — no GitHub Actions workflow, no
+> per-token API key, and a separate code-review usage pool. See
+> [codex-code-review-setup.md](codex-code-review-setup.md), including
+> instructions for switching an existing repo between providers.
+
 `opensymphony init` now tries to configure the GitHub Actions variables and
 label automatically when `gh` is installed and can access the target repository.
 It also prompts you to commit and push the generated OpenSymphony files so this
