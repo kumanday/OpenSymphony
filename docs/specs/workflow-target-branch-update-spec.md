@@ -58,8 +58,8 @@ not orchestrator scheduling state.
 - Do not create, protect, or retarget remote branches through GitHub settings.
 - Do not change the orchestrator state machine or Linear polling.
 - Do not make the TUI or desktop clients own merge target decisions.
-- Do not scaffold OpenHands PR-review GitHub Actions from marker-only update
-  mode.
+- Do not scaffold or repair missing OpenHands PR-review GitHub Actions from
+  marker-only update mode.
 
 ## 5. Workflow Model
 
@@ -139,10 +139,22 @@ Supported code review values should reuse the existing provider vocabulary:
 codex | openhands | none
 ```
 
-`--code-review codex` and `--code-review none` are marker-only. If
-`--code-review openhands` is used and the repo lacks the OpenHands review
-workflow files, print a warning that the marker controls agent review behavior
-but does not install the GitHub Actions review workflow in this mode.
+`--code-review` is marker-first, not marker-only. It must patch the workflow
+provider marker and then synchronize any already-installed OpenHands PR-review
+GitHub Actions workflow:
+
+- `--code-review openhands`: if `.github/workflows/ai-pr-review.yml` already
+  exists, attempt to enable that workflow for the repository.
+- `--code-review codex` or `--code-review none`: if
+  `.github/workflows/ai-pr-review.yml` already exists, attempt to disable that
+  workflow so an outdated OpenHands review job does not keep running after the
+  marker switches away from `openhands`.
+- If the workflow file is missing, do not create it. Print a clear warning for
+  `--code-review openhands` explaining that update mode did not install the
+  OpenHands review workflow.
+- If GitHub CLI access is unavailable or workflow enable/disable fails, keep the
+  marker change and print an actionable warning with the failed command. Do not
+  silently pretend the GitHub Actions state was synchronized.
 
 If a marker is missing, insert the minimal managed section instead of fetching
 the whole template. If a marker is malformed, fail with a clear message and do
@@ -152,6 +164,9 @@ not guess.
 
 - Reuse the existing review provider enum instead of adding a second provider
   model.
+- Reuse `gh workflow enable` / `gh workflow disable` for already-installed
+  OpenHands review workflow toggles. Do not edit workflow YAML by hand just to
+  toggle it.
 - Add a small target-branch value type or helper, not a new config subsystem.
 - Extend workflow customization to replace both review provider and target
   branch during init.
@@ -173,7 +188,11 @@ Add focused tests for:
 - update with `--code-review codex` changes only the active review provider
   marker
 - combined update changes both markers in one write
-- marker-only update does not fetch template skill assets
+- settings update does not fetch template skill assets
+- `--code-review openhands` attempts to enable an existing
+  `.github/workflows/ai-pr-review.yml`
+- `--code-review codex` and `--code-review none` attempt to disable an existing
+  `.github/workflows/ai-pr-review.yml`
 - no-flag update still refreshes template-managed skills
 - help output documents both new flags
 
@@ -191,5 +210,6 @@ Use the dev fallback aliases if system DuckDB is unavailable.
 ## 10. Deferred
 
 If operators later want `opensymphony update --code-review openhands` to install
-or repair the full OpenHands review workflow, add an explicit flag for that
-scaffold. Do not hide it inside marker-only workflow settings mode.
+or repair the full OpenHands review workflow when it is missing or stale, add an
+explicit flag for that scaffold. Do not hide creation or repair inside workflow
+settings mode.

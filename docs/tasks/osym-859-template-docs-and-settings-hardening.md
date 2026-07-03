@@ -25,12 +25,12 @@ Finish the configurable branch-target wave by aligning target-repo templates, do
 - Update repo-local or template-managed `pull`, `push`, and `land` skill wording so agents follow the configured target branch instead of hard-coding `origin/main`.
 - Update README and development docs for `opensymphony init --target-branch` and marker-only `opensymphony update` usage.
 - Verify the planning spec's full init/update test matrix.
-- Record any OpenHands `--code-review openhands` scaffold limitation in user-facing docs.
+- Record that `--code-review` toggles existing OpenHands review workflows but does not install or repair missing workflow files.
 
 ### Out of scope
 
 - Publishing the task package to Linear.
-- Full OpenHands PR-review scaffold repair from update mode.
+- Full OpenHands PR-review scaffold install or repair from update mode.
 - Release tagging or Cargo publishing.
 
 ## Deliverables
@@ -44,7 +44,8 @@ Finish the configurable branch-target wave by aligning target-repo templates, do
 - [ ] Fresh init output and updated existing workflow output use the same marker semantics.
 - [ ] Generated or template-managed agent guidance tells agents to sync against the configured target branch.
 - [ ] Documentation includes examples for the default `develop`, explicit `main`, `release/next`, and combined `--target-branch` plus `--code-review` update usage.
-- [ ] The OpenHands marker-only limitation is documented.
+- [ ] Documentation explains that `--code-review openhands` enables an existing OpenHands review workflow, while `codex` and `none` disable an existing OpenHands review workflow.
+- [ ] Documentation explains that missing OpenHands review workflow files are not created or repaired by update settings mode.
 - [ ] All required checks from the spec pass or have explicit, reproducible blockers.
 
 ## Test Plan
