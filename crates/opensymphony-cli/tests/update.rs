@@ -172,6 +172,7 @@ Target branch: `main`
 
 Keep feature branches current with `origin/main`.
 - `pull`: keep branch updated with latest origin/main before handoff.
+- `pull`: keep branch updated with latest `origin/main` before handoff.
 Run the pull skill to sync with latest origin/main before any code edits.
 Leave https://github.com/origin/main.git unchanged.
 
@@ -220,6 +221,7 @@ Active review provider: `openhands`
     assert!(workflow.contains("Active review provider: `openhands`"));
     assert!(workflow.contains("Keep feature branches current with `origin/develop`."));
     assert!(workflow.contains("latest origin/develop before handoff"));
+    assert!(workflow.contains("latest `origin/develop` before handoff"));
     assert!(workflow.contains("sync with latest origin/develop before"));
     assert!(workflow.contains("https://github.com/origin/main.git"));
 }

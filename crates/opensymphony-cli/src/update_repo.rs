@@ -470,6 +470,10 @@ fn replace_legacy_branch_control_phrases(
     target_branch: &TargetBranch,
 ) -> String {
     let remote_ref = target_branch.remote_ref();
+    workflow = workflow.replace(
+        &format!("`{LEGACY_WORKFLOW_TARGET_REMOTE_REF}`"),
+        &format!("`{remote_ref}`"),
+    );
     for phrase in LEGACY_BRANCH_CONTROL_PHRASES {
         workflow = workflow.replace(
             phrase,
