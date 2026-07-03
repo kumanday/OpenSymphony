@@ -39,6 +39,10 @@ const AGENTS_EXAMPLE_PATH: &str = "AGENTS-example.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
 const WORKFLOW_GIT_REMOTE_PLACEHOLDER: &str = "https://github.com/YOUR-ORG/YOUR-REPO.git";
 const WORKFLOW_REVIEW_PROVIDER_PLACEHOLDER: &str = "YOUR-REVIEW-PROVIDER";
+const WORKFLOW_TARGET_BRANCH_PLACEHOLDER: &str = "YOUR-TARGET-BRANCH";
+const WORKFLOW_AUTOMATED_REVIEW_HEADING: &str = "## Automated AI PR review";
+const DEFAULT_TARGET_BRANCH: &str = "develop";
+const LEGACY_WORKFLOW_TARGET_REMOTE_REF: &str = "origin/main";
 const CODEX_CODE_REVIEW_SETUP_GUIDE_URL: &str =
     "https://github.com/kumanday/OpenSymphony/blob/main/docs/codex-code-review-setup.md";
 const CODEX_CODE_REVIEW_DOCS_URL: &str = "https://developers.openai.com/codex/integrations/github";
@@ -180,6 +184,51 @@ impl ReviewProviderArg {
             Self::Codex => "codex",
             Self::None => "none",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TargetBranch(String);
+
+impl TargetBranch {
+    fn parse(value: &str) -> Result<Self, InitCommandError> {
+        let branch = value.trim();
+        if branch.is_empty() {
+            return Err(InitCommandError::InvalidArgument(
+                "target branch must be a non-empty local branch name".to_string(),
+            ));
+        }
+        if branch.starts_with("origin/") || branch.starts_with("refs/heads/") {
+            return Err(InitCommandError::InvalidArgument(format!(
+                "target branch `{branch}` must be a local branch name, not a remote or full ref"
+            )));
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["check-ref-format", "--branch", branch])
+            .output()
+            .map_err(InitCommandError::GitCheckRefFormat)?;
+        if !output.status.success() {
+            return Err(InitCommandError::InvalidArgument(format!(
+                "target branch `{branch}` is not accepted by `git check-ref-format --branch`"
+            )));
+        }
+
+        Ok(Self(branch.to_string()))
+    }
+
+    fn local(&self) -> &str {
+        &self.0
+    }
+
+    fn remote_ref(&self) -> String {
+        format!("origin/{}", self.0)
+    }
+}
+
+impl Default for TargetBranch {
+    fn default() -> Self {
+        Self(DEFAULT_TARGET_BRANCH.to_string())
     }
 }
 
@@ -355,6 +404,8 @@ pub(crate) enum InitCommandError {
     },
     #[error("failed to read interactive input: {0}")]
     PromptIo(#[source] io::Error),
+    #[error("failed to validate target branch with git check-ref-format: {0}")]
+    GitCheckRefFormat(#[source] io::Error),
     #[error("input closed while waiting for a response")]
     PromptClosed,
     #[error(
@@ -644,6 +695,7 @@ where
     } else {
         prompt_review_provider(ui)?
     };
+    let target_branch = TargetBranch::parse(DEFAULT_TARGET_BRANCH)?;
     let enable_ai_pr_review = review_provider == ReviewProviderArg::Openhands;
     let ai_review_config = if enable_ai_pr_review {
         Some(
@@ -744,6 +796,7 @@ where
             git_remote_url(&git_remote),
             linear_project_slug.as_deref(),
             review_provider,
+            &target_branch,
         )?;
 
         match final_result {
@@ -1135,6 +1188,7 @@ fn apply_asset(
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
     review_provider: ReviewProviderArg,
+    target_branch: &TargetBranch,
 ) -> Result<AppliedChange, InitCommandError> {
     let existing = planned.existing.as_deref();
 
@@ -1144,6 +1198,7 @@ fn apply_asset(
         git_remote_url,
         linear_project_slug,
         review_provider,
+        target_branch,
     ) else {
         return Ok(match planned.action {
             PlannedAction::Skip => AppliedChange::Skipped,
@@ -1195,6 +1250,7 @@ fn build_final_contents(
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
     review_provider: ReviewProviderArg,
+    target_branch: &TargetBranch,
 ) -> Option<String> {
     match action {
         PlannedAction::Create | PlannedAction::Overwrite => Some(match asset.kind {
@@ -1203,6 +1259,7 @@ fn build_final_contents(
                 git_remote_url,
                 linear_project_slug,
                 review_provider,
+                target_branch,
             ),
             _ => asset.contents.clone(),
         }),
@@ -1211,6 +1268,7 @@ fn build_final_contents(
             git_remote_url,
             linear_project_slug,
             review_provider,
+            target_branch,
         )),
         PlannedAction::Skip | PlannedAction::Unchanged => None,
         PlannedAction::Prompt => None,
@@ -1698,6 +1756,7 @@ fn customize_workflow(
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
     review_provider: ReviewProviderArg,
+    target_branch: &TargetBranch,
 ) -> String {
     let mut customized = template.to_string();
 
@@ -1713,10 +1772,34 @@ fn customize_workflow(
             customized.replace(WORKFLOW_PROJECT_SLUG_PLACEHOLDER, &yaml_double_quote(slug));
     }
 
-    customized.replace(
+    customized = customized.replace(
         WORKFLOW_REVIEW_PROVIDER_PLACEHOLDER,
         review_provider.as_str(),
+    );
+    customized = customized.replace(WORKFLOW_TARGET_BRANCH_PLACEHOLDER, target_branch.local());
+    customized = ensure_target_branch_marker(customized, target_branch);
+
+    customized.replace(
+        LEGACY_WORKFLOW_TARGET_REMOTE_REF,
+        &target_branch.remote_ref(),
     )
+}
+
+fn ensure_target_branch_marker(mut workflow: String, target_branch: &TargetBranch) -> String {
+    if workflow.contains("Target branch: `") {
+        return workflow;
+    }
+
+    let section = format!(
+        "## Branch target\n\nTarget branch: `{}`\n\n<!-- Set by `opensymphony init` or `opensymphony update --target-branch`.\n     Value is a local branch name, not an `origin/...` ref. Agents should use\n     `origin/<target-branch>` when syncing, creating replacement branches, and\n     preparing PRs. -->\n\n",
+        target_branch.local()
+    );
+
+    if let Some(index) = workflow.find(WORKFLOW_AUTOMATED_REVIEW_HEADING) {
+        workflow.insert_str(index, &section);
+    }
+
+    workflow
 }
 
 fn comparable_text(value: &str) -> String {
@@ -2365,7 +2448,7 @@ mod tests {
     use super::{
         AiReviewConfig, AiReviewProviderKindArg, DEFAULT_AI_REVIEW_MODEL_ID, DEFAULT_LLM_BASE_URL,
         DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS, GitRemoteDetection, InitArgs,
-        InitCommandError, PromptUi, ReviewProviderArg, comparable_text,
+        InitCommandError, PromptUi, ReviewProviderArg, TargetBranch, comparable_text,
         custom_codereview_guide_contents, customize_workflow, git_remote_url,
         github_repo_slug_from_remote, normalize_github_repo_slug, prompt_ai_review_config,
         prompt_for_missing_llm_env, prompt_review_provider, prompt_yes_no,
@@ -2401,6 +2484,7 @@ Active review provider: `YOUR-REVIEW-PROVIDER`
             Some("git@github.com:kumanday/demo.git"),
             Some("demo-project"),
             ReviewProviderArg::Openhands,
+            &TargetBranch::default(),
         );
 
         assert!(customized.contains("project_slug: \"demo-project\""));
@@ -2412,15 +2496,116 @@ Active review provider: `YOUR-REVIEW-PROVIDER`
     fn customize_workflow_replaces_review_provider_for_codex_and_none() {
         let workflow = "Active review provider: `YOUR-REVIEW-PROVIDER`\n";
 
-        let codex = customize_workflow(workflow, None, None, ReviewProviderArg::Codex);
+        let codex = customize_workflow(
+            workflow,
+            None,
+            None,
+            ReviewProviderArg::Codex,
+            &TargetBranch::default(),
+        );
         assert!(codex.contains("Active review provider: `codex`"));
 
-        let none = customize_workflow(workflow, None, None, ReviewProviderArg::None);
+        let none = customize_workflow(
+            workflow,
+            None,
+            None,
+            ReviewProviderArg::None,
+            &TargetBranch::default(),
+        );
         assert!(none.contains("Active review provider: `none`"));
 
-        let without_placeholder =
-            customize_workflow("no marker here\n", None, None, ReviewProviderArg::Codex);
+        let without_placeholder = customize_workflow(
+            "no marker here\n",
+            None,
+            None,
+            ReviewProviderArg::Codex,
+            &TargetBranch::default(),
+        );
         assert_eq!(without_placeholder, "no marker here\n");
+    }
+
+    #[test]
+    fn customize_workflow_renders_target_branch_marker_and_guidance() {
+        let workflow = r#"## Branch target
+
+Target branch: `YOUR-TARGET-BRANCH`
+
+Keep feature branches current with `origin/main`.
+
+## Automated AI PR review
+
+Active review provider: `YOUR-REVIEW-PROVIDER`
+"#;
+
+        let default_branch = customize_workflow(
+            workflow,
+            None,
+            None,
+            ReviewProviderArg::None,
+            &TargetBranch::default(),
+        );
+        assert!(default_branch.contains("Target branch: `develop`"));
+        assert!(default_branch.contains("`origin/develop`"));
+        assert!(!default_branch.contains("Target branch: `origin/develop`"));
+
+        let release_branch = TargetBranch::parse("release/next").expect("valid branch");
+        let customized = customize_workflow(
+            workflow,
+            None,
+            None,
+            ReviewProviderArg::Codex,
+            &release_branch,
+        );
+        assert!(customized.contains("Target branch: `release/next`"));
+        assert!(customized.contains("`origin/release/next`"));
+        assert!(!customized.contains("Target branch: `origin/release/next`"));
+        assert!(!customized.contains("origin/main"));
+    }
+
+    #[test]
+    fn customize_workflow_inserts_default_target_branch_marker() {
+        let workflow = r#"## Automated AI PR review
+
+Active review provider: `YOUR-REVIEW-PROVIDER`
+"#;
+
+        let customized = customize_workflow(
+            workflow,
+            None,
+            None,
+            ReviewProviderArg::None,
+            &TargetBranch::default(),
+        );
+
+        assert!(customized.contains("## Branch target"));
+        assert!(customized.contains("Target branch: `develop`"));
+        assert!(customized.contains("Active review provider: `none`"));
+    }
+
+    #[test]
+    fn target_branch_parser_accepts_local_branch_names() {
+        assert_eq!(
+            TargetBranch::parse(" main ")
+                .expect("main should parse")
+                .local(),
+            "main"
+        );
+        assert_eq!(
+            TargetBranch::parse("release/next")
+                .expect("slash branch should parse")
+                .local(),
+            "release/next"
+        );
+    }
+
+    #[test]
+    fn target_branch_parser_rejects_remote_and_full_refs() {
+        for branch in ["", "origin/develop", "refs/heads/develop", "bad..branch"] {
+            assert!(
+                TargetBranch::parse(branch).is_err(),
+                "{branch:?} should be rejected"
+            );
+        }
     }
 
     #[test]
@@ -2439,6 +2624,7 @@ hooks:
             Some("https://github.com/example/demo.git"),
             Some("demo-project"),
             ReviewProviderArg::None,
+            &TargetBranch::default(),
         );
 
         assert!(customized.contains("project_slug:    \"demo-project\""));

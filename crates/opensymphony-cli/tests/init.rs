@@ -40,6 +40,18 @@ async fn init_copies_template_files_and_customizes_workflow() {
         workflow.contains("Active review provider: `none`"),
         "declining review setup should record provider `none`: {workflow}",
     );
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "init should record the default target branch: {workflow}",
+    );
+    assert!(
+        workflow.contains("Keep feature branches current with `origin/develop`."),
+        "init should patch generated branch guidance: {workflow}",
+    );
+    assert!(
+        !workflow.contains("Target branch: `origin/develop`"),
+        "stored marker must stay local-only: {workflow}",
+    );
     assert!(config.contains("tool_dir: ~/.opensymphony/openhands-server"));
 
     assert!(
@@ -182,6 +194,14 @@ async fn init_non_interactive_succeeds_with_flags_and_closed_stdin() {
         fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
     assert!(workflow.contains("project_slug: \"demo-project\""));
     assert!(workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."));
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "non-interactive init should record the default target branch: {workflow}",
+    );
+    assert!(
+        workflow.contains("Keep feature branches current with `origin/develop`."),
+        "non-interactive init should patch generated branch guidance: {workflow}",
+    );
     assert!(
         stdout.contains("Skipped automatic commit/push. Pass `--commit-and-push`"),
         "non-interactive init should skip commit/push without prompting: {stdout}",
@@ -326,6 +346,10 @@ async fn init_non_interactive_conflict_policy_overwrite_replaces_existing_files(
         workflow.contains("project_slug: \"demo-project\"")
             && workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."),
         "overwrite should replace the workflow with customized template content: {workflow}",
+    );
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "overwrite should render the default target branch: {workflow}",
     );
     assert!(
         !workflow.contains("user workflow"),
@@ -1243,6 +1267,12 @@ openhands:
       llm:
         model: ${LLM_MODEL}
 ---
+
+## Branch target
+
+Target branch: `YOUR-TARGET-BRANCH`
+
+Keep feature branches current with `origin/main`.
 
 ## Automated AI PR review
 
