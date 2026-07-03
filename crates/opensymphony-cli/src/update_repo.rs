@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     env, fs, io,
     path::{Path, PathBuf},
-    process::{ExitCode, Stdio},
+    process::{Command as StdCommand, ExitCode, Stdio},
 };
 
 use clap::Args;
@@ -46,7 +46,7 @@ pub struct UpdateArgs {
         long,
         value_enum,
         value_name = "PROVIDER",
-        help = "Patch the managed WORKFLOW.md review provider marker: codex, openhands, or none"
+        help = "Patch the managed WORKFLOW.md review provider marker and toggle any existing OpenHands review workflow: codex, openhands, or none"
     )]
     code_review: Option<ReviewProviderArg>,
 }
@@ -255,15 +255,49 @@ fn update_workflow_settings(
         println!("Updated WORKFLOW.md managed settings.");
     }
 
-    if matches!(args.code_review, Some(ReviewProviderArg::Openhands))
-        && !current_dir.join(OPENHANDS_REVIEW_WORKFLOW_PATH).is_file()
-    {
-        eprintln!(
-            "Warning: `--code-review openhands` only updates WORKFLOW.md; {OPENHANDS_REVIEW_WORKFLOW_PATH} is missing, so the OpenHands GitHub Actions review workflow was not installed."
-        );
+    if let Some(code_review) = args.code_review {
+        sync_openhands_review_workflow(current_dir, code_review);
     }
 
     Ok(())
+}
+
+fn sync_openhands_review_workflow(current_dir: &Path, code_review: ReviewProviderArg) {
+    if !current_dir.join(OPENHANDS_REVIEW_WORKFLOW_PATH).is_file() {
+        if matches!(code_review, ReviewProviderArg::Openhands) {
+            eprintln!(
+                "Warning: `--code-review openhands` updated WORKFLOW.md but {OPENHANDS_REVIEW_WORKFLOW_PATH} is missing; update mode did not install or enable the OpenHands GitHub Actions review workflow."
+            );
+        }
+        return;
+    }
+
+    let action = match code_review {
+        ReviewProviderArg::Openhands => "enable",
+        ReviewProviderArg::Codex | ReviewProviderArg::None => "disable",
+    };
+    let command = format!("gh workflow {action} {OPENHANDS_REVIEW_WORKFLOW_PATH}");
+    match StdCommand::new("gh")
+        .args(["workflow", action, OPENHANDS_REVIEW_WORKFLOW_PATH])
+        .current_dir(current_dir)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            println!("{action}d existing OpenHands GitHub Actions review workflow.");
+        }
+        Ok(output) => {
+            eprintln!(
+                "Warning: `{command}` exited with {}; WORKFLOW.md marker remains updated, but the existing OpenHands GitHub Actions review workflow state was not synchronized.",
+                render_exit_status(output.status)
+            );
+        }
+        Err(source) => {
+            eprintln!(
+                "Warning: failed to run `{command}`: {source}; WORKFLOW.md marker remains updated, but the existing OpenHands GitHub Actions review workflow state was not synchronized."
+            );
+        }
+    }
 }
 
 fn patch_workflow_settings(

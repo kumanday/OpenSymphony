@@ -336,8 +336,111 @@ async fn marker_only_openhands_warns_when_review_workflow_file_is_absent() {
         "update should succeed: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stderr.contains("Warning: `--code-review openhands` only updates WORKFLOW.md"),
+        stderr.contains("Warning: `--code-review openhands` updated WORKFLOW.md"),
         "stderr should warn about missing OpenHands workflow: {stderr}",
+    );
+}
+
+#[tokio::test]
+async fn marker_only_openhands_enables_existing_review_workflow() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+    let gh_log = repo.path().join("gh.log");
+    write_fake_gh(repo.path().join(".test-bin/gh"), &gh_log, 0);
+    write_target_repo_files(repo.path(), "none");
+    write_openhands_review_workflow(repo.path());
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--code-review", "openhands"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "update should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    let gh_log = fs::read_to_string(gh_log).expect("gh log should exist");
+    assert!(
+        gh_log.contains("ARGS=workflow enable .github/workflows/ai-pr-review.yml"),
+        "update should enable the existing OpenHands workflow: {gh_log}",
+    );
+    assert!(
+        stdout.contains("enabled existing OpenHands GitHub Actions review workflow."),
+        "stdout should report workflow sync: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn marker_only_non_openhands_providers_disable_existing_review_workflow() {
+    for provider in ["codex", "none"] {
+        let server = UpdateServer::start("9.9.9").await;
+        let repo = TempDir::new().expect("temp repo should exist");
+        let cargo_log = repo.path().join("cargo.log");
+        let gh_log = repo.path().join("gh.log");
+        write_fake_gh(repo.path().join(".test-bin/gh"), &gh_log, 0);
+        write_target_repo_files(repo.path(), "openhands");
+        write_openhands_review_workflow(repo.path());
+
+        let output = run_update_with_args(
+            repo.path(),
+            &cargo_log,
+            &server,
+            &["--code-review", provider],
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success(),
+            "update should succeed for {provider}: stdout={stdout}, stderr={stderr}",
+        );
+        let gh_log = fs::read_to_string(gh_log).expect("gh log should exist");
+        assert!(
+            gh_log.contains("ARGS=workflow disable .github/workflows/ai-pr-review.yml"),
+            "update should disable the existing OpenHands workflow for {provider}: {gh_log}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn marker_only_workflow_toggle_failure_warns_and_keeps_marker_update() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+    let gh_log = repo.path().join("gh.log");
+    write_fake_gh(repo.path().join(".test-bin/gh"), &gh_log, 42);
+    write_target_repo_files(repo.path(), "openhands");
+    write_openhands_review_workflow(repo.path());
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--code-review", "codex"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "toggle failure should not fail marker update: stdout={stdout}, stderr={stderr}",
+    );
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should read");
+    assert!(workflow.contains("Active review provider: `codex`"));
+    assert!(
+        stderr.contains(
+            "Warning: `gh workflow disable .github/workflows/ai-pr-review.yml` exited with exit code 42"
+        ) && stderr.contains("WORKFLOW.md marker remains updated"),
+        "stderr should warn with the failed command: {stderr}",
     );
 }
 
@@ -570,6 +673,9 @@ fn path_only(path: &Path) -> OsString {
 }
 
 fn write_fake_cargo(path: PathBuf, log_path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("fake bin dir should exist");
+    }
     write_executable(
         path,
         &format!(
@@ -578,6 +684,38 @@ fn write_fake_cargo(path: PathBuf, log_path: &Path) {
             log_path.display(),
         ),
     );
+}
+
+fn write_fake_gh(path: PathBuf, log_path: &Path, exit_code: i32) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("fake bin dir should exist");
+    }
+    write_executable(
+        path,
+        &format!(
+            "#!/bin/sh\nset -eu\nprintf 'PWD=%s\\n' \"$PWD\" >> \"{}\"\nprintf 'ARGS=%s\\n' \"$*\" >> \"{}\"\nexit {exit_code}\n",
+            log_path.display(),
+            log_path.display(),
+        ),
+    );
+}
+
+fn write_target_repo_files(repo_root: &Path, provider: &str) {
+    fs::write(
+        repo_root.join("WORKFLOW.md"),
+        format!(
+            "## Branch target\n\nTarget branch: `main`\n\n## Automated AI PR review\n\nActive review provider: `{provider}`\n"
+        ),
+    )
+    .expect("workflow should write");
+    fs::write(repo_root.join("config.yaml"), "tracker: {}\n").expect("config should write");
+}
+
+fn write_openhands_review_workflow(repo_root: &Path) {
+    let path = repo_root.join(".github/workflows/ai-pr-review.yml");
+    fs::create_dir_all(path.parent().expect("workflow should have parent"))
+        .expect("workflow dir should exist");
+    fs::write(path, "name: ai-pr-review\n").expect("workflow should write");
 }
 
 fn write_executable(path: PathBuf, contents: &str) {
