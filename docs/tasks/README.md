@@ -27,6 +27,7 @@ Rich client, hosted mode, collaborative planning, subscription-auth, and future 
 - OSYM-805 Desktop run detail operations and interrupts
 - OSYM-813 Project grouping and dependency signals
 - OSYM-850 Tree-sitter code intelligence
+- OSYM-856 Workflow target branch configuration
 
 See `milestones.md` for the new task set and `../host-client-implementation_plan.md` for the source implementation strategy.
 

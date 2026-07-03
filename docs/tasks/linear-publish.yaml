@@ -1,38 +1,28 @@
-planningWave: tree-sitter-code-intelligence
+planningWave: workflow-target-branch-configuration
 linearProject: opensymphony-bootstrap-e7b957855cb7
-publishedAt: '2026-06-27T00:11:59.812888+00:00'
+publishedAt: '2026-07-03T13:29:01.730091+00:00'
 milestones:
-  'M12.6: Tree-sitter Code Intelligence':
-    milestoneId: 098d0df4-0fd1-49f2-b9a8-fede57843134
-    name: 'M12.6: Tree-sitter Code Intelligence'
+  'M12.7: Workflow Target Branch Configuration':
+    milestoneId: 76e14ee9-9a5d-469d-b240-a748b00efba9
+    name: 'M12.7: Workflow Target Branch Configuration'
 tasks:
-  OSYM-850:
-    issue: COE-498
-    issueId: b223eedc-972e-4d8c-9cd0-be0731e9dc63
-    url: https://linear.app/trilogy-ai-coe/issue/COE-498/tree-sitter-provider-skeleton-and-rust-parsing
-    file: docs/tasks/osym-850-tree-sitter-provider-skeleton-and-rust-parsing.md
-  OSYM-851:
-    issue: COE-499
-    issueId: 0f78a09c-e98c-4586-b891-f6b6bb05c300
-    url: https://linear.app/trilogy-ai-coe/issue/COE-499/memory-context-ast-provider-integration
-    file: docs/tasks/osym-851-memory-context-ast-provider-integration.md
-  OSYM-852:
-    issue: COE-500
-    issueId: f9194f81-1527-458e-8293-d5298001883d
-    url: https://linear.app/trilogy-ai-coe/issue/COE-500/query-packs-for-supported-agent-languages
-    file: docs/tasks/osym-852-query-packs-for-supported-agent-languages.md
-  OSYM-853:
-    issue: COE-501
-    issueId: b8acf91a-abb5-41ba-9e85-ed355040355e
-    url: https://linear.app/trilogy-ai-coe/issue/COE-501/code-intelligence-persistence-and-ingestion
-    file: docs/tasks/osym-853-code-intelligence-persistence-and-ingestion.md
-  OSYM-854:
-    issue: COE-502
-    issueId: 7a968dff-5d4b-41e8-886d-de5170e3bd52
-    url: https://linear.app/trilogy-ai-coe/issue/COE-502/read-only-ast-mcp-and-cli-tools
-    file: docs/tasks/osym-854-read-only-ast-mcp-and-cli-tools.md
-  OSYM-855:
-    issue: COE-503
-    issueId: 54b5fef3-2c74-4269-9d83-5fb43651b905
-    url: https://linear.app/trilogy-ai-coe/issue/COE-503/code-intelligence-performance-docs-and-hardening
-    file: docs/tasks/osym-855-code-intelligence-performance-docs-and-hardening.md
+  OSYM-856:
+    issue: COE-521
+    issueId: 40feaff9-fc8a-4f88-93f7-f5ca07581ebd
+    url: https://linear.app/trilogy-ai-coe/issue/COE-521/workflow-target-branch-model-and-init-customization
+    file: docs/tasks/osym-856-workflow-target-branch-model-and-init-customization.md
+  OSYM-857:
+    issue: COE-522
+    issueId: 7c488de0-ae23-4325-bdc2-8243f7168829
+    url: https://linear.app/trilogy-ai-coe/issue/COE-522/init-target-branch-prompt-and-flag
+    file: docs/tasks/osym-857-init-target-branch-prompt-and-flag.md
+  OSYM-858:
+    issue: COE-523
+    issueId: 09aa7e54-533f-420a-8f53-e46f2a066231
+    url: https://linear.app/trilogy-ai-coe/issue/COE-523/update-workflow-settings-mode
+    file: docs/tasks/osym-858-update-workflow-settings-mode.md
+  OSYM-859:
+    issue: COE-524
+    issueId: e130bbca-29ba-4865-b18e-9c86fbd97363
+    url: https://linear.app/trilogy-ai-coe/issue/COE-524/template-docs-and-settings-hardening
+    file: docs/tasks/osym-859-template-docs-and-settings-hardening.md

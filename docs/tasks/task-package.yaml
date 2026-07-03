@@ -1,17 +1,13 @@
-planningWave: tree-sitter-code-intelligence
+planningWave: workflow-target-branch-configuration
 tasksDir: docs/tasks
 milestones:
-  - "M12.6: Tree-sitter Code Intelligence"
+  - "M12.7: Workflow Target Branch Configuration"
 tasks:
-  - id: OSYM-850
-    file: docs/tasks/osym-850-tree-sitter-provider-skeleton-and-rust-parsing.md
-  - id: OSYM-851
-    file: docs/tasks/osym-851-memory-context-ast-provider-integration.md
-  - id: OSYM-852
-    file: docs/tasks/osym-852-query-packs-for-supported-agent-languages.md
-  - id: OSYM-853
-    file: docs/tasks/osym-853-code-intelligence-persistence-and-ingestion.md
-  - id: OSYM-854
-    file: docs/tasks/osym-854-read-only-ast-mcp-and-cli-tools.md
-  - id: OSYM-855
-    file: docs/tasks/osym-855-code-intelligence-performance-docs-and-hardening.md
+  - id: OSYM-856
+    file: docs/tasks/osym-856-workflow-target-branch-model-and-init-customization.md
+  - id: OSYM-857
+    file: docs/tasks/osym-857-init-target-branch-prompt-and-flag.md
+  - id: OSYM-858
+    file: docs/tasks/osym-858-update-workflow-settings-mode.md
+  - id: OSYM-859
+    file: docs/tasks/osym-859-template-docs-and-settings-hardening.md
