@@ -182,10 +182,13 @@ opensymphony update --target-branch release/next
 opensymphony update --target-branch release/next --code-review openhands
 ```
 
-`--code-review openhands` enables an existing OpenHands review workflow when
+`--code-review openhands` records the marker and attempts to enable an existing
+OpenHands review workflow through `gh workflow` when
 `.github/workflows/ai-pr-review.yml` is already present. It does not install or
 repair a missing workflow file; `--code-review codex` and `--code-review none`
-disable an existing OpenHands review workflow.
+record the marker and attempt to disable that workflow. If `gh` is unavailable,
+unauthorized, or cannot access Actions, `update` warns and leaves the workflow
+state unchanged; verify or adjust the workflow state manually.
 
 ### Running the Orchestrator
 

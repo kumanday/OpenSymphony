@@ -125,9 +125,12 @@ opensymphony update --target-branch release/next --code-review openhands
 ```
 
 Settings mode skips the CLI reinstall, template skill refresh, and memory
-bootstrap. `--code-review openhands` enables an existing
-`.github/workflows/ai-pr-review.yml` but does not install or repair a missing
-workflow file; `codex` and `none` disable an existing OpenHands review workflow.
+bootstrap. `--code-review openhands` records the marker and attempts to enable
+an existing `.github/workflows/ai-pr-review.yml` through `gh workflow` but does
+not install or repair a missing workflow file; `codex` and `none` record the
+marker and attempt to disable an existing OpenHands review workflow. If `gh` is
+unavailable, unauthorized, or cannot access Actions, verify or adjust the
+workflow state manually.
 
 Normal user installs use bundled DuckDB. This keeps `cargo install
 opensymphony` and `opensymphony update` turnkey even when the memory database is

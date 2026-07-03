@@ -284,10 +284,12 @@ opensymphony update --target-branch release/next
 opensymphony update --target-branch release/next --code-review openhands
 ```
 
-`--code-review openhands` toggles an existing
-`.github/workflows/ai-pr-review.yml`; update settings mode warns instead of
-installing or repairing that workflow when it is missing. `codex` and `none`
-disable an existing OpenHands review workflow.
+`--code-review openhands` records the marker and attempts to enable an existing
+`.github/workflows/ai-pr-review.yml` through `gh workflow`; update settings
+mode warns instead of installing or repairing that workflow when it is missing.
+`codex` and `none` record the marker and attempt to disable an existing
+OpenHands review workflow. If `gh` is unavailable, unauthorized, or cannot
+access Actions, verify or adjust the workflow state manually.
 
 Use `cargo test-system-duckdb --test init`,
 `cargo test-system-duckdb --test update`, and

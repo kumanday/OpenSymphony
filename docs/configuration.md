@@ -110,10 +110,13 @@ agents how to re-trigger review after follow-up pushes (`review-this` label
 for openhands, an exact `@codex review` comment for codex).
 
 For initialized target repos, `opensymphony update --code-review openhands`
-updates the marker and enables an existing `.github/workflows/ai-pr-review.yml`.
-It does not create or repair that workflow when the file is missing. Switching
-with `--code-review codex` or `--code-review none` disables an existing
-OpenHands review workflow.
+updates the marker and attempts to enable an existing
+`.github/workflows/ai-pr-review.yml` through `gh workflow`. It does not create
+or repair that workflow when the file is missing. Switching with
+`--code-review codex` or `--code-review none` records the marker and attempts
+to disable an existing OpenHands review workflow. If `gh` is unavailable,
+unauthorized, or cannot access Actions, `update` warns and leaves the workflow
+state unchanged; verify or adjust it manually.
 
 ## Labels
 

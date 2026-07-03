@@ -47,8 +47,9 @@ description:
      rewriting remotes or switching protocols as a workaround.
 
 5. Ensure a PR exists for the branch:
-   - If no PR exists, create one.
-   - If a PR exists and is open, update it.
+   - Read `WORKFLOW.md` `Target branch:` and use it as the PR base.
+   - If no PR exists, create one against the configured target branch.
+   - If a PR exists and is open, update it and correct the base if needed.
    - If branch is tied to a closed/merged PR, create a new branch + PR.
    - Write a proper PR title that clearly describes the change outcome
    - For branch updates, explicitly reconsider whether current PR title still
@@ -89,6 +90,8 @@ git push -u origin HEAD
 git push --force-with-lease origin HEAD
 
 # Ensure a PR exists (create only if missing)
+target_branch=$(awk -F': *' '/^Target branch:/ { print $2; exit }' WORKFLOW.md)
+target_branch=${target_branch:-develop}
 pr_state=$(gh pr view --json state -q .state 2>/dev/null || true)
 if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
   echo "Current branch is tied to a closed PR; create a new branch + PR." >&2
@@ -98,8 +101,12 @@ fi
 # Write a clear, human-friendly title that summarizes the shipped change.
 pr_title="<clear PR title written for this change>"
 if [ -z "$pr_state" ]; then
-  gh pr create --title "$pr_title"
+  gh pr create --base "$target_branch" --title "$pr_title"
 else
+  current_base=$(gh pr view --json baseRefName -q .baseRefName)
+  if [ "$current_base" != "$target_branch" ]; then
+    gh pr edit --base "$target_branch"
+  fi
   # Reconsider title on every branch update; edit if scope shifted.
   gh pr edit --title "$pr_title"
 fi
