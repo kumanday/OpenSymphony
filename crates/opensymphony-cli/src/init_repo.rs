@@ -198,9 +198,14 @@ impl TargetBranch {
                 "target branch must be a non-empty local branch name".to_string(),
             ));
         }
-        if branch.starts_with("origin/") || branch.starts_with("refs/heads/") {
+        if branch.starts_with("origin/") || branch.starts_with("refs/") {
             return Err(InitCommandError::InvalidArgument(format!(
                 "target branch `{branch}` must be a local branch name, not a remote or full ref"
+            )));
+        }
+        if branch.starts_with("@{-") {
+            return Err(InitCommandError::InvalidArgument(format!(
+                "target branch `{branch}` must be a stable local branch name, not checkout shorthand"
             )));
         }
 
@@ -1778,10 +1783,13 @@ fn customize_workflow(
     );
     customized = customized.replace(WORKFLOW_TARGET_BRANCH_PLACEHOLDER, target_branch.local());
     customized = ensure_target_branch_marker(customized, target_branch);
+    replace_legacy_target_remote_refs(customized, target_branch)
+}
 
-    customized.replace(
-        LEGACY_WORKFLOW_TARGET_REMOTE_REF,
-        &target_branch.remote_ref(),
+fn replace_legacy_target_remote_refs(workflow: String, target_branch: &TargetBranch) -> String {
+    workflow.replace(
+        &format!("`{LEGACY_WORKFLOW_TARGET_REMOTE_REF}`"),
+        &format!("`{}`", target_branch.remote_ref()),
     )
 }
 
@@ -2600,7 +2608,14 @@ Active review provider: `YOUR-REVIEW-PROVIDER`
 
     #[test]
     fn target_branch_parser_rejects_remote_and_full_refs() {
-        for branch in ["", "origin/develop", "refs/heads/develop", "bad..branch"] {
+        for branch in [
+            "",
+            "origin/develop",
+            "refs/heads/develop",
+            "refs/remotes/origin/develop",
+            "@{-1}",
+            "bad..branch",
+        ] {
             assert!(
                 TargetBranch::parse(branch).is_err(),
                 "{branch:?} should be rejected"
@@ -2629,6 +2644,30 @@ hooks:
 
         assert!(customized.contains("project_slug:    \"demo-project\""));
         assert!(customized.contains("git clone --depth 1 'https://github.com/example/demo.git' ."));
+    }
+
+    #[test]
+    fn customize_workflow_preserves_origin_main_inside_repo_url() {
+        let workflow = r#"---
+hooks:
+  after_create: |
+    git clone --depth 1 https://github.com/YOUR-ORG/YOUR-REPO.git .
+---
+
+Keep feature branches current with `origin/main`.
+"#;
+
+        let customized = customize_workflow(
+            workflow,
+            Some("https://github.com/origin/main.git"),
+            None,
+            ReviewProviderArg::None,
+            &TargetBranch::default(),
+        );
+
+        assert!(customized.contains("git clone --depth 1 'https://github.com/origin/main.git' ."));
+        assert!(customized.contains("`origin/develop`"));
+        assert!(!customized.contains("https://github.com/origin/develop.git"));
     }
 
     #[test]
