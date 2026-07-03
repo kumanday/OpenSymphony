@@ -175,6 +175,7 @@ Keep feature branches current with `origin/main`.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
 Run the pull skill to sync with latest origin/main before any code edits.
 Leave https://github.com/origin/main.git unchanged.
+Do not delete `origin/main`.
 
 ## Automated AI PR review
 
@@ -224,6 +225,7 @@ Active review provider: `openhands`
     assert!(workflow.contains("latest `origin/develop` before handoff"));
     assert!(workflow.contains("sync with latest origin/develop before"));
     assert!(workflow.contains("https://github.com/origin/main.git"));
+    assert!(workflow.contains("Do not delete `origin/main`."));
 }
 
 #[tokio::test]
@@ -369,7 +371,7 @@ async fn marker_only_openhands_enables_existing_review_workflow() {
     );
     let gh_log = fs::read_to_string(gh_log).expect("gh log should exist");
     assert!(
-        gh_log.contains("ARGS=workflow enable .github/workflows/ai-pr-review.yml"),
+        gh_log.contains("ARGS=workflow enable ai-pr-review.yml"),
         "update should enable the existing OpenHands workflow: {gh_log}",
     );
     assert!(
@@ -405,7 +407,7 @@ async fn marker_only_non_openhands_providers_disable_existing_review_workflow() 
         );
         let gh_log = fs::read_to_string(gh_log).expect("gh log should exist");
         assert!(
-            gh_log.contains("ARGS=workflow disable .github/workflows/ai-pr-review.yml"),
+            gh_log.contains("ARGS=workflow disable ai-pr-review.yml"),
             "update should disable the existing OpenHands workflow for {provider}: {gh_log}",
         );
     }
@@ -439,9 +441,8 @@ async fn marker_only_workflow_toggle_failure_warns_and_keeps_marker_update() {
         fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should read");
     assert!(workflow.contains("Active review provider: `codex`"));
     assert!(
-        stderr.contains(
-            "Warning: `gh workflow disable .github/workflows/ai-pr-review.yml` exited with exit code 42"
-        ) && stderr.contains("WORKFLOW.md marker remains updated"),
+        stderr.contains("Warning: `gh workflow disable ai-pr-review.yml` exited with exit code 42")
+            && stderr.contains("WORKFLOW.md marker remains updated"),
         "stderr should warn with the failed command: {stderr}",
     );
 }

@@ -209,6 +209,11 @@ impl TargetBranch {
                 "target branch `{branch}` must be a stable local branch name, not checkout shorthand"
             )));
         }
+        if branch.contains('`') {
+            return Err(InitCommandError::InvalidArgument(format!(
+                "target branch `{branch}` cannot contain backticks because WORKFLOW.md markers use backtick delimiters"
+            )));
+        }
 
         let output = std::process::Command::new("git")
             .args(["check-ref-format", "--branch", branch])
@@ -2632,6 +2637,7 @@ Active review provider: `YOUR-REVIEW-PROVIDER`
             "refs/remotes/origin/develop",
             "@{-1}",
             "bad..branch",
+            "feature/has`tick",
         ] {
             assert!(
                 TargetBranch::parse(branch).is_err(),

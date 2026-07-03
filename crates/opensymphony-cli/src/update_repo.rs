@@ -22,15 +22,22 @@ const WORKFLOW_TARGET_BRANCH_HEADING: &str = "## Branch target";
 const WORKFLOW_TARGET_BRANCH_MARKER: &str = "Target branch:";
 const WORKFLOW_REVIEW_PROVIDER_MARKER: &str = "Active review provider:";
 const OPENHANDS_REVIEW_WORKFLOW_PATH: &str = ".github/workflows/ai-pr-review.yml";
+const OPENHANDS_REVIEW_WORKFLOW_FILE: &str = "ai-pr-review.yml";
 const LEGACY_WORKFLOW_TARGET_REMOTE_REF: &str = "origin/main";
 const LEGACY_BRANCH_CONTROL_PHRASES: &[&str] = &[
     "Keep feature branches current with `origin/main`.",
     "latest origin/main before handoff",
+    "latest `origin/main` before handoff",
     "branch from origin/main and restart",
+    "branch from `origin/main` and restart",
     "sync with latest origin/main before",
+    "sync with latest `origin/main` before",
     "Merge latest origin/main into branch",
+    "Merge latest `origin/main` into branch",
     "Create a fresh branch from origin/main.",
+    "Create a fresh branch from `origin/main`.",
     "merged origin/main clean",
+    "merged `origin/main` clean",
 ];
 
 #[derive(Debug, Args, Clone)]
@@ -276,9 +283,9 @@ fn sync_openhands_review_workflow(current_dir: &Path, code_review: ReviewProvide
         ReviewProviderArg::Openhands => "enable",
         ReviewProviderArg::Codex | ReviewProviderArg::None => "disable",
     };
-    let command = format!("gh workflow {action} {OPENHANDS_REVIEW_WORKFLOW_PATH}");
+    let command = format!("gh workflow {action} {OPENHANDS_REVIEW_WORKFLOW_FILE}");
     match StdCommand::new("gh")
-        .args(["workflow", action, OPENHANDS_REVIEW_WORKFLOW_PATH])
+        .args(["workflow", action, OPENHANDS_REVIEW_WORKFLOW_FILE])
         .current_dir(current_dir)
         .stdin(Stdio::null())
         .output()
@@ -362,17 +369,18 @@ where
 {
     let mut matches = Vec::new();
     let mut offset = 0;
-    let mut awaiting_marker = false;
+    let mut in_section = false;
     for line in workflow.split_inclusive('\n') {
         let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
         let trimmed = line_without_newline.trim();
         if trimmed == section_heading {
-            awaiting_marker = true;
-        } else if awaiting_marker && !trimmed.is_empty() {
-            if marker_line_value(line_without_newline, marker)?.is_some() {
+            in_section = true;
+        } else if in_section {
+            if trimmed.starts_with('#') {
+                in_section = false;
+            } else if marker_line_value(line_without_newline, marker)?.is_some() {
                 matches.push((offset, offset + line_without_newline.len()));
             }
-            awaiting_marker = false;
         }
         offset += line.len();
     }
@@ -465,15 +473,9 @@ fn review_provider_section(code_review: ReviewProviderArg) -> String {
     )
 }
 
-fn replace_legacy_branch_control_phrases(
-    mut workflow: String,
-    target_branch: &TargetBranch,
-) -> String {
+fn replace_legacy_branch_control_phrases(workflow: String, target_branch: &TargetBranch) -> String {
     let remote_ref = target_branch.remote_ref();
-    workflow = workflow.replace(
-        &format!("`{LEGACY_WORKFLOW_TARGET_REMOTE_REF}`"),
-        &format!("`{remote_ref}`"),
-    );
+    let mut workflow = workflow;
     for phrase in LEGACY_BRANCH_CONTROL_PHRASES {
         workflow = workflow.replace(
             phrase,
@@ -807,6 +809,8 @@ mod tests {
 Target branch: `main`
 
 Keep feature branches current with `origin/main`.
+Run the pull skill to sync with latest `origin/main` before code edits.
+Do not delete `origin/main`.
 Leave https://github.com/origin/main.git alone.
 
 ## Automated AI PR review
@@ -824,6 +828,8 @@ Active review provider: `openhands`
         assert!(patched.contains("Target branch: `release/next`"));
         assert!(patched.contains("Active review provider: `codex`"));
         assert!(patched.contains("Keep feature branches current with `origin/release/next`."));
+        assert!(patched.contains("sync with latest `origin/release/next` before"));
+        assert!(patched.contains("Do not delete `origin/main`."));
         assert!(patched.contains("https://github.com/origin/main.git"));
     }
 
@@ -860,6 +866,24 @@ Active review provider: `openhands`
             error
                 .to_string()
                 .contains("malformed managed `Target branch:` marker"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn patch_workflow_settings_rejects_duplicate_marker_in_managed_section() {
+        let target_branch = TargetBranch::parse("develop").expect("branch should parse");
+        let error = patch_workflow_settings(
+            "## Branch target\n\nTarget branch: `main`\nTarget branch: `release`\n",
+            Some(&target_branch),
+            None,
+        )
+        .expect_err("duplicate marker should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("multiple managed `Target branch:` markers"),
             "unexpected error: {error}"
         );
     }
