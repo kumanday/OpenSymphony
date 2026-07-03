@@ -181,6 +181,8 @@ fn update_help_explains_self_update_and_skill_refresh() {
     for snippet in [
         "Update the installed CLI and refresh template-managed skills",
         "Usage: opensymphony update",
+        "--target-branch <BRANCH>",
+        "--code-review <PROVIDER>",
     ] {
         assert!(
             stdout.contains(snippet),

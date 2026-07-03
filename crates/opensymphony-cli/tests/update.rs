@@ -4,7 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use axum::{
@@ -159,10 +159,237 @@ async fn update_installs_when_latest_is_newer_and_skips_skill_refresh_outside_ta
     );
 }
 
+#[tokio::test]
+async fn marker_only_target_branch_update_skips_reinstall_template_fetch_and_memory_bootstrap() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+    fs::write(
+        repo.path().join("WORKFLOW.md"),
+        r#"## Branch target
+
+Target branch: `main`
+
+Keep feature branches current with `origin/main`.
+- `pull`: keep branch updated with latest origin/main before handoff.
+Run the pull skill to sync with latest origin/main before any code edits.
+Leave https://github.com/origin/main.git unchanged.
+
+## Automated AI PR review
+
+Active review provider: `openhands`
+"#,
+    )
+    .expect("workflow should write");
+    fs::write(repo.path().join("config.yaml"), "tracker: {}\n").expect("config should write");
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--target-branch", "develop"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "update should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert_eq!(
+        cargo_invocation_count(&cargo_log),
+        0,
+        "marker-only mode should not run cargo install",
+    );
+    assert!(
+        server.requested_paths().is_empty(),
+        "marker-only mode should not fetch crate metadata or template assets: {:?}",
+        server.requested_paths(),
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/memory.yaml")
+            .exists(),
+        "marker-only mode should not initialize memory",
+    );
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should read");
+    assert!(workflow.contains("Target branch: `develop`"));
+    assert!(workflow.contains("Active review provider: `openhands`"));
+    assert!(workflow.contains("Keep feature branches current with `origin/develop`."));
+    assert!(workflow.contains("latest origin/develop before handoff"));
+    assert!(workflow.contains("sync with latest origin/develop before"));
+    assert!(workflow.contains("https://github.com/origin/main.git"));
+}
+
+#[tokio::test]
+async fn marker_only_code_review_update_changes_only_provider_marker() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+    fs::write(
+        repo.path().join("WORKFLOW.md"),
+        r#"## Branch target
+
+Target branch: `main`
+
+Keep feature branches current with `origin/main`.
+
+## Automated AI PR review
+
+Active review provider: `openhands`
+"#,
+    )
+    .expect("workflow should write");
+    fs::write(repo.path().join("config.yaml"), "tracker: {}\n").expect("config should write");
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--code-review", "codex"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "update should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert_eq!(cargo_invocation_count(&cargo_log), 0);
+    assert!(server.requested_paths().is_empty());
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should read");
+    assert!(workflow.contains("Target branch: `main`"));
+    assert!(workflow.contains("Keep feature branches current with `origin/main`."));
+    assert!(workflow.contains("Active review provider: `codex`"));
+}
+
+#[tokio::test]
+async fn marker_only_combined_update_changes_both_markers() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+    fs::write(
+        repo.path().join("WORKFLOW.md"),
+        r#"## Branch target
+
+Target branch: `main`
+
+## Automated AI PR review
+
+Active review provider: `openhands`
+"#,
+    )
+    .expect("workflow should write");
+    fs::write(repo.path().join("config.yaml"), "tracker: {}\n").expect("config should write");
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--target-branch", "develop", "--code-review", "codex"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "update should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should read");
+    assert!(workflow.contains("Target branch: `develop`"));
+    assert!(workflow.contains("Active review provider: `codex`"));
+    assert_eq!(cargo_invocation_count(&cargo_log), 0);
+    assert!(server.requested_paths().is_empty());
+}
+
+#[tokio::test]
+async fn marker_only_openhands_warns_when_review_workflow_file_is_absent() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+    fs::write(
+        repo.path().join("WORKFLOW.md"),
+        "## Automated AI PR review\n\nActive review provider: `none`\n",
+    )
+    .expect("workflow should write");
+    fs::write(repo.path().join("config.yaml"), "tracker: {}\n").expect("config should write");
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--code-review", "openhands"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "update should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stderr.contains("Warning: `--code-review openhands` only updates WORKFLOW.md"),
+        "stderr should warn about missing OpenHands workflow: {stderr}",
+    );
+}
+
+#[tokio::test]
+async fn marker_only_update_requires_target_repo_markers_before_side_effects() {
+    let server = UpdateServer::start("9.9.9").await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let cargo_log = repo.path().join("cargo.log");
+
+    let output = run_update_with_args(
+        repo.path(),
+        &cargo_log,
+        &server,
+        &["--code-review", "codex"],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "update should fail outside a target repo: stdout={stdout}, stderr={stderr}",
+    );
+    assert_eq!(
+        cargo_invocation_count(&cargo_log),
+        0,
+        "marker-only mode should not run cargo install before marker validation",
+    );
+    assert!(
+        server.requested_paths().is_empty(),
+        "marker-only mode should not fetch before marker validation: {:?}",
+        server.requested_paths(),
+    );
+    assert!(
+        stderr.contains("workflow settings mode requires an OpenSymphony target repo"),
+        "stderr should explain missing target repo markers: {stderr}",
+    );
+}
+
 async fn run_update(
     repo_root: &Path,
     cargo_log: &Path,
     server: &UpdateServer,
+) -> std::process::Output {
+    run_update_with_args(repo_root, cargo_log, server, &[]).await
+}
+
+async fn run_update_with_args(
+    repo_root: &Path,
+    cargo_log: &Path,
+    server: &UpdateServer,
+    args: &[&str],
 ) -> std::process::Output {
     let fake_bin_dir = repo_root.join(".test-bin");
     fs::create_dir_all(&fake_bin_dir).expect("fake bin dir should exist");
@@ -170,6 +397,7 @@ async fn run_update(
 
     Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .arg("update")
+        .args(args)
         .current_dir(repo_root)
         .env("PATH", path_only(fake_bin_dir.as_path()))
         .env("OPENSYMPHONY_TEMPLATE_BASE_URL", server.base_url())
@@ -189,6 +417,7 @@ async fn run_update(
 struct UpdateServer {
     base_url: String,
     crate_metadata_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -197,7 +426,9 @@ impl UpdateServer {
         let state = Arc::new(ServerState {
             latest_version: latest_version.to_string(),
             assets: template_assets(),
+            requests: Arc::new(Mutex::new(Vec::new())),
         });
+        let requests = Arc::clone(&state.requests);
         let app = Router::new()
             .fallback(get(update_handler))
             .with_state(state);
@@ -216,6 +447,7 @@ impl UpdateServer {
         Self {
             base_url: format!("http://{address}/"),
             crate_metadata_url: format!("http://{address}/__crate.json"),
+            requests,
             task,
         }
     }
@@ -226,6 +458,13 @@ impl UpdateServer {
 
     fn crate_metadata_url(&self) -> &str {
         &self.crate_metadata_url
+    }
+
+    fn requested_paths(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .expect("request log should not be poisoned")
+            .clone()
     }
 }
 
@@ -238,6 +477,7 @@ impl Drop for UpdateServer {
 struct ServerState {
     latest_version: String,
     assets: BTreeMap<String, String>,
+    requests: Arc<Mutex<Vec<String>>>,
 }
 
 async fn update_handler(
@@ -246,6 +486,11 @@ async fn update_handler(
     _request: Request,
 ) -> Response {
     let path = uri.path().trim_start_matches('/');
+    state
+        .requests
+        .lock()
+        .expect("request log should not be poisoned")
+        .push(path.to_string());
     if path == "__crate.json" {
         return (
             StatusCode::OK,
@@ -317,7 +562,11 @@ fn memory_gitignore_policy(prefix: &str) -> String {
 }
 
 fn path_only(path: &Path) -> OsString {
-    std::env::join_paths([path]).expect("path should join")
+    let mut paths = vec![path.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths).expect("path should join")
 }
 
 fn write_fake_cargo(path: PathBuf, log_path: &Path) {
