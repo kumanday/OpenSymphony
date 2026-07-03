@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: query-packs
+area: target-repo-bootstrap
 visibility: public
-last_memory_sync: 2026-07-02T03:46:15.376296+00:00
+last_memory_sync: 2026-07-03T14:47:49.886918+00:00
 ---
 
-# Query Packs
+# Target Repo Bootstrap
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

@@ -40,10 +40,13 @@ areas:
       - area:memory
       - area:operations
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
+      - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   ai-pr-review-human-setup:
     title: OpenHands PR Review - Human Setup Guide
     docs_target: docs/ai-pr-review-human-setup.md
@@ -127,6 +130,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -142,6 +146,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   cli:
     title: Cli
@@ -184,6 +189,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -199,6 +205,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   code-intelligence:
     title: Code Intelligence
@@ -225,12 +232,15 @@ areas:
       - area:query-packs
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   codex:
     title: Codex
     docs_target: docs/codex.md
@@ -270,6 +280,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -285,6 +296,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   codex-app-server:
     title: Codex App-Server Harness
@@ -334,13 +346,16 @@ areas:
       - area:query-packs
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -361,6 +376,7 @@ areas:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9.5: Developer Build Acceleration'
@@ -404,6 +420,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -419,6 +436,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   deployment-modes:
     title: Deployment Modes
@@ -474,6 +492,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -489,6 +508,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   developer-experience:
     title: Developer Experience
@@ -530,6 +550,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -544,6 +565,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   development:
     title: Development Guide
@@ -620,6 +642,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -635,6 +658,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   documentation:
     title: Documentation
@@ -646,11 +670,15 @@ areas:
     - documentation
     source_refs:
       linear_labels:
+      - area:cli
       - area:documentation
       - area:operations
+      - area:target-repo-bootstrap
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   duckdb:
     title: Duckdb
     docs_target: docs/duckdb.md
@@ -690,6 +718,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -705,6 +734,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   elixir-hierarchy-changes:
     title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
@@ -740,12 +770,15 @@ areas:
       - area:operations
       - area:query-packs
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   gateway:
     title: Gateway
     docs_target: docs/gateway.md
@@ -785,6 +818,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -800,6 +834,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   graph-view:
     title: Graph View
@@ -826,12 +861,15 @@ areas:
       - area:query-packs
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   harness-runtime:
     title: Harness Runtime
     docs_target: docs/harness-runtime.md
@@ -872,6 +910,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -886,6 +925,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   host-client-architecture:
     title: OpenSymphony Host-Client Architecture
@@ -1004,6 +1044,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1018,6 +1059,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   linear:
     title: Linear
@@ -1058,6 +1100,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1073,6 +1116,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   linear-and-tools:
     title: Linear and Tools
@@ -1128,6 +1172,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1142,6 +1187,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   memory:
     title: Project Memory
@@ -1188,6 +1234,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1203,6 +1250,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -1260,6 +1308,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1274,6 +1323,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   okf:
     title: Okf
@@ -1314,6 +1364,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1328,6 +1379,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   openhands-agent-server:
     title: OpenHands Agent-Server Integration
@@ -1383,13 +1435,16 @@ areas:
       - area:query-packs
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   operations:
     title: Operations
     docs_target: docs/operations.md
@@ -1431,6 +1486,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1447,6 +1503,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -1492,6 +1549,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1507,6 +1565,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   prerequisites:
     title: Prerequisites
@@ -1547,12 +1606,15 @@ areas:
       - area:operations
       - area:query-packs
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   repository-layout:
     title: Repository Layout
     docs_target: docs/repository-layout.md
@@ -1610,6 +1672,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1625,6 +1688,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   rust:
     title: Rust
@@ -1650,13 +1714,16 @@ areas:
       - area:query-packs
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   security:
     title: Security
     docs_target: docs/security.md
@@ -1696,6 +1763,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1711,6 +1779,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   sources:
     title: Sources and Trust Notes
@@ -1743,6 +1812,21 @@ areas:
     source_refs:
       docs:
       - docs/specs/symphony-spec-alignment.md
+  target-repo-bootstrap:
+    title: Target Repo Bootstrap
+    docs_target: docs/target-repo-bootstrap.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - target repo bootstrap
+    - target-repo-bootstrap
+    source_refs:
+      linear_labels:
+      - area:target-repo-bootstrap
+      - area:workflow
+      linear_milestones:
+      - 'M12.7: Workflow Target Branch Configuration'
   testing:
     title: Testing
     docs_target: docs/testing.md
@@ -1782,6 +1866,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1797,6 +1882,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   testing-and-operations:
     title: Testing
@@ -1848,13 +1934,16 @@ areas:
       - area:memory
       - area:operations
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   threejs:
     title: Threejs
     docs_target: docs/threejs.md
@@ -1877,11 +1966,14 @@ areas:
       - area:memory
       - area:operations
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:threejs
+      - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   tui:
     title: Tui
     docs_target: docs/tui.md
@@ -1921,6 +2013,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1935,6 +2028,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   ui:
     title: Ui
@@ -1975,6 +2069,7 @@ areas:
       - area:runtime
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -1989,6 +2084,7 @@ areas:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M9.5: Developer Build Acceleration'
   ui-frankentui:
     title: FrankenTUI Operator UI
@@ -2044,6 +2140,7 @@ areas:
       - area:query-packs
       - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:testing
       - area:tests
       - area:threejs
@@ -2052,6 +2149,7 @@ areas:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
     docs_target: docs/workspace-and-lifecycle.md
