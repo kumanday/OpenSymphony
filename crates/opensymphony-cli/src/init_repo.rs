@@ -188,10 +188,11 @@ impl ReviewProviderArg {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct TargetBranch(String);
+pub(crate) struct TargetBranch(String);
 
 impl TargetBranch {
-    fn parse(value: &str) -> Result<Self, InitCommandError> {
+    #[allow(dead_code)]
+    pub(crate) fn parse(value: &str) -> Result<Self, InitCommandError> {
         let branch = value.trim();
         if branch.is_empty() {
             return Err(InitCommandError::InvalidArgument(
@@ -409,6 +410,7 @@ pub(crate) enum InitCommandError {
     },
     #[error("failed to read interactive input: {0}")]
     PromptIo(#[source] io::Error),
+    #[allow(dead_code)]
     #[error("failed to validate target branch with git check-ref-format: {0}")]
     GitCheckRefFormat(#[source] io::Error),
     #[error("input closed while waiting for a response")]
@@ -700,7 +702,7 @@ where
     } else {
         prompt_review_provider(ui)?
     };
-    let target_branch = TargetBranch::parse(DEFAULT_TARGET_BRANCH)?;
+    let target_branch = TargetBranch::default();
     let enable_ai_pr_review = review_provider == ReviewProviderArg::Openhands;
     let ai_review_config = if enable_ai_pr_review {
         Some(
@@ -1788,14 +1790,24 @@ fn customize_workflow(
 
 fn replace_legacy_target_remote_refs(workflow: String, target_branch: &TargetBranch) -> String {
     let remote_ref = target_branch.remote_ref();
-    let workflow = workflow.replace(
+    let mut workflow = workflow.replace(
         &format!("`{LEGACY_WORKFLOW_TARGET_REMOTE_REF}`"),
         &format!("`{remote_ref}`"),
     );
-    workflow.replace(
+    for phrase in [
+        "latest origin/main before handoff",
+        "branch from origin/main and restart",
+        "sync with latest origin/main before",
+        "Merge latest origin/main into branch",
+        "Create a fresh branch from origin/main.",
         "merged origin/main clean",
-        &format!("merged {remote_ref} clean"),
-    )
+    ] {
+        workflow = workflow.replace(
+            phrase,
+            &phrase.replace(LEGACY_WORKFLOW_TARGET_REMOTE_REF, &remote_ref),
+        );
+    }
+    workflow
 }
 
 fn ensure_target_branch_marker(mut workflow: String, target_branch: &TargetBranch) -> String {
@@ -2661,6 +2673,11 @@ hooks:
 
 Keep feature branches current with `origin/main`.
 
+- `pull`: keep branch updated with latest origin/main before handoff.
+- For closed PRs, create a fresh branch from origin/main and restart execution flow.
+- Run the pull skill to sync with latest origin/main before any code edits.
+- Merge latest origin/main into branch, resolve conflicts, and rerun checks.
+- Create a fresh branch from origin/main.
 Pull skill: merged origin/main clean, HEAD now <short-sha>.
 "#;
 
@@ -2674,8 +2691,18 @@ Pull skill: merged origin/main clean, HEAD now <short-sha>.
 
         assert!(customized.contains("git clone --depth 1 'https://github.com/origin/main.git' ."));
         assert!(customized.contains("`origin/develop`"));
+        assert!(customized.contains("latest origin/develop before handoff"));
+        assert!(customized.contains("branch from origin/develop and restart"));
+        assert!(customized.contains("sync with latest origin/develop before"));
+        assert!(customized.contains("Merge latest origin/develop into branch"));
+        assert!(customized.contains("Create a fresh branch from origin/develop."));
         assert!(customized.contains("Pull skill: merged origin/develop clean"));
         assert!(!customized.contains("https://github.com/origin/develop.git"));
+        assert!(!customized.contains("latest origin/main before handoff"));
+        assert!(!customized.contains("branch from origin/main and restart"));
+        assert!(!customized.contains("sync with latest origin/main before"));
+        assert!(!customized.contains("Merge latest origin/main into branch"));
+        assert!(!customized.contains("Create a fresh branch from origin/main."));
     }
 
     #[test]

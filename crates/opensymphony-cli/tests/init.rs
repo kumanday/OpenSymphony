@@ -217,6 +217,40 @@ async fn init_non_interactive_succeeds_with_flags_and_closed_stdin() {
 }
 
 #[tokio::test]
+async fn init_non_interactive_default_target_branch_does_not_require_git_on_path() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child_with_env(
+        repo.path(),
+        server.base_url(),
+        &["--non-interactive", "--linear-project-slug", "demo-project"],
+        &[("PATH", "")],
+    );
+    write_stdin(&mut child, "").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "non-interactive init should not require git to validate the default branch: stdout={stdout}, stderr={stderr}",
+    );
+
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "init should record the static default target branch: {workflow}",
+    );
+}
+
+#[tokio::test]
 async fn init_non_interactive_fails_before_writing_without_conflict_policy() {
     let server = TemplateServer::start().await;
     let repo = TempDir::new().expect("temp repo should exist");
