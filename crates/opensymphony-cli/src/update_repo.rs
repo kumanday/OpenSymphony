@@ -18,6 +18,7 @@ use crate::opensymphony_cli::init_repo::{
 use crate::opensymphony_memory::{MemoryInitApplyReport, ensure_memory_initialized};
 
 const DEFAULT_CRATE_METADATA_URL: &str = "https://crates.io/api/v1/crates/opensymphony";
+const WORKFLOW_TARGET_BRANCH_HEADING: &str = "## Branch target";
 const WORKFLOW_TARGET_BRANCH_MARKER: &str = "Target branch:";
 const WORKFLOW_REVIEW_PROVIDER_MARKER: &str = "Active review provider:";
 const OPENHANDS_REVIEW_WORKFLOW_PATH: &str = ".github/workflows/ai-pr-review.yml";
@@ -295,6 +296,7 @@ fn patch_target_branch_marker(
 ) -> Result<String, UpdateCommandError> {
     patch_marker_line(
         workflow,
+        WORKFLOW_TARGET_BRANCH_HEADING,
         WORKFLOW_TARGET_BRANCH_MARKER,
         target_branch.local(),
         || target_branch_section(target_branch),
@@ -307,6 +309,7 @@ fn patch_review_provider_marker(
 ) -> Result<String, UpdateCommandError> {
     patch_marker_line(
         workflow,
+        WORKFLOW_AUTOMATED_REVIEW_HEADING,
         WORKFLOW_REVIEW_PROVIDER_MARKER,
         code_review.as_str(),
         || review_provider_section(code_review),
@@ -315,6 +318,7 @@ fn patch_review_provider_marker(
 
 fn patch_marker_line<F>(
     workflow: String,
+    section_heading: &'static str,
     marker: &'static str,
     value: &str,
     missing_section: F,
@@ -324,10 +328,17 @@ where
 {
     let mut matches = Vec::new();
     let mut offset = 0;
+    let mut awaiting_marker = false;
     for line in workflow.split_inclusive('\n') {
         let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
-        if marker_line_value(line_without_newline, marker)?.is_some() {
-            matches.push((offset, offset + line_without_newline.len()));
+        let trimmed = line_without_newline.trim();
+        if trimmed == section_heading {
+            awaiting_marker = true;
+        } else if awaiting_marker && !trimmed.is_empty() {
+            if marker_line_value(line_without_newline, marker)?.is_some() {
+                matches.push((offset, offset + line_without_newline.len()));
+            }
+            awaiting_marker = false;
         }
         offset += line.len();
     }
@@ -408,7 +419,7 @@ fn insert_managed_section(mut workflow: String, section: &str, marker: &str) -> 
 
 fn target_branch_section(target_branch: &TargetBranch) -> String {
     format!(
-        "## Branch target\n\nTarget branch: `{}`\n\n<!-- Set by `opensymphony init` or `opensymphony update --target-branch`.\n     Value is a local branch name, not an `origin/...` ref. Agents should use\n     `origin/<target-branch>` when syncing, creating replacement branches, and\n     preparing PRs. -->\n\n",
+        "{WORKFLOW_TARGET_BRANCH_HEADING}\n\nTarget branch: `{}`\n\n<!-- Set by `opensymphony init` or `opensymphony update --target-branch`.\n     Value is a local branch name, not an `origin/...` ref. Agents should use\n     `origin/<target-branch>` when syncing, creating replacement branches, and\n     preparing PRs. -->\n\n",
         target_branch.local()
     )
 }
@@ -812,6 +823,42 @@ Active review provider: `openhands`
                 .to_string()
                 .contains("malformed managed `Target branch:` marker"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn patch_workflow_settings_ignores_marker_like_prose_outside_managed_slot() {
+        let target_branch = TargetBranch::parse("develop").expect("branch should parse");
+        let workflow = r#"# Notes
+
+Target branch: `example`
+Active review provider: `example`
+
+## Branch target
+
+Target branch: `main`
+
+## Automated AI PR review
+
+Active review provider: `openhands`
+"#;
+
+        let patched = patch_workflow_settings(
+            workflow,
+            Some(&target_branch),
+            Some(ReviewProviderArg::Codex),
+        )
+        .expect("workflow should patch");
+
+        assert_eq!(patched.matches("Target branch: `example`").count(), 1);
+        assert_eq!(
+            patched.matches("Active review provider: `example`").count(),
+            1
+        );
+        assert_eq!(patched.matches("Target branch: `develop`").count(), 1);
+        assert_eq!(
+            patched.matches("Active review provider: `codex`").count(),
+            1
         );
     }
 }
