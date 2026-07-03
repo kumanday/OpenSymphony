@@ -251,6 +251,9 @@ Important rule:
 When you change shared target-repo assets, update the template first and then
 make sure the `init` and `update` flows still copy the full tree.
 
+For the planned configurable target branch and marker-only workflow update
+flags, see [Workflow Target Branch And Update Settings Specification](specs/workflow-target-branch-update-spec.md).
+
 Provisioning scripts can initialize a target repo without stdin prompts:
 
 ```bash

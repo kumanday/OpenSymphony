@@ -218,6 +218,17 @@ Tasks:
 - OSYM-854 Read-Only AST MCP And CLI Tools
 - OSYM-855 Code Intelligence Performance Docs And Hardening
 
+## M12.7: Workflow Target Branch Configuration
+
+Goal: Let target repositories choose `main`, `master`, `develop`, or another long-lived integration branch for OpenSymphony-generated agent workflow guidance without rewriting local workflow customizations.
+
+Tasks:
+
+- OSYM-856 Workflow Target Branch Model And Init Customization
+- OSYM-857 Init Target Branch Prompt And Flag
+- OSYM-858 Update Workflow Settings Mode
+- OSYM-859 Template Docs And Settings Hardening
+
 ## M13: Hardening And Release Quality
 
 Goal: Prove the system through contract, end-to-end, performance, security, accessibility, and documentation work.
