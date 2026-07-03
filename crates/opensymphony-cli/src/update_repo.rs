@@ -316,12 +316,16 @@ fn patch_workflow_settings(
     let mut patched = workflow.replace("\r\n", "\n");
 
     if let Some(target_branch) = target_branch {
-        patched = patch_target_branch_marker(patched, target_branch)?;
-        patched = replace_legacy_branch_control_phrases(patched, target_branch);
+        let marker_patch = patch_target_branch_marker(patched, target_branch)?;
+        patched = replace_legacy_branch_control_phrases(
+            marker_patch.workflow,
+            marker_patch.previous_value.as_deref(),
+            target_branch,
+        );
     }
 
     if let Some(code_review) = code_review {
-        patched = patch_review_provider_marker(patched, code_review)?;
+        patched = patch_review_provider_marker(patched, code_review)?.workflow;
     }
 
     if had_crlf {
@@ -331,10 +335,15 @@ fn patch_workflow_settings(
     }
 }
 
+struct MarkerPatch {
+    workflow: String,
+    previous_value: Option<String>,
+}
+
 fn patch_target_branch_marker(
     workflow: String,
     target_branch: &TargetBranch,
-) -> Result<String, UpdateCommandError> {
+) -> Result<MarkerPatch, UpdateCommandError> {
     patch_marker_line(
         workflow,
         WORKFLOW_TARGET_BRANCH_HEADING,
@@ -347,7 +356,7 @@ fn patch_target_branch_marker(
 fn patch_review_provider_marker(
     workflow: String,
     code_review: ReviewProviderArg,
-) -> Result<String, UpdateCommandError> {
+) -> Result<MarkerPatch, UpdateCommandError> {
     patch_marker_line(
         workflow,
         WORKFLOW_AUTOMATED_REVIEW_HEADING,
@@ -363,7 +372,7 @@ fn patch_marker_line<F>(
     marker: &'static str,
     value: &str,
     missing_section: F,
-) -> Result<String, UpdateCommandError>
+) -> Result<MarkerPatch, UpdateCommandError>
 where
     F: FnOnce() -> String,
 {
@@ -378,19 +387,29 @@ where
         } else if in_section {
             if trimmed.starts_with('#') {
                 in_section = false;
-            } else if marker_line_value(line_without_newline, marker)?.is_some() {
-                matches.push((offset, offset + line_without_newline.len()));
+            } else if let Some(value) = marker_line_value(line_without_newline, marker)? {
+                matches.push((
+                    offset,
+                    offset + line_without_newline.len(),
+                    value.to_string(),
+                ));
             }
         }
         offset += line.len();
     }
 
     match matches.as_slice() {
-        [] => Ok(insert_managed_section(workflow, &missing_section(), marker)),
-        [(start, end)] => {
+        [] => Ok(MarkerPatch {
+            workflow: insert_managed_section(workflow, &missing_section(), marker),
+            previous_value: None,
+        }),
+        [(start, end, previous_value)] => {
             let mut patched = workflow;
             patched.replace_range(*start..*end, &format!("{marker} `{value}`"));
-            Ok(patched)
+            Ok(MarkerPatch {
+                workflow: patched,
+                previous_value: Some(previous_value.clone()),
+            })
         }
         _ => Err(UpdateCommandError::MultipleWorkflowMarkers { marker }),
     }
@@ -411,16 +430,25 @@ fn marker_line_value<'a>(
     else {
         return Err(UpdateCommandError::MalformedWorkflowMarker {
             marker,
-            example: format!("{marker} `develop`"),
+            example: marker_example(marker),
         });
     };
     if value.trim().is_empty() || value.contains('`') {
         return Err(UpdateCommandError::MalformedWorkflowMarker {
             marker,
-            example: format!("{marker} `develop`"),
+            example: marker_example(marker),
         });
     }
     Ok(Some(value))
+}
+
+fn marker_example(marker: &'static str) -> String {
+    let value = if marker == WORKFLOW_REVIEW_PROVIDER_MARKER {
+        "codex"
+    } else {
+        "develop"
+    };
+    format!("{marker} `{value}`")
 }
 
 fn insert_managed_section(mut workflow: String, section: &str, marker: &str) -> String {
@@ -473,14 +501,26 @@ fn review_provider_section(code_review: ReviewProviderArg) -> String {
     )
 }
 
-fn replace_legacy_branch_control_phrases(workflow: String, target_branch: &TargetBranch) -> String {
+fn replace_legacy_branch_control_phrases(
+    workflow: String,
+    previous_branch: Option<&str>,
+    target_branch: &TargetBranch,
+) -> String {
     let remote_ref = target_branch.remote_ref();
     let mut workflow = workflow;
+    let mut source_refs = vec![LEGACY_WORKFLOW_TARGET_REMOTE_REF.to_string()];
+    if let Some(previous_branch) = previous_branch {
+        let previous_ref = format!("origin/{previous_branch}");
+        if previous_ref != LEGACY_WORKFLOW_TARGET_REMOTE_REF {
+            source_refs.push(previous_ref);
+        }
+    }
     for phrase in LEGACY_BRANCH_CONTROL_PHRASES {
-        workflow = workflow.replace(
-            phrase,
-            &phrase.replace(LEGACY_WORKFLOW_TARGET_REMOTE_REF, &remote_ref),
-        );
+        for source_ref in &source_refs {
+            let source_phrase = phrase.replace(LEGACY_WORKFLOW_TARGET_REMOTE_REF, source_ref);
+            let target_phrase = phrase.replace(LEGACY_WORKFLOW_TARGET_REMOTE_REF, &remote_ref);
+            workflow = workflow.replace(&source_phrase, &target_phrase);
+        }
     }
     workflow
 }
@@ -834,6 +874,33 @@ Active review provider: `openhands`
     }
 
     #[test]
+    fn patch_workflow_settings_updates_previous_branch_control_text() {
+        let target_branch = TargetBranch::parse("release/next").expect("branch should parse");
+        let workflow = r#"## Branch target
+
+Target branch: `develop`
+
+Keep feature branches current with `origin/develop`.
+Run the pull skill to sync with latest origin/develop before code edits.
+Run the pull skill to sync with latest `origin/develop` before code edits.
+Do not delete `origin/develop`.
+
+## Automated AI PR review
+
+Active review provider: `codex`
+"#;
+
+        let patched = patch_workflow_settings(workflow, Some(&target_branch), None)
+            .expect("workflow should patch");
+
+        assert!(patched.contains("Target branch: `release/next`"));
+        assert!(patched.contains("Keep feature branches current with `origin/release/next`."));
+        assert!(patched.contains("sync with latest origin/release/next before"));
+        assert!(patched.contains("sync with latest `origin/release/next` before"));
+        assert!(patched.contains("Do not delete `origin/develop`."));
+    }
+
+    #[test]
     fn patch_workflow_settings_inserts_missing_managed_markers() {
         let target_branch = TargetBranch::parse("develop").expect("branch should parse");
         let workflow = "# Existing workflow\n\nKeep this prose.\n";
@@ -868,6 +935,42 @@ Active review provider: `openhands`
                 .contains("malformed managed `Target branch:` marker"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn patch_workflow_settings_uses_provider_example_for_malformed_provider_marker() {
+        let error = patch_workflow_settings(
+            "## Automated AI PR review\n\nActive review provider: codex\n",
+            None,
+            Some(ReviewProviderArg::Openhands),
+        )
+        .expect_err("malformed provider marker should fail");
+        let error = error.to_string();
+
+        assert!(
+            error.contains("expected `Active review provider: `codex``"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains("Active review provider: `develop`"),
+            "provider marker error should not show branch examples: {error}"
+        );
+    }
+
+    #[test]
+    fn patch_workflow_settings_accepts_trailing_marker_whitespace() {
+        let target_branch = TargetBranch::parse("develop").expect("branch should parse");
+        let workflow = "## Branch target\n\nTarget branch: `main`  \n\n## Automated AI PR review\n\nActive review provider: `openhands`\t\n";
+
+        let patched = patch_workflow_settings(
+            workflow,
+            Some(&target_branch),
+            Some(ReviewProviderArg::Codex),
+        )
+        .expect("trailing whitespace should be tolerated");
+
+        assert!(patched.contains("Target branch: `develop`"));
+        assert!(patched.contains("Active review provider: `codex`"));
     }
 
     #[test]
