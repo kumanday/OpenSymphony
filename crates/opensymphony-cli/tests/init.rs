@@ -40,6 +40,18 @@ async fn init_copies_template_files_and_customizes_workflow() {
         workflow.contains("Active review provider: `none`"),
         "declining review setup should record provider `none`: {workflow}",
     );
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "init should record the default target branch: {workflow}",
+    );
+    assert!(
+        workflow.contains("Keep feature branches current with `origin/develop`."),
+        "init should patch generated branch guidance: {workflow}",
+    );
+    assert!(
+        !workflow.contains("Target branch: `origin/develop`"),
+        "stored marker must stay local-only: {workflow}",
+    );
     assert!(config.contains("tool_dir: ~/.opensymphony/openhands-server"));
 
     assert!(
@@ -183,6 +195,14 @@ async fn init_non_interactive_succeeds_with_flags_and_closed_stdin() {
     assert!(workflow.contains("project_slug: \"demo-project\""));
     assert!(workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."));
     assert!(
+        workflow.contains("Target branch: `develop`"),
+        "non-interactive init should record the default target branch: {workflow}",
+    );
+    assert!(
+        workflow.contains("Keep feature branches current with `origin/develop`."),
+        "non-interactive init should patch generated branch guidance: {workflow}",
+    );
+    assert!(
         stdout.contains("Skipped automatic commit/push. Pass `--commit-and-push`"),
         "non-interactive init should skip commit/push without prompting: {stdout}",
     );
@@ -193,6 +213,40 @@ async fn init_non_interactive_succeeds_with_flags_and_closed_stdin() {
     assert!(
         !stdout.contains("Enter your Linear project slug/key"),
         "non-interactive init should not prompt for Linear slug: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn init_non_interactive_default_target_branch_does_not_require_git_on_path() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child_with_env(
+        repo.path(),
+        server.base_url(),
+        &["--non-interactive", "--linear-project-slug", "demo-project"],
+        &[("PATH", "")],
+    );
+    write_stdin(&mut child, "").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "non-interactive init should not require git to validate the default branch: stdout={stdout}, stderr={stderr}",
+    );
+
+    let workflow =
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "init should record the static default target branch: {workflow}",
     );
 }
 
@@ -326,6 +380,10 @@ async fn init_non_interactive_conflict_policy_overwrite_replaces_existing_files(
         workflow.contains("project_slug: \"demo-project\"")
             && workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."),
         "overwrite should replace the workflow with customized template content: {workflow}",
+    );
+    assert!(
+        workflow.contains("Target branch: `develop`"),
+        "overwrite should render the default target branch: {workflow}",
     );
     assert!(
         !workflow.contains("user workflow"),
@@ -1243,6 +1301,12 @@ openhands:
       llm:
         model: ${LLM_MODEL}
 ---
+
+## Branch target
+
+Target branch: `YOUR-TARGET-BRANCH`
+
+Keep feature branches current with `origin/main`.
 
 ## Automated AI PR review
 
