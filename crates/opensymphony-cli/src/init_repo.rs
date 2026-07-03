@@ -74,6 +74,12 @@ pub struct InitArgs {
     linear_project_slug: Option<String>,
     #[arg(
         long,
+        value_name = "BRANCH",
+        help = "Target branch for feature PRs and syncs; examples: develop (default), main, release/next"
+    )]
+    target_branch: Option<String>,
+    #[arg(
+        long,
         value_enum,
         value_name = "POLICY",
         help = "Apply this policy for existing generated files instead of prompting"
@@ -276,6 +282,13 @@ impl InitArgs {
         }
 
         Ok(())
+    }
+
+    fn explicit_target_branch(&self) -> Result<Option<TargetBranch>, InitCommandError> {
+        self.target_branch
+            .as_deref()
+            .map(TargetBranch::parse)
+            .transpose()
     }
 
     fn resolved_review_provider_from_flags(&self) -> Option<ReviewProviderArg> {
@@ -688,6 +701,7 @@ where
     E: EnvLookup,
 {
     args.validate()?;
+    let explicit_target_branch = args.explicit_target_branch()?;
     ui.set_allow_prompts(!args.non_interactive);
 
     let target_repo = env::current_dir().map_err(InitCommandError::CurrentDir)?;
@@ -702,7 +716,6 @@ where
     } else {
         prompt_review_provider(ui)?
     };
-    let target_branch = TargetBranch::default();
     let enable_ai_pr_review = review_provider == ReviewProviderArg::Openhands;
     let ai_review_config = if enable_ai_pr_review {
         Some(
@@ -741,6 +754,13 @@ where
                 PlannedAction::Create | PlannedAction::Overwrite | PlannedAction::CustomizeWorkflow
             )
     });
+    let target_branch = if let Some(branch) = explicit_target_branch {
+        branch
+    } else if workflow_will_change && !args.non_interactive {
+        prompt_target_branch(ui)?
+    } else {
+        TargetBranch::default()
+    };
 
     let git_remote = detect_git_remote_url(&target_repo);
     match &git_remote {
@@ -1573,6 +1593,30 @@ where
         Ok(default.to_string())
     } else {
         Ok(trimmed.to_string())
+    }
+}
+
+fn prompt_target_branch<R, W>(ui: &mut PromptUi<R, W>) -> Result<TargetBranch, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    ui.blank_line()?;
+    ui.line("Choose the target branch for future feature PRs and syncs.")?;
+    ui.line("Examples: `develop` (default), `main`, `release/next`, etc.")?;
+    loop {
+        let response = prompt_with_default(
+            ui,
+            "Target branch for feature PRs and syncs (default develop): ",
+            DEFAULT_TARGET_BRANCH,
+        )?;
+        match TargetBranch::parse(&response) {
+            Ok(branch) => return Ok(branch),
+            Err(InitCommandError::InvalidArgument(message)) => {
+                ui.line(format!("Please enter a local branch name: {message}"))?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
