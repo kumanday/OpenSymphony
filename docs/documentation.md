@@ -11,11 +11,7 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 
 ## Current model
 
-- COE-503 contributed: PR #175: feat(code-intel): harden AST limits and docs (merge `c6241a9`)
-- COE-505 contributed: PR #162: Interrupt review polling when issues start merging (merge `0a3047a`)
-- COE-506 contributed: PR #167: feat(memory): use AST code intel for context (merge `2e0a092`)
-- COE-507 contributed: PR #178: Refactor query-pack assets for grammar variants (merge `638e83e`)
-- COE-508 contributed: PR #180: Cache code-intel parser and query-pack setup (merge `aa26dfc`)
+- COE-521 contributed: PR #184: Record workflow target branch marker (merge `641c8bb`)
 
 ## Important invariants
 
@@ -32,18 +28,10 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 
 ## Recent changes
 
-- COE-503: Code Intelligence Performance Docs And Hardening
-- COE-505: Add scheduler-side Codex stdio interrupt channel
-- COE-506: Invert CodeIntelIndex trait ownership after AST memory integration
-- COE-507: Deduplicate query-pack assets for grammar variants
-- COE-508: Cache code-intel parsers and compiled query packs
+- COE-521: Workflow Target Branch Model And Init Customization
 
 ## Source refs
 
-- COE-503
-- COE-505
-- COE-506
-- COE-507
-- COE-508
+- COE-521
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
