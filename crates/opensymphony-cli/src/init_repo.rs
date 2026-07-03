@@ -1787,9 +1787,14 @@ fn customize_workflow(
 }
 
 fn replace_legacy_target_remote_refs(workflow: String, target_branch: &TargetBranch) -> String {
-    workflow.replace(
+    let remote_ref = target_branch.remote_ref();
+    let workflow = workflow.replace(
         &format!("`{LEGACY_WORKFLOW_TARGET_REMOTE_REF}`"),
-        &format!("`{}`", target_branch.remote_ref()),
+        &format!("`{remote_ref}`"),
+    );
+    workflow.replace(
+        "merged origin/main clean",
+        &format!("merged {remote_ref} clean"),
     )
 }
 
@@ -2655,6 +2660,8 @@ hooks:
 ---
 
 Keep feature branches current with `origin/main`.
+
+Pull skill: merged origin/main clean, HEAD now <short-sha>.
 "#;
 
         let customized = customize_workflow(
@@ -2667,6 +2674,7 @@ Keep feature branches current with `origin/main`.
 
         assert!(customized.contains("git clone --depth 1 'https://github.com/origin/main.git' ."));
         assert!(customized.contains("`origin/develop`"));
+        assert!(customized.contains("Pull skill: merged origin/develop clean"));
         assert!(!customized.contains("https://github.com/origin/develop.git"));
     }
 
