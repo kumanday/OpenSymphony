@@ -138,7 +138,7 @@ workflow.
 - `linear`: interact with Linear.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
-- `pull`: keep branch updated with latest `origin/main` before handoff.
+- `pull`: keep branch updated with the configured target branch before handoff.
 - `land`: when ticket reaches `Merging`, explicitly open and follow `.agents/skills/land/SKILL.md`, which includes the `land` loop.
 
 ## Status map
@@ -167,7 +167,7 @@ workflow.
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
    - For `Todo`, `In Progress`, or `Rework`: if a branch PR exists and is `CLOSED` or `MERGED`, treat prior branch work as non-reusable for this run.
-   - For `Todo`, `In Progress`, or `Rework`: create a fresh branch from `origin/main` and restart execution flow as a new attempt.
+   - For `Todo`, `In Progress`, or `Rework`: create a fresh branch from the configured target branch and restart execution flow as a new attempt.
    - For `Human Review` or `Merging`: if the attached PR is already `MERGED`, do **not** reset the branch; update the workpad/dashboard as needed and move the issue to `Done`.
 5. For `Todo` tickets, do startup sequencing in this exact order:
    - `update_issue(..., state: "In Progress")`
@@ -201,12 +201,21 @@ workflow.
 8.  Run a principal-style self-review of the plan and refine it in the comment.
 9.  Before implementing, capture a concrete reproduction signal and record it in the workpad `Notes` section (command/output, screenshot, or deterministic UI behavior).
 10. After initial file discovery, re-run `opensymphony memory context --issue {{ issue.identifier }} --paths <path1>,<path2> --include-code-intel` for touched areas when memory is configured, record useful references in the workpad, and treat current source files and tests as authoritative over generated context.
-11. Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the pull/sync result in the workpad `Notes`.
+11. Run the `pull` skill to sync with the latest configured target branch before any code edits, then record the pull/sync result in the workpad `Notes`.
     - Include a `pull skill evidence` note with:
       - merge source(s),
       - result (`clean` or `conflicts resolved`),
       - resulting `HEAD` short SHA.
 12. Compact context and proceed to execution.
+
+## Branch target
+
+Target branch: `main`
+
+<!-- Set by `opensymphony init` or `opensymphony update --target-branch`.
+     Value is a local branch name, not an `origin/...` ref. Agents should use
+     `origin/<target-branch>` when syncing, creating replacement branches, and
+     preparing PRs. -->
 
 ## Automated AI PR review
 
@@ -339,7 +348,7 @@ Use this only when completion is blocked by missing required tools or missing au
     - Ensure the GitHub PR has label `symphony` (add it if missing).
     - Do **not** re-trigger AI review when this push created the PR; the PR open already triggered the initial review.
     - If this push updated an existing PR with new commits, re-trigger AI review after the push (see `Automated AI PR review`) to request a fresh review pass.
-9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
+9.  Merge latest configured target branch into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
     - Add final handoff notes (commit + validation summary) in the same workpad comment.
@@ -431,7 +440,7 @@ For major rework:
 1. Document in the workpad **why** a reset is necessary before closing anything.
 2. Close the existing PR tied to the issue.
 3. Remove the existing `## Agent Harness Workpad` comment from the issue.
-4. Create a fresh branch from `origin/main`.
+4. Create a fresh branch from the configured target branch.
 5. Start over from the normal kickoff flow:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
    - Create a new bootstrap `## Agent Harness Workpad` comment.
@@ -452,7 +461,7 @@ For major rework:
 ## Guardrails
 
 - If the branch PR is already closed/merged, do not reuse that branch or prior implementation state for continuation.
-- For closed/merged branch PRs, create a new branch from `origin/main` and restart from reproduction/planning as if starting fresh.
+- For closed/merged branch PRs, create a new branch from the configured target branch and restart from reproduction/planning as if starting fresh.
 - **Do not close an open PR for minor feedback or incremental changes** - address feedback in the same branch/PR to preserve review history and discussion context.
 - Only close a PR and start fresh for major rework (fundamentally flawed approach, unrecoverable branch, or completely changed scope).
 - If issue state is `Backlog`, do not modify it; wait for human to move it to `Todo`.
@@ -569,7 +578,7 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 Timestamped audit log. Add an entry after every milestone (state change, reproduction captured, code change, validation run, PR event, review addressed). Use ISO format: `YYYY-MM-DD HH:MMZ: <action>`.
 
 - YYYY-MM-DD HH:MMZ: State transition: Todo → In Progress, created workpad
-- YYYY-MM-DD HH:MMZ: Pull skill: merged origin/main clean, HEAD now <short-sha>
+- YYYY-MM-DD HH:MMZ: Pull skill: merged origin/<target-branch> clean, HEAD now <short-sha>
 - YYYY-MM-DD HH:MMZ: Reproduction captured: <command or behavior observed>
 - YYYY-MM-DD HH:MMZ: Validation passed: <test command and result>
 - YYYY-MM-DD HH:MMZ: Committed <short-sha>: <commit message summary>

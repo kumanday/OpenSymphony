@@ -114,6 +114,21 @@ maintenance path:
 - leaves `WORKFLOW.md`, `AGENTS.md`, `.github/*`, and repo-local extra skills
   alone
 
+Use workflow settings mode when only the managed branch or review-provider
+markers need to change:
+
+```bash
+opensymphony update --target-branch develop
+opensymphony update --target-branch main
+opensymphony update --target-branch release/next
+opensymphony update --target-branch release/next --code-review openhands
+```
+
+Settings mode skips the CLI reinstall, template skill refresh, and memory
+bootstrap. `--code-review openhands` enables an existing
+`.github/workflows/ai-pr-review.yml` but does not install or repair a missing
+workflow file; `codex` and `none` disable an existing OpenHands review workflow.
+
 Normal user installs use bundled DuckDB. This keeps `cargo install
 opensymphony` and `opensymphony update` turnkey even when the memory database is
 enabled.

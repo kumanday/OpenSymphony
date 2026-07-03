@@ -247,12 +247,21 @@ Important rule:
 - keep `opensymphony init --non-interactive` aligned with the interactive
   bootstrap flow. Every prompt-driven decision should have an explicit flag,
   and unresolved file conflicts must fail before writing.
+- keep generated `WORKFLOW.md` branch-target guidance and template-managed
+  skills aligned with the `Target branch:` marker instead of hard-coding one
+  remote branch.
 
 When you change shared target-repo assets, update the template first and then
 make sure the `init` and `update` flows still copy the full tree.
+If the current PR cannot modify `OpenSymphony-template`, leave a follow-up that
+updates that repo's `WORKFLOW.md` plus `.agents/skills/pull/SKILL.md`,
+`.agents/skills/push/SKILL.md`, and `.agents/skills/land/SKILL.md` with the
+same branch-marker wording before relying on fresh template fetches.
 
-For the planned configurable target branch and marker-only workflow update
-flags, see [Workflow Target Branch And Update Settings Specification](specs/workflow-target-branch-update-spec.md).
+For configurable target branches and marker-only workflow update flags, see
+[Workflow Target Branch And Update Settings Specification](specs/workflow-target-branch-update-spec.md).
+The default target branch is `develop`, but automation should also cover
+explicit `main` and slash branch names such as `release/next`.
 
 Provisioning scripts can initialize a target repo without stdin prompts:
 
@@ -260,11 +269,29 @@ Provisioning scripts can initialize a target repo without stdin prompts:
 opensymphony init \
   --non-interactive \
   --linear-project-slug my-linear-project \
+  --target-branch release/next \
   --conflict-policy overwrite \
   --commit-and-push
 ```
 
-Use `cargo test-system-duckdb --test init` after changing the init flow.
+Existing target repos can patch only workflow settings without refreshing the
+template-managed skill tree:
+
+```bash
+opensymphony update --target-branch develop
+opensymphony update --target-branch main
+opensymphony update --target-branch release/next
+opensymphony update --target-branch release/next --code-review openhands
+```
+
+`--code-review openhands` toggles an existing
+`.github/workflows/ai-pr-review.yml`; update settings mode warns instead of
+installing or repairing that workflow when it is missing. `codex` and `none`
+disable an existing OpenHands review workflow.
+
+Use `cargo test-system-duckdb --test init`,
+`cargo test-system-duckdb --test update`, and
+`cargo test-system-duckdb --test help` after changing this flow.
 
 ## Linear development rules
 

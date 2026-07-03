@@ -149,6 +149,15 @@ opensymphony init
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
 can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` ignores local OpenSymphony runtime state.
+The generated workflow records a target branch marker for feature PRs and syncs.
+The default is `develop`; non-interactive setup can choose a repository-specific
+branch:
+
+```bash
+opensymphony init --non-interactive --target-branch main
+opensymphony init --non-interactive --target-branch release/next
+```
+
 If `AGENTS.md` already exists during first-time setup, `init` leaves it alone
 and writes the starter guidance to `AGENTS-example.md` for review.
 It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
@@ -162,6 +171,21 @@ maintenance path: it refreshes changed or new template-owned skill files under
 `.agents/skills/` without touching `WORKFLOW.md`, `AGENTS.md`, or the broader
 bootstrap files. When run from an OpenSymphony target repo, `update` also
 initializes or repairs the memory config and `.gitignore` policy if needed.
+When `--target-branch` or `--code-review` is present, `update` enters workflow
+settings mode instead: it patches only the managed `WORKFLOW.md` markers and
+skips the CLI reinstall, template skill refresh, and memory bootstrap.
+
+```bash
+opensymphony update --target-branch develop
+opensymphony update --target-branch main
+opensymphony update --target-branch release/next
+opensymphony update --target-branch release/next --code-review openhands
+```
+
+`--code-review openhands` enables an existing OpenHands review workflow when
+`.github/workflows/ai-pr-review.yml` is already present. It does not install or
+repair a missing workflow file; `--code-review codex` and `--code-review none`
+disable an existing OpenHands review workflow.
 
 ### Running the Orchestrator
 

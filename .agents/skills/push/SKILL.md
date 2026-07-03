@@ -39,7 +39,8 @@ description:
    remote URL is already configured.
 4. If push is not clean/rejected:
    - If the failure is a non-fast-forward or sync problem, run the `pull`
-     skill to merge `origin/main`, resolve conflicts, and rerun validation.
+     skill to merge the configured target branch, resolve conflicts, and rerun
+     validation.
    - Push again; use `--force-with-lease` only when history was rewritten.
    - If the failure is due to auth, permissions, or workflow restrictions on
      the configured remote, stop and surface the exact error instead of
