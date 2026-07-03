@@ -40,7 +40,7 @@ const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
 const WORKFLOW_GIT_REMOTE_PLACEHOLDER: &str = "https://github.com/YOUR-ORG/YOUR-REPO.git";
 const WORKFLOW_REVIEW_PROVIDER_PLACEHOLDER: &str = "YOUR-REVIEW-PROVIDER";
 const WORKFLOW_TARGET_BRANCH_PLACEHOLDER: &str = "YOUR-TARGET-BRANCH";
-const WORKFLOW_AUTOMATED_REVIEW_HEADING: &str = "## Automated AI PR review";
+pub(crate) const WORKFLOW_AUTOMATED_REVIEW_HEADING: &str = "## Automated AI PR review";
 const DEFAULT_TARGET_BRANCH: &str = "develop";
 const LEGACY_WORKFLOW_TARGET_REMOTE_REF: &str = "origin/main";
 const CODEX_CODE_REVIEW_SETUP_GUIDE_URL: &str =
@@ -177,14 +177,14 @@ impl AiReviewProviderKindArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum ReviewProviderArg {
+pub(crate) enum ReviewProviderArg {
     Openhands,
     Codex,
     None,
 }
 
 impl ReviewProviderArg {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Openhands => "openhands",
             Self::Codex => "codex",
@@ -215,6 +215,11 @@ impl TargetBranch {
                 "target branch `{branch}` must be a stable local branch name, not checkout shorthand"
             )));
         }
+        if branch.contains('`') {
+            return Err(InitCommandError::InvalidArgument(format!(
+                "target branch `{branch}` cannot contain backticks because WORKFLOW.md markers use backtick delimiters"
+            )));
+        }
 
         let output = std::process::Command::new("git")
             .args(["check-ref-format", "--branch", branch])
@@ -229,11 +234,11 @@ impl TargetBranch {
         Ok(Self(branch.to_string()))
     }
 
-    fn local(&self) -> &str {
+    pub(crate) fn local(&self) -> &str {
         &self.0
     }
 
-    fn remote_ref(&self) -> String {
+    pub(crate) fn remote_ref(&self) -> String {
         format!("origin/{}", self.0)
     }
 }
@@ -2676,6 +2681,7 @@ Active review provider: `YOUR-REVIEW-PROVIDER`
             "refs/remotes/origin/develop",
             "@{-1}",
             "bad..branch",
+            "feature/has`tick",
         ] {
             assert!(
                 TargetBranch::parse(branch).is_err(),
