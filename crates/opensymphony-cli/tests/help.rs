@@ -79,6 +79,8 @@ fn init_help_explains_non_interactive_automation_flags() {
     );
     for snippet in [
         "--non-interactive",
+        "--target-branch",
+        "develop (default), main, release/next",
         "--linear-project-slug",
         "--conflict-policy",
         "--review-provider",
