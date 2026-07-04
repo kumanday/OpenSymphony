@@ -183,29 +183,31 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 ## 11. Follow-on rich client and knowledge milestones
 
 The current Linear roadmap extends the local MVP with rich-client, hosted,
-provider, and release-quality work in M6 through M13. The additional OKF memory,
+provider, and release-quality work in M6 through M15. The additional OKF memory,
 LLM wiki graph, ACP debugging, Tree-sitter code-intelligence, and workflow
 target-branch specifications fit best as additive fractional milestones instead
 of broadening the existing hardening milestone:
 
 | Milestone | Placement | Scope |
 |---|---|---|
-| M10.3 Codex And Subscription Readiness | after M10 web client/external gateway work, before M10.5 OKF memory and M11 hosted alpha | local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode |
+| M10.3 Codex And Subscription Readiness | after M10 web client/external gateway work, before M10.5 OKF memory and M14 hosted alpha | local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode |
 | M10.4 Desktop Live Operations And Model Polish | after M10.3 Codex readiness, before M10.5 OKF memory | desktop live refresh, truthful run-detail metrics, and Codex subscription model-configuration cleanup from first operator use |
-| M10.5 OKF Memory Bundle Foundation | after M10 web/client transport, before M11 hosted visibility depends on portable memory documents | OKF concept schema, writer/lint, catalog reindex, import/export, docs sync and MCP/admin parity |
-| M10.6 Desktop Run Detail Operations And Interrupts | after M10.5 OKF memory, before M11 hosted alpha | harness interrupt contract, OpenHands/Codex cancel wiring, Human Review to Merging supersede, Run Detail action cleanup, TUI parity, lazy desktop launcher |
-| M10.7 Project Grouping And Dependency Signals | after M10.6 desktop operations, before M11 hosted alpha | control-plane project/dependency metadata, TUI project headers and dependency gutter, desktop grouping and collapse |
-| M11.5 LLM Wiki Graph View | after M11 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
-| M12.5 ACP Debugging And IDE Attach | after M12 harness/model seams, before M13 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
-| M12.6 Tree-sitter Code Intelligence | after M12.5 ACP debugging, before M13 release hardening | trusted Tree-sitter provider, memory-context AST integration, query packs, persistence, read-only MCP/CLI AST tools, performance and docs |
-| M12.7 Workflow Target Branch Configuration | after M12.6 code intelligence, before M13 release hardening | configurable target branch markers, init prompt and flag, marker-only update settings mode, template/docs hardening |
+| M10.5 OKF Memory Bundle Foundation | after M10 web/client transport, before M14 hosted visibility depends on portable memory documents | OKF concept schema, writer/lint, catalog reindex, import/export, docs sync and MCP/admin parity |
+| M10.6 Desktop Run Detail Operations And Interrupts | after M10.5 OKF memory, before M14 hosted alpha | harness interrupt contract, OpenHands/Codex cancel wiring, Human Review to Merging supersede, Run Detail action cleanup, TUI parity, lazy desktop launcher |
+| M10.7 Project Grouping And Dependency Signals | after M10.6 desktop operations, before M14 hosted alpha | control-plane project/dependency metadata, TUI project headers and dependency gutter, desktop grouping and collapse |
+| M11.5 LLM Wiki Graph View | after M14 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
+| M13 ACP Debugging And IDE Attach | after M12 harness/model seams, before M15 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
+| M12.6 Tree-sitter Code Intelligence | after M13 ACP debugging, before M15 release hardening | trusted Tree-sitter provider, memory-context AST integration, query packs, persistence, read-only MCP/CLI AST tools, performance and docs |
+| M12.7 Workflow Target Branch Configuration | after M12.6 code intelligence, before M15 release hardening | configurable target branch markers, init prompt and flag, marker-only update settings mode, template/docs hardening |
+| M12.8 Desktop App Installer And Auto-Update | after M12.7 workflow target branch configuration, before M15 release hardening | lazy desktop installer/launcher, verified release bundles, source-build fallback, auto-update prompts, and installer docs |
+| M12.9 Code Graph View | after M12.8 desktop installer and after M12.6 code-intelligence foundations, before M15 release hardening | graph-hero shell, stable symbol identity, code graph DTOs, shared frontend surface, run-diff overlays, cross-graph chips, and hardening |
 
 M10.3 pulls the shared harness adapter, model/credential settings, OpenHands
 subscription credential adapter, model configuration UI metadata, Codex
 app-server prototype, ChatGPT OAuth readiness, production Codex harness
 enablement, and cross-harness approval/routing work forward before the broader
 hosted-provider backlog. Hosted subscription credential brokering remains in
-M11 so local Codex subscription support is not blocked by hosted secret storage.
+M14 so local Codex subscription support is not blocked by hosted secret storage.
 
 M10.4 captures the immediate operator feedback from live Codex-backed desktop
 and TUI use: live snapshot/run-detail refresh without app restart, truthful Run
@@ -231,9 +233,18 @@ M12.7 follows the workflow target branch specification with the smallest useful
 target-repo bootstrap wave: workflow branch markers, init prompt and flag,
 marker-only update flags, and template/docs hardening.
 
+M12.8 follows the desktop installer and auto-update specification with release
+metadata, verified bundles, app install/launch flow, source-build fallback,
+update prompts, and end-to-end installer documentation.
+
+M12.9 follows the Code Graph specification with the smallest useful split:
+workspace shell geometry first, stable symbol identity and code read contracts,
+shared frontend adapters, run-diff symbol navigation, cross-graph chips, and
+scale/accessibility hardening.
+
 The current default planning source is `docs/tasks/task-package.yaml` for the
-M12.7 workflow-target-branch-configuration wave. The ACP debugging wave remains
-in `docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
+M12.9 code-graph-view wave. The ACP debugging wave remains in
+`docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
 `docs/tasks/linear-publish.yaml` records the latest published planning wave.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->

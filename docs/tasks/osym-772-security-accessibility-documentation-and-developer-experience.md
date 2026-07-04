@@ -1,7 +1,7 @@
 ---
 id: OSYM-772
 title: Security, Accessibility, Documentation, And Developer Experience
-milestone: "M13: Hardening And Release Quality"
+milestone: "M15: Hardening And Release Quality"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-754", "OSYM-771"]

@@ -1,38 +1,43 @@
-planningWave: desktop-app-installer-auto-update
+planningWave: code-graph-view
 linearProject: opensymphony-bootstrap-e7b957855cb7
-publishedAt: '2026-07-04T01:53:34.233742+00:00'
+publishedAt: '2026-07-04T18:04:30.107045+00:00'
 milestones:
-  'M12.8: Desktop App Installer And Auto-Update':
-    milestoneId: 2cd07f9d-e6ec-4eb8-8e12-152ba37d3f9c
-    name: 'M12.8: Desktop App Installer And Auto-Update'
+  'M12.9: Code Graph View':
+    milestoneId: b6d6eb2b-bbf9-4960-965d-3ad57e424507
+    name: 'M12.9: Code Graph View'
 tasks:
-  OSYM-860:
-    issue: COE-525
-    issueId: 9facfcc8-0d50-4aff-a4e0-010332ebb70a
-    url: https://linear.app/trilogy-ai-coe/issue/COE-525/desktop-installer-contract-and-release-metadata
-    file: docs/tasks/osym-860-desktop-installer-contract-and-release-metadata.md
-  OSYM-861:
-    issue: COE-526
-    issueId: c8048e57-2a17-41d7-9986-25c68121e1f5
-    url: https://linear.app/trilogy-ai-coe/issue/COE-526/desktop-release-bundle-pipeline
-    file: docs/tasks/osym-861-desktop-release-bundle-pipeline.md
-  OSYM-863:
-    issue: COE-527
-    issueId: d0353676-5aba-418b-8f20-9565252f8156
-    url: https://linear.app/trilogy-ai-coe/issue/COE-527/source-build-fallback-and-prerequisites
-    file: docs/tasks/osym-863-source-build-fallback-and-prerequisites.md
-  OSYM-862:
-    issue: COE-528
-    issueId: df02d157-4173-4951-9de4-0c3b302d8447
-    url: https://linear.app/trilogy-ai-coe/issue/COE-528/app-download-install-and-launch-flow
-    file: docs/tasks/osym-862-app-download-install-and-launch-flow.md
-  OSYM-864:
-    issue: COE-529
-    issueId: 5a89bd0c-f039-435f-84e5-b3be1880984c
-    url: https://linear.app/trilogy-ai-coe/issue/COE-529/desktop-auto-update-flow
-    file: docs/tasks/osym-864-desktop-auto-update-flow.md
-  OSYM-865:
-    issue: COE-530
-    issueId: c057db0d-46d5-4c4f-a469-e02354cf6fcb
-    url: https://linear.app/trilogy-ai-coe/issue/COE-530/installer-docs-and-end-to-end-validation
-    file: docs/tasks/osym-865-installer-docs-and-end-to-end-validation.md
+  OSYM-870:
+    issue: COE-531
+    issueId: 3ea3a626-c2e5-4f80-bf01-a3733a3306e3
+    url: https://linear.app/trilogy-ai-coe/issue/COE-531/workspace-shell-graph-hero-and-surface-state
+    file: docs/tasks/osym-870-workspace-shell-graph-hero-and-surface-state.md
+  OSYM-871:
+    issue: COE-532
+    issueId: fa91e2e2-44ec-4f05-832c-b16fb025d284
+    url: https://linear.app/trilogy-ai-coe/issue/COE-532/symbol-identity-container-chain-and-code-read-model
+    file: docs/tasks/osym-871-symbol-identity-container-chain-and-code-read-model.md
+  OSYM-872:
+    issue: COE-533
+    issueId: e8fbef89-8b3b-4b51-a564-9322b55043a1
+    url: https://linear.app/trilogy-ai-coe/issue/COE-533/code-graph-dtos-gateway-routes-and-native-commands
+    file: docs/tasks/osym-872-code-graph-dtos-gateway-routes-and-native-commands.md
+  OSYM-873:
+    issue: COE-534
+    issueId: 067f5422-32d3-426c-b6a2-f6b6dd031385
+    url: https://linear.app/trilogy-ai-coe/issue/COE-534/code-graph-frontend-surface-adapters-and-inspector
+    file: docs/tasks/osym-873-code-graph-frontend-surface-adapters-and-inspector.md
+  OSYM-874:
+    issue: COE-535
+    issueId: 4a5b26d0-4066-4841-808d-34e4154175cd
+    url: https://linear.app/trilogy-ai-coe/issue/COE-535/run-diff-symbol-navigation-and-code-overlay
+    file: docs/tasks/osym-874-run-diff-symbol-navigation-and-code-overlay.md
+  OSYM-875:
+    issue: COE-536
+    issueId: 400b53f1-a33d-48af-aed0-24e4c881867b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-536/cross-graph-code-memory-and-work-chips
+    file: docs/tasks/osym-875-cross-graph-code-memory-and-work-chips.md
+  OSYM-876:
+    issue: COE-537
+    issueId: 17e45371-972e-4a7a-b395-18d7b06c57af
+    url: https://linear.app/trilogy-ai-coe/issue/COE-537/code-graph-scale-accessibility-and-parity-hardening
+    file: docs/tasks/osym-876-code-graph-scale-accessibility-and-parity-hardening.md

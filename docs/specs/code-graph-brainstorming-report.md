@@ -203,7 +203,7 @@ Verify each of these against the local codebase before drafting; the report was 
 - [ ] Whether the left-nav `Task Graph / Knowledge Graph` toggle shipped and how modes/panes are registered, so `Code Graph` slots in as a third entry.
 - [ ] DuckDB migrations: do `code_documents/code_symbols/code_edges/code_diagnostics` exist as specified; are there indexes suitable for span-containment queries (symbol-at-position) and inbound-edge traversal (blast radius).
 - [ ] `memory.ingest_code_intel` status and whether scope_refs/source_refs on code records are being written — the cross-graph edges depend on it.
-- [ ] Confirm milestone numbering and pick the task ID range (candidates below assume a fresh range, e.g., OSYM-84x under a new milestone like "M12.5: Code Graph View" — verify against actual milestone plan).
+- [ ] Confirm milestone numbering and pick the task ID range (the reviewed plan uses OSYM-870 through OSYM-876 under "M12.9: Code Graph View").
 - [ ] Check `docs/tasks/multi-repo-memory-server-with-code-intelligence.md` (referenced by the AST spec §20) for prior placeholder language to supersede or align with.
 
 ---

@@ -1,7 +1,7 @@
 ---
 id: OSYM-843
 title: Tauri Debug-In-Zed Launch Action
-milestone: "M12.5: ACP Debugging And IDE Attach"
+milestone: "M13: ACP Debugging And IDE Attach"
 priority: 3
 estimate: 5
 blockedBy: ["OSYM-840", "OSYM-842"]

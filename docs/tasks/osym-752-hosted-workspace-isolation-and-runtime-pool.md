@@ -1,7 +1,7 @@
 ---
 id: OSYM-752
 title: Hosted Workspace Isolation And Runtime Pool
-milestone: "M11: Hosted Alpha"
+milestone: "M14: Hosted Alpha"
 priority: 1
 estimate: 13
 blockedBy: ["OSYM-723", "OSYM-725", "OSYM-750", "OSYM-751"]

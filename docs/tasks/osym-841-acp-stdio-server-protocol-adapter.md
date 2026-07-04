@@ -1,7 +1,7 @@
 ---
 id: OSYM-841
 title: ACP Stdio Server Protocol Adapter
-milestone: "M12.5: ACP Debugging And IDE Attach"
+milestone: "M13: ACP Debugging And IDE Attach"
 priority: 2
 estimate: 13
 blockedBy: ["OSYM-840"]

@@ -1,7 +1,7 @@
 ---
 id: OSYM-840
 title: Debug Attachment Core Refactor
-milestone: "M12.5: ACP Debugging And IDE Attach"
+milestone: "M13: ACP Debugging And IDE Attach"
 priority: 2
 estimate: 8
 blockedBy: []
