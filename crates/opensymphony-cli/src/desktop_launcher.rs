@@ -363,20 +363,21 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
         return Ok(verified.executable);
     }
 
-    let release_index_url = selected_release_index_url(args.release_index_url);
+    let (install_release_index_url, update_release_index_url) =
+        selected_release_index_urls(args.release_index_url);
 
     let verified = ensure_verified_bundle(
         &cache_root,
         &cache_dir,
         bundle_dir,
-        release_index_url.as_str(),
+        install_release_index_url.as_str(),
         true,
     )
     .await?;
     let verified = maybe_update_verified_bundle(
         &cache_root,
         verified,
-        release_index_url.as_str(),
+        update_release_index_url.as_str(),
         skip_update,
     )
     .await;
@@ -698,11 +699,25 @@ fn parse_release_index(contents: &str) -> Result<DesktopReleaseIndex, serde_json
     serde_json::from_str(contents)
 }
 
-fn selected_release_index_url(override_url: Option<String>) -> String {
-    override_url.unwrap_or_else(default_release_index_url)
+fn selected_release_index_urls(override_url: Option<String>) -> (String, String) {
+    match override_url {
+        Some(url) => (url.clone(), url),
+        None => (
+            default_install_release_index_url(),
+            default_update_release_index_url(),
+        ),
+    }
 }
 
-fn default_release_index_url() -> String {
+fn default_install_release_index_url() -> String {
+    format!(
+        "https://github.com/kumanday/OpenSymphony/releases/download/v{}/{}",
+        desktop_version(),
+        RELEASE_INDEX_FILE
+    )
+}
+
+fn default_update_release_index_url() -> String {
     format!(
         "https://github.com/kumanday/OpenSymphony/releases/latest/download/{}",
         RELEASE_INDEX_FILE
@@ -2243,10 +2258,25 @@ mod tests {
     }
 
     #[test]
-    fn default_release_index_uses_stable_latest_url() {
+    fn default_release_index_urls_keep_installs_versioned_and_updates_latest() {
         assert_eq!(
-            default_release_index_url(),
+            default_install_release_index_url(),
+            "https://github.com/kumanday/OpenSymphony/releases/download/v2.7.0/opensymphony-desktop-release-index.json"
+        );
+        assert_eq!(
+            default_update_release_index_url(),
             "https://github.com/kumanday/OpenSymphony/releases/latest/download/opensymphony-desktop-release-index.json"
+        );
+    }
+
+    #[test]
+    fn release_index_override_applies_to_install_and_update() {
+        assert_eq!(
+            selected_release_index_urls(Some("http://example.com/index.json".to_string())),
+            (
+                "http://example.com/index.json".to_string(),
+                "http://example.com/index.json".to_string()
+            )
         );
     }
 

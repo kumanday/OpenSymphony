@@ -73,8 +73,11 @@ binary. The archive contains:
 The release index is the metadata asset consumed by the CLI download path. It
 uses schema version `1`, lists compatible assets by version/platform/arch, and
 records the archive URL, archive SHA-256, and launch target. By default,
-`opensymphony app` reads it from the latest GitHub release; set
-`OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` for a mirror or fake release server.
+cache-miss installs read the versioned GitHub release for the running CLI
+version, while update checks read the latest GitHub release index so existing
+desktop installs can discover newer compatible bundles. Set
+`OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` for a mirror or fake release server;
+the override applies to both install and update checks.
 When an existing release index is present in the output directory, the package
 command preserves other assets and unknown top-level metadata, then replaces
 only the matching version/platform/arch entry. Upload the archive asset first,
@@ -89,8 +92,8 @@ The release index selects assets by OpenSymphony version, platform,
 architecture, URL, SHA-256 checksum metadata, and launch target. The install
 root defaults to `~/.opensymphony/desktop`, while `--install-path <dir>` and
 `OPENSYMPHONY_DESKTOP_INSTALL_PATH` choose a custom root with versioned bundles
-beneath it. Update prompts default to yes only for interactive TTY execution;
-non-TTY runs do not prompt and must not infer consent.
+beneath it. Interactive update prompts default to yes; non-TTY runs do not
+prompt and update by default unless `--no-update` is supplied.
 
 Do not make downloaded prebuilt DuckDB the default `cargo install` path until a
 managed installer or equivalent runtime-library strategy owns native library
