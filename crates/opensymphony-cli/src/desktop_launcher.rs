@@ -488,7 +488,9 @@ fn ensure_source_build_prerequisites<R: DesktopCommandRunner>(
         println!("Installing desktop platform prerequisites with detected package manager.");
         for command in commands {
             println!("Running prerequisite installer: {}", command.display());
-            runner.run(&command)?;
+            if runner.run(&command).is_err() {
+                return Err(platform_missing_prerequisites(platform, runner));
+            }
         }
     }
 
@@ -674,29 +676,55 @@ fn platform_install_plan<R: DesktopCommandRunner>(
     None
 }
 
-fn platform_manual_commands<R: DesktopCommandRunner>(platform: &str, runner: &R) -> Vec<String> {
-    if let Some(commands) = platform_install_plan(platform, runner) {
-        return commands
-            .into_iter()
-            .map(|command| command.display())
-            .collect();
+fn platform_missing_prerequisites<R: DesktopCommandRunner>(
+    platform: &str,
+    runner: &R,
+) -> DesktopLauncherError {
+    DesktopLauncherError::MissingPrerequisites {
+        details: format_prerequisite_issues(&[PrerequisiteIssue {
+            name: platform_prerequisite_name(platform),
+            manual_commands: platform_manual_commands(platform, runner),
+        }]),
     }
+}
+
+fn platform_manual_commands<R: DesktopCommandRunner>(platform: &str, runner: &R) -> Vec<String> {
     match platform {
         "macos" => vec!["xcode-select --install".to_string()],
         "windows" => vec![
             "winget install --id Microsoft.VisualStudio.2022.BuildTools".to_string(),
             "install Microsoft Edge WebView2 Evergreen Runtime".to_string(),
         ],
-        "linux" => vec![
-            "sudo apt-get update".to_string(),
-            "sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config".to_string(),
-            "or use the equivalent Tauri prerequisite packages for your Linux distribution".to_string(),
-        ],
+        "linux" => linux_manual_commands(runner),
         _ => vec![
-            "install the Tauri desktop prerequisites for this platform before building"
-                .to_string(),
+            "install the Tauri desktop prerequisites for this platform before building".to_string(),
         ],
     }
+}
+
+fn linux_manual_commands<R: DesktopCommandRunner>(runner: &R) -> Vec<String> {
+    if runner.program_exists("apt-get") {
+        return vec![
+            "sudo apt-get update".to_string(),
+            "sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config".to_string(),
+        ];
+    }
+    if runner.program_exists("pacman") {
+        return vec![
+            "sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module libappindicator-gtk3 librsvg xdotool pkgconf".to_string(),
+        ];
+    }
+    if runner.program_exists("dnf") {
+        return vec![
+            "sudo dnf install -y webkit2gtk4.1-devel openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel libxdo-devel pkgconf-pkg-config".to_string(),
+            "sudo dnf group install -y c-development".to_string(),
+        ];
+    }
+    vec![
+        "sudo apt-get update".to_string(),
+        "sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config".to_string(),
+        "or use the equivalent Tauri prerequisite packages for your Linux distribution".to_string(),
+    ]
 }
 
 fn format_prerequisite_issues(issues: &[PrerequisiteIssue]) -> String {
@@ -838,7 +866,7 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     validate_source_archive_version(source_dir)?;
     validate_frontend_lockfile(source_dir)?;
     println!("Installing desktop frontend dependencies.");
-    runner.run(&DesktopCommand::new("npm", &["ci"]).in_dir(source_dir))?;
+    runner.run(&DesktopCommand::new("npm", &["ci", "--include=dev"]).in_dir(source_dir))?;
     let tauri_dir = source_dir.join("apps/desktop/src-tauri");
     let source_target_dir = source_build_target_dir(source_dir);
     println!("Building desktop app from source.");
@@ -1529,6 +1557,18 @@ mod tests {
     }
 
     #[test]
+    fn platform_manual_commands_allow_interactive_sudo() {
+        let runner = FakeRunner::with_programs(&["sudo", "apt-get"]);
+        let commands = platform_manual_commands("linux", &runner);
+
+        assert_eq!(commands[0], "sudo apt-get update");
+        assert!(
+            commands.iter().all(|command| !command.contains("sudo -n")),
+            "manual prerequisite commands should not force noninteractive sudo"
+        );
+    }
+
+    #[test]
     fn automatic_platform_install_waits_for_other_prerequisites() {
         let mut runner = FakeRunner::with_programs(&["sudo", "apt-get"]);
         let error = ensure_source_build_prerequisites("linux", &mut runner)
@@ -1537,6 +1577,26 @@ mod tests {
         assert!(runner.runs.is_empty());
         assert!(error.to_string().contains("Rust/Cargo"));
         assert!(error.to_string().contains("Node/npm"));
+    }
+
+    #[test]
+    fn automatic_platform_install_failure_reports_manual_commands() {
+        let mut runner =
+            FakeRunner::with_programs(&["cargo", "rustc", "node", "npm", "tar", "sudo", "apt-get"])
+                .fail_run("sudo", &["-n", "apt-get", "update"]);
+
+        let error = ensure_source_build_prerequisites("linux", &mut runner)
+            .expect_err("failed noninteractive installer should print manual guidance");
+        let details = error.to_string();
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::MissingPrerequisites { .. }
+        ));
+        assert!(details.contains("Linux desktop/Tauri dependencies"));
+        assert!(details.contains("sudo apt-get update"));
+        assert!(!details.contains("sudo -n apt-get update"));
+        assert_eq!(runner.runs, vec!["sudo -n apt-get update"]);
     }
 
     #[test]
@@ -1736,7 +1796,7 @@ mod tests {
                 .canonicalize()
                 .expect("canonical installed executable")
         );
-        assert_eq!(runner.runs[0], "npm ci");
+        assert_eq!(runner.runs[0], "npm ci --include=dev");
         assert!(runner.runs[1].starts_with("cargo build --release --locked --target-dir "));
         assert!(runner.runs[1].contains(SOURCE_BUILD_TARGET_DIR));
     }

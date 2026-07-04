@@ -78,7 +78,7 @@ active desktop development, run the Tauri app from this checkout.
 
 ```bash
 # 1. Install pinned frontend dependencies once from the workspace root.
-npm ci
+npm ci --include=dev
 
 # 2. Launch the Tauri shell.
 cd apps/desktop/src-tauri
@@ -87,8 +87,9 @@ cargo run
 
 The frontend workspace commits the root `package-lock.json` so
 release-sensitive paths use a pinned dependency graph. The desktop source-build
-fallback requires that lockfile and installs frontend dependencies with `npm ci`
-before building.
+fallback requires that lockfile and installs frontend dependencies with
+`npm ci --include=dev` before building, so `NODE_ENV=production` does not omit
+the Vite/TypeScript build toolchain.
 
 `cargo run` rebuilds the desktop frontend first, so local source changes under
 `apps/desktop` and shared frontend packages are reflected in the Tauri shell.

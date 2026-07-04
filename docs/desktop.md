@@ -50,7 +50,7 @@ For development from a clone, rebuild the desktop frontend when `apps/desktop`
 or shared frontend packages change:
 
 ```bash
-npm ci
+npm ci --include=dev
 ```
 
 Then launch the Tauri shell:
