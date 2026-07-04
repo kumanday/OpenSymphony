@@ -629,7 +629,7 @@ copy that guide into the target repository.
 
 ## Current model
 
-- COE-524 contributed: PR #185: Add workflow settings update mode (merge `7dede06`)
+- COE-531 contributed: PR #195: Promote workspace graph surfaces into hero shell (merge `932991f`)
 
 ## Important invariants
 
@@ -646,10 +646,10 @@ copy that guide into the target repository.
 
 ## Recent changes
 
-- COE-524: Template Docs And Settings Hardening
+- COE-531: Workspace Shell Graph Hero And Surface State
 
 ## Source refs
 
-- COE-524
+- COE-531
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -127,6 +127,7 @@ fn matched_prs(
         .collect::<Vec<_>>();
     prs.sort_by_key(|pr| pr.number);
     prs.dedup_by_key(|pr| pr.number);
+    sort_prs_for_capture(&mut prs);
     prs
 }
 
@@ -136,7 +137,17 @@ fn merge_prs(target: &mut Vec<PullRequestEvidence>, incoming: Vec<PullRequestEvi
             target.push(pr);
         }
     }
-    target.sort_by_key(|pr| pr.number);
+    sort_prs_for_capture(target);
+}
+
+fn sort_prs_for_capture(prs: &mut [PullRequestEvidence]) {
+    prs.sort_by(|left, right| {
+        right
+            .merge_sha
+            .is_some()
+            .cmp(&left.merge_sha.is_some())
+            .then_with(|| right.number.cmp(&left.number))
+    });
 }
 
 fn infer_areas(

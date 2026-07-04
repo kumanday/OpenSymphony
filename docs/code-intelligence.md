@@ -110,7 +110,7 @@ thread.
 
 ## Current model
 
-- COE-530 contributed: PR #193: docs(installer): document desktop installer validation (merge `7588cc7`)
+- COE-531 contributed: PR #195: Promote workspace graph surfaces into hero shell (merge `932991f`)
 
 ## Important invariants
 
@@ -127,10 +127,10 @@ thread.
 
 ## Recent changes
 
-- COE-530: Installer Docs And End-To-End Validation
+- COE-531: Workspace Shell Graph Hero And Surface State
 
 ## Source refs
 
-- COE-530
+- COE-531
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
