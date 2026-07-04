@@ -107,15 +107,22 @@ struct VerifiedBundle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DesktopCommand {
     program: String,
-    args: Vec<String>,
+    args: Vec<OsString>,
     cwd: Option<PathBuf>,
 }
 
 impl DesktopCommand {
     fn new(program: &str, args: &[&str]) -> Self {
+        Self::new_os(
+            program,
+            args.iter().map(|arg| OsString::from(*arg)).collect(),
+        )
+    }
+
+    fn new_os(program: &str, args: Vec<OsString>) -> Self {
         Self {
             program: program.to_string(),
-            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            args,
             cwd: None,
         }
     }
@@ -129,7 +136,13 @@ impl DesktopCommand {
         if self.args.is_empty() {
             self.program.clone()
         } else {
-            format!("{} {}", self.program, self.args.join(" "))
+            let args = self
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{} {args}", self.program)
         }
     }
 }
@@ -357,8 +370,6 @@ async fn build_source_fallback<R: DesktopCommandRunner>(
         current_platform(),
         current_arch()
     );
-    ensure_source_build_prerequisites(current_platform(), runner)?;
-
     validate_cache_dir(cache_root, cache_dir)?;
     fs::create_dir_all(cache_root).map_err(|source| DesktopLauncherError::Repair {
         path: cache_root.to_path_buf(),
@@ -376,6 +387,7 @@ async fn build_source_fallback<R: DesktopCommandRunner>(
         path: source_dir.clone(),
         source,
     })?;
+    ensure_source_build_prerequisites(current_platform(), runner)?;
 
     let archive = staging.path().join("opensymphony-source.tar.gz");
     let url = source_archive_url();
@@ -386,23 +398,15 @@ async fn build_source_fallback<R: DesktopCommandRunner>(
     download_source_archive(&url, &archive).await?;
 
     println!("Extracting OpenSymphony source archive.");
-    runner.run(&DesktopCommand::new(
+    runner.run(&DesktopCommand::new_os(
         "tar",
-        &[
-            "-xzf",
-            archive
-                .to_str()
-                .ok_or_else(|| DesktopLauncherError::NonUtf8Path {
-                    path: archive.clone(),
-                })?,
-            "-C",
-            source_dir
-                .to_str()
-                .ok_or_else(|| DesktopLauncherError::NonUtf8Path {
-                    path: source_dir.clone(),
-                })?,
-            "--strip-components",
-            "1",
+        vec![
+            OsString::from("-xzf"),
+            archive.as_os_str().to_os_string(),
+            OsString::from("-C"),
+            source_dir.as_os_str().to_os_string(),
+            OsString::from("--strip-components"),
+            OsString::from("1"),
         ],
     ))?;
     install_source_built_bundle_from_source_dir(cache_root, cache_dir, &source_dir, runner)
@@ -819,22 +823,16 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     runner.run(&DesktopCommand::new("npm", &["install"]).in_dir(source_dir))?;
     let tauri_dir = source_dir.join("apps/desktop/src-tauri");
     let source_target_dir = source_build_target_dir(source_dir);
-    let source_target_dir_arg =
-        source_target_dir
-            .to_str()
-            .ok_or_else(|| DesktopLauncherError::NonUtf8Path {
-                path: source_target_dir.clone(),
-            })?;
     println!("Building desktop app from source.");
     runner.run(
-        &DesktopCommand::new(
+        &DesktopCommand::new_os(
             "cargo",
-            &[
-                "build",
-                "--release",
-                "--locked",
-                "--target-dir",
-                source_target_dir_arg,
+            vec![
+                OsString::from("build"),
+                OsString::from("--release"),
+                OsString::from("--locked"),
+                OsString::from("--target-dir"),
+                source_target_dir.as_os_str().to_os_string(),
             ],
         )
         .in_dir(&tauri_dir),
@@ -1212,8 +1210,6 @@ enum DesktopLauncherError {
         platform: String,
         arch: String,
     },
-    #[error("desktop source archive path is not valid UTF-8: {path}")]
-    NonUtf8Path { path: PathBuf },
     #[error("failed to download desktop source archive from {url}: {source}")]
     SourceDownload { url: String, source: reqwest::Error },
     #[error("failed to download desktop source archive from {url}: HTTP {status}")]
@@ -1530,6 +1526,20 @@ mod tests {
         assert_eq!(display, "https://example.com/archive.tar.gz");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn desktop_command_preserves_non_utf8_path_arguments() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let raw_path = b"/tmp/opensymphony-\xFF".to_vec();
+        let command = DesktopCommand::new_os(
+            "tar",
+            vec![OsString::from("-C"), OsString::from_vec(raw_path.clone())],
+        );
+
+        assert_eq!(command.args[1].as_os_str().as_bytes(), raw_path);
+    }
+
     #[tokio::test]
     async fn dry_run_without_cached_bundle_does_not_build_from_source() {
         let cache = TempDir::new().expect("cache tempdir");
@@ -1547,6 +1557,29 @@ mod tests {
             DesktopLauncherError::DryRunSourceBuildRequired { .. }
         ));
         assert!(!cache.path().join(desktop_version()).exists());
+    }
+
+    #[tokio::test]
+    async fn source_fallback_validates_cache_root_before_installing_prerequisites() {
+        let parent = TempDir::new().expect("cache parent tempdir");
+        let cache_root = parent.path().join("desktop-cache-file");
+        fs::write(&cache_root, b"not a directory").expect("write cache root file");
+        let cache_dir = cache_root.join(desktop_version());
+        let mut runner =
+            FakeRunner::with_programs(&["cargo", "rustc", "node", "npm", "tar", "sudo", "apt-get"]);
+
+        let error = build_source_fallback(&cache_root, &cache_dir, &mut runner)
+            .await
+            .expect_err("file cache root should fail before installing packages");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::Repair { ref path, .. } if path == &cache_root
+        ));
+        assert!(
+            runner.runs.is_empty(),
+            "package installers must not run before cache root is writable"
+        );
     }
 
     #[tokio::test]
