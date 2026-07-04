@@ -60,9 +60,10 @@ archive first and the release index last. The index is the CLI-consumable
 metadata file; it should never be published before the referenced archive is
 available. If an index already exists in the output directory, the package
 command preserves entries for other platform/architecture assets and replaces
-only the current asset entry. It also fails before writing metadata when the
-desktop package, Tauri crate, or Tauri config version does not match the release
-version, or when Cargo lockfile drift would change the desktop dependency graph.
+only the current asset entry while keeping unknown top-level metadata. It also
+fails before writing metadata when the desktop package, Tauri crate, or Tauri
+config version does not match the release version, or when Cargo lockfile drift
+would change the desktop dependency graph.
 Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
 custom install root. That root contains versioned bundles such as
 `<dir>/<version>/`; it is not the bundle directory itself. Download metadata,

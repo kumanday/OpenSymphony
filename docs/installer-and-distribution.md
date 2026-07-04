@@ -56,8 +56,9 @@ fails before writing release metadata if `apps/desktop/package.json`,
 declare a different desktop version. `PLATFORM`/`ARCH` use the same strings the
 CLI verifies (`macos`, `linux`, `windows`, `aarch64`, `x86_64`, and so on). The
 desktop Cargo build runs with `--locked`, so lockfile drift fails packaging
-instead of producing a release from an uncommitted dependency graph. The archive
-contains:
+instead of producing a release from an uncommitted dependency graph. The same
+locked metadata preflight runs when `--skip-build` is used with an existing
+binary. The archive contains:
 
 - `opensymphony-desktop-manifest.json`, with version, platform, architecture,
   relative executable path, and executable SHA-256.
@@ -67,8 +68,8 @@ The release index is the metadata asset consumed by the CLI download path. It
 uses schema version `1`, lists compatible assets by version/platform/arch, and
 records the archive URL, archive SHA-256, and launch target. When an existing
 release index is present in the output directory, the package command preserves
-other assets and replaces only the matching version/platform/arch entry. Upload
-the archive asset first, then upload or replace
+other assets and unknown top-level metadata, then replaces only the matching
+version/platform/arch entry. Upload the archive asset first, then upload or replace
 `opensymphony-desktop-release-index.json` last. The packaging script follows the
 same rule locally: it stages all output, publishes the archive, and only then
 publishes the index, so a failed packaging run does not leave new metadata

@@ -37,6 +37,7 @@ try {
 async function main(options) {
   const version = options.version ?? (await readWorkspaceVersion());
   await assertDesktopVersions(version);
+  assertDesktopLockfile(version);
   const platform = rustPlatform(process.platform);
   const arch = rustArch(process.arch);
   const executableName = process.platform === "win32" ? "OpenSymphony.exe" : "OpenSymphony";
@@ -224,9 +225,45 @@ async function assertDesktopVersions(expectedVersion) {
   }
 }
 
+function assertDesktopLockfile(expectedVersion) {
+  const result = spawnSync(
+    "cargo",
+    [
+      "metadata",
+      "--locked",
+      "--format-version",
+      "1",
+      "--no-deps",
+      "--manifest-path",
+      "apps/desktop/src-tauri/Cargo.toml",
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  if (result.error) {
+    throw new Error(`failed to run cargo metadata --locked: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`desktop Cargo.lock is stale: ${result.stderr.trim() || result.stdout.trim()}`);
+  }
+
+  const metadata = JSON.parse(result.stdout);
+  const desktopPackage = metadata.packages.find((pkg) => pkg.name === "opensymphony-desktop");
+  if (desktopPackage?.version !== expectedVersion) {
+    throw new Error(
+      `desktop Cargo.lock records opensymphony-desktop ${desktopPackage?.version ?? "unknown"}, expected ${expectedVersion}`,
+    );
+  }
+}
+
 async function mergeReleaseIndex(indexPath, asset) {
   const existing = await readExistingIndex(indexPath);
   return {
+    ...existing,
     schema_version: 1,
     assets: [
       ...existing.assets.filter(
