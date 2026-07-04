@@ -68,7 +68,25 @@ export function mountKnowledgeGraphRenderer(
   options: KnowledgeGraphMountOptions,
 ): void {
   const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
-  if (!canvas || !options.snapshot || !options.layout) return;
+  if (!canvas) return;
+  if (!options.snapshot || !options.layout) {
+    // The morphing render preserves the canvas node, so without drawable
+    // data the previous mount's bitmap and handlers would otherwise stay
+    // live and interactive against a stale layout. Always detach the
+    // interaction handlers; drop the bitmap too once the snapshot itself is
+    // gone (bundle switch/reset). During a pure re-layout the snapshot is
+    // still present and keeping the bitmap avoids a blank flash.
+    canvas.onwheel = null;
+    canvas.onpointerdown = null;
+    canvas.onpointermove = null;
+    canvas.onpointerup = null;
+    if (!options.snapshot) {
+      disposeKnowledgeGraphCanvas(canvas);
+      canvas.width = canvas.width || 1;
+      canvas.dataset.nonblank = "false";
+    }
+    return;
+  }
   const stage = canvas.closest<HTMLElement>("[data-kg-stage]");
   const view = {
     scale: options.view.scale,
@@ -144,12 +162,15 @@ export function mountKnowledgeGraphRenderer(
       if (nodeId) options.onSelect(nodeId);
     }
   };
+  // Handler properties (not addEventListener) so re-mounting after every
+  // render stays idempotent: the DOM morph preserves these buttons across
+  // renders, and stacked listeners would fire once per past render.
   root.querySelectorAll<HTMLElement>("[data-kg-node-id]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.onclick = () => {
       const nodeId = button.dataset.kgNodeId;
       if (nodeId) options.onSelect(nodeId);
-    });
-    button.addEventListener("keydown", (event) => {
+    };
+    button.onkeydown = (event) => {
       const direction = graphListNavigationDirection(event.key);
       if (!direction) return;
       const buttons = Array.from(root.querySelectorAll<HTMLElement>(".os-kg-list [data-kg-node-id]"));
@@ -162,11 +183,11 @@ export function mountKnowledgeGraphRenderer(
           ? buttons.length - 1
           : (index + direction + buttons.length) % buttons.length;
       buttons[nextIndex]?.focus();
-    });
-    button.addEventListener("focus", () => {
+    };
+    button.onfocus = () => {
       const nodeId = button.dataset.kgNodeId;
       if (nodeId) options.onFocus(nodeId);
-    });
+    };
   });
 }
 
