@@ -111,11 +111,8 @@ pub async fn run_command(args: AppArgs) -> ExitCode {
 }
 
 fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
-    let cache_root = normalize_cache_root(
-        args.install_path
-            .or(args.cache_root)
-            .unwrap_or(default_cache_root()?),
-    )?;
+    let cache_root =
+        normalize_cache_root(selected_install_root(args.install_path, args.cache_root)?)?;
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
@@ -301,6 +298,16 @@ fn file_sha256(path: &Path) -> Result<String, DesktopLauncherError> {
 fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
     let home = home_dir().ok_or(DesktopLauncherError::MissingHome)?;
     Ok(home.join(DEFAULT_CACHE_RELATIVE))
+}
+
+fn selected_install_root(
+    install_path: Option<PathBuf>,
+    cache_root: Option<PathBuf>,
+) -> Result<PathBuf, DesktopLauncherError> {
+    match install_path.or(cache_root) {
+        Some(path) => Ok(path),
+        None => default_cache_root(),
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -554,6 +561,14 @@ mod tests {
             root.join(desktop_version()),
             PathBuf::from(format!("/tmp/opensymphony-desktop/{}", desktop_version()))
         );
+    }
+
+    #[test]
+    fn explicit_install_path_skips_default_home_lookup() {
+        let root = selected_install_root(Some(PathBuf::from("/tmp/custom-desktop")), None)
+            .expect("explicit install path should be accepted before HOME lookup");
+
+        assert_eq!(root, PathBuf::from("/tmp/custom-desktop"));
     }
 
     #[test]
