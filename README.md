@@ -236,12 +236,13 @@ Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
 different install root; the launcher still creates the versioned bundle beneath
 that root. On a cache miss, the launcher downloads the release index from the
 versioned GitHub release matching the running CLI and installs the compatible
-asset; set `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to point at a private or
-test index. When a cached bundle is already installed, the launcher checks the
-latest release index before launch, prompts `Update before launch? [Y/n]` in an
-interactive terminal when a newer compatible bundle is available, and updates
-by default in non-interactive runs. Pass `--no-update` to launch the cached
-bundle without checking first.
+asset, so an empty desktop cache produces a real install attempt instead of a
+missing-manifest dead end. Set `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to
+point at a private or test index. When a cached bundle is already installed,
+the launcher checks the latest release index before launch, prompts
+`Update before launch? [Y/n]` in an interactive terminal when a newer
+compatible bundle is available, and updates by default in non-interactive runs.
+Pass `--no-update` to launch the cached bundle without checking first.
 The release-index and update prompt contract is defined in
 [Desktop App Installer And Auto-Update Spec](docs/specs/desktop-app-installer-auto-update-spec.md).
 

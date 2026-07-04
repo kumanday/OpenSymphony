@@ -70,13 +70,17 @@ The `opensymphony app` command, with visible alias `opensymphony desktop`, is
 implemented by COE-488 / OSYM-811 as a lazy cached launcher for released/local
 desktop bundles. It verifies the cache under
 `~/.opensymphony/desktop/<version>/`; early local bundles can be materialized
-with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. If no bundle
-verifies, the launcher can build the matching source archive after checking
-Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. `--dry-run`
-stays read-only and reports when source build fallback would be required. For
-an installed cache, launch checks for newer compatible release metadata first;
-pass `--no-update` to skip that check during local smoke work. For
-active desktop development, run the Tauri app from this checkout.
+with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. Use
+`--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to replace the
+default install root with another directory that still contains
+`<version>/` bundle children. If no bundle verifies, the launcher can download
+a compatible prebuilt archive from release metadata or build the matching
+source archive after checking Rust/Cargo, Node/npm, and platform desktop/Tauri
+prerequisites. `--dry-run` stays read-only and reports when source build
+fallback would be required. For an installed cache, launch checks for newer
+compatible release metadata first; the update prompt defaults to yes. Pass
+`--no-update` to skip that check during local smoke work. For active desktop
+development, run the Tauri app from this checkout.
 
 On Windows, the source fallback does not require `cl.exe` to be present on
 `PATH`; a normal PowerShell can use installed Microsoft C++ Build Tools through
