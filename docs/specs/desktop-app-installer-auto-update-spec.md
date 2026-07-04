@@ -2,7 +2,7 @@
 
 This spec defines the durable contract for `opensymphony app` desktop bundle
 installation and update discovery. It does not define signed installer
-packaging, real asset publication, or download implementation.
+packaging, real asset publication, or prebuilt download implementation.
 
 ## Release Index
 
@@ -17,13 +17,13 @@ needs before choosing a downloadable desktop asset.
       "version": "2.7.0",
       "platform": "macos",
       "arch": "aarch64",
-      "url": "https://downloads.example.invalid/opensymphony/2.7.0/macos-aarch64.zip",
+      "url": "https://github.com/kumanday/OpenSymphony/releases/download/v2.7.0/opensymphony-desktop-v2.7.0-macos-aarch64.tar.gz",
       "checksum": {
         "algorithm": "sha256",
-        "value": "0123456789abcdef"
+        "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       },
       "launch_target": {
-        "executable": "OpenSymphony.app/Contents/MacOS/OpenSymphony",
+        "executable": "OpenSymphony",
         "args": []
       }
     }
@@ -84,8 +84,8 @@ local bundles stay compatible with the current fields:
   "version": "2.7.0",
   "platform": "macos",
   "arch": "aarch64",
-  "executable": "OpenSymphony.app/Contents/MacOS/OpenSymphony",
-  "sha256": "0123456789abcdef"
+  "executable": "OpenSymphony",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
 
