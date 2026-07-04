@@ -55,7 +55,7 @@ Connect the graph view to live memory data, update events, stale-state warnings,
 
 - Builds on OSYM-803, OSYM-820, and OSYM-821.
 - Read `docs/specs/llm-wiki-graph-view-spec.md` sections 7, 12, and 15.
-- M11 hosted auth work provides the broader authorization foundation outside this package.
+- M14 hosted auth work provides the broader authorization foundation outside this package.
 
 ## Definition of Ready
 

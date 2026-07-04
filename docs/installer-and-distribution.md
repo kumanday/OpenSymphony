@@ -217,9 +217,9 @@ This work is complementary to, not a replacement for, current roadmap stories:
   changing normal user installation behavior.
 - M10 web client and external gateway work defines the browser and remote
   gateway profiles that an installer can configure.
-- M11 hosted alpha reduces the need for local memory-server installation when a
+- M14 hosted alpha reduces the need for local memory-server installation when a
   user selects hosted mode only.
-- M13 hardening and release quality is the natural place to convert this spec
+- M15 hardening and release quality is the natural place to convert this spec
   into signed installers, update tests, platform smoke tests, and support docs.
 
 The installer should not be used to blur local and hosted mode. Hosted mode is a

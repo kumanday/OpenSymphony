@@ -1,7 +1,7 @@
 ---
 id: OSYM-755
 title: Hosted Subscription Credential Broker And Secret Store
-milestone: "M11: Hosted Alpha"
+milestone: "M14: Hosted Alpha"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-750", "OSYM-751"]

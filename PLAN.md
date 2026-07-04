@@ -8,7 +8,7 @@ Create a new near-term milestone for Codex + ChatGPT subscription readiness, ret
 
 - Create milestone `M10.3: Codex And Subscription Readiness`.
   - Goal: deliver local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode.
-  - Place it after M10 web client/external gateway work and before M10.5, M11, and the broader M12 hosted/provider backlog.
+  - Place it after M10 web client/external gateway work and before M10.5, M14, and the broader hosted/provider backlog.
 
 - Move to `M10.3` and set to `Todo`:
   - `COE-408 Harness Adapter And Capability Model`
@@ -25,7 +25,7 @@ Create a new near-term milestone for Codex + ChatGPT subscription readiness, ret
 
 - Add new Backlog task in hosted lane:
   - Title: `Hosted Subscription Credential Broker And Secret Store`
-  - Milestone: `M11: Hosted Alpha` or a new `M11.2: Hosted Credential Broker`
+  - Milestone: `M14: Hosted Alpha` or a new `M14.2: Hosted Credential Broker`
   - Scope: encrypted per-user/per-org ChatGPT OAuth refresh-token storage, token refresh, revocation, short-lived credential injection, audit logs, and tenant isolation.
   - Blocked by: `COE-420` and `COE-421`
   - Blocks: hosted production Codex use and hosted subscription-backed OpenHands use.

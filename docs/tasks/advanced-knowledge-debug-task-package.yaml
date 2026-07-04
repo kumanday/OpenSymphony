@@ -3,7 +3,7 @@ tasksDir: docs/tasks
 milestones:
   - "M10.5: OKF Memory Bundle Foundation"
   - "M11.5: LLM Wiki Graph View"
-  - "M12.5: ACP Debugging And IDE Attach"
+  - "M13: ACP Debugging And IDE Attach"
 tasks:
   - id: OSYM-800
     file: docs/tasks/osym-800-okf-bundle-schema-and-legacy-capsule-mapping.md

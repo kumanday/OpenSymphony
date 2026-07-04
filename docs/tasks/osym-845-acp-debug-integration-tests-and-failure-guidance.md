@@ -1,7 +1,7 @@
 ---
 id: OSYM-845
 title: ACP Debug Integration Tests And Failure Guidance
-milestone: "M12.5: ACP Debugging And IDE Attach"
+milestone: "M13: ACP Debugging And IDE Attach"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-840", "OSYM-841", "OSYM-843", "OSYM-844"]

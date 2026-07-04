@@ -1,7 +1,7 @@
 ---
 id: OSYM-842
 title: Zed Static Agent Configuration And Setup UX
-milestone: "M12.5: ACP Debugging And IDE Attach"
+milestone: "M13: ACP Debugging And IDE Attach"
 priority: 3
 estimate: 3
 blockedBy: ["OSYM-841"]

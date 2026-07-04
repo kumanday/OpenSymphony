@@ -1,17 +1,19 @@
-planningWave: desktop-app-installer-auto-update
+planningWave: code-graph-view
 tasksDir: docs/tasks
 milestones:
-  - "M12.8: Desktop App Installer And Auto-Update"
+  - "M12.9: Code Graph View"
 tasks:
-  - id: OSYM-860
-    file: docs/tasks/osym-860-desktop-installer-contract-and-release-metadata.md
-  - id: OSYM-861
-    file: docs/tasks/osym-861-desktop-release-bundle-pipeline.md
-  - id: OSYM-862
-    file: docs/tasks/osym-862-app-download-install-and-launch-flow.md
-  - id: OSYM-863
-    file: docs/tasks/osym-863-source-build-fallback-and-prerequisites.md
-  - id: OSYM-864
-    file: docs/tasks/osym-864-desktop-auto-update-flow.md
-  - id: OSYM-865
-    file: docs/tasks/osym-865-installer-docs-and-end-to-end-validation.md
+  - id: OSYM-870
+    file: docs/tasks/osym-870-workspace-shell-graph-hero-and-surface-state.md
+  - id: OSYM-871
+    file: docs/tasks/osym-871-symbol-identity-container-chain-and-code-read-model.md
+  - id: OSYM-872
+    file: docs/tasks/osym-872-code-graph-dtos-gateway-routes-and-native-commands.md
+  - id: OSYM-873
+    file: docs/tasks/osym-873-code-graph-frontend-surface-adapters-and-inspector.md
+  - id: OSYM-874
+    file: docs/tasks/osym-874-run-diff-symbol-navigation-and-code-overlay.md
+  - id: OSYM-875
+    file: docs/tasks/osym-875-cross-graph-code-memory-and-work-chips.md
+  - id: OSYM-876
+    file: docs/tasks/osym-876-code-graph-scale-accessibility-and-parity-hardening.md

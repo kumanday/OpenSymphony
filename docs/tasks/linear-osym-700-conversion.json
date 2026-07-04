@@ -74,7 +74,7 @@
       ]
     },
     "M6 Hosted Alpha": {
-      "name": "M11: Hosted Alpha",
+      "name": "M14: Hosted Alpha",
       "goal": "Add hosted multi-user execution where server-owned runs continue after clients disconnect and permissions, secrets, workspaces, audit, and administration are enforced centrally.",
       "id": "4a82a4eb-1782-47a1-8a47-7afb0210cb76",
       "tasks": [
@@ -99,7 +99,7 @@
       ]
     },
     "M8 Hardening And Release Quality": {
-      "name": "M13: Hardening And Release Quality",
+      "name": "M15: Hardening And Release Quality",
       "goal": "Prove the system through contract, end-to-end, performance, security, accessibility, and documentation work.",
       "id": "0b105fe4-91be-42c2-98b3-75895d4de095",
       "tasks": [
@@ -653,7 +653,7 @@
       "linearId": "COE-420",
       "linearUuid": "862b20f6-df35-4721-9530-c242b028987d",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-420/hosted-identity-auth-and-rbac",
-      "milestone": "M11: Hosted Alpha",
+      "milestone": "M14: Hosted Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -674,7 +674,7 @@
       "linearId": "COE-421",
       "linearUuid": "43dc1741-824b-4ac1-af75-fc9b97428d97",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-421/hosted-secrets-and-linear-connections",
-      "milestone": "M11: Hosted Alpha",
+      "milestone": "M14: Hosted Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -690,7 +690,7 @@
       "linearId": "COE-422",
       "linearUuid": "31ea6749-c5cd-4828-aa45-8763f4cb01ac",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-422/hosted-workspace-isolation-and-runtime-pool",
-      "milestone": "M11: Hosted Alpha",
+      "milestone": "M14: Hosted Alpha",
       "priority": 1,
       "estimate": 13,
       "blockedBy": [
@@ -708,7 +708,7 @@
       "linearId": "COE-424",
       "linearUuid": "7db21ecd-dd54-4547-aec6-c490f91a597b",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-424/client-independent-run-persistence",
-      "milestone": "M11: Hosted Alpha",
+      "milestone": "M14: Hosted Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -726,7 +726,7 @@
       "linearId": "COE-427",
       "linearUuid": "2684469b-4ea6-465f-be81-11a2737c3d4f",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-427/hosted-audit-metrics-and-admin-controls",
-      "milestone": "M11: Hosted Alpha",
+      "milestone": "M14: Hosted Alpha",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -743,7 +743,7 @@
       "linearId": "COE-477",
       "linearUuid": "1b0711b0-1418-4ff6-8164-ad4c312bd070",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-477/hosted-subscription-credential-broker-and-secret-store",
-      "milestone": "M11: Hosted Alpha",
+      "milestone": "M14: Hosted Alpha",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -886,7 +886,7 @@
       "linearId": "COE-430",
       "linearUuid": "73e4816c-758d-46b9-a598-3a9606961370",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-430/contract-and-local-end-to-end-tests",
-      "milestone": "M13: Hardening And Release Quality",
+      "milestone": "M15: Hardening And Release Quality",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -905,7 +905,7 @@
       "linearId": "COE-431",
       "linearUuid": "7f96a927-765f-44e0-81a0-ede032aa4b92",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-431/web-hosted-and-performance-tests",
-      "milestone": "M13: Hardening And Release Quality",
+      "milestone": "M15: Hardening And Release Quality",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -924,7 +924,7 @@
       "linearId": "COE-432",
       "linearUuid": "6a83c438-df12-49b6-b87f-585f02cb879a",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-432/security-accessibility-documentation-and-developer-experience",
-      "milestone": "M13: Hardening And Release Quality",
+      "milestone": "M15: Hardening And Release Quality",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [

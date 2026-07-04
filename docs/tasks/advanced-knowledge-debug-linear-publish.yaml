@@ -8,9 +8,9 @@ milestones:
   'M11.5: LLM Wiki Graph View':
     milestoneId: 3c7e9e36-67d9-40ec-9ce0-08b13dd2f818
     name: 'M11.5: LLM Wiki Graph View'
-  'M12.5: ACP Debugging And IDE Attach':
+  'M13: ACP Debugging And IDE Attach':
     milestoneId: 12eda288-1f93-45db-a31d-43afab515cd8
-    name: 'M12.5: ACP Debugging And IDE Attach'
+    name: 'M13: ACP Debugging And IDE Attach'
 tasks:
   OSYM-800:
     issue: COE-454

@@ -13,6 +13,7 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/specs/tui-dependency-gutter-spec.md`
 - `docs/specs/opensymphony_tree_sitter_ast_spec.md`
 - `docs/specs/desktop-app-installer-auto-update-spec.md`
+- `docs/specs/code-graph-view-spec.md`
 
 ## M6: Gateway And Stream Contract
 
@@ -93,7 +94,7 @@ Tasks:
 
 Goal: Deliver local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode.
 
-Placement: After M10 web client/external gateway work and before M10.5 OKF Memory Bundle Foundation, M11 Hosted Alpha, and the broader M12 provider/harness backlog.
+Placement: After M10 web client/external gateway work and before M10.5 OKF Memory Bundle Foundation, M14 Hosted Alpha, and the broader M12 provider/harness backlog.
 
 Tasks:
 
@@ -158,7 +159,7 @@ Tasks:
 - OSYM-815 Desktop Project Grouping And Collapse
 - OSYM-816 Project Grouping Integration Hardening
 
-## M11: Hosted Alpha
+## M14: Hosted Alpha
 
 Goal: Add hosted multi-user execution where server-owned runs continue after clients disconnect and permissions, secrets, workspaces, audit, and administration are enforced centrally.
 
@@ -193,7 +194,7 @@ Tasks:
 
 - Follow-on tasks to be assigned after M10.3 Codex And Subscription Readiness.
 
-## M12.5: ACP Debugging And IDE Attach
+## M13: ACP Debugging And IDE Attach
 
 Goal: Expose OpenSymphony issue debug sessions through Zed ACP while preserving issue workspace, OpenHands conversation, and debug stream ownership in OpenSymphony.
 
@@ -243,7 +244,21 @@ Tasks:
 - OSYM-864 Desktop Auto-Update Flow
 - OSYM-865 Installer Docs And End-To-End Validation
 
-## M13: Hardening And Release Quality
+## M12.9: Code Graph View
+
+Goal: Add a shared web and desktop Code Graph surface over Tree-sitter code-intelligence data, with stable symbol identity, gateway/native contracts, run-diff entry points, cross-graph chips, and scale/accessibility hardening.
+
+Tasks:
+
+- OSYM-870 Workspace Shell Graph Hero And Surface State
+- OSYM-871 Symbol Identity Container Chain And Code Read Model
+- OSYM-872 Code Graph DTOs Gateway Routes And Native Commands
+- OSYM-873 Code Graph Frontend Surface Adapters And Inspector
+- OSYM-874 Run Diff Symbol Navigation And Code Overlay
+- OSYM-875 Cross Graph Code Memory And Work Chips
+- OSYM-876 Code Graph Scale Accessibility And Parity Hardening
+
+## M15: Hardening And Release Quality
 
 Goal: Prove the system through contract, end-to-end, performance, security, accessibility, and documentation work.
 
