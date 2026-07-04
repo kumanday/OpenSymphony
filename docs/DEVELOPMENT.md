@@ -257,6 +257,9 @@ If the current PR cannot modify `OpenSymphony-template`, leave a follow-up that
 updates that repo's `WORKFLOW.md` plus `.agents/skills/pull/SKILL.md`,
 `.agents/skills/push/SKILL.md`, and `.agents/skills/land/SKILL.md` with the
 same branch-marker wording before relying on fresh template fetches.
+The raw fetch URLs live in `crates/opensymphony-cli/src/init_repo.rs` as the
+`OpenSymphony-template` base and tree endpoints, so local repo-only guidance is
+not enough to make fresh init output fully consistent.
 
 For configurable target branches and marker-only workflow update flags, see
 [Workflow Target Branch And Update Settings Specification](specs/workflow-target-branch-update-spec.md).
@@ -275,7 +278,9 @@ opensymphony init \
 ```
 
 Existing target repos can patch only workflow settings without refreshing the
-template-managed skill tree:
+template-managed skill tree. Target-branch changes update the managed marker and
+known legacy branch-control phrases in `WORKFLOW.md`; they do not refresh
+template-owned skills:
 
 ```bash
 opensymphony update --target-branch develop

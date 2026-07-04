@@ -90,7 +90,7 @@ git push -u origin HEAD
 git push --force-with-lease origin HEAD
 
 # Ensure a PR exists (create only if missing)
-target_branch=$(awk -F': *' '/^Target branch:/ { print $2; exit }' WORKFLOW.md)
+target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)
 target_branch=${target_branch:-develop}
 pr_state=$(gh pr view --json state -q .state 2>/dev/null || true)
 if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then

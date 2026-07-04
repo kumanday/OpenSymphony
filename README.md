@@ -158,6 +158,10 @@ opensymphony init --non-interactive --target-branch main
 opensymphony init --non-interactive --target-branch release/next
 ```
 
+Fresh init fetches target-repo assets from `kumanday/OpenSymphony-template`;
+that template's `WORKFLOW.md` and `pull`/`push`/`land` skills must carry the
+same marker-aware wording before these branch examples are release-ready.
+
 If `AGENTS.md` already exists during first-time setup, `init` leaves it alone
 and writes the starter guidance to `AGENTS-example.md` for review.
 It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
@@ -172,8 +176,9 @@ maintenance path: it refreshes changed or new template-owned skill files under
 bootstrap files. When run from an OpenSymphony target repo, `update` also
 initializes or repairs the memory config and `.gitignore` policy if needed.
 When `--target-branch` or `--code-review` is present, `update` enters workflow
-settings mode instead: it patches only the managed `WORKFLOW.md` markers and
-skips the CLI reinstall, template skill refresh, and memory bootstrap.
+settings mode instead: it patches the managed `WORKFLOW.md` markers, rewrites
+known legacy branch-control phrases when the target branch changes, and skips
+the CLI reinstall, template skill refresh, and memory bootstrap.
 
 ```bash
 opensymphony update --target-branch develop

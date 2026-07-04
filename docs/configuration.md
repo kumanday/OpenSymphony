@@ -48,7 +48,8 @@ the command then refreshes changed or new files under `.agents/skills/`.
 
 When `--target-branch` or `--code-review` is present, `update` uses workflow
 settings mode instead of the normal maintenance path. It requires `WORKFLOW.md`
-and `config.yaml`, patches only the managed workflow markers, and skips Cargo
+and `config.yaml`, patches the managed workflow markers, rewrites known legacy
+branch-control phrases when the target branch changes, and skips Cargo
 self-update, template skill refresh, and memory bootstrap:
 
 ```bash
@@ -64,6 +65,10 @@ manual setup step:
 
 - [kumanday/OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template)
 - [Raw template base](https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/WORKFLOW.md)
+
+Fresh init branch-target behavior is fully consistent only when that template
+repo's `WORKFLOW.md` and `pull`/`push`/`land` skills have the same marker-aware
+wording as this repository's local copies.
 
 ## Files Added By `init`
 
