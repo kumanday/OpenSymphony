@@ -166,7 +166,7 @@ async function flushUntil(predicate: () => boolean, maxIterations = 40): Promise
 interface ModeSnapshot {
   mode: string;
   root: HTMLDivElement;
-  metricsText: string;
+  stripMetricsText: string;
   taskGraphNodes: string[];
   runHead: string;
   planningHeading: string | null;
@@ -189,7 +189,7 @@ async function snapshotMode(mode: "web" | "desktop"): Promise<ModeSnapshot> {
   (root.querySelector("[data-node-id='run-parity']") as HTMLElement).click();
   await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "COE-700");
 
-  const metricsText = root.querySelector(".os-metrics")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+  const stripMetricsText = root.querySelector(".os-strip-metrics")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
   const taskGraphNodes = Array.from(root.querySelectorAll("[data-node-id]")).map((el) => el.getAttribute("data-node-id") ?? "");
   const runHead = root.querySelector(".os-run-head strong")?.textContent ?? "";
   const authState = root.querySelector("[data-opensymphony-app-shell='mounted']")?.getAttribute("data-auth-state") ?? "";
@@ -206,7 +206,7 @@ async function snapshotMode(mode: "web" | "desktop"): Promise<ModeSnapshot> {
   await handle.destroy();
   root.remove();
 
-  return { mode, root, metricsText, taskGraphNodes, runHead, planningHeading, authState };
+  return { mode, root, stripMetricsText, taskGraphNodes, runHead, planningHeading, authState };
 }
 
 describe("Remote web/desktop parity (COE-419)", () => {
@@ -214,11 +214,11 @@ describe("Remote web/desktop parity (COE-419)", () => {
     const web = await snapshotMode("web");
     const desktop = await snapshotMode("desktop");
 
-    // Dashboard metrics parity
-    expect(web.metricsText).toBe(desktop.metricsText);
-    expect(web.metricsText).toContain("2");
-    expect(web.metricsText).toContain("Running");
-    expect(web.metricsText).toContain("Retry Queue");
+    // Dashboard status strip metrics parity
+    expect(web.stripMetricsText).toBe(desktop.stripMetricsText);
+    expect(web.stripMetricsText).toContain("2 running");
+    expect(web.stripMetricsText).toContain("1 retry");
+    expect(web.stripMetricsText).toContain("tokens");
 
     // Task graph node parity
     expect(web.taskGraphNodes).toEqual(desktop.taskGraphNodes);

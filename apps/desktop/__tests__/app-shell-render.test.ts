@@ -86,9 +86,10 @@ describe("desktop app shell render", () => {
     expect(shell?.getAttribute("data-mode")).toBe("desktop");
     expect(root.querySelector(".os-topbar")).not.toBeNull();
     expect(root.querySelector(".os-grid")).not.toBeNull();
-    expect(root.querySelector(".os-profile-panel")).not.toBeNull();
+    expect(root.querySelector(".os-profile-panel")).toBeNull();
     (root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement).click();
     await Promise.resolve();
+    expect(root.querySelector(".os-profile-panel")).not.toBeNull();
     expect(root.querySelector("[data-profile-select]")).not.toBeNull();
     expect(root.querySelector("[data-profile-gateway]")).not.toBeNull();
     expect(root.querySelector("[data-save-profile]")).not.toBeNull();

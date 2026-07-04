@@ -2144,6 +2144,12 @@ mod tests {
         }
     }
 
+    fn newer_than_desktop_version() -> String {
+        let version =
+            SemanticVersion::parse(desktop_version()).expect("desktop version should be semantic");
+        format!("{}.{}.{}", version.major, version.minor, version.patch + 1)
+    }
+
     fn command_key(program: &str, args: &[&str]) -> String {
         if args.is_empty() {
             program.to_string()
@@ -2287,7 +2293,10 @@ mod tests {
     fn default_release_index_urls_keep_installs_versioned_and_updates_latest() {
         assert_eq!(
             default_install_release_index_url(),
-            "https://github.com/kumanday/OpenSymphony/releases/download/v2.7.0/opensymphony-desktop-release-index.json"
+            format!(
+                "https://github.com/kumanday/OpenSymphony/releases/download/v{}/opensymphony-desktop-release-index.json",
+                desktop_version()
+            )
         );
         assert_eq!(
             default_update_release_index_url(),
@@ -2755,13 +2764,14 @@ mod tests {
     #[test]
     fn dry_run_uses_latest_verified_cached_bundle() {
         let install_root = TempDir::new().expect("install root");
+        let newer_version = newer_than_desktop_version();
         write_installed_bundle(
             &install_root.path().join(desktop_version()),
             b"current desktop",
         );
         write_installed_bundle_for_version(
-            &install_root.path().join("2.7.1"),
-            "2.7.1",
+            &install_root.path().join(&newer_version),
+            &newer_version,
             b"updated desktop",
         );
 
@@ -2772,8 +2782,8 @@ mod tests {
         )
         .expect("dry-run should use latest cached bundle");
 
-        assert_eq!(verified.manifest.version, "2.7.1");
-        assert_eq!(verified.bundle_dir, install_root.path().join("2.7.1"));
+        assert_eq!(verified.manifest.version, newer_version);
+        assert_eq!(verified.bundle_dir, install_root.path().join(newer_version));
     }
 
     #[test]
@@ -2814,14 +2824,15 @@ mod tests {
 
     #[tokio::test]
     async fn failed_update_launches_existing_verified_bundle() {
-        let archive = desktop_release_archive_for_version("2.7.1", b"updated desktop");
+        let newer_version = newer_than_desktop_version();
+        let archive = desktop_release_archive_for_version(&newer_version, b"updated desktop");
         let server = FakeReleaseServer::start(|base_url| {
             vec![
                 (
                     "/index.json",
                     release_index_body_for_version(
                         base_url,
-                        "2.7.1",
+                        &newer_version,
                         "0000000000000000000000000000000000000000000000000000000000000000",
                     )
                     .into_bytes(),
@@ -2844,18 +2855,19 @@ mod tests {
 
         assert_eq!(launched.manifest.version, desktop_version());
         assert!(cache_dir.join(MANIFEST_FILE).is_file());
-        assert!(!install_root.path().join("2.7.1").exists());
+        assert!(!install_root.path().join(newer_version).exists());
     }
 
     #[tokio::test]
     async fn newer_release_promotes_and_launches_updated_bundle() {
-        let archive = desktop_release_archive_for_version("2.7.1", b"updated desktop");
+        let newer_version = newer_than_desktop_version();
+        let archive = desktop_release_archive_for_version(&newer_version, b"updated desktop");
         let archive_sha = sha256_bytes(&archive);
         let server = FakeReleaseServer::start(|base_url| {
             vec![
                 (
                     "/index.json",
-                    release_index_body_for_version(base_url, "2.7.1", archive_sha.as_str())
+                    release_index_body_for_version(base_url, &newer_version, archive_sha.as_str())
                         .into_bytes(),
                 ),
                 ("/bundle.tar.gz", archive),
@@ -2874,8 +2886,8 @@ mod tests {
         )
         .await;
 
-        let updated_dir = install_root.path().join("2.7.1");
-        assert_eq!(launched.manifest.version, "2.7.1");
+        let updated_dir = install_root.path().join(&newer_version);
+        assert_eq!(launched.manifest.version, newer_version);
         assert_eq!(launched.bundle_dir, updated_dir);
         assert!(updated_dir.join(MANIFEST_FILE).is_file());
         assert_eq!(

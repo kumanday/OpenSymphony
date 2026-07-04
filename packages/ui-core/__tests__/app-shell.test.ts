@@ -691,25 +691,32 @@ describe("OpenSymphonyApp mount", () => {
       () => root.querySelector("[data-node-id='desktop-alpha']") !== null,
     );
 
-    expect(root.querySelector(".os-status-panel h2")?.textContent).toBe("Status");
-    expect(root.querySelector(".os-profile-panel h2")?.textContent).toBe("Connection");
-    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+    expect(root.querySelector("[data-testid='status-strip']")).not.toBeNull();
+    expect(root.querySelector(".os-status-panel")).toBeNull();
+    expect(root.querySelector(".os-profile-panel")).toBeNull();
+    expect(root.querySelector("[data-testid='graph-hero']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='graph-hero'] h2")?.textContent).toBe("Graph Surface");
     expect(root.querySelector(".os-run-detail-panel h2")?.textContent).toBe("Run Detail");
     expect(root.querySelector(".os-run-evidence-panel h2")?.textContent).toBe("Inspector");
-    expect(root.querySelectorAll("[data-pane-resizer]")).toHaveLength(2);
-    (root.querySelector("[data-pane-resizer='task-run']") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect((root.querySelector("[data-testid='workspace-pane-shell']") as HTMLElement).style.getPropertyValue("--os-task-pane")).toBe("50%");
+    expect(root.querySelectorAll("[data-pane-resizer]")).toHaveLength(1);
+    (root.querySelector("[data-pane-resizer='lower-columns']") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect((root.querySelector("[data-testid='workspace-lower-columns']") as HTMLElement).style.getPropertyValue("--os-left-column")).toBe("52%");
     expect(root.querySelector("[data-profile-label]")).toBeNull();
-    expect(root.querySelector(".os-metrics")).not.toBeNull();
+    expect(root.querySelector(".os-strip-metrics")).not.toBeNull();
     expect(root.querySelector("[data-project-id='proj-alpha']")).toBeNull();
-    expect(root.querySelectorAll(".os-events li")).toHaveLength(3);
-    const compactEvents = root.querySelector(".os-events");
+    expect(root.querySelectorAll("[data-testid='event-log-mini'] li")).toHaveLength(2);
+    const compactEvents = root.querySelector("[data-testid='event-log-mini']");
     expect(compactEvents?.textContent).not.toContain("codex.thread/tokenUsage/updated");
     expect(compactEvents?.textContent).not.toContain("codex.turn/diff/updated");
     expect(compactEvents?.textContent).not.toContain("Codex token usage");
     expect(compactEvents?.textContent).not.toContain("Codex diff updated");
-    expect(root.querySelector(".os-event-time")).not.toBeNull();
     expect(root.textContent).not.toContain("should not render in compact status");
+    (root.querySelector("[data-open-event-log]") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='event-log-modal']") !== null);
+    expect(root.querySelector("[data-testid='event-log-modal']")?.textContent).toContain("should not render in compact status");
+    expect(root.querySelector("[data-testid='event-log-modal']")?.textContent).not.toContain("Codex token usage");
+    (root.querySelector("[data-close-event-log]") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-testid='event-log-modal']") === null);
     expect(root.textContent).not.toContain("1 running, 2 done, 1 failed");
     expect(root.querySelector("[data-tg-create='milestone']")).toBeNull();
     expect(root.querySelector("[data-tg-create='issue']")).toBeNull();
@@ -820,11 +827,11 @@ describe("OpenSymphonyApp mount", () => {
     });
     try {
       (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
-      expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+      await flushUntil(() => root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
+      expect(root.querySelector(".os-graph-hero-panel h2")?.textContent).toBe("Graph Surface");
       expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
-      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
-      expect(root.querySelector(".os-task-graph-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
+      expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
+      expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
       expect(fillStyles).toContain("#e7ebef");
       expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
       expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain(`${fixtureGraphSnapshot.nodes.length} nodes`);
@@ -836,7 +843,9 @@ describe("OpenSymphonyApp mount", () => {
       fallbackButtons[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
       expect(nextFocus).toHaveBeenCalled();
       nextFocus.mockRestore();
-      expect(root.querySelector(".os-task-graph-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.querySelector(".os-graph-hero-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.querySelector("[data-testid='knowledge-lower-list']")).not.toBeNull();
+      expect(root.querySelector("[data-testid='knowledge-lower-detail']")).not.toBeNull();
       expect(root.textContent).not.toContain("unknown_frontmatter");
       expect(root.textContent).not.toContain("frontmatter_summary");
       // TODO(COE-471): migrate the COE-468 search/filter/inspector/raw-frontmatter controls
@@ -845,6 +854,11 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-kg-search]")).toBeNull();
       expect(root.querySelector("[data-kg-raw-toggle]")).toBeNull();
       expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
+      (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
+      expect(root.querySelector("[data-testid='workspace-pane-shell']")?.getAttribute("data-graph-surface")).toBe("code");
+      expect(root.querySelector("[data-testid='code-graph-structure-list']")).not.toBeNull();
+      expect(root.querySelector("[data-testid='code-graph-detail']")).not.toBeNull();
     } finally {
       consoleError.mockRestore();
       getContext.mockRestore();
@@ -852,9 +866,76 @@ describe("OpenSymphonyApp mount", () => {
 
     (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
-    expect(root.querySelector(".os-task-graph-panel h2")).toBeNull();
+    expect(root.querySelector(".os-graph-hero-panel h2")?.textContent).toBe("Graph Surface");
+    expect((root.querySelector("[data-testid='workspace-lower-columns']") as HTMLElement).style.getPropertyValue("--os-left-column")).toBe("52%");
 
     await handle.destroy();
+  });
+
+  it("restores graph surface state and lower columns across round trips", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const getContext = jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (
+      contextId: string,
+    ) {
+      if (contextId.startsWith("webgl")) {
+        return null;
+      }
+      if (contextId !== "2d") return null;
+      return {
+        setTransform: jest.fn(),
+        fillRect: jest.fn(),
+        beginPath: jest.fn(),
+        moveTo: jest.fn(),
+        lineTo: jest.fn(),
+        stroke: jest.fn(),
+        arc: jest.fn(),
+        fill: jest.fn(),
+        set fillStyle(_value: string) {},
+        set strokeStyle(_value: string) {},
+        set lineWidth(_value: number) {},
+        set globalAlpha(_value: number) {},
+      } as unknown as CanvasRenderingContext2D;
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      const resizer = () => root.querySelector("[data-pane-resizer='lower-columns']") as HTMLElement;
+      const lowerColumns = () => root.querySelector("[data-testid='workspace-lower-columns']") as HTMLElement;
+
+      resizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("52%");
+
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-kg-node-id='concept:coe-465']") !== null);
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("50%");
+      (root.querySelector("[data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
+      resizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
+
+      (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("50%");
+
+      (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='task-graph-visualization']") !== null);
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("52%");
+      expect(root.querySelector("[data-node-id='desktop-alpha']")?.classList.contains("is-selected")).toBe(true);
+
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
+    } finally {
+      getContext.mockRestore();
+      await handle.destroy();
+    }
   });
 
   it("refreshes the Knowledge Graph on memory_graph_updated events", async () => {
@@ -1918,21 +1999,21 @@ describe("OpenSymphonyApp mount", () => {
       initialModelProfiles: profiles,
     });
 
-    await flushUntil(() => root.querySelector("[data-testid='model-profile-panel']") !== null);
+    await flushUntil(() => root.querySelector("[data-toggle-settings='model']") !== null);
 
-    expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
+    expect(root.querySelector("[data-testid='model-profile-panel']")).toBeNull();
     const collapsedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
     expect(collapsedToggle).not.toBeNull();
-    expect(collapsedToggle.classList.contains("os-activity-toggle")).toBe(true);
-    expect(collapsedToggle.textContent?.trim()).toBe(">");
+    expect(collapsedToggle.classList.contains("os-model-gear")).toBe(true);
     expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
     expect(collapsedToggle.textContent).not.toContain("Collapse");
     expect(collapsedToggle.textContent).not.toContain("Edit");
-    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("API key not configured");
     expect(root.querySelector("[data-model-credential-ref]")).toBeNull();
     await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
-    const expandedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
-    expect(expandedToggle.textContent?.trim()).toBe("v");
+    const expandedToggle = root.querySelector("[data-settings-modal='model'] [data-toggle-settings='model']") as HTMLButtonElement;
+    expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("API key not configured");
+    expect(expandedToggle.textContent?.trim()).toBe("x");
     expect(expandedToggle.getAttribute("aria-expanded")).toBe("true");
     expect(expandedToggle.textContent).not.toContain("Collapse");
     expect(expandedToggle.textContent).not.toContain("Edit");
@@ -2610,6 +2691,38 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("renders one connection settings modal in hosted auth placeholders", async () => {
+    class AuthSnapshotTransport extends MockGatewayTransport {
+      override async snapshot(): Promise<DashboardSnapshot> {
+        throw { code: "unauthenticated", message: "sign in required" };
+      }
+    }
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: new AuthSnapshotTransport({
+        baseUri: "http://127.0.0.1:2468",
+        health: { ...capabilities, auth_modes: ["oauth"] },
+        snapshot: dashboard,
+        taskGraph,
+        runDetails: [runDetail],
+      }),
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='auth-placeholder']") !== null);
+    expect(root.querySelector("[data-testid='auth-placeholder']")?.getAttribute("data-auth-state")).toBe("unauthenticated");
+    expect(root.querySelector(".os-profile-panel")).toBeNull();
+
+    await expandSettingsPanel(root, "connection", "[data-profile-select]");
+
+    expect(root.querySelectorAll(".os-profile-panel")).toHaveLength(1);
+    expect(root.querySelectorAll("[data-profile-select]")).toHaveLength(1);
+
+    await handle.destroy();
+  });
+
   it("renders the profile panel and provided initial profile when no controller is set", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -2619,18 +2732,17 @@ describe("OpenSymphonyApp mount", () => {
       transport: buildTransport(),
     });
 
-    await flushUntil(() => root.querySelector(".os-profile-panel") !== null);
+    await flushUntil(() => root.querySelector("[data-toggle-settings='connection']") !== null);
+    expect(root.querySelector(".os-profile-panel")).toBeNull();
     expect(root.querySelector("[data-profile-select]")).toBeNull();
     const collapsedToggle = root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement;
     expect(collapsedToggle).not.toBeNull();
-    expect(collapsedToggle.classList.contains("os-activity-toggle")).toBe(true);
-    expect(collapsedToggle.textContent?.trim()).toBe(">");
     expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
     expect(collapsedToggle.textContent).not.toContain("Collapse");
     expect(collapsedToggle.textContent).not.toContain("Edit");
     await expandSettingsPanel(root, "connection", "[data-profile-select]");
-    const expandedToggle = root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement;
-    expect(expandedToggle.textContent?.trim()).toBe("v");
+    const expandedToggle = root.querySelector("[data-settings-modal='connection'] [data-toggle-settings='connection']") as HTMLButtonElement;
+    expect(expandedToggle.textContent?.trim()).toBe("x");
     expect(expandedToggle.getAttribute("aria-expanded")).toBe("true");
     expect(expandedToggle.textContent).not.toContain("Collapse");
     expect(expandedToggle.textContent).not.toContain("Edit");

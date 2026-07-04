@@ -206,7 +206,8 @@ interface AppState {
   runEvents: RunEvent[] | null;
   expandedActivityEvents: Set<string>;
   collapsedActivityEvents: Set<string>;
-  workspacePaneSizes: WorkspacePaneSizes;
+  workspacePaneSizes: WorkspacePaneSizesBySurface;
+  eventLogModalOpen: boolean;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
   lastActionReceipt: ActionReceipt | null;
@@ -247,21 +248,22 @@ interface AuditTrailEntry {
 }
 
 type EvidenceView = "diff" | "activity";
-type GraphPaneView = "task" | "knowledge";
-type WorkspacePaneResizeHandle = "task-run" | "run-evidence";
+type GraphPaneView = "task" | "knowledge" | "code";
+type WorkspacePaneResizeHandle = "lower-columns";
 
 interface WorkspacePaneSizes {
-  task: number;
-  run: number;
-  evidence: number;
+  left: number;
+  right: number;
 }
+
+type WorkspacePaneSizesBySurface = Record<GraphPaneView, WorkspacePaneSizes>;
 
 const schemaVersion = { major: 1, minor: 0, patch: 0 };
 // Two consecutive failures avoid noisy transient warnings while still surfacing stale live data.
 const liveRefreshFailureThreshold = 2;
 const liveRefreshPollIntervalMs = 5_000;
-const defaultWorkspacePaneSizes: WorkspacePaneSizes = { task: 48, run: 26, evidence: 26 };
-const minWorkspacePaneSizes: WorkspacePaneSizes = { task: 24, run: 20, evidence: 20 };
+const defaultWorkspacePaneSizes: WorkspacePaneSizes = { left: 50, right: 50 };
+const minWorkspacePaneSizes: WorkspacePaneSizes = { left: 30, right: 30 };
 
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
@@ -324,7 +326,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runEvents: null,
       expandedActivityEvents: new Set(),
       collapsedActivityEvents: new Set(),
-      workspacePaneSizes: { ...defaultWorkspacePaneSizes },
+      workspacePaneSizes: createDefaultWorkspacePaneSizes(),
+      eventLogModalOpen: false,
       runValidation: null,
       runApprovals: null,
       lastActionReceipt: null,
@@ -1127,7 +1130,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!isWorkspacePaneResizeHandle(handle)) {
       return;
     }
-    const shell = (event.currentTarget as HTMLElement).closest<HTMLElement>(".os-workspace-shell");
+    const shell = (event.currentTarget as HTMLElement).closest<HTMLElement>(".os-lower-columns");
     if (!shell) {
       return;
     }
@@ -1137,11 +1140,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     event.preventDefault();
     const startX = event.clientX;
-    const start = { ...this.state.workspacePaneSizes };
+    const surface = this.state.graphPaneView;
+    const start = { ...this.currentWorkspacePaneSizes() };
     const move = (moveEvent: PointerEvent) => {
       const delta = ((moveEvent.clientX - startX) / width) * 100;
-      this.state.workspacePaneSizes = resizeWorkspacePanes(start, handle, delta);
-      applyWorkspacePaneStyle(shell, this.state.workspacePaneSizes);
+      const nextSizes = resizeWorkspacePanes(start, handle, delta);
+      this.state.workspacePaneSizes = {
+        ...this.state.workspacePaneSizes,
+        [surface]: nextSizes,
+      };
+      applyWorkspacePaneStyle(shell, nextSizes);
     };
     const done = () => {
       window.removeEventListener("pointermove", move);
@@ -1162,7 +1170,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     event.preventDefault();
     const delta = event.key === "ArrowRight" ? 2 : -2;
-    this.state.workspacePaneSizes = resizeWorkspacePanes(this.state.workspacePaneSizes, handle, delta);
+    this.state.workspacePaneSizes = {
+      ...this.state.workspacePaneSizes,
+      [this.state.graphPaneView]: resizeWorkspacePanes(this.currentWorkspacePaneSizes(), handle, delta),
+    };
     this.render();
   }
 
@@ -1611,13 +1622,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             <button type="button" class="os-view-tab ${this.state.activeView === "dashboard" ? "os-view-tab-active" : ""}" data-plan-view="dashboard">Dashboard</button>
             <button type="button" class="os-view-tab ${this.state.activeView === "planning" ? "os-view-tab-active" : ""}" data-plan-view="planning">Planning</button>
           </div>
-          <div class="os-status os-status-${this.state.connectionMode}">
-            <span></span>${escapeHtml(statusLabel(this.state.connectionMode))}
-          </div>
+          ${this.renderTopbarStatusStrip()}
         </header>
         <section class="os-grid">
           ${this.renderViewContent()}
         </section>
+        ${this.renderGlobalModals()}
       </main>
     `;
     if (preservedKnowledgeCanvas) {
@@ -1638,29 +1648,133 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (this.state.activeView === "planning") {
       return `
-        ${this.renderProfiles()}
-        ${this.renderModelProfiles()}
         ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
       `;
     }
     return `
-      ${this.renderStatus()}
-      ${this.renderProfiles()}
-      ${this.renderModelProfiles()}
       ${this.renderDashboardWorkspace()}
     `;
   }
 
-  private renderDashboardWorkspace(): string {
-    const sizes = this.state.workspacePaneSizes;
+  private renderGlobalModals(): string {
     return `
-      <section class="os-workspace-shell" data-testid="workspace-pane-shell" style="--os-task-pane: ${panePercent(sizes.task)}; --os-run-pane: ${panePercent(sizes.run)}; --os-evidence-pane: ${panePercent(sizes.evidence)};">
+      ${this.renderProfiles()}
+      ${this.renderModelProfiles()}
+      ${this.renderEventLogModal()}
+    `;
+  }
+
+  private renderTopbarStatusStrip(): string {
+    const snapshot = this.state.snapshot;
+    const totalTokens = snapshot
+      ? snapshot.metrics.total_input_tokens
+        + snapshot.metrics.total_cache_read_tokens
+        + snapshot.metrics.total_output_tokens
+      : 0;
+    const metrics = snapshot
+      ? `
+        <span><strong>${snapshot.metrics.running_issue_count}</strong> running</span>
+        <span><strong>${snapshot.metrics.retry_queue_depth}</strong> retry</span>
+        <span><strong>${formatNumber(totalTokens)}</strong> tokens</span>
+      `
+      : `<span>status loading</span>`;
+    const events = statusEvents(snapshot)
+      .slice(0, 2)
+      .map((event) => `
+        <li>
+          <time datetime="${escapeAttr(event.happened_at)}">${escapeHtml(formatEventTime(event.happened_at))}</time>
+          <span>${escapeHtml(event.issue_identifier ?? "system")}</span>
+          ${escapeHtml(event.summary)}
+        </li>
+      `)
+      .join("");
+    const profiles = this.state.profiles.length > 0
+      ? this.state.profiles
+      : defaultUiProfiles(this.transport.baseUri);
+    const activeProfile = profiles.find((profile) => profile.id === this.state.activeProfileId)
+      ?? profiles[0]
+      ?? null;
+    const modelProfiles = modelProfilesWithDefaults(this.state.modelProfiles);
+    const activeModel = activeModelProfile(modelProfiles, this.state.activeModelProfileId)
+      ?? modelProfiles[0]
+      ?? null;
+    const persistence = this.options.modelProfileController?.persistence;
+    const persistenceMeta = persistence
+      ? `<span class="os-model-persistence os-model-persistence-${escapeAttr(persistence.kind)}" data-testid="model-persistence-status">${escapeHtml(persistence.label)}</span>`
+      : "";
+    const modelProfileError = this.state.modelProfileError
+      ? `<span class="os-model-error os-strip-alert" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</span>`
+      : "";
+    return `
+      <div class="os-status-strip" data-testid="status-strip">
+        <div class="os-status os-status-${this.state.connectionMode}">
+          <span aria-hidden="true"></span>${escapeHtml(statusLabel(this.state.connectionMode))}
+        </div>
+        <div class="os-strip-metrics">${metrics}</div>
+        <div class="os-strip-connection">
+          <span>${escapeHtml(activeProfile?.label ?? "Connection")}</span>
+          <button type="button" class="os-icon-button" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="Connection settings" title="Connection settings">Connection</button>
+        </div>
+        <div class="os-event-mini" data-testid="event-log-mini">
+          <ol>${events || `<li>No recent events</li>`}</ol>
+          <button type="button" class="os-icon-button" data-open-event-log aria-haspopup="dialog">Log</button>
+        </div>
+        <div class="os-strip-model">
+          <span>${escapeHtml(activeModel?.model || activeModel?.label || "Model")}</span>
+          ${persistenceMeta}
+          ${modelProfileError}
+          <button type="button" class="os-icon-button os-model-gear" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="Model Configuration settings" title="Model Configuration settings">&#9881;</button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderDashboardWorkspace(): string {
+    const sizes = this.currentWorkspacePaneSizes();
+    return `
+      <section class="os-workspace-shell" data-testid="workspace-pane-shell" data-graph-surface="${escapeAttr(this.state.graphPaneView)}">
         ${this.renderGraphPane()}
-        ${renderPaneResizer("task-run", "Resize Task Graph and Run Detail panes", sizes.task)}
-        ${this.renderRunDetail()}
-        ${renderPaneResizer("run-evidence", "Resize Run Detail and Inspector panes", sizes.task + sizes.run)}
-        ${this.renderRunEvidence()}
+        <section class="os-lower-columns" data-testid="workspace-lower-columns" style="--os-left-column: ${panePercent(sizes.left)}; --os-right-column: ${panePercent(sizes.right)};">
+          ${this.renderLowerColumn("left")}
+          ${renderPaneResizer("lower-columns", "Resize lower workspace columns", sizes.left)}
+          ${this.renderLowerColumn("right")}
+        </section>
       </section>
+    `;
+  }
+
+  private currentWorkspacePaneSizes(): WorkspacePaneSizes {
+    return this.state.workspacePaneSizes[this.state.graphPaneView] ?? defaultWorkspacePaneSizes;
+  }
+
+  private renderEventLogModal(): string {
+    if (!this.state.eventLogModalOpen) {
+      return "";
+    }
+    const events = statusEvents(this.state.snapshot);
+    const items = events.map((event) => `
+      <li>
+        <time datetime="${escapeAttr(event.happened_at)}">${escapeHtml(formatEventTime(event.happened_at))}</time>
+        <span>${escapeHtml(event.kind)}</span>
+        <strong>${escapeHtml(event.issue_identifier ?? "system")}</strong>
+        ${escapeHtml(event.summary)}
+      </li>
+    `).join("");
+    return `
+      <div class="os-modal-backdrop" data-event-log-modal>
+        <section class="os-dialog os-event-log-modal" role="dialog" aria-modal="true" aria-labelledby="os-event-log-title">
+          <div class="os-section-head">
+            <div>
+              <h2 id="os-event-log-title">Event Log</h2>
+              <span>${events.length} recent event${events.length === 1 ? "" : "s"}</span>
+            </div>
+            <button type="button" class="os-activity-toggle os-panel-toggle" data-close-event-log aria-label="Close Event Log" title="Close Event Log">
+              <span aria-hidden="true">x</span>
+            </button>
+          </div>
+          <ol class="os-events os-events-full" data-testid="event-log-modal">${items || `<li>No recent events</li>`}</ol>
+        </section>
+      </div>
     `;
   }
 
@@ -1682,7 +1796,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const orgProject = state === "forbidden" ? "" : this.renderOrgProjectPlaceholder();
     if (state === "unauthenticated") {
       return `
-        ${this.renderProfiles()}
         <section class="os-panel os-auth-panel" data-testid="auth-placeholder" data-auth-state="unauthenticated">
           <div class="os-section-head"><h2>Sign in</h2><span>hosted</span></div>
           <div class="os-auth-body">
@@ -1699,7 +1812,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (state === "unauthorized") {
       return `
-        ${this.renderProfiles()}
         <section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="unauthorized">
           <div class="os-section-head"><h2>Access denied</h2><span>hosted</span></div>
           <div class="os-auth-body">
@@ -1715,7 +1827,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     // forbidden
     return `
-      ${this.renderProfiles()}
       <section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="forbidden">
         <div class="os-section-head"><h2>Access forbidden</h2><span>hosted</span></div>
         <div class="os-auth-body">
@@ -1764,6 +1875,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private renderProfiles(): string {
+    if (!this.state.profilePanelExpanded) {
+      return "";
+    }
     const profiles = this.state.profiles.length > 0
       ? this.state.profiles
       : defaultUiProfiles(this.transport.baseUri);
@@ -1785,58 +1899,45 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const capabilities = this.state.capabilities?.transports
       .map((transport) => transport.transport)
       .join(", ") ?? "unknown";
-    const summary = activeProfile
-      ? `${activeProfile.label} • ${activeProfile.gatewayUrl}`
-      : this.transport.baseUri;
-    const toggleLabel = this.state.profilePanelExpanded ? "Collapse" : "Expand";
-    const header = `
-      <div class="os-section-head">
-        <div>
-          <h2>Connection</h2>
-          <span>${escapeHtml(summary)}</span>
-        </div>
-        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="${toggleLabel} Connection settings" title="${toggleLabel} Connection settings">
-          <span aria-hidden="true">${this.state.profilePanelExpanded ? "v" : ">"}</span>
-        </button>
-      </div>
-    `;
-    if (!this.state.profilePanelExpanded) {
-      return `
-        <section class="os-panel os-profile-panel os-panel-collapsed">
-          ${header}
-          <div class="os-meta">Transport: ${escapeHtml(capabilities)}</div>
-        </section>
-      `;
-    }
     const canRemoveProfile = profiles.length > 1;
     return `
-      <section class="os-panel os-profile-panel">
-        ${header}
-        <label class="os-field">
-          <span>Profile</span>
-          <select data-profile-select>${options}</select>
-        </label>
-        <div class="os-inline-fields">
-          <label class="os-field">
-            <span>Label</span>
-            <input data-profile-label value="${escapeAttr(activeProfile?.label ?? "Local Gateway")}" />
-          </label>
-          <label class="os-field">
-            <span>Kind</span>
-            <select data-profile-kind>${kindOptions}</select>
-          </label>
-          <label class="os-field">
-            <span>Gateway URL</span>
-            <input data-profile-gateway value="${escapeAttr(this.state.gatewayDraft)}" />
-          </label>
-          <div class="os-model-actions">
-            <button type="button" data-save-profile ${this.options.profileController ? "" : "disabled"}>Save</button>
-            <button type="button" data-new-profile ${this.options.profileController ? "" : "disabled"}>New</button>
-            <button type="button" data-remove-profile ${this.options.profileController && canRemoveProfile ? "" : "disabled"}>Delete</button>
+      <div class="os-modal-backdrop" data-settings-modal="connection">
+        <section class="os-dialog os-profile-panel" role="dialog" aria-modal="true" aria-labelledby="os-connection-settings-title">
+          <div class="os-section-head">
+            <div>
+              <h2 id="os-connection-settings-title">Connection</h2>
+              <span>${escapeHtml(activeProfile ? `${activeProfile.label} | ${activeProfile.gatewayUrl}` : this.transport.baseUri)}</span>
+            </div>
+            <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="connection" aria-expanded="true" aria-label="Close Connection settings" title="Close Connection settings">
+              <span aria-hidden="true">x</span>
+            </button>
           </div>
-        </div>
-        <div class="os-meta">Transport: ${escapeHtml(capabilities)}</div>
-      </section>
+          <label class="os-field">
+            <span>Profile</span>
+            <select data-profile-select>${options}</select>
+          </label>
+          <div class="os-inline-fields">
+            <label class="os-field">
+              <span>Label</span>
+              <input data-profile-label value="${escapeAttr(activeProfile?.label ?? "Local Gateway")}" />
+            </label>
+            <label class="os-field">
+              <span>Kind</span>
+              <select data-profile-kind>${kindOptions}</select>
+            </label>
+            <label class="os-field">
+              <span>Gateway URL</span>
+              <input data-profile-gateway value="${escapeAttr(this.state.gatewayDraft)}" />
+            </label>
+            <div class="os-model-actions">
+              <button type="button" data-save-profile ${this.options.profileController ? "" : "disabled"}>Save</button>
+              <button type="button" data-new-profile ${this.options.profileController ? "" : "disabled"}>New</button>
+              <button type="button" data-remove-profile ${this.options.profileController && canRemoveProfile ? "" : "disabled"}>Delete</button>
+            </div>
+          </div>
+          <div class="os-meta">Transport: ${escapeHtml(capabilities)}</div>
+        </section>
+      </div>
     `;
   }
 
@@ -1845,16 +1946,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const active = activeModelProfile(profiles, this.state.activeModelProfileId)
       ?? profiles[0]
       ?? null;
+    if (!this.state.modelPanelExpanded) {
+      return "";
+    }
     if (!active) {
       return `
-        <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
+        <div class="os-modal-backdrop" data-settings-modal="model">
+        <section class="os-dialog os-model-panel" role="dialog" aria-modal="true" aria-labelledby="os-model-settings-title" data-testid="model-profile-panel">
           <div class="os-section-head">
             <div>
-              <h2>Model Configuration</h2>
+              <h2 id="os-model-settings-title">Model Configuration</h2>
               <span>No model profiles</span>
             </div>
+            <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="model" aria-expanded="true" aria-label="Close Model Configuration settings" title="Close Model Configuration settings">
+              <span aria-hidden="true">x</span>
+            </button>
           </div>
         </section>
+        </div>
       `;
     }
     const options = profiles
@@ -1878,32 +1987,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       : "";
     const canRemoveProfile = profiles.length > 1;
     const summary = `${active.label} • ${active.model || "No model"}${active.baseUrl ? ` • ${active.baseUrl}` : ""}`;
-    const toggleLabel = this.state.modelPanelExpanded ? "Collapse" : "Expand";
     const header = `
       <div class="os-section-head">
         <div>
-          <h2>Model Configuration</h2>
+          <h2 id="os-model-settings-title">Model Configuration</h2>
           <span>${escapeHtml(summary)}</span>
         </div>
-        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="${toggleLabel} Model Configuration settings" title="${toggleLabel} Model Configuration settings">
-          <span aria-hidden="true">${this.state.modelPanelExpanded ? "v" : ">"}</span>
+        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="model" aria-expanded="true" aria-label="Close Model Configuration settings" title="Close Model Configuration settings">
+          <span aria-hidden="true">x</span>
         </button>
       </div>
     `;
-    if (!this.state.modelPanelExpanded) {
-      return `
-        <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
-          ${header}
-          <div class="os-model-meta" data-testid="model-redacted-credential">
-            Credential: ${escapeHtml(credentialSummary)}
-          </div>
-          ${persistenceMeta}
-          ${modelProfileError}
-        </section>
-      `;
-    }
     return `
-      <section class="os-panel os-model-panel" data-testid="model-profile-panel">
+      <div class="os-modal-backdrop" data-settings-modal="model">
+      <section class="os-dialog os-model-panel" role="dialog" aria-modal="true" aria-labelledby="os-model-settings-title" data-testid="model-profile-panel">
         ${header}
         <div class="os-model-layout">
           <label class="os-field">
@@ -1966,59 +2063,46 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         ${persistenceMeta}
         ${modelProfileError}
       </section>
+      </div>
     `;
   }
 
-  private renderStatus(): string {
-    const snapshot = this.state.snapshot;
-    if (!snapshot) {
-      return panel("Status", `<div class="os-empty">Loading status</div>`, "os-status-panel");
-    }
-    const events = snapshot.recent_events.filter((event) => !isTelemetryEventKind(event.kind)).slice(0, 3).map((event) => `
-      <li>
-        <time class="os-event-time" datetime="${escapeAttr(event.happened_at)}">${escapeHtml(formatEventTime(event.happened_at))}</time>
-        <span>${escapeHtml(event.kind)}</span>
-        <strong>${escapeHtml(event.issue_identifier ?? "system")}</strong>
-        ${escapeHtml(event.summary)}
-      </li>
-    `).join("");
-    const totalTokens = snapshot.metrics.total_input_tokens
-      + snapshot.metrics.total_cache_read_tokens
-      + snapshot.metrics.total_output_tokens;
-    return panel(
-      "Status",
-      `
-        <div class="os-metrics">
-          <div><strong>${snapshot.metrics.running_issue_count}</strong><span>Running</span></div>
-          <div><strong>${snapshot.metrics.retry_queue_depth}</strong><span>Retry Queue</span></div>
-          <div><strong>${formatNumber(snapshot.metrics.total_input_tokens)}</strong><span>Input</span></div>
-          <div><strong>${formatNumber(snapshot.metrics.total_cache_read_tokens)}</strong><span>Cache</span></div>
-          <div><strong>${formatNumber(snapshot.metrics.total_output_tokens)}</strong><span>Output</span></div>
-          <div><strong>${formatNumber(totalTokens)}</strong><span>Total</span></div>
+  private renderGraphPane(): string {
+    const content = this.state.graphPaneView === "task"
+      ? this.renderTaskGraph()
+      : this.state.graphPaneView === "knowledge"
+        ? renderKnowledgeGraphSurface({
+          snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
+          layout: this.state.knowledgeGraphLayout,
+          state: this.state.knowledgeGraph,
+        })
+        : this.renderCodeGraphPlaceholder();
+    return `
+      <section class="os-panel os-graph-hero-panel" data-testid="graph-hero" data-active-graph-surface="${escapeAttr(this.state.graphPaneView)}">
+        <div class="os-graph-hero-toolbar">
+          <div>
+            <h2>Graph Surface</h2>
+            <span>${escapeHtml(graphSurfaceSummary(this.state.graphPaneView))}</span>
+          </div>
+          <div class="os-segmented" data-testid="graph-view-toggle">
+            <button type="button" class="${this.state.graphPaneView === "task" ? "is-selected" : ""}" data-graph-view="task">Task Graph</button>
+            <button type="button" class="${this.state.graphPaneView === "knowledge" ? "is-selected" : ""}" data-graph-view="knowledge">Knowledge Graph</button>
+            <button type="button" class="${this.state.graphPaneView === "code" ? "is-selected" : ""}" data-graph-view="code">Code Graph</button>
+          </div>
         </div>
-        <ol class="os-events">${events || `<li>No recent events</li>`}</ol>
-      `,
-      "os-status-panel",
-    );
+        <div class="os-graph-hero-body">
+          ${content}
+        </div>
+      </section>
+    `;
   }
 
-  private renderGraphPane(): string {
-    const showingTasks = this.state.graphPaneView === "task";
-    const content = showingTasks
-      ? this.renderTaskGraph()
-      : renderKnowledgeGraphSurface({
-        snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
-        layout: this.state.knowledgeGraphLayout,
-        state: this.state.knowledgeGraph,
-      });
+  private renderCodeGraphPlaceholder(): string {
     return `
-      <section class="os-panel os-task-graph-panel">
-        <div class="os-segmented" data-testid="graph-view-toggle">
-          <button type="button" class="${showingTasks ? "is-selected" : ""}" data-graph-view="task">Task Graph</button>
-          <button type="button" class="${showingTasks ? "" : "is-selected"}" data-graph-view="knowledge">Knowledge Graph</button>
-        </div>
-        ${content}
-      </section>
+      <div class="os-code-graph-placeholder" data-testid="code-graph-placeholder">
+        <strong>Code Graph</strong>
+        <span>Surface registered. Code graph data lands in the follow-on adapter work.</span>
+      </div>
     `;
   }
 
@@ -2094,6 +2178,69 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       "Task Graph",
       `${toolbar}${filters}${pendingBanner}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
       "os-task-graph-panel",
+    );
+  }
+
+  private renderLowerColumn(column: "left" | "right"): string {
+    switch (this.state.graphPaneView) {
+      case "task":
+        return column === "left" ? this.renderRunDetail() : this.renderRunEvidence();
+      case "knowledge":
+        return column === "left" ? this.renderKnowledgeGraphListColumn() : this.renderKnowledgeGraphDetailColumn();
+      case "code":
+        return column === "left" ? this.renderCodeGraphStructureColumn() : this.renderCodeGraphDetailColumn();
+    }
+  }
+
+  private renderKnowledgeGraphListColumn(): string {
+    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
+    const selected = new Set(this.state.knowledgeGraph.selectedNodeIds);
+    const nodes = snapshot?.nodes.slice(0, 12).map((node) => `
+      <li class="${selected.has(node.id) ? "is-selected" : ""}">
+        <strong>${escapeHtml(node.label)}</strong>
+        <span>${escapeHtml(node.kind)}</span>
+      </li>
+    `).join("");
+    return panel(
+      "Neighborhood",
+      nodes
+        ? `<ul class="os-surface-list" data-testid="knowledge-lower-list">${nodes}</ul>`
+        : `<div class="os-empty" data-testid="knowledge-lower-list">Load the Knowledge Graph to populate this surface list</div>`,
+      "os-knowledge-lower-panel",
+    );
+  }
+
+  private renderKnowledgeGraphDetailColumn(): string {
+    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
+    const selectedId = this.state.knowledgeGraph.selectedNodeIds[0] ?? null;
+    const node = selectedId ? snapshot?.nodes.find((candidate) => candidate.id === selectedId) : null;
+    return panel(
+      "Concept",
+      node
+        ? `
+          <div class="os-surface-detail" data-testid="knowledge-lower-detail">
+            <strong>${escapeHtml(node.label)}</strong>
+            <span>${escapeHtml(node.kind)}</span>
+          </div>
+        `
+        : `<div class="os-empty" data-testid="knowledge-lower-detail">Select a Knowledge Graph node to inspect it here</div>`,
+      "os-knowledge-lower-panel",
+    );
+  }
+
+  private renderCodeGraphStructureColumn(): string {
+    return panel(
+      "Structure List",
+      `<div class="os-empty" data-testid="code-graph-structure-list">Code Graph structure data is not available yet</div>`,
+      "os-code-graph-lower-panel",
+    );
+  }
+
+  private renderCodeGraphDetailColumn(): string {
+    return panel(
+      "Symbol Detail",
+      `<div class="os-empty" data-testid="code-graph-detail">Select a code symbol after the adapter supplies data</div>`,
+      "os-code-graph-lower-panel",
     );
   }
 
@@ -2254,6 +2401,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
+    this.options.root.querySelector("[data-open-event-log]")?.addEventListener("click", () => {
+      this.state.eventLogModalOpen = true;
+      this.render();
+    });
+    this.options.root.querySelector("[data-close-event-log]")?.addEventListener("click", () => {
+      this.state.eventLogModalOpen = false;
+      this.render();
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
       button.addEventListener("click", () => {
         const action = button.dataset.authAction;
@@ -2348,7 +2503,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelectorAll<HTMLElement>("[data-graph-view]").forEach((button) => {
       button.addEventListener("click", () => {
         const view = button.dataset.graphView;
-        if (view === "task" || view === "knowledge") {
+        if (view === "task" || view === "knowledge" || view === "code") {
           this.selectGraphPaneView(view);
         }
       });
@@ -3133,9 +3288,11 @@ function panel(title: string, body: string, className = ""): string {
 }
 
 const shellScrollSelectors = [
-  ".os-task-graph-panel",
+  ".os-graph-hero-panel",
   ".os-run-detail-panel",
   ".os-run-evidence-panel",
+  ".os-knowledge-lower-panel",
+  ".os-code-graph-lower-panel",
   ".os-task-graph-stage",
   ".os-run-activity",
 ] as const;
@@ -3177,9 +3334,8 @@ function panePercent(value: number): string {
 }
 
 function applyWorkspacePaneStyle(shell: HTMLElement, sizes: WorkspacePaneSizes): void {
-  shell.style.setProperty("--os-task-pane", panePercent(sizes.task));
-  shell.style.setProperty("--os-run-pane", panePercent(sizes.run));
-  shell.style.setProperty("--os-evidence-pane", panePercent(sizes.evidence));
+  shell.style.setProperty("--os-left-column", panePercent(sizes.left));
+  shell.style.setProperty("--os-right-column", panePercent(sizes.right));
 }
 
 function resizeWorkspacePanes(
@@ -3187,12 +3343,11 @@ function resizeWorkspacePanes(
   handle: WorkspacePaneResizeHandle,
   delta: number,
 ): WorkspacePaneSizes {
-  if (handle === "task-run") {
-    const [task, run] = resizePair(start.task, start.run, delta, minWorkspacePaneSizes.task, minWorkspacePaneSizes.run);
-    return { task, run, evidence: start.evidence };
+  if (handle === "lower-columns") {
+    const [left, right] = resizePair(start.left, start.right, delta, minWorkspacePaneSizes.left, minWorkspacePaneSizes.right);
+    return { left, right };
   }
-  const [run, evidence] = resizePair(start.run, start.evidence, delta, minWorkspacePaneSizes.run, minWorkspacePaneSizes.evidence);
-  return { task: start.task, run, evidence };
+  return start;
 }
 
 function resizePair(
@@ -3212,7 +3367,15 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function isWorkspacePaneResizeHandle(value: string | undefined): value is WorkspacePaneResizeHandle {
-  return value === "task-run" || value === "run-evidence";
+  return value === "lower-columns";
+}
+
+function createDefaultWorkspacePaneSizes(): WorkspacePaneSizesBySurface {
+  return {
+    task: { ...defaultWorkspacePaneSizes },
+    knowledge: { ...defaultWorkspacePaneSizes },
+    code: { ...defaultWorkspacePaneSizes },
+  };
 }
 
 function isMemoryGraphUpdatedEvent(value: unknown): value is MemoryGraphUpdatedEvent {
@@ -3224,6 +3387,21 @@ function isMemoryGraphUpdatedEvent(value: unknown): value is MemoryGraphUpdatedE
     && !!cursor
     && typeof cursor.sequence === "number"
     && typeof cursor.partition === "string";
+}
+
+function statusEvents(snapshot: DashboardSnapshot | null): DashboardSnapshot["recent_events"] {
+  return snapshot?.recent_events.filter((event) => !isTelemetryEventKind(event.kind)) ?? [];
+}
+
+function graphSurfaceSummary(view: GraphPaneView): string {
+  switch (view) {
+    case "task":
+      return "Task scheduling and run context";
+    case "knowledge":
+      return "Memory graph exploration";
+    case "code":
+      return "Fixture-ready code graph slot";
+  }
 }
 
 function renderRunActivity(
@@ -4170,23 +4348,40 @@ function appShellStyles(): string {
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
     body { margin: 0; background: #f4f6f8; color: #17202a; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .os-app { min-height: 100vh; display: flex; flex-direction: column; }
-    .os-topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 22px; background: #ffffff; border-bottom: 1px solid #d8dee4; }
+    .os-topbar { display: grid; grid-template-columns: minmax(180px, 0.9fr) auto minmax(420px, 2fr); align-items: center; gap: 18px; padding: 14px 18px; background: #ffffff; border-bottom: 1px solid #d8dee4; }
     .os-topbar h1 { margin: 0; font-size: 18px; line-height: 1.2; letter-spacing: 0; }
     .os-topbar p { margin: 5px 0 0; color: #5d6b78; font-size: 13px; }
+    .os-status-strip { min-width: 0; display: grid; grid-template-columns: auto auto minmax(120px, 0.8fr) minmax(170px, 1.1fr) minmax(150px, 1fr); gap: 8px; align-items: center; }
     .os-status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cad3dd; border-radius: 6px; padding: 7px 10px; background: #f8fafc; font-size: 13px; white-space: nowrap; }
     .os-status span { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .os-status-connected span { background: #1f9d55; }
     .os-status-failed span { background: #c2410c; }
+    .os-strip-metrics, .os-strip-connection, .os-strip-model, .os-event-mini { min-width: 0; min-height: 34px; display: flex; align-items: center; gap: 7px; border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 7px; background: #fbfcfd; font-size: 12px; color: #536170; }
+    .os-strip-metrics { flex-wrap: wrap; }
+    .os-strip-metrics strong { color: #17202a; }
+    .os-strip-connection > span, .os-strip-model > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-event-mini ol { min-width: 0; display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+    .os-event-mini li { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-event-mini time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; margin-right: 4px; }
+    .os-event-mini span { color: #39708f; margin-right: 4px; }
+    .os-icon-button { flex: 0 0 auto; min-height: 28px; padding: 4px 8px; font-size: 12px; }
+    .os-model-gear { width: 30px; padding: 0; font-size: 15px; }
+    .os-strip-alert { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 14px; align-items: start; }
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
-    .os-status-panel, .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
+    .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
     .os-profile-panel { grid-column: span 3; }
     .os-model-panel { grid-column: 1 / -1; }
-    .os-workspace-shell { grid-column: 1 / -1; display: flex; align-items: stretch; gap: 0; min-height: 640px; }
-    .os-workspace-shell > .os-panel { box-sizing: border-box; max-height: calc(100vh - 224px); overflow: auto; }
-    .os-workspace-shell > .os-task-graph-panel { flex: 0 0 calc(var(--os-task-pane, 48%) - 7px); }
-    .os-workspace-shell > .os-run-detail-panel { flex: 0 0 calc(var(--os-run-pane, 26%) - 7px); }
-    .os-workspace-shell > .os-run-evidence-panel { flex: 0 0 calc(var(--os-evidence-pane, 26%) - 7px); }
+    .os-workspace-shell { grid-column: 1 / -1; display: grid; gap: 14px; min-height: 0; }
+    .os-graph-hero-panel { min-height: 360px; }
+    .os-graph-hero-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .os-graph-hero-toolbar h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
+    .os-graph-hero-toolbar span { display: block; color: #667788; font-size: 12px; margin-top: 2px; }
+    .os-graph-hero-body { min-width: 0; }
+    .os-lower-columns { display: flex; align-items: stretch; gap: 0; min-height: 360px; }
+    .os-lower-columns > .os-panel { box-sizing: border-box; max-height: clamp(320px, calc(100vh - 560px), 560px); min-height: 320px; overflow: auto; }
+    .os-lower-columns > .os-panel:first-child { flex: 0 0 calc(var(--os-left-column, 50%) - 5px); }
+    .os-lower-columns > .os-panel:last-child { flex: 0 0 calc(var(--os-right-column, 50%) - 5px); }
     .os-pane-resizer { flex: 0 0 10px; min-width: 10px; display: grid; place-items: center; cursor: col-resize; touch-action: none; outline: none; }
     .os-pane-resizer span { width: 2px; height: 100%; min-height: 44px; border-radius: 999px; background: #cad3dd; transition-property: background-color, width; transition-duration: 150ms; transition-timing-function: cubic-bezier(0.2, 0, 0, 1); }
     .os-pane-resizer:hover span, .os-pane-resizer:focus-visible span { width: 3px; background: #39708f; }
@@ -4216,10 +4411,10 @@ function appShellStyles(): string {
     button { min-height: 34px; border: 1px solid #afbac5; border-radius: 6px; background: #eef3f8; color: #17202a; font: inherit; cursor: pointer; }
     button:disabled { opacity: 0.48; cursor: not-allowed; }
     button:hover:not(:disabled), .os-list-item:hover, .os-node:hover { border-color: #39708f; background: #e7f1f5; }
-    .os-metrics, .os-run-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-bottom: 12px; }
-    .os-metrics div, .os-run-grid div { border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #f8fafc; }
-    .os-metrics strong, .os-run-grid strong { display: block; font-size: 18px; }
-    .os-metrics span, .os-run-grid span { display: block; color: #667788; font-size: 12px; margin-top: 3px; }
+    .os-run-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-bottom: 12px; }
+    .os-run-grid div { border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #f8fafc; }
+    .os-run-grid strong { display: block; font-size: 18px; }
+    .os-run-grid span { display: block; color: #667788; font-size: 12px; margin-top: 3px; }
     .os-list, .os-node-list { display: grid; gap: 8px; }
     .os-list-item, .os-node { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px; background: #ffffff; }
     .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
@@ -4250,6 +4445,15 @@ function appShellStyles(): string {
     .os-kg-inspector dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
     .os-kg-inspector dt { color: #667788; font-size: 11px; }
     .os-kg-inspector dd { margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .os-code-graph-placeholder { min-height: clamp(260px, 36vh, 460px); display: grid; place-content: center; gap: 5px; border: 1px dashed #afbac5; border-radius: 6px; background: #f8fafc; text-align: center; }
+    .os-code-graph-placeholder strong { color: #23566f; font-size: 15px; }
+    .os-code-graph-placeholder span { color: #667788; font-size: 12px; }
+    .os-surface-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .os-surface-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 9px; background: #ffffff; }
+    .os-surface-list li.is-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-surface-list strong, .os-surface-detail strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-surface-list span, .os-surface-detail span { color: #667788; font-size: 11px; text-transform: uppercase; }
+    .os-surface-detail { display: grid; gap: 5px; border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #f8fafc; }
     .os-project-group { display: grid; gap: 8px; margin-bottom: 10px; }
     .os-project-group-header { width: 100%; min-height: 32px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 6px; background: #f8fafc; text-align: left; }
     .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4288,7 +4492,6 @@ function appShellStyles(): string {
     .os-detail-strip span, .os-run-head span { color: #667788; font-size: 12px; }
     .os-events { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 12px; line-height: 1.35; }
     .os-events span { color: #39708f; margin-right: 5px; }
-    .os-event-time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; margin-right: 6px; }
     .os-pill, .os-actions span { border-radius: 999px; background: #e7f1f5; color: #23566f; padding: 5px 9px; font-size: 12px; }
     .os-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
     .os-run-detail-panel { font-size: 12px; }
@@ -4413,8 +4616,11 @@ function appShellStyles(): string {
     .os-filter-bar .os-field { flex: 1 1 140px; }
     .os-tg-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
     .os-pending-banner { padding: 8px 10px; border-radius: 6px; background: #fef3c7; color: #92400e; font-size: 12px; margin-bottom: 10px; }
-    .os-dialog-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .os-dialog-backdrop, .os-modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: flex; align-items: center; justify-content: center; z-index: 100; }
     .os-dialog { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 18px; min-width: 320px; max-width: 90vw; box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15); }
+    .os-modal-backdrop .os-dialog { width: min(920px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+    .os-event-log-modal { width: min(760px, calc(100vw - 32px)); }
+    .os-events-full { max-height: min(62vh, 560px); overflow: auto; }
     .os-dialog .os-section-head { margin-bottom: 14px; }
     .os-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
     .os-dialog-actions-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
@@ -4486,18 +4692,25 @@ function appShellStyles(): string {
     .os-plan-graph-node-selected rect { fill: #e7f1f5; stroke: #39708f; }
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
-      .os-status-panel, .os-profile-panel, .os-model-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
-      .os-workspace-shell { display: grid; grid-template-columns: 1fr; gap: 14px; min-height: 0; }
-      .os-workspace-shell > .os-panel { max-height: none; overflow: visible; }
+      .os-profile-panel, .os-model-panel, .os-task-graph-panel, .os-graph-hero-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
+      .os-workspace-shell, .os-lower-columns { display: grid; grid-template-columns: 1fr; gap: 14px; min-height: 0; }
+      .os-lower-columns > .os-panel { max-height: none; min-height: 0; overflow: visible; }
       .os-pane-resizer { display: none; }
-      .os-inline-fields, .os-model-layout, .os-advanced-grid, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
-      .os-topbar { align-items: flex-start; flex-direction: column; }
+      .os-inline-fields, .os-model-layout, .os-advanced-grid, .os-run-grid { grid-template-columns: 1fr; }
+      .os-topbar, .os-status-strip { grid-template-columns: 1fr; align-items: stretch; }
+      .os-graph-hero-toolbar { align-items: flex-start; flex-direction: column; }
     }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-run-meta-row span, .os-event-time { color: #94a3b3; }
-      .os-status, .os-metrics div, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-run-grid span, .os-run-meta, .os-run-meta-row span { color: #94a3b3; }
+      .os-status, .os-strip-metrics, .os-strip-connection, .os-strip-model, .os-event-mini, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-strip-metrics strong, .os-surface-list strong, .os-surface-detail strong { color: #d9e2ea; }
+      .os-code-graph-placeholder, .os-surface-detail { background: #111820; border-color: #344454; }
+      .os-code-graph-placeholder strong { color: #8bd0e6; }
+      .os-code-graph-placeholder span, .os-surface-list span, .os-surface-detail span { color: #94a3b3; }
+      .os-surface-list li { background: #171d23; border-color: #2a3440; }
+      .os-surface-list li.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-knowledge-stage { background: #e7ebef; border-color: #2a3440; }
       .os-kg-list li, .os-kg-inspector { background: #111820; border-color: #2a3440; }
       .os-kg-label { background: rgba(17, 24, 32, 0.92); color: #d9e2ea; border-color: #2a3440; }
