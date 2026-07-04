@@ -518,7 +518,7 @@ are covered by the same archive operation.
 
 ## Current model
 
-- COE-524 contributed: PR #185: Add workflow settings update mode (merge `7dede06`)
+- COE-530 contributed: PR #193: docs(installer): document desktop installer validation (merge `7588cc7`)
 
 ## Important invariants
 
@@ -535,10 +535,10 @@ are covered by the same archive operation.
 
 ## Recent changes
 
-- COE-524: Template Docs And Settings Hardening
+- COE-530: Installer Docs And End-To-End Validation
 
 ## Source refs
 
-- COE-524
+- COE-530
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

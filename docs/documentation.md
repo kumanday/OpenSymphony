@@ -11,7 +11,7 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 
 ## Current model
 
-- COE-524 contributed: PR #185: Add workflow settings update mode (merge `7dede06`)
+- COE-530 contributed: PR #193: docs(installer): document desktop installer validation (merge `7588cc7`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 
 ## Recent changes
 
-- COE-524: Template Docs And Settings Hardening
+- COE-530: Installer Docs And End-To-End Validation
 
 ## Source refs
 
-- COE-524
+- COE-530
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: workflow
+area: release
 visibility: public
-last_memory_sync: 2026-07-02T03:36:18.853412+00:00
+last_memory_sync: 2026-07-04T03:35:18.210566+00:00
 ---
 
-# Workflow
+# Release
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

@@ -52,9 +52,10 @@ GitHub repository.
    image, no setup script, internet off during the agent phase).
 4. Enable **Code review** for the repository.
 5. Turn on **Automatic reviews** so every newly opened PR gets an initial
-   review without any agent action. Re-reviews after follow-up pushes are
-   requested by the agent per `WORKFLOW.md` (an exact `@codex review`
-   comment), so each fix round still gets reviewed.
+   review without any agent action. In the repository preferences, set
+   **Review trigger** to **On PR open**, not **On every push**. OpenSymphony
+   already requests follow-up reviews by commenting exactly `@codex review`
+   after each fix push; using **On every push** would duplicate that review.
 6. Keep review guidance current. Codex applies the `## Review guidelines`
    section of the closest `AGENTS.md`; `opensymphony init` seeds that section
    and the fuller `.agents/skills/custom-codereview-guide.md` it points to.
@@ -130,5 +131,9 @@ GitHub repository.
 - **A `@codex` comment started a cloud task instead of a review**: the comment
   contained more than the exact phrase `@codex review`. This is the documented
   Codex behavior; the workflow guardrails exist to prevent it.
+- **Duplicate Codex reviews after a push**: the repository's Codex **Review
+  trigger** is probably set to **On every push**. Set it to **On PR open** so
+  the initial review stays automatic and follow-up reviews come only from the
+  exact `@codex review` agent comment.
 - **Both providers reviewed a PR**: the OpenHands workflow was left enabled
   while Codex Automatic reviews were on. Disable one (steps above).
