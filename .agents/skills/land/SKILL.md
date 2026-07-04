@@ -60,7 +60,7 @@ branch=$(git branch --show-current)
 pr_number=$(gh pr view --json number -q .number)
 pr_title=$(gh pr view --json title -q .title)
 pr_body=$(gh pr view --json body -q .body)
-target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)
+target_branch=$(awk -F': *' '/^Target branch:/ { branch=$2; gsub(/`/, "", branch); gsub(/\r/, "", branch); gsub(/^[ \t]+|[ \t]+$/, "", branch); print branch; exit }' WORKFLOW.md)
 if [ -z "$target_branch" ]; then
   echo "WORKFLOW.md is missing a Target branch marker; run opensymphony update --target-branch <branch> before landing." >&2
   exit 1

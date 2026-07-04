@@ -28,7 +28,7 @@ description:
      before merging the configured target branch.
 6. Merge in order:
    - Extract the configured target branch before merging:
-     `target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)`
+     `target_branch=$(awk -F': *' '/^Target branch:/ { branch=$2; gsub(/`/, "", branch); gsub(/\r/, "", branch); gsub(/^[ \t]+|[ \t]+$/, "", branch); print branch; exit }' WORKFLOW.md)`
    - If the marker is missing, stop and ask for the target branch to be added
      to `WORKFLOW.md`; do not guess.
    - Prefer `git -c merge.conflictstyle=zdiff3 merge "origin/$target_branch"`

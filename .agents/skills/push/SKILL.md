@@ -90,7 +90,7 @@ git push -u origin HEAD
 git push --force-with-lease origin HEAD
 
 # Ensure a PR exists (create only if missing)
-target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)
+target_branch=$(awk -F': *' '/^Target branch:/ { branch=$2; gsub(/`/, "", branch); gsub(/\r/, "", branch); gsub(/^[ \t]+|[ \t]+$/, "", branch); print branch; exit }' WORKFLOW.md)
 if [ -z "$target_branch" ]; then
   echo "WORKFLOW.md is missing a Target branch marker; run opensymphony update --target-branch <branch> before creating or retargeting a PR." >&2
   exit 1
