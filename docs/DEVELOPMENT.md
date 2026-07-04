@@ -70,22 +70,31 @@ The `opensymphony app` command, with visible alias `opensymphony desktop`, is
 implemented by COE-488 / OSYM-811 as a lazy cached launcher for released/local
 desktop bundles. It verifies the cache under
 `~/.opensymphony/desktop/<version>/`; early local bundles can be materialized
-with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. For active
-desktop development, run the Tauri app from this checkout.
+with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. If no bundle
+verifies, the launcher can build the matching source archive after checking
+Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. `--dry-run`
+stays read-only and reports when source build fallback would be required. For
+active desktop development, run the Tauri app from this checkout.
+
+On Windows, the source fallback does not require `cl.exe` to be present on
+`PATH`; a normal PowerShell can use installed Microsoft C++ Build Tools through
+Cargo/rustup's MSVC discovery, and Cargo reports the precise toolchain error if
+that setup is incomplete.
 
 ```bash
-# 1. Install frontend dependencies once from the workspace root.
-npm install
+# 1. Install pinned frontend dependencies once from the workspace root.
+npm ci --include=dev
 
 # 2. Launch the Tauri shell.
 cd apps/desktop/src-tauri
 cargo run
 ```
 
-The frontend workspace intentionally does not commit an npm lockfile today:
-`package-lock.json` is listed in `.gitignore`, and CI installs from the
-workspace package manifests with `npm install`. Revisit that policy before
-release packaging or other supply-chain-sensitive frontend dependency changes.
+The frontend workspace commits the root `package-lock.json` so
+release-sensitive paths use a pinned dependency graph. The desktop source-build
+fallback requires that lockfile and installs frontend dependencies with
+`npm ci --include=dev` before building, so `NODE_ENV=production` does not omit
+the Vite/TypeScript build toolchain.
 
 `cargo run` rebuilds the desktop frontend first, so local source changes under
 `apps/desktop` and shared frontend packages are reflected in the Tauri shell.

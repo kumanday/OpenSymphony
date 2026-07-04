@@ -31,10 +31,16 @@ Keep system-linked or downloaded DuckDB as an optimization path:
 The CLI also exposes `opensymphony app`, with visible alias
 `opensymphony desktop`, as a lazy desktop launcher. It verifies a cached desktop
 bundle under `~/.opensymphony/desktop/<version>/` and can materialize an early
-local bundle from `--bundle-dir` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. This
-launcher does not make `cargo install opensymphony` compile Tauri, npm, or
-platform desktop dependencies; signed/downloaded desktop bundle distribution is
-still future installer work.
+local bundle from `--bundle-dir` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. When no
+installed or local bundle verifies, it falls back to a best-effort source build:
+it checks Rust/Cargo, Node/npm, source archive extraction, and platform
+desktop/Tauri prerequisites, attempts known safe Linux package-manager
+installation commands when available, prints exact manual commands otherwise,
+builds into staging, writes the installed manifest, and promotes only after the
+same verification path succeeds. `--dry-run` does not install prerequisites,
+download sources, or build; it only verifies an existing cached/local bundle or
+reports that a normal run would need source build fallback. Signed/downloaded
+desktop bundle distribution is still future installer work.
 
 Maintainers can produce the current early desktop release assets from a source
 checkout with the desktop workspace script:
