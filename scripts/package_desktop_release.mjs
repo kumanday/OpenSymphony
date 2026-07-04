@@ -36,6 +36,7 @@ try {
 
 async function main(options) {
   const version = options.version ?? (await readWorkspaceVersion());
+  await assertDesktopVersions(version);
   const platform = rustPlatform(process.platform);
   const arch = rustArch(process.arch);
   const executableName = process.platform === "win32" ? "OpenSymphony.exe" : "OpenSymphony";
@@ -109,29 +110,23 @@ async function main(options) {
     ]);
 
     const archiveSha = await sha256(stagedArchive);
-    await writeJson(stagedIndex, {
-      schema_version: 1,
-      assets: [
-        {
-          version,
-          platform,
-          arch,
-          url: assetUrl,
-          checksum: {
-            algorithm: "sha256",
-            value: archiveSha,
-          },
-          launch_target: {
-            executable: executableName,
-            args: [],
-          },
-        },
-      ],
+    const releaseIndex = await mergeReleaseIndex(finalIndex, {
+      version,
+      platform,
+      arch,
+      url: assetUrl,
+      checksum: {
+        algorithm: "sha256",
+        value: archiveSha,
+      },
+      launch_target: {
+        executable: executableName,
+        args: [],
+      },
     });
+    await writeJson(stagedIndex, releaseIndex);
 
-    await rm(finalArchive, { force: true });
     await rename(stagedArchive, finalArchive);
-    await rm(finalIndex, { force: true });
     await rename(stagedIndex, finalIndex);
 
     console.log(`Wrote ${finalArchive}`);
@@ -204,6 +199,63 @@ async function readWorkspaceVersion() {
     throw new Error("could not read [workspace.package] version from Cargo.toml");
   }
   return workspacePackage[1];
+}
+
+async function assertDesktopVersions(expectedVersion) {
+  const packageJson = JSON.parse(await readFile(join(repoRoot, "apps/desktop/package.json"), "utf8"));
+  const tauriConfig = JSON.parse(
+    await readFile(join(repoRoot, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"),
+  );
+  const cargoToml = await readFile(join(repoRoot, "apps/desktop/src-tauri/Cargo.toml"), "utf8");
+  const cargoPackage = cargoToml.match(/\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
+  const versions = [
+    ["apps/desktop/package.json", packageJson.version],
+    ["apps/desktop/src-tauri/tauri.conf.json", tauriConfig.version],
+    ["apps/desktop/src-tauri/Cargo.toml", cargoPackage?.[1]],
+  ];
+  const mismatches = versions.filter(([, version]) => version !== expectedVersion);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `desktop version mismatch for release ${expectedVersion}: ${mismatches
+        .map(([path, version]) => `${path} has ${version ?? "no version"}`)
+        .join(", ")}`,
+    );
+  }
+}
+
+async function mergeReleaseIndex(indexPath, asset) {
+  const existing = await readExistingIndex(indexPath);
+  return {
+    schema_version: 1,
+    assets: [
+      ...existing.assets.filter(
+        (candidate) =>
+          !(
+            candidate.version === asset.version &&
+            candidate.platform === asset.platform &&
+            candidate.arch === asset.arch
+          ),
+      ),
+      asset,
+    ],
+  };
+}
+
+async function readExistingIndex(indexPath) {
+  let raw;
+  try {
+    raw = await readFile(indexPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { schema_version: 1, assets: [] };
+    }
+    throw error;
+  }
+  const parsed = JSON.parse(raw);
+  if (parsed.schema_version !== 1 || !Array.isArray(parsed.assets)) {
+    throw new Error(`${indexPath} is not a schema_version 1 desktop release index`);
+  }
+  return parsed;
 }
 
 function rustPlatform(platform) {

@@ -81,8 +81,9 @@ npm run package:release --workspace=@opensymphony/desktop
 The package step writes a stable archive name and release index under
 `dist/desktop-release/`. The archive includes
 `opensymphony-desktop-manifest.json` plus the launch target named in that
-manifest. Upload the archive before replacing
-`opensymphony-desktop-release-index.json`.
+manifest. If an index already exists, the package step keeps other
+platform/architecture entries and replaces only the current asset entry. Upload
+the archive before replacing `opensymphony-desktop-release-index.json`.
 
 ## Task Graph Project Groups
 

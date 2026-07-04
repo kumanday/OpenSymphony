@@ -50,9 +50,12 @@ then writes these files under `dist/desktop-release/`:
 - `opensymphony-desktop-v<VERSION>-<PLATFORM>-<ARCH>.tar.gz`
 - `opensymphony-desktop-release-index.json`
 
-`VERSION` is the root Cargo workspace package version, and `PLATFORM`/`ARCH`
-use the same strings the CLI verifies (`macos`, `linux`, `windows`, `aarch64`,
-`x86_64`, and so on). The archive contains:
+`VERSION` is the root Cargo workspace package version. The package command
+fails before writing release metadata if `apps/desktop/package.json`,
+`apps/desktop/src-tauri/Cargo.toml`, or `apps/desktop/src-tauri/tauri.conf.json`
+declare a different desktop version. `PLATFORM`/`ARCH` use the same strings the
+CLI verifies (`macos`, `linux`, `windows`, `aarch64`, `x86_64`, and so on). The
+archive contains:
 
 - `opensymphony-desktop-manifest.json`, with version, platform, architecture,
   relative executable path, and executable SHA-256.
@@ -60,11 +63,14 @@ use the same strings the CLI verifies (`macos`, `linux`, `windows`, `aarch64`,
 
 The release index is the metadata asset consumed by the CLI download path. It
 uses schema version `1`, lists compatible assets by version/platform/arch, and
-records the archive URL, archive SHA-256, and launch target. Upload the archive
-asset first, then upload or replace `opensymphony-desktop-release-index.json`
-last. The packaging script follows the same rule locally: it stages all output,
-publishes the archive, and only then publishes the index, so a failed packaging
-run does not leave new metadata claiming an unavailable archive.
+records the archive URL, archive SHA-256, and launch target. When an existing
+release index is present in the output directory, the package command preserves
+other assets and replaces only the matching version/platform/arch entry. Upload
+the archive asset first, then upload or replace
+`opensymphony-desktop-release-index.json` last. The packaging script follows the
+same rule locally: it stages all output, publishes the archive, and only then
+publishes the index, so a failed packaging run does not leave new metadata
+claiming an unavailable archive.
 
 The desktop bundle contract is intentionally small and lives in
 [Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
