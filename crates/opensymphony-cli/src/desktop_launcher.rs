@@ -6,8 +6,8 @@ use std::{
     io,
     io::Read,
     path::{Path, PathBuf},
-    process::{self, Command, ExitCode, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    process::{Command, ExitCode, Stdio},
+    time::Duration,
 };
 
 use clap::Args;
@@ -459,14 +459,21 @@ fn install_release_bundle_blocking(
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
     let index = download_release_index(release_index_url)?;
     let asset = compatible_release_asset(&index, release_index_url)?;
-    let stage_dir = unique_stage_dir(cache_root);
-    let archive_path = stage_dir.join("bundle.tar.gz");
-
-    let result = (|| {
-        fs::create_dir_all(&stage_dir).map_err(|source| DesktopLauncherError::Repair {
-            path: stage_dir.clone(),
+    fs::create_dir_all(cache_root).map_err(|source| DesktopLauncherError::Repair {
+        path: cache_root.to_path_buf(),
+        source,
+    })?;
+    let staging = tempfile::Builder::new()
+        .prefix(".release-install-")
+        .tempdir_in(cache_root)
+        .map_err(|source| DesktopLauncherError::Repair {
+            path: cache_root.to_path_buf(),
             source,
         })?;
+    let stage_dir = staging.path().to_path_buf();
+    let archive_path = stage_dir.join("bundle.tar.gz");
+
+    (|| {
         download_file(&asset.url, &archive_path)?;
         verify_archive_checksum(&archive_path, asset)?;
         extract_release_archive(&archive_path, &stage_dir)?;
@@ -476,12 +483,7 @@ fn install_release_bundle_blocking(
             executable: promoted.executable,
             manifest: verified.manifest,
         })
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&stage_dir);
-    }
-    result
+    })()
 }
 
 fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLauncherError> {
@@ -489,7 +491,7 @@ fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLaunc
     let client =
         release_http_client().map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
             url: display_url.clone(),
-            source,
+            source: source.without_url(),
         })?;
     let body = client
         .get(url)
@@ -498,7 +500,7 @@ fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLaunc
         .and_then(|response| response.text())
         .map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
             url: display_url.clone(),
-            source,
+            source: source.without_url(),
         })?;
     let index =
         parse_release_index(&body).map_err(|source| DesktopLauncherError::InvalidReleaseIndex {
@@ -573,26 +575,25 @@ fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherErr
     let client =
         release_http_client().map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
             url: display_url.clone(),
-            source,
+            source: source.without_url(),
         })?;
-    let mut response = client
+    let response = client
         .get(url)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
+            url: display_url.clone(),
+            source: source.without_url(),
+        })?;
+    let body = response
+        .bytes()
+        .map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
             url: display_url,
-            source,
+            source: source.without_url(),
         })?;
-    let mut file =
-        File::create(destination).map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
-            path: destination.to_path_buf(),
-            source,
-        })?;
-    io::copy(&mut response, &mut file).map_err(|source| {
-        DesktopLauncherError::ReleaseArchiveRead {
-            path: destination.to_path_buf(),
-            source,
-        }
+    fs::write(destination, body).map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+        path: destination.to_path_buf(),
+        source,
     })?;
     Ok(())
 }
@@ -1401,14 +1402,6 @@ fn raw_file_sha256(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn unique_stage_dir(cache_root: &Path) -> PathBuf {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    cache_root.join(format!(".tmp-desktop-install-{}-{millis}", process::id()))
-}
-
 fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
     let home = home_dir().ok_or(DesktopLauncherError::MissingHome)?;
     Ok(home.join(DEFAULT_CACHE_RELATIVE))
@@ -1919,6 +1912,74 @@ mod tests {
             release_url_display_url("https://user:secret@example.com/index.json?token=secret#frag");
 
         assert_eq!(display, "https://example.com/index.json");
+    }
+
+    #[test]
+    fn release_index_download_error_redacts_reqwest_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+        let addr = listener.local_addr().expect("local address");
+        drop(listener);
+        let url = format!("http://user:secret@{addr}/index.json?token=secret#fragment");
+
+        let error = download_release_index(&url).expect_err("closed port should fail");
+        let message = error.to_string();
+
+        assert!(message.contains(&format!("http://{addr}/index.json")));
+        assert!(!message.contains("user:secret"));
+        assert!(!message.contains("token=secret"));
+        assert!(!message.contains("#fragment"));
+    }
+
+    #[test]
+    fn release_asset_download_error_redacts_reqwest_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+        let addr = listener.local_addr().expect("local address");
+        drop(listener);
+        let temp = TempDir::new().expect("tempdir");
+        let url = format!("http://user:secret@{addr}/bundle.tar.gz?token=secret#fragment");
+
+        let error = download_file(&url, &temp.path().join("bundle.tar.gz"))
+            .expect_err("closed port should fail");
+        let message = error.to_string();
+
+        assert!(message.contains(&format!("http://{addr}/bundle.tar.gz")));
+        assert!(!message.contains("user:secret"));
+        assert!(!message.contains("token=secret"));
+        assert!(!message.contains("#fragment"));
+    }
+
+    #[test]
+    fn interrupted_release_asset_body_is_download_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        let addr = listener.local_addr().expect("local address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = reader.read_line(&mut line).expect("read request line");
+                if read == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+                .expect("write partial response");
+        });
+        let temp = TempDir::new().expect("tempdir");
+
+        let error = download_file(
+            &format!("http://{addr}/bundle.tar.gz"),
+            &temp.path().join("bundle.tar.gz"),
+        )
+        .expect_err("short response body should fail");
+        handle.join().expect("server thread should finish");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::ReleaseAssetDownload { .. }
+        ));
     }
 
     #[tokio::test]
