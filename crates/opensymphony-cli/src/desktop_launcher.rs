@@ -403,7 +403,6 @@ async fn build_source_fallback<R: DesktopCommandRunner>(
             "1",
         ],
     ))?;
-
     install_source_built_bundle_from_source_dir(cache_root, cache_dir, &source_dir, runner)
 }
 
@@ -672,6 +671,88 @@ fn format_prerequisite_issues(issues: &[PrerequisiteIssue]) -> String {
     details
 }
 
+fn validate_source_archive_version(source_dir: &Path) -> Result<(), DesktopLauncherError> {
+    validate_source_metadata_version(
+        &source_dir.join("Cargo.toml"),
+        toml_version(
+            &source_dir.join("Cargo.toml"),
+            &["workspace", "package", "version"],
+        )?,
+    )?;
+    validate_source_metadata_version(
+        &source_dir.join("apps/desktop/src-tauri/Cargo.toml"),
+        toml_version(
+            &source_dir.join("apps/desktop/src-tauri/Cargo.toml"),
+            &["package", "version"],
+        )?,
+    )?;
+    validate_source_metadata_version(
+        &source_dir.join("apps/desktop/package.json"),
+        json_package_version(&source_dir.join("apps/desktop/package.json"))?,
+    )
+}
+
+fn toml_version(path: &Path, keys: &[&str]) -> Result<String, DesktopLauncherError> {
+    let contents = fs::read_to_string(path).map_err(|source| DesktopLauncherError::Repair {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parsed = contents.parse::<toml::Value>().map_err(|source| {
+        DesktopLauncherError::InvalidSourceMetadata {
+            path: path.to_path_buf(),
+            details: source.to_string(),
+        }
+    })?;
+    let mut value = &parsed;
+    for key in keys {
+        value = value
+            .get(*key)
+            .ok_or_else(|| DesktopLauncherError::MissingSourceVersion {
+                path: path.to_path_buf(),
+            })?;
+    }
+    value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+        DesktopLauncherError::MissingSourceVersion {
+            path: path.to_path_buf(),
+        }
+    })
+}
+
+fn json_package_version(path: &Path) -> Result<String, DesktopLauncherError> {
+    let contents = fs::read_to_string(path).map_err(|source| DesktopLauncherError::Repair {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&contents).map_err(|source| {
+        DesktopLauncherError::InvalidSourceMetadata {
+            path: path.to_path_buf(),
+            details: source.to_string(),
+        }
+    })?;
+    parsed
+        .get("version")
+        .and_then(|version| version.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| DesktopLauncherError::MissingSourceVersion {
+            path: path.to_path_buf(),
+        })
+}
+
+fn validate_source_metadata_version(
+    path: &Path,
+    actual: String,
+) -> Result<(), DesktopLauncherError> {
+    if actual == desktop_version() {
+        Ok(())
+    } else {
+        Err(DesktopLauncherError::SourceVersionMismatch {
+            path: path.to_path_buf(),
+            expected: desktop_version().to_string(),
+            actual,
+        })
+    }
+}
+
 fn install_source_built_bundle_from_source_dir<R: DesktopCommandRunner>(
     cache_root: &Path,
     cache_dir: &Path,
@@ -711,6 +792,7 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     bundle_dir: &Path,
     runner: &mut R,
 ) -> Result<(), DesktopLauncherError> {
+    validate_source_archive_version(source_dir)?;
     println!("Installing desktop frontend dependencies.");
     runner.run(&DesktopCommand::new("npm", &["install"]).in_dir(source_dir))?;
     let tauri_dir = source_dir.join("apps/desktop/src-tauri");
@@ -725,7 +807,13 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     runner.run(
         &DesktopCommand::new(
             "cargo",
-            &["build", "--release", "--target-dir", source_target_dir_arg],
+            &[
+                "build",
+                "--release",
+                "--locked",
+                "--target-dir",
+                source_target_dir_arg,
+            ],
         )
         .in_dir(&tauri_dir),
     )?;
@@ -1090,6 +1178,24 @@ enum DesktopLauncherError {
     SourceDownload { url: String, source: reqwest::Error },
     #[error("failed to download desktop source archive from {url}: HTTP {status}")]
     SourceDownloadStatus { url: String, status: u16 },
+    #[error(
+        "desktop source metadata {path} is invalid: {details}\nRepair: use the OpenSymphony source archive matching CLI version {expected}.",
+        expected = desktop_version()
+    )]
+    InvalidSourceMetadata { path: PathBuf, details: String },
+    #[error(
+        "desktop source metadata {path} is missing a version field\nRepair: use the OpenSymphony source archive matching CLI version {expected}.",
+        expected = desktop_version()
+    )]
+    MissingSourceVersion { path: PathBuf },
+    #[error(
+        "desktop source archive version {actual} in {path} does not match CLI version {expected}\nRepair: use the OpenSymphony source archive matching CLI version {expected}."
+    )]
+    SourceVersionMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
     #[error("failed to run desktop source build command `{command}`: {source}")]
     SourceBuildCommandIo { command: String, source: io::Error },
     #[error("desktop source build command failed: `{command}` exited with {status}")]
@@ -1161,6 +1267,26 @@ mod tests {
         } else {
             format!("{} {}", program, args.join(" "))
         }
+    }
+
+    fn write_source_metadata(source: &Path, version: &str) {
+        fs::create_dir_all(source.join("apps/desktop/src-tauri")).expect("create fake tauri dir");
+        fs::create_dir_all(source.join("apps/desktop")).expect("create fake desktop dir");
+        fs::write(
+            source.join("Cargo.toml"),
+            format!("[workspace.package]\nversion = \"{version}\"\n"),
+        )
+        .expect("write root cargo metadata");
+        fs::write(
+            source.join("apps/desktop/src-tauri/Cargo.toml"),
+            format!("[package]\nname = \"opensymphony-desktop\"\nversion = \"{version}\"\n"),
+        )
+        .expect("write tauri cargo metadata");
+        fs::write(
+            source.join("apps/desktop/package.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .expect("write desktop package metadata");
     }
 
     #[test]
@@ -1343,13 +1469,18 @@ mod tests {
     fn source_build_failure_reports_failed_command() {
         let source = TempDir::new().expect("source tempdir");
         let bundle = TempDir::new().expect("bundle tempdir");
-        fs::create_dir_all(source.path().join("apps/desktop/src-tauri"))
-            .expect("create fake source tree");
+        write_source_metadata(source.path(), desktop_version());
         let target_dir = source_build_target_dir(source.path());
         let target_dir_arg = target_dir.to_str().expect("target dir utf8");
         let mut runner = FakeRunner::default().fail_run(
             "cargo",
-            &["build", "--release", "--target-dir", target_dir_arg],
+            &[
+                "build",
+                "--release",
+                "--locked",
+                "--target-dir",
+                target_dir_arg,
+            ],
         );
 
         let error = build_source_bundle_from_source_dir(source.path(), bundle.path(), &mut runner)
@@ -1363,6 +1494,7 @@ mod tests {
     fn source_build_promotes_fake_build_and_verifies() {
         let source = TempDir::new().expect("source tempdir");
         let cache_root = TempDir::new().expect("cache tempdir");
+        write_source_metadata(source.path(), desktop_version());
         let built_executable = source_build_target_dir(source.path())
             .join("release")
             .join(source_build_executable_name(current_platform()));
@@ -1390,8 +1522,26 @@ mod tests {
                 .expect("canonical installed executable")
         );
         assert_eq!(runner.runs[0], "npm install");
-        assert!(runner.runs[1].starts_with("cargo build --release --target-dir "));
+        assert!(runner.runs[1].starts_with("cargo build --release --locked --target-dir "));
         assert!(runner.runs[1].contains(SOURCE_BUILD_TARGET_DIR));
+    }
+
+    #[test]
+    fn source_build_rejects_mismatched_source_version_before_caching() {
+        let source = TempDir::new().expect("source tempdir");
+        let bundle = TempDir::new().expect("bundle tempdir");
+        write_source_metadata(source.path(), "0.0.0");
+        let mut runner = FakeRunner::default();
+
+        let error = build_source_bundle_from_source_dir(source.path(), bundle.path(), &mut runner)
+            .expect_err("mismatched source metadata should abort source build");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::SourceVersionMismatch { .. }
+        ));
+        assert!(runner.runs.is_empty());
+        assert!(!bundle.path().join(MANIFEST_FILE).exists());
     }
 
     #[tokio::test]
