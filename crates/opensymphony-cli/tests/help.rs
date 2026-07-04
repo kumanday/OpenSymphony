@@ -235,6 +235,7 @@ fn app_help_explains_install_path() {
         "--install-path <DIR>",
         "Install root for versioned desktop bundles",
         "--bundle-dir <BUNDLE_DIR>",
+        "--no-update",
         "--dry-run",
     ] {
         assert!(

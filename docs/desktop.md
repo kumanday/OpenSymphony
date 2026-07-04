@@ -44,10 +44,12 @@ materialize an early local bundle from `--bundle-dir <path>` or
 `OPENSYMPHONY_DESKTOP_BUNDLE_DIR` without adding Tauri or npm dependencies to
 the normal Cargo install path. `--install-path <dir>` selects a custom install
 root with versioned bundles beneath it. When no verified bundle is cached, the
-launcher downloads the schema version 1 release index from the matching GitHub
-release, verifies the compatible archive, promotes it into the versioned cache,
-and launches from there. Set `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to use a
-private mirror or fake release server.
+launcher downloads the schema version 1 release index from the versioned GitHub
+release for the running CLI, verifies the compatible archive, promotes it into
+the versioned cache, and launches from there. Existing cached bundles check the
+latest GitHub release index for newer compatible updates before launch. Set
+`OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to use a private mirror or fake release
+server.
 
 For development from a clone, rebuild the desktop frontend when `apps/desktop`
 or shared frontend packages change:

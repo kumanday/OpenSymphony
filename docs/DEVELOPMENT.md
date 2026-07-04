@@ -74,6 +74,8 @@ with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. If no bundle
 verifies, the launcher can build the matching source archive after checking
 Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. `--dry-run`
 stays read-only and reports when source build fallback would be required. For
+an installed cache, launch checks for newer compatible release metadata first;
+pass `--no-update` to skip that check during local smoke work. For
 active desktop development, run the Tauri app from this checkout.
 
 On Windows, the source fallback does not require `cl.exe` to be present on
