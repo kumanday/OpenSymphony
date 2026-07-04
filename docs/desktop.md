@@ -37,12 +37,16 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
 ## Local Build And Run
 
-The desktop app currently requires a repo checkout. The planned
-`opensymphony app` / `opensymphony desktop` lazy installer is tracked by
-COE-488 / OSYM-811 and is not implemented yet.
+The `opensymphony app` command, with visible alias `opensymphony desktop`, is
+implemented by COE-488 / OSYM-811 as a lazy cached launcher. It verifies a
+versioned desktop bundle under `~/.opensymphony/desktop/<version>/` and can
+materialize an early local bundle from `--bundle-dir <path>` or
+`OPENSYMPHONY_DESKTOP_BUNDLE_DIR` without adding Tauri or npm dependencies to
+the normal Cargo install path. Signed or downloaded bundle distribution remains
+future installer work.
 
-From a clone, rebuild the desktop frontend when `apps/desktop` or shared
-frontend packages change:
+For development from a clone, rebuild the desktop frontend when `apps/desktop`
+or shared frontend packages change:
 
 ```bash
 npm install
