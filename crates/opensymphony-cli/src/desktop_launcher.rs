@@ -566,7 +566,10 @@ fn platform_desktop_dependencies_ready<R: DesktopCommandRunner>(
                 && linux_build_toolchain_ready(runner)
                 && linux_pkg_config_modules_ready(runner)
         }
-        "windows" => runner.program_exists("cl"),
+        // Windows Build Tools are often installed without exposing cl.exe in a
+        // normal shell. Let Cargo's MSVC probe report the precise toolchain
+        // error instead of blocking source fallback on a brittle PATH check.
+        "windows" => true,
         _ => false,
     }
 }
@@ -1516,6 +1519,17 @@ mod tests {
         assert!(details.contains("winget install --id Rustlang.Rustup --source winget"));
         assert!(details.contains("rustup default stable-msvc"));
         assert!(!details.contains("https://sh.rustup.rs"));
+    }
+
+    #[test]
+    fn windows_prerequisite_probe_does_not_require_cl_on_path() {
+        let runner = FakeRunner::with_programs(&["cargo", "rustc", "node", "npm", "tar"]);
+        let missing = probe_source_build_prerequisites("windows", &runner);
+
+        assert!(
+            missing.is_empty(),
+            "Cargo should surface MSVC Build Tools errors instead of a brittle cl.exe PATH probe"
+        );
     }
 
     #[test]

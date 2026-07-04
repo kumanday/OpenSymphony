@@ -76,6 +76,11 @@ Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. `--dry-run`
 stays read-only and reports when source build fallback would be required. For
 active desktop development, run the Tauri app from this checkout.
 
+On Windows, the source fallback does not require `cl.exe` to be present on
+`PATH`; a normal PowerShell can use installed Microsoft C++ Build Tools through
+Cargo/rustup's MSVC discovery, and Cargo reports the precise toolchain error if
+that setup is incomplete.
+
 ```bash
 # 1. Install pinned frontend dependencies once from the workspace root.
 npm ci --include=dev

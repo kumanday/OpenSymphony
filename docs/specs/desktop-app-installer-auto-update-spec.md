@@ -145,6 +145,9 @@ desktop dependencies when `sudo` and a supported package manager are available.
 Unsupported or incomplete prerequisite installation fails before building and
 prints exact manual commands. macOS and Windows system prerequisite installers
 remain manual because they require OS-managed UI or administrator approval.
+Windows source builds do not require `cl.exe` to be on `PATH`; Cargo/rustup's
+MSVC discovery is allowed to surface the concrete Build Tools error during
+`cargo build --locked`.
 
 The source fallback requires the root `package-lock.json`, runs
 `npm ci --include=dev` from the source root, builds the desktop crate with
