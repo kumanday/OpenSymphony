@@ -2,7 +2,7 @@
 
 This spec defines the durable contract for `opensymphony app` desktop bundle
 installation and update discovery. It does not define signed installer
-packaging, real asset publication, or prebuilt download implementation.
+packaging or real asset publication.
 
 ## Release Index
 
@@ -115,8 +115,10 @@ The launcher must never treat a failed prompt read as consent.
 
 1. Use the cached installed bundle for the requested OpenSymphony version when
    the installed manifest verifies.
-2. Use a matching prebuilt download from the release index when download support
-   exists and update policy permits it.
+2. Use a matching prebuilt download from the release index when update policy
+   permits it. The default index URL is the matching GitHub release asset named
+   `opensymphony-desktop-release-index.json`; test and mirror flows can set
+   `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL`.
 3. Use source-build fallback when prerequisites pass.
 4. Fail with a clear repair message.
 
