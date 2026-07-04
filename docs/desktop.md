@@ -50,6 +50,11 @@ the versioned cache, and launches from there. Existing cached bundles check the
 latest GitHub release index for newer compatible updates before launch. Set
 `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to use a private mirror or fake release
 server.
+If the release index has no compatible prebuilt asset, or the index/archive
+download is unavailable, the launcher falls back to a matching source build
+after prerequisite checks. Interactive updates prompt with
+`Update before launch? [Y/n]`; Enter means yes, and non-interactive launches
+update by default unless `--no-update` is supplied.
 
 For development from a clone, rebuild the desktop frontend when `apps/desktop`
 or shared frontend packages change:

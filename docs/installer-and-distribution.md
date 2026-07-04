@@ -1,7 +1,7 @@
 # Installer and Distribution Strategy
 
-This document defines a future installer and update shape for OpenSymphony. It
-is a planning spec, not the current installation path.
+This document tracks the current Cargo install plus lazy desktop launcher path
+and the future managed installer/update shape.
 
 ## Audience and outcome
 
@@ -39,8 +39,9 @@ installation commands when available, prints exact manual commands otherwise,
 builds into staging, writes the installed manifest, and promotes only after the
 same verification path succeeds. `--dry-run` does not install prerequisites,
 download sources, or build; it only verifies an existing cached/local bundle or
-reports that a normal run would need source build fallback. Signed/downloaded
-desktop bundle distribution is still future installer work.
+reports that a normal run would need source build fallback. A production-signed
+native installer and hosted desktop update channels remain future installer
+work; the current prebuilt path is the release index plus verified tarball.
 
 Maintainers can produce the current early desktop release assets from a source
 checkout with the desktop workspace script:
@@ -85,6 +86,17 @@ then upload or replace `opensymphony-desktop-release-index.json` last. The
 packaging script follows the same rule locally: it stages all output, publishes
 the archive, and only then publishes the index, so a failed packaging run does
 not leave new metadata claiming an unavailable archive.
+
+Release checklist for desktop bundle metadata:
+
+- Confirm package, Tauri crate, and Tauri config versions match the root Cargo
+  version before publishing metadata.
+- Upload the `opensymphony-desktop-v<VERSION>-<PLATFORM>-<ARCH>.tar.gz`
+  archive first.
+- Upload or replace `opensymphony-desktop-release-index.json` last, after the
+  archive URL is reachable.
+- Preserve existing release-index entries for other platforms and architectures
+  unless intentionally replacing them.
 
 The desktop bundle contract is intentionally small and lives in
 [Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
