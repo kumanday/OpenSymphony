@@ -117,17 +117,28 @@ struct VerifiedBundle {
     manifest: DesktopBundleManifest,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SemanticVersion {
     major: u64,
     minor: u64,
     patch: u64,
+    pre_release: Option<Vec<PreReleaseIdentifier>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreReleaseIdentifier {
+    Numeric(u64),
+    Text(String),
 }
 
 impl SemanticVersion {
     fn parse(value: &str) -> Option<Self> {
-        let core = value.split_once('+').map_or(value, |(core, _)| core);
-        let core = core.split_once('-').map_or(core, |(core, _)| core);
+        let without_build = value.split_once('+').map_or(value, |(core, _)| core);
+        let (core, pre_release) = without_build
+            .split_once('-')
+            .map_or((without_build, None), |(core, pre_release)| {
+                (core, Some(pre_release))
+            });
         let mut parts = core.split('.');
         let major = parse_version_part(parts.next()?)?;
         let minor = parse_version_part(parts.next()?)?;
@@ -135,17 +146,25 @@ impl SemanticVersion {
         if parts.next().is_some() {
             return None;
         }
+        let pre_release = match pre_release {
+            Some(value) => Some(parse_pre_release(value)?),
+            None => None,
+        }
+        .filter(|identifiers| !identifiers.is_empty());
         Some(Self {
             major,
             minor,
             patch,
+            pre_release,
         })
     }
 }
 
 impl Ord for SemanticVersion {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch))
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| compare_pre_release(&self.pre_release, &other.pre_release))
     }
 }
 
@@ -160,6 +179,53 @@ fn parse_version_part(part: &str) -> Option<u64> {
         return None;
     }
     part.parse().ok()
+}
+
+fn parse_pre_release(value: &str) -> Option<Vec<PreReleaseIdentifier>> {
+    value
+        .split('.')
+        .map(|identifier| {
+            if identifier.is_empty() {
+                return None;
+            }
+            if identifier.bytes().all(|byte| byte.is_ascii_digit()) {
+                Some(PreReleaseIdentifier::Numeric(identifier.parse().ok()?))
+            } else {
+                Some(PreReleaseIdentifier::Text(identifier.to_string()))
+            }
+        })
+        .collect()
+}
+
+fn compare_pre_release(
+    left: &Option<Vec<PreReleaseIdentifier>>,
+    right: &Option<Vec<PreReleaseIdentifier>>,
+) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => left
+            .iter()
+            .zip(right.iter())
+            .map(|(left, right)| compare_pre_release_identifier(left, right))
+            .find(|ordering| *ordering != Ordering::Equal)
+            .unwrap_or_else(|| left.len().cmp(&right.len())),
+    }
+}
+
+fn compare_pre_release_identifier(
+    left: &PreReleaseIdentifier,
+    right: &PreReleaseIdentifier,
+) -> Ordering {
+    match (left, right) {
+        (PreReleaseIdentifier::Numeric(left), PreReleaseIdentifier::Numeric(right)) => {
+            left.cmp(right)
+        }
+        (PreReleaseIdentifier::Numeric(_), PreReleaseIdentifier::Text(_)) => Ordering::Less,
+        (PreReleaseIdentifier::Text(_), PreReleaseIdentifier::Numeric(_)) => Ordering::Greater,
+        (PreReleaseIdentifier::Text(left), PreReleaseIdentifier::Text(right)) => left.cmp(right),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,7 +355,7 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     let no_update = args.no_update;
     let skip_update = no_update || bundle_dir.is_some();
     if args.dry_run {
-        let verified = dry_run_verified_bundle(&cache_dir, bundle_dir)?;
+        let verified = dry_run_verified_bundle(&cache_root, &cache_dir, bundle_dir)?;
         println!(
             "Dry run: would launch OpenSymphony desktop at {}",
             verified.executable.display()
@@ -325,9 +391,15 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
 }
 
 fn dry_run_verified_bundle(
+    cache_root: &Path,
     cache_dir: &Path,
     bundle_dir: Option<&Path>,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
+    if bundle_dir.is_none()
+        && let Some(bundle) = latest_verified_cached_bundle(cache_root)
+    {
+        return Ok(bundle);
+    }
     if let Ok(bundle) = verify_bundle(cache_dir) {
         return Ok(bundle);
     }
@@ -476,7 +548,7 @@ async fn latest_update_candidate(
     installed_version: &str,
 ) -> Result<Option<DesktopReleaseAsset>, DesktopLauncherError> {
     let index = download_release_index_task(release_index_url).await?;
-    Ok(newest_compatible_release_asset(&index, release_index_url, installed_version)?.cloned())
+    Ok(newest_compatible_release_asset(&index, installed_version).cloned())
 }
 
 async fn download_release_index_task(
@@ -490,24 +562,18 @@ async fn download_release_index_task(
 
 fn newest_compatible_release_asset<'a>(
     index: &'a DesktopReleaseIndex,
-    _release_index_url: &str,
     installed_version: &str,
-) -> Result<Option<&'a DesktopReleaseAsset>, DesktopLauncherError> {
-    let Some(installed_version) = SemanticVersion::parse(installed_version) else {
-        return Ok(None);
-    };
-    let asset = index
+) -> Option<&'a DesktopReleaseAsset> {
+    let installed_version = SemanticVersion::parse(installed_version)?;
+    index
         .assets
         .iter()
         .filter(|asset| asset.platform == current_platform() && asset.arch == current_arch())
+        .filter(|asset| validate_release_asset(asset).is_ok())
         .filter_map(|asset| Some((SemanticVersion::parse(&asset.version)?, asset)))
         .filter(|(version, _)| *version > installed_version)
-        .max_by_key(|(version, _)| *version)
-        .map(|(_, asset)| asset);
-    if let Some(asset) = asset {
-        validate_release_asset(asset)?;
-    }
-    Ok(asset)
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, asset)| asset)
 }
 
 fn prompt_update_decision<R, W>(
@@ -559,7 +625,7 @@ fn latest_verified_cached_bundle(cache_root: &Path) -> Option<VerifiedBundle> {
             let verified = verify_bundle_for_version(&cache_dir, Some(&manifest.version)).ok()?;
             Some((version, verified))
         })
-        .max_by_key(|(version, _)| *version)
+        .max_by(|(left, _), (right, _)| left.cmp(right))
         .map(|(_, verified)| verified)
 }
 
@@ -2211,11 +2277,45 @@ mod tests {
         };
 
         let asset =
-            newest_compatible_release_asset(&index, "http://example.com/index.json", "2.8.0")
-                .expect("candidate lookup should succeed")
-                .expect("newer asset should exist");
+            newest_compatible_release_asset(&index, "2.8.0").expect("newer asset should exist");
 
         assert_eq!(asset.version, "2.10.0");
+    }
+
+    #[test]
+    fn semver_selection_treats_stable_as_newer_than_prerelease() {
+        let index = DesktopReleaseIndex {
+            schema_version: 1,
+            assets: vec![desktop_release_asset(
+                "2.8.0",
+                "http://example.com/2.8.0.tar.gz",
+                "0",
+            )],
+        };
+
+        let asset = newest_compatible_release_asset(&index, "2.8.0-beta.1")
+            .expect("stable release should be newer than prerelease");
+
+        assert_eq!(asset.version, "2.8.0");
+    }
+
+    #[test]
+    fn update_selection_skips_unsupported_highest_asset() {
+        let mut unsupported =
+            desktop_release_asset("2.9.0", "http://example.com/2.9.0.tar.gz", "0");
+        unsupported.launch_target.args = vec!["--future".to_string()];
+        let index = DesktopReleaseIndex {
+            schema_version: 1,
+            assets: vec![
+                desktop_release_asset("2.8.0", "http://example.com/2.8.0.tar.gz", "0"),
+                unsupported,
+            ],
+        };
+
+        let asset = newest_compatible_release_asset(&index, "2.7.0")
+            .expect("compatible update should exist");
+
+        assert_eq!(asset.version, "2.8.0");
     }
 
     #[test]
@@ -2484,6 +2584,30 @@ mod tests {
 
         assert_eq!(launched.manifest.version, desktop_version());
         assert_eq!(server.requests(), vec!["/index.json".to_string()]);
+    }
+
+    #[test]
+    fn dry_run_uses_latest_verified_cached_bundle() {
+        let install_root = TempDir::new().expect("install root");
+        write_installed_bundle(
+            &install_root.path().join(desktop_version()),
+            b"current desktop",
+        );
+        write_installed_bundle_for_version(
+            &install_root.path().join("2.7.1"),
+            "2.7.1",
+            b"updated desktop",
+        );
+
+        let verified = dry_run_verified_bundle(
+            install_root.path(),
+            &install_root.path().join(desktop_version()),
+            None,
+        )
+        .expect("dry-run should use latest cached bundle");
+
+        assert_eq!(verified.manifest.version, "2.7.1");
+        assert_eq!(verified.bundle_dir, install_root.path().join("2.7.1"));
     }
 
     #[tokio::test]
@@ -3343,11 +3467,19 @@ mod tests {
     }
 
     fn write_installed_bundle(cache_dir: &Path, executable_contents: &[u8]) {
+        write_installed_bundle_for_version(cache_dir, desktop_version(), executable_contents);
+    }
+
+    fn write_installed_bundle_for_version(
+        cache_dir: &Path,
+        version: &str,
+        executable_contents: &[u8],
+    ) {
         fs::create_dir_all(cache_dir).expect("create cache dir");
         let executable = cache_dir.join("OpenSymphony");
         fs::write(&executable, executable_contents).expect("write fake executable");
         let manifest = DesktopBundleManifest {
-            version: desktop_version().to_string(),
+            version: version.to_string(),
             platform: current_platform().to_string(),
             arch: current_arch().to_string(),
             executable: PathBuf::from("OpenSymphony"),
