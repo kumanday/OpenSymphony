@@ -31,6 +31,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -41,6 +42,7 @@ areas:
       - area:operations
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:workflow
       linear_milestones:
@@ -105,6 +107,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -131,6 +134,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -164,6 +168,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -190,6 +195,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -221,6 +227,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -233,6 +240,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -240,6 +248,23 @@ areas:
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
+  code-review:
+    title: Code Review
+    docs_target: docs/code-review.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - code review
+    - code-review
+    source_refs:
+      linear_labels:
+      - area:code-review
+      - area:documentation
+      - area:template
+      - area:workflow
+      linear_milestones:
       - 'M12.7: Workflow Target Branch Configuration'
   codex:
     title: Codex
@@ -255,6 +280,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -281,6 +307,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -333,6 +360,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:documentation
       - area:duckdb
@@ -347,6 +375,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -395,6 +424,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -421,6 +451,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -467,6 +498,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -493,6 +525,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -525,6 +558,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -551,6 +585,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -587,6 +622,7 @@ areas:
       - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10: Web Client And External Gateway'
       - 'M11.5: LLM Wiki Graph View'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -617,6 +653,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -643,6 +680,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -671,9 +709,11 @@ areas:
     source_refs:
       linear_labels:
       - area:cli
+      - area:code-review
       - area:documentation
       - area:operations
       - area:target-repo-bootstrap
+      - area:template
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -693,6 +733,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -719,6 +760,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -760,6 +802,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -771,6 +814,7 @@ areas:
       - area:query-packs
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -793,6 +837,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -819,6 +864,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -850,6 +896,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -862,6 +909,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -885,6 +933,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -911,6 +960,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1019,6 +1069,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1045,6 +1096,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1075,6 +1127,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1101,6 +1154,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1147,6 +1201,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1173,6 +1228,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1209,6 +1265,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1235,6 +1292,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1283,6 +1341,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1309,6 +1368,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1339,6 +1399,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1365,6 +1426,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1423,6 +1485,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -1436,6 +1499,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1461,6 +1525,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1487,6 +1552,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1524,6 +1590,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1550,6 +1617,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1596,6 +1664,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -1607,6 +1676,7 @@ areas:
       - area:query-packs
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1647,6 +1717,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1673,6 +1744,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1703,6 +1775,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -1715,6 +1788,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1738,6 +1812,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1764,6 +1839,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1823,7 +1899,25 @@ areas:
     - target-repo-bootstrap
     source_refs:
       linear_labels:
+      - area:cli
+      - area:code-review
+      - area:documentation
       - area:target-repo-bootstrap
+      - area:template
+      - area:workflow
+      linear_milestones:
+      - 'M12.7: Workflow Target Branch Configuration'
+  template:
+    title: Template
+    docs_target: docs/template.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - template
+    source_refs:
+      linear_labels:
+      - area:template
       - area:workflow
       linear_milestones:
       - 'M12.7: Workflow Target Branch Configuration'
@@ -1841,6 +1935,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -1867,6 +1962,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1925,6 +2021,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -1935,6 +2032,7 @@ areas:
       - area:operations
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -1957,6 +2055,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -1967,6 +2066,7 @@ areas:
       - area:operations
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:threejs
       - area:workflow
@@ -1988,6 +2088,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -2014,6 +2115,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -2044,6 +2146,7 @@ areas:
       - area:build
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex
       - area:codex-runtime
       - area:control
@@ -2070,6 +2173,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs
@@ -2129,6 +2233,7 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:documentation
       - area:duckdb
       - area:frontend
@@ -2141,6 +2246,7 @@ areas:
       - area:rust
       - area:security
       - area:target-repo-bootstrap
+      - area:template
       - area:testing
       - area:tests
       - area:threejs

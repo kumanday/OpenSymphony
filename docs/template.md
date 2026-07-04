@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: openhands-runtime
+area: template
 visibility: public
-last_memory_sync: 2026-07-02T03:36:15.105926+00:00
+last_memory_sync: 2026-07-04T01:04:06.159695+00:00
 ---
 
-# Openhands Runtime
+# Template
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

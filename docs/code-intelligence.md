@@ -110,7 +110,7 @@ thread.
 
 ## Current model
 
-- COE-521 contributed: PR #184: Record workflow target branch marker (merge `641c8bb`)
+- COE-524 contributed: PR #185: Add workflow settings update mode (merge `7dede06`)
 
 ## Important invariants
 
@@ -127,10 +127,10 @@ thread.
 
 ## Recent changes
 
-- COE-521: Workflow Target Branch Model And Init Customization
+- COE-524: Template Docs And Settings Hardening
 
 ## Source refs
 
-- COE-521
+- COE-524
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
