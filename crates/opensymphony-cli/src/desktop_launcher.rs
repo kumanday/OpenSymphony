@@ -234,6 +234,15 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
+    if args.dry_run {
+        let verified = dry_run_verified_bundle(&cache_dir, bundle_dir)?;
+        println!(
+            "Dry run: would launch OpenSymphony desktop at {}",
+            verified.executable.display()
+        );
+        return Ok(verified.executable);
+    }
+
     let release_index_url = selected_release_index_url(args.release_index_url);
 
     let verified = ensure_verified_bundle(
@@ -241,16 +250,9 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
         &cache_dir,
         bundle_dir,
         release_index_url.as_str(),
-        !args.dry_run,
+        true,
     )
     .await?;
-    if args.dry_run {
-        println!(
-            "Dry run: would launch OpenSymphony desktop at {}",
-            verified.executable.display()
-        );
-        return Ok(verified.executable);
-    }
     Command::new(&verified.executable)
         .current_dir(&cache_dir)
         .spawn()
@@ -259,6 +261,23 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
             source,
         })?;
     Ok(verified.executable)
+}
+
+fn dry_run_verified_bundle(
+    cache_dir: &Path,
+    bundle_dir: Option<&Path>,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
+    if let Ok(bundle) = verify_bundle(cache_dir) {
+        return Ok(bundle);
+    }
+    if let Some(bundle_dir) = bundle_dir {
+        return verify_bundle(bundle_dir);
+    }
+    Err(DesktopLauncherError::DryRunSourceBuildRequired {
+        version: desktop_version().to_string(),
+        platform: current_platform().to_string(),
+        arch: current_arch().to_string(),
+    })
 }
 
 async fn ensure_verified_bundle(
@@ -306,12 +325,12 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
             } else {
                 match install_release_bundle(cache_root, cache_dir, release_index_url).await {
                     Ok(bundle) => Ok(bundle),
-                    Err(DesktopLauncherError::NoCompatibleReleaseAsset { .. })
-                        if allow_source_build =>
+                    Err(error)
+                        if allow_source_build && release_error_allows_source_fallback(&error) =>
                     {
                         build_source_fallback(cache_root, cache_dir, runner).await
                     }
-                    Err(DesktopLauncherError::NoCompatibleReleaseAsset { .. }) => {
+                    Err(error) if release_error_allows_source_fallback(&error) => {
                         Err(DesktopLauncherError::DryRunSourceBuildRequired {
                             version: desktop_version().to_string(),
                             platform: current_platform().to_string(),
@@ -323,6 +342,17 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
             }
         }
     }
+}
+
+fn release_error_allows_source_fallback(error: &DesktopLauncherError) -> bool {
+    matches!(
+        error,
+        DesktopLauncherError::ReleaseIndexDownload { .. }
+            | DesktopLauncherError::InvalidReleaseIndex { .. }
+            | DesktopLauncherError::UnsupportedReleaseIndex { .. }
+            | DesktopLauncherError::NoCompatibleReleaseAsset { .. }
+            | DesktopLauncherError::ReleaseAssetDownload { .. }
+    )
 }
 
 fn verify_bundle(cache_dir: &Path) -> Result<VerifiedBundle, DesktopLauncherError> {
@@ -396,6 +426,17 @@ fn default_release_index_url() -> String {
     )
 }
 
+fn release_url_display_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "<invalid release URL>".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
 async fn install_release_bundle(
     cache_root: &Path,
     cache_dir: &Path,
@@ -444,9 +485,10 @@ fn install_release_bundle_blocking(
 }
 
 fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLauncherError> {
+    let display_url = release_url_display_url(url);
     let client =
         release_http_client().map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
-            url: url.to_string(),
+            url: display_url.clone(),
             source,
         })?;
     let body = client
@@ -455,17 +497,17 @@ fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLaunc
         .and_then(|response| response.error_for_status())
         .and_then(|response| response.text())
         .map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
-            url: url.to_string(),
+            url: display_url.clone(),
             source,
         })?;
     let index =
         parse_release_index(&body).map_err(|source| DesktopLauncherError::InvalidReleaseIndex {
-            url: url.to_string(),
+            url: display_url.clone(),
             source,
         })?;
     if index.schema_version != 1 {
         return Err(DesktopLauncherError::UnsupportedReleaseIndex {
-            url: url.to_string(),
+            url: display_url,
             schema_version: index.schema_version,
         });
     }
@@ -476,6 +518,7 @@ fn compatible_release_asset<'a>(
     index: &'a DesktopReleaseIndex,
     release_index_url: &str,
 ) -> Result<&'a DesktopReleaseAsset, DesktopLauncherError> {
+    let display_index_url = release_url_display_url(release_index_url);
     index
         .assets
         .iter()
@@ -485,21 +528,22 @@ fn compatible_release_asset<'a>(
                 && asset.arch == current_arch()
         })
         .ok_or_else(|| DesktopLauncherError::NoCompatibleReleaseAsset {
-            url: release_index_url.to_string(),
+            url: display_index_url,
             version: desktop_version().to_string(),
             platform: current_platform().to_string(),
             arch: current_arch().to_string(),
         })
         .and_then(|asset| {
+            let display_asset_url = release_url_display_url(&asset.url);
             if asset.checksum.algorithm != "sha256" {
                 return Err(DesktopLauncherError::UnsupportedReleaseChecksum {
-                    url: asset.url.clone(),
+                    url: display_asset_url,
                     algorithm: asset.checksum.algorithm.clone(),
                 });
             }
             if !asset.launch_target.args.is_empty() {
                 return Err(DesktopLauncherError::UnsupportedLaunchArgs {
-                    url: asset.url.clone(),
+                    url: display_asset_url,
                 });
             }
             if asset.launch_target.executable.is_absolute()
@@ -525,9 +569,10 @@ fn compatible_release_asset<'a>(
 }
 
 fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherError> {
+    let display_url = release_url_display_url(url);
     let client =
         release_http_client().map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
-            url: url.to_string(),
+            url: display_url.clone(),
             source,
         })?;
     let mut response = client
@@ -535,7 +580,7 @@ fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherErr
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
-            url: url.to_string(),
+            url: display_url,
             source,
         })?;
     let mut file =
@@ -661,10 +706,7 @@ fn promote_verified_bundle(
 ) -> Result<(), DesktopLauncherError> {
     validate_cache_dir(cache_root, cache_dir)?;
     if cache_dir.exists() {
-        fs::remove_dir_all(cache_dir).map_err(|source| DesktopLauncherError::Repair {
-            path: cache_dir.to_path_buf(),
-            source,
-        })?;
+        remove_cache_entry(cache_root, cache_dir)?;
     }
     fs::rename(stage_dir, cache_dir).map_err(|source| DesktopLauncherError::Repair {
         path: cache_dir.to_path_buf(),
@@ -1871,8 +1913,16 @@ mod tests {
         assert!(asset.launch_target.args.is_empty());
     }
 
+    #[test]
+    fn release_url_display_url_redacts_credentials_query_and_fragment() {
+        let display =
+            release_url_display_url("https://user:secret@example.com/index.json?token=secret#frag");
+
+        assert_eq!(display, "https://example.com/index.json");
+    }
+
     #[tokio::test]
-    async fn remote_release_installs_to_custom_path_and_dry_runs() {
+    async fn remote_release_installs_to_custom_path() {
         let archive = desktop_release_archive(b"fake desktop");
         let archive_sha = sha256_bytes(&archive);
         let server = FakeReleaseServer::start(|base_url| {
@@ -1885,20 +1935,20 @@ mod tests {
             ]
         });
         let install_root = TempDir::new().expect("install root");
-
-        let executable = run_app(AppArgs {
-            bundle_dir: None,
-            install_path: Some(install_root.path().to_path_buf()),
-            cache_root: None,
-            release_index_url: Some(server.url("/index.json")),
-            dry_run: true,
-        })
-        .await
-        .expect("remote release should install and dry-run");
-
         let cache_dir = install_root.path().join(desktop_version());
+
+        let verified = ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            &server.url("/index.json"),
+            false,
+        )
+        .await
+        .expect("remote release should install");
+
         assert_eq!(
-            executable,
+            verified.executable,
             cache_dir
                 .join("OpenSymphony")
                 .canonicalize()
@@ -1909,6 +1959,37 @@ mod tests {
             server.requests(),
             vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn remote_promotion_repairs_file_cache_entry() {
+        let archive = desktop_release_archive(b"fake desktop");
+        let archive_sha = sha256_bytes(&archive);
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body(base_url, archive_sha.as_str()).into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        fs::write(&cache_dir, b"stale cache file").expect("write stale file");
+
+        ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            &server.url("/index.json"),
+            false,
+        )
+        .await
+        .expect("remote release should replace stale file cache entry");
+
+        assert!(cache_dir.is_dir());
+        assert!(cache_dir.join(MANIFEST_FILE).is_file());
     }
 
     #[tokio::test]
@@ -1948,6 +2029,29 @@ mod tests {
             !cache_dir.exists(),
             "failed verification must not promote a versioned bundle"
         );
+    }
+
+    #[tokio::test]
+    async fn release_index_download_failure_falls_back_to_source_build() {
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        let mut runner = FakeRunner::default();
+
+        let error = ensure_verified_bundle_with(
+            install_root.path(),
+            &cache_dir,
+            None,
+            "http://127.0.0.1:9/index.json",
+            true,
+            &mut runner,
+        )
+        .await
+        .expect_err("source fallback should report missing prerequisites");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::MissingPrerequisites { .. }
+        ));
     }
 
     #[tokio::test]
@@ -2185,6 +2289,10 @@ mod tests {
             DesktopLauncherError::DryRunSourceBuildRequired { .. }
         ));
         assert!(!cache.path().join(desktop_version()).exists());
+        assert!(
+            server.requests().is_empty(),
+            "dry run must not download or install remote bundles"
+        );
     }
 
     #[tokio::test]
