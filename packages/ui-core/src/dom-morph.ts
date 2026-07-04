@@ -17,7 +17,7 @@
  *   checked state, and selection; everything else syncs to the new render.
  */
 
-const KEY_ATTRIBUTES = ["id", "data-key", "data-node-id", "data-path"] as const;
+const KEY_ATTRIBUTES = ["id", "data-key", "data-node-id", "data-path", "data-approval-id"] as const;
 
 export function morphChildren(target: Element, html: string): void {
   const template = target.ownerDocument.createElement("template");

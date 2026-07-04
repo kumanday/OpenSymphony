@@ -2236,7 +2236,9 @@ fn parse_git_numstat_z(output: &str) -> HashMap<String, (u32, u32)> {
         if record.is_empty() {
             continue;
         }
-        let mut columns = record.split('\t');
+        // Three-field split: the path column is the remainder, so file names
+        // containing tabs stay intact.
+        let mut columns = record.splitn(3, '\t');
         let lines_added = parse_numstat_count(columns.next());
         let lines_removed = parse_numstat_count(columns.next());
         match columns.next() {
@@ -4687,16 +4689,19 @@ exit 2
     #[test]
     fn parse_git_numstat_z_handles_regular_rename_and_binary_entries() {
         // Regular entry, rename entry (empty path column + two NUL paths),
-        // and a binary entry reporting `-` counts.
+        // a binary entry reporting `-` counts, and a path containing a tab
+        // (legal in git; only the first two columns are numstat fields).
         let output = "3\t1\tsrc/main.rs\0\
                       5\t2\t\0src/old_name.rs\0src/new_name.rs\0\
-                      -\t-\tassets/logo.png\0";
+                      -\t-\tassets/logo.png\0\
+                      4\t0\tweird\tname.txt\0";
         let counts = parse_git_numstat_z(output);
 
         assert_eq!(counts.get("src/main.rs"), Some(&(3, 1)));
         assert_eq!(counts.get("src/new_name.rs"), Some(&(5, 2)));
         assert_eq!(counts.get("assets/logo.png"), Some(&(0, 0)));
-        assert_eq!(counts.len(), 3);
+        assert_eq!(counts.get("weird\tname.txt"), Some(&(4, 0)));
+        assert_eq!(counts.len(), 4);
     }
 
     #[test]

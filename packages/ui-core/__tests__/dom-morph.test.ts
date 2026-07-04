@@ -134,6 +134,32 @@ describe("morphChildren", () => {
     expect(root.children[1].nodeName).toBe("EM");
   });
 
+  it("does not migrate approval row state when an earlier approval disappears", () => {
+    const root = mount(`
+      <div>
+        <div data-approval-id="app-1"><input class="explain" value=""></div>
+        <div data-approval-id="app-2"><input class="explain" value=""></div>
+      </div>
+    `);
+    const secondRow = root.querySelector("[data-approval-id='app-2']")!;
+    const firstInput = root.querySelector<HTMLInputElement>("[data-approval-id='app-1'] input")!;
+    firstInput.focus();
+    firstInput.value = "typed for app-1";
+
+    // The first approval resolves away; app-2 must not inherit app-1's DOM
+    // (or the operator's typed explanation).
+    morphChildren(root, `
+      <div>
+        <div data-approval-id="app-2"><input class="explain" value=""></div>
+      </div>
+    `);
+
+    const remaining = root.querySelector("[data-approval-id='app-2']")!;
+    expect(remaining).toBe(secondRow);
+    expect(remaining.querySelector("input")!.value).toBe("");
+    expect(root.querySelector("[data-approval-id='app-1']")).toBeNull();
+  });
+
   it("replaces nodes whose keys differ instead of reusing them", () => {
     const root = mount(`<div data-node-id="alpha">alpha</div>`);
     const alpha = root.querySelector("div")!;
