@@ -7,7 +7,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{self, Command, ExitCode},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Args;
@@ -19,6 +19,7 @@ use thiserror::Error;
 const MANIFEST_FILE: &str = "opensymphony-desktop-manifest.json";
 const RELEASE_INDEX_FILE: &str = "opensymphony-desktop-release-index.json";
 const DEFAULT_CACHE_RELATIVE: &str = ".opensymphony/desktop";
+const RELEASE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Args)]
 pub struct AppArgs {
@@ -102,15 +103,19 @@ struct VerifiedBundle {
 
 pub async fn run_command(args: AppArgs) -> ExitCode {
     let dry_run = args.dry_run;
-    match run_app(args) {
-        Ok(executable) => {
+    match tokio::task::spawn_blocking(move || run_app(args)).await {
+        Ok(Ok(executable)) => {
             if !dry_run {
                 println!("OpenSymphony desktop ready: {}", executable.display());
             }
             ExitCode::SUCCESS
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             eprintln!("{error}");
+            ExitCode::from(1)
+        }
+        Err(error) => {
+            eprintln!("desktop launcher task failed: {error}");
             ExitCode::from(1)
         }
     }
@@ -281,7 +286,14 @@ fn install_release_bundle(
 }
 
 fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLauncherError> {
-    let body = reqwest::blocking::get(url)
+    let client =
+        release_http_client().map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
+            url: url.to_string(),
+            source,
+        })?;
+    let body = client
+        .get(url)
+        .send()
         .and_then(|response| response.error_for_status())
         .and_then(|response| response.text())
         .map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
@@ -355,7 +367,14 @@ fn compatible_release_asset<'a>(
 }
 
 fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherError> {
-    let mut response = reqwest::blocking::get(url)
+    let client =
+        release_http_client().map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
+            url: url.to_string(),
+            source,
+        })?;
+    let mut response = client
+        .get(url)
+        .send()
         .and_then(|response| response.error_for_status())
         .map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
             url: url.to_string(),
@@ -373,6 +392,12 @@ fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherErr
         }
     })?;
     Ok(())
+}
+
+fn release_http_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .timeout(RELEASE_DOWNLOAD_TIMEOUT)
+        .build()
 }
 
 fn verify_archive_checksum(
