@@ -52,6 +52,12 @@ version, platform, architecture, relative executable path, and executable
 SHA-256. Local bundle materialization copies regular files and directories;
 symlinked bundle entries should be packaged by the downloaded archive path
 instead of this local smoke path.
+When no compatible prebuilt asset is available or a release download fails, a
+normal run attempts the source-build fallback after checking Rust/Cargo,
+Node/npm, source archive extraction, and platform desktop/Tauri prerequisites.
+Interactive update prompts use `Update before launch? [Y/n]`; pressing Enter
+accepts the update, and non-interactive runs update by default unless
+`--no-update` is supplied.
 
 Maintainers can build the current release bundle assets from a checkout:
 
@@ -74,8 +80,8 @@ would change the desktop dependency graph.
 Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
 custom install root. That root contains versioned bundles such as
 `<dir>/<version>/`; it is not the bundle directory itself. `--dry-run` remains
-read-only and never starts source-build prerequisite installation. Download metadata,
-auto-update prompting, fallback order, and path-safety rules are defined in
+read-only and never starts source-build prerequisite installation. Download
+metadata, auto-update prompting, fallback order, and path-safety rules are defined in
 [Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
 
 Important `init` behavior:

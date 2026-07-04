@@ -2498,6 +2498,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fake_release_smoke_covers_install_update_custom_path_and_cache_repair() {
+        let install_root = TempDir::new().expect("custom install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        let first_server = fake_release_server_for_version(desktop_version(), b"first desktop");
+
+        let installed = ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            &first_server.url("/index.json"),
+            false,
+        )
+        .await
+        .expect("empty custom cache should install from fake release");
+
+        assert_eq!(installed.bundle_dir, cache_dir);
+        assert_eq!(
+            fs::read(&installed.executable).expect("read installed executable"),
+            b"first desktop"
+        );
+        assert_eq!(
+            first_server.requests(),
+            vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
+        );
+
+        let update_server = fake_release_server_for_version("2.7.1", b"updated desktop");
+        let updated = maybe_update_verified_bundle(
+            install_root.path(),
+            installed,
+            &update_server.url("/index.json"),
+            false,
+        )
+        .await;
+        let update_dir = install_root.path().join("2.7.1");
+
+        assert_eq!(updated.manifest.version, "2.7.1");
+        assert_eq!(updated.bundle_dir, update_dir);
+        assert_eq!(
+            fs::read(&updated.executable).expect("read updated executable"),
+            b"updated desktop"
+        );
+        assert_eq!(
+            update_server.requests(),
+            vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
+        );
+
+        let corrupt_root = TempDir::new().expect("corrupt cache root");
+        let corrupt_dir = corrupt_root.path().join(desktop_version());
+        fs::write(&corrupt_dir, b"corrupt cache entry").expect("write corrupt cache file");
+        let repair_server = fake_release_server_for_version(desktop_version(), b"repaired desktop");
+
+        let repaired = ensure_verified_bundle(
+            corrupt_root.path(),
+            &corrupt_dir,
+            None,
+            &repair_server.url("/index.json"),
+            false,
+        )
+        .await
+        .expect("fake release should repair corrupt cache entry");
+
+        assert_eq!(repaired.bundle_dir, corrupt_dir);
+        assert!(corrupt_dir.join(MANIFEST_FILE).is_file());
+        assert_eq!(
+            fs::read(repaired.executable).expect("read repaired executable"),
+            b"repaired desktop"
+        );
+    }
+
+    #[tokio::test]
     async fn remote_promotion_repairs_file_cache_entry() {
         let archive = desktop_release_archive(b"fake desktop");
         let archive_sha = sha256_bytes(&archive);
@@ -3677,6 +3747,24 @@ mod tests {
             }]
         })
         .to_string()
+    }
+
+    fn fake_release_server_for_version(
+        version: &str,
+        executable_contents: &[u8],
+    ) -> FakeReleaseServer {
+        let archive = desktop_release_archive_for_version(version, executable_contents);
+        let archive_sha = sha256_bytes(&archive);
+        FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body_for_version(base_url, version, archive_sha.as_str())
+                        .into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        })
     }
 
     fn desktop_release_asset(version: &str, url: &str, checksum: &str) -> DesktopReleaseAsset {
