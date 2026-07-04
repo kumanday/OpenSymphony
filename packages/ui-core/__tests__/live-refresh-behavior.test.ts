@@ -177,12 +177,19 @@ function buildRunEvents(runId: string): RunEventPage {
  */
 class GatedTransport extends MockGatewayTransport {
   taskGraphReads = 0;
+  runDetailGateHits = 0;
   private gateFromRead = Number.POSITIVE_INFINITY;
+  private gatedRunDetailId: string | null = null;
   private gateResolvers: Array<() => void> = [];
 
   /** Gate task-graph reads starting with the given 1-based read number. */
   gateTaskGraphFromRead(read: number): void {
     this.gateFromRead = read;
+  }
+
+  /** Gate run-detail reads for one specific run id. */
+  gateRunDetailFor(runId: string | null): void {
+    this.gatedRunDetailId = runId;
   }
 
   releaseGatedReads(): void {
@@ -198,6 +205,16 @@ class GatedTransport extends MockGatewayTransport {
       });
     }
     return super.taskGraph(projectId);
+  }
+
+  override async runDetail(runId: string): Promise<RunDetail> {
+    if (runId === this.gatedRunDetailId) {
+      this.runDetailGateHits += 1;
+      await new Promise<void>((resolve) => {
+        this.gateResolvers.push(resolve);
+      });
+    }
+    return super.runDetail(runId);
   }
 }
 
@@ -349,6 +366,32 @@ describe("live refresh vs. user navigation", () => {
     await refresh;
     expect(root.querySelectorAll("[data-testid='changed-file-item']").length).toBeGreaterThan(0);
     expect(root.querySelector("[data-testid='file-diff']")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("does not cancel an in-flight task open when a stale diff file is clicked", async () => {
+    const transport = buildGatedTransport();
+    const { root, handle } = await mountApp(transport);
+
+    // Freeze RUN-B's detail read so opening node-b hangs mid-flight.
+    transport.gateRunDetailFor("RUN-B");
+    root.querySelector<HTMLElement>("[data-node-id='node-b']")!.click();
+    await flushUntil(() => transport.runDetailGateHits >= 1);
+
+    // While RUN-B is loading, RUN-A's changed files are still on screen;
+    // clicking one used to bump the shared epoch and abort the open.
+    const staleFile = root.querySelector<HTMLElement>("[data-testid='changed-file-item'][data-path='src/other.ts']");
+    expect(staleFile).not.toBeNull();
+    staleFile!.click();
+    await flushAsync();
+
+    transport.gateRunDetailFor(null);
+    transport.releaseGatedReads();
+    await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "RUN-B");
+
+    // The opened run applied; its diff selection reset to the new run's data.
+    expect(root.querySelector(".os-run-head strong")?.textContent).toBe("RUN-B");
 
     await handle.destroy();
   });

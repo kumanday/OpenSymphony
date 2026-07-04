@@ -117,6 +117,7 @@ const CODEX_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
 const CODEX_READINESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEX_CLI_COMMAND: &str = "codex";
 const PR_URL_CACHE_TTL: Duration = Duration::from_secs(60);
+const PR_URL_MISS_TTL: Duration = Duration::from_secs(5);
 const PR_URL_COMMAND: &str = "gh";
 
 #[async_trait]
@@ -390,6 +391,21 @@ struct PrUrlCacheEntry {
     in_flight: bool,
 }
 
+/// Misses expire much sooner than hits: a run usually gains its PR shortly
+/// after starting, and caching `None` for the full TTL would keep showing
+/// "Not found" long after the PR exists. A short miss TTL means the next
+/// dashboard poll retries while resolved URLs stay cached for the full TTL.
+fn pr_url_entry_fresh(entry: &PrUrlCacheEntry) -> bool {
+    let ttl = if entry.url.is_some() {
+        PR_URL_CACHE_TTL
+    } else {
+        PR_URL_MISS_TTL
+    };
+    entry
+        .resolved_at
+        .is_some_and(|resolved_at| resolved_at.elapsed() < ttl)
+}
+
 impl PrUrls {
     fn lookup(&self, workspace_path: PathBuf, program: impl Into<String>) -> Option<String> {
         let program = program.into();
@@ -401,10 +417,7 @@ impl PrUrls {
                 url: None,
                 in_flight: false,
             });
-        let fresh = entry
-            .resolved_at
-            .is_some_and(|resolved_at| resolved_at.elapsed() < PR_URL_CACHE_TTL);
-        if fresh || entry.in_flight {
+        if pr_url_entry_fresh(entry) || entry.in_flight {
             return entry.url.clone();
         }
         entry.in_flight = true;
@@ -4638,6 +4651,37 @@ exit 2
             resolved,
             "https://github.com/kumanday/OpenSymphony/pull/461"
         );
+    }
+
+    #[test]
+    fn pr_url_misses_expire_sooner_than_hits() {
+        let hit = PrUrlCacheEntry {
+            resolved_at: Instant::now().checked_sub(Duration::from_secs(30)),
+            url: Some("https://github.com/kumanday/OpenSymphony/pull/461".to_owned()),
+            in_flight: false,
+        };
+        let miss = PrUrlCacheEntry {
+            resolved_at: Instant::now().checked_sub(Duration::from_secs(30)),
+            url: None,
+            in_flight: false,
+        };
+        let recent_miss = PrUrlCacheEntry {
+            resolved_at: Some(Instant::now()),
+            url: None,
+            in_flight: false,
+        };
+        let unresolved = PrUrlCacheEntry {
+            resolved_at: None,
+            url: None,
+            in_flight: false,
+        };
+
+        // A 30s-old hit is still inside the 60s hit TTL; a 30s-old miss is
+        // well past the 5s miss TTL and must be retried.
+        assert!(pr_url_entry_fresh(&hit));
+        assert!(!pr_url_entry_fresh(&miss));
+        assert!(pr_url_entry_fresh(&recent_miss));
+        assert!(!pr_url_entry_fresh(&unresolved));
     }
 
     #[test]

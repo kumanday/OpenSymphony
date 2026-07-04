@@ -144,12 +144,15 @@ export function mountKnowledgeGraphRenderer(
       if (nodeId) options.onSelect(nodeId);
     }
   };
+  // Handler properties (not addEventListener) so re-mounting after every
+  // render stays idempotent: the DOM morph preserves these buttons across
+  // renders, and stacked listeners would fire once per past render.
   root.querySelectorAll<HTMLElement>("[data-kg-node-id]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.onclick = () => {
       const nodeId = button.dataset.kgNodeId;
       if (nodeId) options.onSelect(nodeId);
-    });
-    button.addEventListener("keydown", (event) => {
+    };
+    button.onkeydown = (event) => {
       const direction = graphListNavigationDirection(event.key);
       if (!direction) return;
       const buttons = Array.from(root.querySelectorAll<HTMLElement>(".os-kg-list [data-kg-node-id]"));
@@ -162,11 +165,11 @@ export function mountKnowledgeGraphRenderer(
           ? buttons.length - 1
           : (index + direction + buttons.length) % buttons.length;
       buttons[nextIndex]?.focus();
-    });
-    button.addEventListener("focus", () => {
+    };
+    button.onfocus = () => {
       const nodeId = button.dataset.kgNodeId;
       if (nodeId) options.onFocus(nodeId);
-    });
+    };
   });
 }
 

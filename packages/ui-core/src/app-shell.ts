@@ -314,6 +314,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    * while it was in flight, so a slow poll can never revert a selection.
    */
   private interactionEpoch = 0;
+  /**
+   * Guards in-flight openRun loads. Deliberately separate from
+   * interactionEpoch: selecting a diff file bumps the epoch (to invalidate
+   * background refreshes) but must not cancel a task open that is still
+   * loading — only a newer open, project switch, or full refresh does.
+   */
+  private runOpenSeq = 0;
+  /** Guards in-flight selectDiffFile loads (superseded by newer diff clicks or opens). */
+  private diffSelectSeq = 0;
   /** Tracks bindEvents sites already attached per element (see listen()). */
   private boundListeners = new WeakMap<Element, Set<string>>();
 
@@ -467,6 +476,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     this.interactionEpoch += 1;
+    this.runOpenSeq += 1;
+    this.diffSelectSeq += 1;
     this.state.loading = true;
     this.render();
 
@@ -1030,7 +1041,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async openRun(node: TaskGraphNode): Promise<void> {
     const runId = runIdForNode(node);
-    const epoch = ++this.interactionEpoch;
+    this.interactionEpoch += 1;
+    this.diffSelectSeq += 1;
+    const openSeq = ++this.runOpenSeq;
     this.state.selectedNodeId = node.node_id;
     this.state.loading = true;
     this.render();
@@ -1041,7 +1054,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.transport.runDetail(runId),
         this.fetchRunDetailBundle(runId, null),
       ]);
-      if (this.destroyed || epoch !== this.interactionEpoch) {
+      if (this.destroyed || openSeq !== this.runOpenSeq) {
         return;
       }
       this.state.runDetail = runDetail;
@@ -1051,7 +1064,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.collapsedActivityEvents = new Set();
       this.applyRunDetailBundle(bundle);
     } catch (error) {
-      if (this.destroyed || epoch !== this.interactionEpoch) {
+      if (this.destroyed || openSeq !== this.runOpenSeq) {
         return;
       }
       this.state.runDetail = null;
@@ -1071,7 +1084,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async selectDiffFile(path: string): Promise<void> {
-    const epoch = ++this.interactionEpoch;
+    // Invalidates background refreshes and older diff fetches, but not an
+    // in-flight openRun: clicking a (possibly stale) file must never cancel
+    // a task the user just opened.
+    this.interactionEpoch += 1;
+    const seq = ++this.diffSelectSeq;
     this.state.selectedDiffPath = path;
     this.state.evidenceView = "diff";
     this.render();
@@ -1084,7 +1101,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       } catch (error) {
         warning = `Diff unavailable: ${errorMessage(error)}`;
       }
-      if (this.destroyed || epoch !== this.interactionEpoch) {
+      // Drop the result if a newer diff click or task open superseded this
+      // fetch, or if the shown run changed while it was in flight.
+      if (this.destroyed || seq !== this.diffSelectSeq || this.state.runDetail?.run_id !== runId) {
         return;
       }
       this.state.runDiff = runDiff;
@@ -1373,6 +1392,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async selectProject(projectId: string): Promise<void> {
     this.interactionEpoch += 1;
+    this.runOpenSeq += 1;
+    this.diffSelectSeq += 1;
     this.state.selectedProjectId = projectId;
     this.state.loading = true;
     this.render();
@@ -1716,7 +1737,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
-    if (this.state.graphPaneView !== "knowledge") {
+    // Dispose whenever the upcoming render will not include the Knowledge
+    // Graph surface — not only on pane switches: the planning view and auth
+    // placeholders also drop the canvas, and morphing it away without
+    // disposal would leak the WebGL context and scheduled draws.
+    const rendersKnowledgeGraph = this.state.graphPaneView === "knowledge"
+      && this.state.activeView === "dashboard"
+      && this.state.authState === "open";
+    if (!rendersKnowledgeGraph) {
       disposeKnowledgeGraphRenderer(this.options.root);
     }
     // Morph the new markup into the live DOM instead of rebuilding it with
@@ -1733,7 +1761,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </div>
           <div class="os-view-tabs">
             <button type="button" class="os-view-tab ${this.state.activeView === "dashboard" ? "os-view-tab-active" : ""}" data-plan-view="dashboard">Dashboard</button>
-            <button type="button" class="os-view-tab ${this.state.activeView === "planning" ? "os-view-tab-active" : ""}" data-plan-view="planning">Planning</button>
+            <button type="button" class="os-view-tab os-view-tab-preview ${this.state.activeView === "planning" ? "os-view-tab-active" : ""}" data-plan-view="planning" title="Planning is under construction">Planning<span class="os-tab-badge">WIP</span></button>
           </div>
           ${this.renderTopbarStatusStrip()}
         </header>
@@ -1753,6 +1781,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (this.state.activeView === "planning") {
       return `
+        <div class="os-preview-banner" role="status" data-testid="planning-preview-banner">
+          <strong>Under construction</strong>
+          <span>This planning workspace shows fixture data for preview purposes — it is not wired to a live planning session yet.</span>
+        </div>
         ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
       `;
     }
@@ -1818,7 +1850,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-strip-metrics">${metrics}</div>
         <div class="os-strip-connection">
           <span>${escapeHtml(activeProfile?.label ?? "Connection")}</span>
-          <button type="button" class="os-icon-button" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="Connection settings" title="Connection settings">Connection</button>
+          <button type="button" class="os-icon-button os-glyph-button" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="Connection settings" title="Connection settings">${connectionIconSvg()}</button>
         </div>
         <div class="os-event-mini" data-testid="event-log-mini">
           <ol>${events || `<li>No recent events</li>`}</ol>
@@ -1828,7 +1860,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <span>${escapeHtml(activeModel?.model || activeModel?.label || "Model")}</span>
           ${persistenceMeta}
           ${modelProfileError}
-          <button type="button" class="os-icon-button os-model-gear" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="Model Configuration settings" title="Model Configuration settings">&#9881;</button>
+          <button type="button" class="os-icon-button os-glyph-button os-model-gear" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="Model Configuration settings" title="Model Configuration settings">${gearIconSvg()}</button>
         </div>
       </div>
     `;
@@ -4478,6 +4510,16 @@ function stageSizeChanged(
   return Math.abs(previous.width - next.width) > 32 || Math.abs(previous.height - next.height) > 32;
 }
 
+/** Feather-style "link" glyph used for the connection settings toggle. */
+function connectionIconSvg(): string {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>`;
+}
+
+/** Feather-style "settings" gear glyph used for the model settings toggle. */
+function gearIconSvg(): string {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
+}
+
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
@@ -4487,13 +4529,14 @@ function appShellStyles(): string {
     .os-topbar { display: grid; grid-template-columns: minmax(180px, 0.9fr) auto minmax(420px, 2fr); align-items: center; gap: 18px; padding: 14px 18px; background: #ffffff; border-bottom: 1px solid #d8dee4; }
     .os-topbar h1 { margin: 0; font-size: 18px; line-height: 1.2; letter-spacing: 0; }
     .os-topbar p { margin: 5px 0 0; color: #5d6b78; font-size: 13px; }
-    .os-status-strip { min-width: 0; display: grid; grid-template-columns: auto auto minmax(120px, 0.8fr) minmax(170px, 1.1fr) minmax(150px, 1fr); gap: 8px; align-items: center; }
+    .os-status-strip { min-width: 0; display: grid; grid-template-columns: auto auto minmax(110px, 0.8fr) minmax(150px, 1.1fr) minmax(130px, 1fr); gap: 8px; align-items: center; }
     .os-status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cad3dd; border-radius: 6px; padding: 7px 10px; background: #f8fafc; font-size: 13px; white-space: nowrap; }
     .os-status span { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .os-status-connected span { background: #1f9d55; }
     .os-status-failed span { background: #c2410c; }
     .os-strip-metrics, .os-strip-connection, .os-strip-model, .os-event-mini { min-width: 0; min-height: 34px; display: flex; align-items: center; gap: 7px; border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 7px; background: #fbfcfd; font-size: 12px; color: #536170; }
-    .os-strip-metrics { flex-wrap: wrap; }
+    .os-strip-metrics { flex-wrap: nowrap; }
+    .os-strip-metrics span { white-space: nowrap; }
     .os-strip-metrics strong { color: #17202a; }
     .os-strip-connection > span, .os-strip-model > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-event-mini ol { min-width: 0; display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -4501,7 +4544,9 @@ function appShellStyles(): string {
     .os-event-mini time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; margin-right: 4px; }
     .os-event-mini span { color: #39708f; margin-right: 4px; }
     .os-icon-button { flex: 0 0 auto; min-height: 28px; padding: 4px 8px; font-size: 12px; }
-    .os-model-gear { width: 30px; padding: 0; font-size: 15px; }
+    .os-glyph-button { width: 32px; min-height: 32px; margin-left: auto; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: #536170; }
+    .os-glyph-button svg { display: block; }
+    .os-glyph-button:hover { color: #17202a; }
     .os-strip-alert { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 14px; align-items: start; }
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
@@ -4777,6 +4822,11 @@ function appShellStyles(): string {
     .os-view-tabs { display: inline-flex; gap: 6px; }
     .os-view-tab { min-height: 32px; padding: 6px 12px; font-size: 13px; border-radius: 6px; background: #f8fafc; border: 1px solid #cad3dd; }
     .os-view-tab-active { background: #e7f1f5; border-color: #39708f; font-weight: 600; }
+    .os-view-tab-preview { color: #8a97a3; }
+    .os-view-tab-preview.os-view-tab-active { color: #536170; }
+    .os-tab-badge { margin-left: 6px; padding: 1px 5px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; border-radius: 4px; background: #fef3c7; border: 1px solid #f0d48a; color: #92600a; vertical-align: 1px; }
+    .os-preview-banner { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; border: 1px solid #f0d48a; border-radius: 8px; background: #fef8e7; color: #92600a; font-size: 13px; }
+    .os-preview-banner strong { text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; white-space: nowrap; }
     .os-planning-panel { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 14px; }
     .os-planning-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
     .os-planning-head h2 { margin: 0; font-size: 16px; }
