@@ -210,7 +210,7 @@ workflow.
 
 ## Branch target
 
-Target branch: `main`
+Target branch: `develop`
 
 <!-- Set by `opensymphony init` or `opensymphony update --target-branch`.
      Value is a local branch name, not an `origin/...` ref. Agents should use
