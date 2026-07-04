@@ -42,8 +42,9 @@ implemented by COE-488 / OSYM-811 as a lazy cached launcher. It verifies a
 versioned desktop bundle under `~/.opensymphony/desktop/<version>/` and can
 materialize an early local bundle from `--bundle-dir <path>` or
 `OPENSYMPHONY_DESKTOP_BUNDLE_DIR` without adding Tauri or npm dependencies to
-the normal Cargo install path. Signed or downloaded bundle distribution remains
-future installer work.
+the normal Cargo install path. `--install-path <dir>` selects a custom install
+root with versioned bundles beneath it. Signed or downloaded bundle
+distribution remains future installer work.
 
 For development from a clone, rebuild the desktop frontend when `apps/desktop`
 or shared frontend packages change:

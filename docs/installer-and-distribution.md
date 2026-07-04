@@ -36,6 +36,15 @@ launcher does not make `cargo install opensymphony` compile Tauri, npm, or
 platform desktop dependencies; signed/downloaded desktop bundle distribution is
 still future installer work.
 
+The desktop bundle contract is intentionally small and lives in
+[Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
+The release index selects assets by OpenSymphony version, platform,
+architecture, URL, SHA-256 checksum metadata, and launch target. The install
+root defaults to `~/.opensymphony/desktop`, while `--install-path <dir>` and
+`OPENSYMPHONY_DESKTOP_INSTALL_PATH` choose a custom root with versioned bundles
+beneath it. Update prompts default to yes only for interactive TTY execution;
+non-TTY runs do not prompt and must not infer consent.
+
 Do not make downloaded prebuilt DuckDB the default `cargo install` path until a
 managed installer or equivalent runtime-library strategy owns native library
 placement, loader configuration, health checks, and rollback.
