@@ -112,12 +112,12 @@ import {
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
 import {
-  disposeKnowledgeGraphCanvas,
   disposeKnowledgeGraphRenderer,
   type KnowledgeGraphViewState,
   mountKnowledgeGraphRenderer,
   renderKnowledgeGraphSurface,
 } from "./knowledge-graph-renderer.js";
+import { morphChildren } from "./dom-morph.js";
 
 export interface GatewayReader {
   readonly baseUri: string;
@@ -247,6 +247,17 @@ interface AuditTrailEntry {
   details?: string;
 }
 
+/** Evidence for one run, fetched concurrently and applied atomically. */
+interface RunDetailBundle {
+  runFiles: ChangedFileEntry[];
+  selectedDiffPath: string | null;
+  runDiff: FileDiffPage | null;
+  runEvents: RunEvent[];
+  runValidation: RunValidationSummary | null;
+  runApprovals: ApprovalRequest[];
+  warnings: string[];
+}
+
 type EvidenceView = "diff" | "activity";
 type GraphPaneView = "task" | "knowledge" | "code";
 type WorkspacePaneResizeHandle = "lower-columns";
@@ -296,6 +307,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private graphLayoutRun = 0;
   private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
+  /**
+   * Monotonic counter bumped by every user-initiated navigation (task click,
+   * project switch, diff-file click, full refresh). Background work snapshots
+   * the epoch when it starts and discards its results if the user navigated
+   * while it was in flight, so a slow poll can never revert a selection.
+   */
+  private interactionEpoch = 0;
+  /**
+   * Guards in-flight openRun loads. Deliberately separate from
+   * interactionEpoch: selecting a diff file bumps the epoch (to invalidate
+   * background refreshes) but must not cancel a task open that is still
+   * loading — only a newer open, project switch, or full refresh does.
+   */
+  private runOpenSeq = 0;
+  /** Guards in-flight selectDiffFile loads (superseded by newer diff clicks or opens). */
+  private diffSelectSeq = 0;
+  /** Tracks bindEvents sites already attached per element (see listen()). */
+  private boundListeners = new WeakMap<Element, Set<string>>();
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -358,61 +387,87 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.loadPlanningWorkspace("opensymphony-local");
   }
 
-  private async loadRunDetails(runId: string, preserveSelection = false): Promise<void> {
-    const previousDiffPath = preserveSelection ? this.state.selectedDiffPath : null;
-    const previousEvidenceView = preserveSelection ? this.state.evidenceView : "diff";
-    this.state.runFiles = null;
-    this.state.runDiff = null;
-    this.state.runEvents = null;
-    this.state.expandedActivityEvents = new Set();
-    this.state.collapsedActivityEvents = new Set();
-    this.state.runValidation = null;
-    this.state.runApprovals = null;
-    this.state.selectedDiffPath = null;
-    try {
-      this.state.runFiles = typeof this.transport.runFiles === "function"
-        ? await this.transport.runFiles(runId)
-        : [];
-    } catch (error) {
-      this.state.runFiles = [];
-      this.state.connectionMessage = `Changed files unavailable: ${errorMessage(error)}`;
-    }
-    this.state.selectedDiffPath = previousDiffPath && this.state.runFiles.some((file) => file.path === previousDiffPath)
-      ? previousDiffPath
-      : this.state.runFiles[0]?.path ?? null;
-    this.state.evidenceView = previousEvidenceView;
-    try {
-      this.state.runDiff = this.state.selectedDiffPath
-        && typeof this.transport.runDiffs === "function"
-        ? await this.transport.runDiffs(runId, this.state.selectedDiffPath)
-        : null;
-    } catch (error) {
-      this.state.runDiff = null;
-      this.state.connectionMessage = `Diff unavailable: ${errorMessage(error)}`;
-    }
-    try {
-      this.state.runEvents = typeof this.transport.runEvents === "function"
-        ? (await this.transport.runEvents(runId)).events
-        : [];
-    } catch (error) {
-      this.state.runEvents = [];
-      this.state.connectionMessage = `Conversation activity unavailable: ${errorMessage(error)}`;
-    }
-    try {
-      this.state.runValidation = typeof this.transport.runValidation === "function"
-        ? await this.transport.runValidation(runId)
-        : null;
-    } catch (error) {
-      this.state.runValidation = null;
-      this.state.connectionMessage = `Validation summary unavailable: ${errorMessage(error)}`;
-    }
-    try {
-      this.state.runApprovals = typeof this.transport.runApprovals === "function"
-        ? await this.transport.runApprovals(runId)
-        : [];
-    } catch (error) {
-      this.state.runApprovals = [];
-      this.state.connectionMessage = `Approvals unavailable: ${errorMessage(error)}`;
+  /**
+   * Fetch all evidence for a run concurrently, without touching state. The
+   * caller applies the returned bundle atomically (applyRunDetailBundle), so
+   * the UI never renders a half-cleared panel while requests are in flight.
+   */
+  private async fetchRunDetailBundle(
+    runId: string,
+    preferredDiffPath: string | null,
+  ): Promise<RunDetailBundle> {
+    const warnings: string[] = [];
+    const filesAndDiff = (async () => {
+      let runFiles: ChangedFileEntry[] = [];
+      try {
+        runFiles = typeof this.transport.runFiles === "function"
+          ? await this.transport.runFiles(runId)
+          : [];
+      } catch (error) {
+        warnings.push(`Changed files unavailable: ${errorMessage(error)}`);
+      }
+      const selectedDiffPath = preferredDiffPath && runFiles.some((file) => file.path === preferredDiffPath)
+        ? preferredDiffPath
+        : runFiles[0]?.path ?? null;
+      let runDiff: FileDiffPage | null = null;
+      if (selectedDiffPath && typeof this.transport.runDiffs === "function") {
+        try {
+          runDiff = await this.transport.runDiffs(runId, selectedDiffPath);
+        } catch (error) {
+          warnings.push(`Diff unavailable: ${errorMessage(error)}`);
+        }
+      }
+      return { runFiles, selectedDiffPath, runDiff };
+    })();
+    const events = (async () => {
+      try {
+        return typeof this.transport.runEvents === "function"
+          ? (await this.transport.runEvents(runId)).events
+          : [];
+      } catch (error) {
+        warnings.push(`Conversation activity unavailable: ${errorMessage(error)}`);
+        return [];
+      }
+    })();
+    const validation = (async () => {
+      try {
+        return typeof this.transport.runValidation === "function"
+          ? await this.transport.runValidation(runId)
+          : null;
+      } catch (error) {
+        warnings.push(`Validation summary unavailable: ${errorMessage(error)}`);
+        return null;
+      }
+    })();
+    const approvals = (async () => {
+      try {
+        return typeof this.transport.runApprovals === "function"
+          ? await this.transport.runApprovals(runId)
+          : [];
+      } catch (error) {
+        warnings.push(`Approvals unavailable: ${errorMessage(error)}`);
+        return [];
+      }
+    })();
+
+    const [
+      { runFiles, selectedDiffPath, runDiff },
+      runEvents,
+      runValidation,
+      runApprovals,
+    ] = await Promise.all([filesAndDiff, events, validation, approvals]);
+    return { runFiles, selectedDiffPath, runDiff, runEvents, runValidation, runApprovals, warnings };
+  }
+
+  private applyRunDetailBundle(bundle: RunDetailBundle): void {
+    this.state.runFiles = bundle.runFiles;
+    this.state.selectedDiffPath = bundle.selectedDiffPath;
+    this.state.runDiff = bundle.runDiff;
+    this.state.runEvents = bundle.runEvents;
+    this.state.runValidation = bundle.runValidation;
+    this.state.runApprovals = bundle.runApprovals;
+    if (bundle.warnings.length > 0) {
+      this.state.connectionMessage = bundle.warnings[bundle.warnings.length - 1];
     }
   }
 
@@ -420,6 +475,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (this.destroyed) {
       return;
     }
+    this.interactionEpoch += 1;
+    this.runOpenSeq += 1;
+    this.diffSelectSeq += 1;
     this.state.loading = true;
     this.render();
 
@@ -654,10 +712,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
-    await this.loadRunOverlays(taskGraph);
-    if (initialNode) {
-      await this.openRun(initialNode);
-    }
+    await Promise.all([
+      this.fetchRunOverlays(taskGraph).then((overlays) => {
+        // A concurrently opened run may already have stored a fresher detail.
+        for (const [runId, run] of this.state.runOverlays) {
+          if (!overlays.has(runId)) {
+            overlays.set(runId, run);
+          }
+        }
+        this.state.runOverlays = overlays;
+      }),
+      initialNode ? this.openRun(initialNode) : Promise.resolve(),
+    ]);
   }
 
   private async loadKnowledgeGraph(bundleId?: string): Promise<void> {
@@ -879,55 +945,87 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async refreshLiveGatewayData(): Promise<void> {
+    // Snapshot the epoch: if the user navigates (task click, project switch,
+    // diff selection) while this refresh is in flight, its results are stale
+    // by definition and must be dropped rather than applied over the user's
+    // choice. The next poll tick picks up the fresh selection.
+    const epoch = this.interactionEpoch;
+    const abandoned = () => this.destroyed || epoch !== this.interactionEpoch;
+
     const snapshot = await this.transport.snapshot();
-    this.state.snapshot = snapshot;
+    if (abandoned()) return;
+
     const previousProjectId = this.state.selectedProjectId;
     const projectStillPresent = snapshot.projects.some((project) => project.project_id === previousProjectId);
-    this.state.selectedProjectId = projectStillPresent
+    const nextProjectId = projectStillPresent
       ? previousProjectId
       : snapshot.projects[0]?.project_id ?? "default";
 
-    if (!this.state.selectedProjectId) {
+    if (!nextProjectId) {
+      this.state.snapshot = snapshot;
+      this.state.selectedProjectId = nextProjectId;
       this.render();
       return;
     }
 
-    const previousNodeId = this.state.selectedNodeId;
-    const previousRunId = this.state.runDetail?.run_id ?? null;
-    const taskGraph = await this.transport.taskGraph(this.state.selectedProjectId);
-    this.state.taskGraph = taskGraph;
-    const selectedNode = taskGraph.nodes.find((node) => node.node_id === previousNodeId)
-      ?? taskGraph.nodes.find((node) => node.run_id === previousRunId)
+    const taskGraph = await this.transport.taskGraph(nextProjectId);
+    if (abandoned()) return;
+
+    // Resolve the preserved selection against the *current* state, not
+    // values captured before the awaits above.
+    const currentNodeId = this.state.selectedNodeId;
+    const currentRunId = this.state.runDetail?.run_id ?? null;
+    const selectedNode = taskGraph.nodes.find((node) => node.node_id === currentNodeId)
+      ?? taskGraph.nodes.find((node) => node.run_id === currentRunId)
       ?? initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
+
+    const [overlays, selectedRun] = await Promise.all([
+      this.fetchRunOverlays(taskGraph),
+      selectedNode ? this.fetchSelectedRunRefresh(selectedNode) : Promise.resolve(null),
+    ]);
+    if (abandoned()) return;
+
+    // Apply everything atomically: the previous data stays on screen until
+    // the replacement is fully loaded, so panels never flash empty.
+    this.state.snapshot = snapshot;
+    this.state.selectedProjectId = nextProjectId;
+    this.state.taskGraph = taskGraph;
+    this.state.runOverlays = overlays;
     this.state.selectedNodeId = selectedNode?.node_id ?? null;
-    await this.loadRunOverlays(taskGraph);
-    if (selectedNode) {
-      await this.refreshSelectedRun(selectedNode);
+    if (selectedRun) {
+      this.state.runDetail = selectedRun.runDetail;
+      this.state.runOverlays.set(selectedRun.runDetail.run_id, selectedRun.runDetail);
+      this.applyRunDetailBundle(selectedRun.bundle);
     }
     if (this.state.graphPaneView === "knowledge") {
       await this.loadKnowledgeGraph();
+      if (abandoned()) return;
     }
     this.render();
   }
 
-  private async refreshSelectedRun(node: TaskGraphNode): Promise<void> {
+  private async fetchSelectedRunRefresh(
+    node: TaskGraphNode,
+  ): Promise<{ runDetail: RunDetail; bundle: RunDetailBundle } | null> {
     const runId = runIdForNode(node);
     try {
-      this.state.runDetail = await this.transport.runDetail(runId);
-      this.state.runOverlays.set(runId, this.state.runDetail);
-      await this.loadRunDetails(runId, true);
+      const [runDetail, bundle] = await Promise.all([
+        this.transport.runDetail(runId),
+        this.fetchRunDetailBundle(runId, this.state.selectedDiffPath),
+      ]);
+      return { runDetail, bundle };
     } catch (error) {
       this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      return null;
     }
   }
 
-  private async loadRunOverlays(taskGraph: TaskGraphSnapshot): Promise<void> {
+  private async fetchRunOverlays(taskGraph: TaskGraphSnapshot): Promise<Map<string, RunDetail>> {
     const runIds = new Set(taskGraph.nodes.map((node) => node.run_id).filter((id): id is string => Boolean(id)));
-    if (runIds.size === 0) {
-      this.state.runOverlays = new Map();
-      return;
-    }
     const overlays = new Map<string, RunDetail>();
+    if (runIds.size === 0) {
+      return overlays;
+    }
     await Promise.all(
       Array.from(runIds).map(async (runId) => {
         try {
@@ -938,18 +1036,37 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       }),
     );
-    this.state.runOverlays = overlays;
+    return overlays;
   }
 
   private async openRun(node: TaskGraphNode): Promise<void> {
     const runId = runIdForNode(node);
+    this.interactionEpoch += 1;
+    this.diffSelectSeq += 1;
+    const openSeq = ++this.runOpenSeq;
     this.state.selectedNodeId = node.node_id;
     this.state.loading = true;
     this.render();
     try {
-      this.state.runDetail = await this.transport.runDetail(runId);
-      this.state.runOverlays.set(runId, this.state.runDetail);
+      // The run detail and every evidence pane load concurrently: the click
+      // latency is one round trip, not six queued ones.
+      const [runDetail, bundle] = await Promise.all([
+        this.transport.runDetail(runId),
+        this.fetchRunDetailBundle(runId, null),
+      ]);
+      if (this.destroyed || openSeq !== this.runOpenSeq) {
+        return;
+      }
+      this.state.runDetail = runDetail;
+      this.state.runOverlays.set(runId, runDetail);
+      this.state.evidenceView = "diff";
+      this.state.expandedActivityEvents = new Set();
+      this.state.collapsedActivityEvents = new Set();
+      this.applyRunDetailBundle(bundle);
     } catch (error) {
+      if (this.destroyed || openSeq !== this.runOpenSeq) {
+        return;
+      }
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
@@ -959,26 +1076,39 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.collapsedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
+      this.state.selectedDiffPath = null;
       this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
-      this.state.loading = false;
-      this.render();
-      return;
     }
-    await this.loadRunDetails(runId);
     this.state.loading = false;
     this.render();
   }
 
   private async selectDiffFile(path: string): Promise<void> {
+    // Invalidates background refreshes and older diff fetches, but not an
+    // in-flight openRun: clicking a (possibly stale) file must never cancel
+    // a task the user just opened.
+    this.interactionEpoch += 1;
+    const seq = ++this.diffSelectSeq;
     this.state.selectedDiffPath = path;
     this.state.evidenceView = "diff";
+    this.render();
     const runId = this.state.runDetail?.run_id;
     if (runId && typeof this.transport.runDiffs === "function") {
+      let runDiff: FileDiffPage | null = null;
+      let warning: string | null = null;
       try {
-        this.state.runDiff = await this.transport.runDiffs!(runId, path);
+        runDiff = await this.transport.runDiffs!(runId, path);
       } catch (error) {
-        this.state.runDiff = null;
-        this.state.connectionMessage = `Diff unavailable: ${errorMessage(error)}`;
+        warning = `Diff unavailable: ${errorMessage(error)}`;
+      }
+      // Drop the result if a newer diff click or task open superseded this
+      // fetch, or if the shown run changed while it was in flight.
+      if (this.destroyed || seq !== this.diffSelectSeq || this.state.runDetail?.run_id !== runId) {
+        return;
+      }
+      this.state.runDiff = runDiff;
+      if (warning) {
+        this.state.connectionMessage = warning;
       }
     } else if (runId) {
       this.state.runDiff = null;
@@ -1261,6 +1391,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async selectProject(projectId: string): Promise<void> {
+    this.interactionEpoch += 1;
+    this.runOpenSeq += 1;
+    this.diffSelectSeq += 1;
     this.state.selectedProjectId = projectId;
     this.state.loading = true;
     this.render();
@@ -1604,13 +1737,21 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const scrollPositions = captureShellScrollPositions(this.options.root);
     const title = this.options.title ?? "OpenSymphony";
-    const preservedKnowledgeCanvas = this.state.graphPaneView === "knowledge"
-      ? this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']")
-      : null;
-    if (!preservedKnowledgeCanvas) {
+    // Dispose whenever the upcoming render will not include the Knowledge
+    // Graph surface — not only on pane switches: the planning view and auth
+    // placeholders also drop the canvas, and morphing it away without
+    // disposal would leak the WebGL context and scheduled draws.
+    const rendersKnowledgeGraph = this.state.graphPaneView === "knowledge"
+      && this.state.activeView === "dashboard"
+      && this.state.authState === "open";
+    if (!rendersKnowledgeGraph) {
       disposeKnowledgeGraphRenderer(this.options.root);
     }
-    this.options.root.innerHTML = `
+    // Morph the new markup into the live DOM instead of rebuilding it with
+    // innerHTML: only changed nodes mutate, so focus, input state, scroll
+    // offsets, the knowledge-graph canvas bitmap, and attached listeners all
+    // survive background refreshes.
+    morphChildren(this.options.root, `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}" data-auth-state="${this.state.authState}">
         <header class="os-topbar">
@@ -1620,7 +1761,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </div>
           <div class="os-view-tabs">
             <button type="button" class="os-view-tab ${this.state.activeView === "dashboard" ? "os-view-tab-active" : ""}" data-plan-view="dashboard">Dashboard</button>
-            <button type="button" class="os-view-tab ${this.state.activeView === "planning" ? "os-view-tab-active" : ""}" data-plan-view="planning">Planning</button>
+            <button type="button" class="os-view-tab os-view-tab-preview ${this.state.activeView === "planning" ? "os-view-tab-active" : ""}" data-plan-view="planning" title="Planning is under construction">Planning<span class="os-tab-badge">WIP</span></button>
           </div>
           ${this.renderTopbarStatusStrip()}
         </header>
@@ -1629,15 +1770,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </section>
         ${this.renderGlobalModals()}
       </main>
-    `;
-    if (preservedKnowledgeCanvas) {
-      const nextCanvas = this.options.root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
-      if (nextCanvas) {
-        nextCanvas.replaceWith(preservedKnowledgeCanvas);
-      } else {
-        disposeKnowledgeGraphCanvas(preservedKnowledgeCanvas);
-      }
-    }
+    `);
     this.bindEvents();
     restoreShellScrollPositions(this.options.root, scrollPositions);
   }
@@ -1648,6 +1781,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (this.state.activeView === "planning") {
       return `
+        <div class="os-preview-banner" role="status" data-testid="planning-preview-banner">
+          <strong>Under construction</strong>
+          <span>This planning workspace shows fixture data for preview purposes — it is not wired to a live planning session yet.</span>
+        </div>
         ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
       `;
     }
@@ -1713,7 +1850,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-strip-metrics">${metrics}</div>
         <div class="os-strip-connection">
           <span>${escapeHtml(activeProfile?.label ?? "Connection")}</span>
-          <button type="button" class="os-icon-button" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="Connection settings" title="Connection settings">Connection</button>
+          <button type="button" class="os-icon-button os-glyph-button" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="Connection settings" title="Connection settings">${connectionIconSvg()}</button>
         </div>
         <div class="os-event-mini" data-testid="event-log-mini">
           <ol>${events || `<li>No recent events</li>`}</ol>
@@ -1723,7 +1860,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <span>${escapeHtml(activeModel?.model || activeModel?.label || "Model")}</span>
           ${persistenceMeta}
           ${modelProfileError}
-          <button type="button" class="os-icon-button os-model-gear" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="Model Configuration settings" title="Model Configuration settings">&#9881;</button>
+          <button type="button" class="os-icon-button os-glyph-button os-model-gear" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="Model Configuration settings" title="Model Configuration settings">${gearIconSvg()}</button>
         </div>
       </div>
     `;
@@ -2374,43 +2511,74 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     );
   }
 
+  /**
+   * Attach a listener exactly once per (element, site, event type).
+   *
+   * render() morphs the DOM in place, so elements — and their listeners —
+   * survive re-renders. bindEvents() still runs after every render to cover
+   * newly created elements; this guard keeps it from stacking duplicate
+   * listeners on the survivors. The site string identifies the bindEvents
+   * call site so distinct handlers for the same element/event coexist.
+   */
+  private listen(
+    element: Element | null | undefined,
+    site: string,
+    type: string,
+    handler: (event: Event) => void,
+  ): void {
+    if (!element) {
+      return;
+    }
+    let sites = this.boundListeners.get(element);
+    if (!sites) {
+      sites = new Set();
+      this.boundListeners.set(element, sites);
+    }
+    const key = `${site}:${type}`;
+    if (sites.has(key)) {
+      return;
+    }
+    sites.add(key);
+    element.addEventListener(type, handler);
+  }
+
   private bindEvents(): void {
-    this.options.root.querySelector("[data-save-profile]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-save-profile]"), "save-profile", "click", () => {
       void this.saveProfile();
     });
-    this.options.root.querySelector("[data-new-profile]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-new-profile]"), "new-profile", "click", () => {
       void this.createProfileDraft();
     });
-    this.options.root.querySelector("[data-remove-profile]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-remove-profile]"), "remove-profile", "click", () => {
       void this.removeProfile();
     });
-    this.options.root.querySelector("[data-save-model-profile]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-save-model-profile]"), "save-model-profile", "click", () => {
       void this.saveModelProfile();
     });
-    this.options.root.querySelector("[data-new-model-profile]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-new-model-profile]"), "new-model-profile", "click", () => {
       void this.createModelProfileDraft();
     });
-    this.options.root.querySelector("[data-remove-model-profile]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-remove-model-profile]"), "remove-model-profile", "click", () => {
       void this.removeModelProfile();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-toggle-settings]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "toggle-settings", "click", () => {
         const panel = button.dataset.toggleSettings;
         if (panel === "connection" || panel === "model") {
           this.toggleSettingsPanel(panel);
         }
       });
     });
-    this.options.root.querySelector("[data-open-event-log]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-open-event-log]"), "open-event-log", "click", () => {
       this.state.eventLogModalOpen = true;
       this.render();
     });
-    this.options.root.querySelector("[data-close-event-log]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-close-event-log]"), "close-event-log", "click", () => {
       this.state.eventLogModalOpen = false;
       this.render();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "auth-action", "click", () => {
         const action = button.dataset.authAction;
         if (action === "sign-in") {
           // Hosted auth provider integration is a follow-on task; the
@@ -2422,20 +2590,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
-    this.options.root.querySelector("[data-profile-select]")?.addEventListener("change", (event) => {
+    this.listen(this.options.root.querySelector("[data-profile-select]"), "profile-select", "change", (event) => {
       const target = event.target as HTMLSelectElement;
       void this.selectProfile(target.value);
     });
-    this.options.root.querySelector("[data-model-profile-select]")?.addEventListener("change", (event) => {
+    this.listen(this.options.root.querySelector("[data-model-profile-select]"), "model-profile-select", "change", (event) => {
       const target = event.target as HTMLSelectElement;
       void this.selectModelProfile(target.value);
     });
-    this.options.root.querySelector("[data-model-mode]")?.addEventListener("change", (event) => {
+    this.listen(this.options.root.querySelector("[data-model-mode]"), "model-mode", "change", (event) => {
       const target = event.target as HTMLSelectElement;
       this.changeModelProfileMode(modelModeFromValue(target.value));
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-id]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "project-id", "click", () => {
         const projectId = button.dataset.projectId;
         if (projectId) {
           void this.selectProject(projectId);
@@ -2443,7 +2611,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-node-id]").forEach((button) => {
-      button.addEventListener("click", (event) => {
+      this.listen(button, "node-id", "click", (event) => {
         // Avoid selecting when clicking inline editor controls or action buttons.
         const target = event.target as HTMLElement;
         if (target.closest(".os-node-actions, .os-inline-input, .os-node-badges")) {
@@ -2463,7 +2631,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-group-toggle]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "project-group-toggle", "click", () => {
         const projectKey = button.dataset.projectGroupToggle;
         if (!projectKey) return;
         if (this.state.collapsedProjectGroups.has(projectKey)) {
@@ -2475,7 +2643,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-open-run]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "open-run", "click", () => {
         const node = this.state.taskGraph?.nodes.find(
           (candidate) => candidate.node_id === button.dataset.openRun,
         );
@@ -2485,7 +2653,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-testid='changed-file-item']").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "changed-file-item", "click", () => {
         const path = button.dataset.path;
         if (path) {
           void this.selectDiffFile(path);
@@ -2493,7 +2661,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-evidence-view]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "evidence-view", "click", () => {
         const view = button.dataset.evidenceView;
         if (view === "diff" || view === "activity") {
           this.selectEvidenceView(view);
@@ -2501,7 +2669,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-graph-view]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "graph-view", "click", () => {
         const view = button.dataset.graphView;
         if (view === "task" || view === "knowledge" || view === "code") {
           this.selectGraphPaneView(view);
@@ -2510,15 +2678,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
     this.bindKnowledgeGraph();
     this.options.root.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach((handle) => {
-      handle.addEventListener("pointerdown", (event) => {
+      this.listen(handle, "pane-resizer", "pointerdown", (event) => {
         this.startPaneResize(handle.dataset.paneResizer, event as PointerEvent);
       });
-      handle.addEventListener("keydown", (event) => {
+      this.listen(handle, "pane-resizer", "keydown", (event) => {
         this.onPaneResizeKey(handle.dataset.paneResizer, event as KeyboardEvent);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-activity-toggle]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "activity-toggle", "click", () => {
         const eventKey = button.dataset.activityToggle;
         if (eventKey) {
           this.toggleActivityEvent(eventKey);
@@ -2526,7 +2694,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-testid='run-action-button']").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "run-action-button", "click", () => {
         const action = button.dataset.action as RunAction | undefined;
         if (action) {
           void this.dispatchRunAction(action);
@@ -2534,7 +2702,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-testid='approve-button']").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "approve-button", "click", () => {
         const approvalId = button.dataset.approvalId;
         if (!approvalId) return;
         const container = button.closest("[data-testid='approval-item']");
@@ -2543,7 +2711,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-testid='deny-button']").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "deny-button", "click", () => {
         const approvalId = button.dataset.approvalId;
         if (!approvalId) return;
         const container = button.closest("[data-testid='approval-item']");
@@ -2555,22 +2723,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     // Task graph filters
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-filter]").forEach((control) => {
-      control.addEventListener("change", () => this.onFilterChange());
-      control.addEventListener("input", () => this.onFilterChange());
+      this.listen(control, "tg-filter", "change", () => this.onFilterChange());
+      this.listen(control, "tg-filter", "input", () => this.onFilterChange());
     });
-    this.options.root.querySelector("[data-tg-filter-reset]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-filter-reset]"), "tg-filter-reset", "click", () => {
       this.state.taskGraphFilter = { ...defaultTaskGraphFilter };
       this.render();
     });
 
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-create]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-create", "click", () => {
         const kind = button.dataset.tgCreate as TaskGraphNodeKind;
         this.openCreateDialog(kind, null);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-create-child]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-create-child", "click", () => {
         const parentId = button.dataset.tgCreateChild;
         if (!parentId) return;
         const parent = this.state.taskGraph?.nodes.find((node) => node.node_id === parentId);
@@ -2579,61 +2747,61 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.openCreateDialog(childKind, parentId);
       });
     });
-    this.options.root.querySelector("[data-tg-create-save]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-create-save]"), "tg-create-save", "click", () => {
       void this.saveCreateDialog();
     });
-    this.options.root.querySelector("[data-tg-create-cancel]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-create-cancel]"), "tg-create-cancel", "click", () => {
       this.state.createDialog = { ...emptyEditorDialog };
       this.render();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-edit]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-edit", "click", () => {
         const nodeId = button.dataset.tgEdit;
         if (nodeId) this.startInlineEdit(nodeId);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-inline-save]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-inline-save", "click", () => {
         const nodeId = button.dataset.tgInlineSave;
         if (nodeId) void this.saveInlineEdit(nodeId);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-inline-cancel]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-inline-cancel", "click", () => {
         this.state.inlineEdit = { ...emptyInlineEdit };
         this.render();
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-deps]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-deps", "click", () => {
         const nodeId = button.dataset.tgDeps;
         if (nodeId) this.openDependencyEditor(nodeId);
       });
     });
-    this.options.root.querySelector("[data-tg-deps-save]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-deps-save]"), "tg-deps-save", "click", () => {
       void this.saveDependencyEdit();
     });
-    this.options.root.querySelector("[data-tg-deps-cancel]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-deps-cancel]"), "tg-deps-cancel", "click", () => {
       this.state.dependencyEdit = { ...emptyDependencyEdit };
       this.render();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-comment]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "tg-comment", "click", () => {
         const nodeId = button.dataset.tgComment;
         if (nodeId) this.openCommentEditor(nodeId);
       });
     });
-    this.options.root.querySelector("[data-tg-comment-save]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-comment-save]"), "tg-comment-save", "click", () => {
       void this.saveCommentEdit();
     });
-    this.options.root.querySelector("[data-tg-comment-cancel]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-tg-comment-cancel]"), "tg-comment-cancel", "click", () => {
       this.state.commentEdit = { ...emptyCommentEdit };
       this.render();
     });
 
     // Planning workspace view navigation
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-view]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-view", "click", () => {
         const view = button.dataset.planView as AppState["activeView"];
         if (view) {
           this.state.activeView = view;
@@ -2644,7 +2812,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     // Planning workspace tabs
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-tab]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-tab", "click", () => {
         const tab = button.dataset.planTab;
         if (!tab) return;
         this.state.planningWorkspace = { ...this.state.planningWorkspace, activeTab: tab as typeof this.state.planningWorkspace.activeTab };
@@ -2653,43 +2821,43 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
 
     // Planning conversation
-    this.options.root.querySelector("[data-plan-send-message]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-plan-send-message]"), "plan-send-message", "click", () => {
       this.sendPlanMessage();
     });
-    this.options.root.querySelector("[data-plan-composer]")?.addEventListener("keydown", (event) => {
+    this.listen(this.options.root.querySelector("[data-plan-composer]"), "plan-composer", "keydown", (event) => {
       if ((event as KeyboardEvent).key === "Enter" && !(event as KeyboardEvent).shiftKey) {
         (event as KeyboardEvent).preventDefault();
         this.sendPlanMessage();
       }
     });
-    this.options.root.querySelector("[data-plan-composer]")?.addEventListener("input", () => {
+    this.listen(this.options.root.querySelector("[data-plan-composer]"), "plan-composer", "input", () => {
       this.state.planningWorkspace.composerDraft = this.options.root.querySelector<HTMLTextAreaElement>("[data-plan-composer]")?.value ?? "";
     });
 
     // Planning artifact editor
-    this.options.root.querySelector("[data-plan-artifact-select]")?.addEventListener("change", () => {
+    this.listen(this.options.root.querySelector("[data-plan-artifact-select]"), "plan-artifact-select", "change", () => {
       const artifactId = this.options.root.querySelector<HTMLSelectElement>("[data-plan-artifact-select]")?.value ?? null;
       this.state.planningWorkspace = selectArtifact(this.state.planningWorkspace, artifactId);
       this.renderPreservingFocus();
     });
-    this.options.root.querySelector("[data-plan-revision-select]")?.addEventListener("change", () => {
+    this.listen(this.options.root.querySelector("[data-plan-revision-select]"), "plan-revision-select", "change", () => {
       const revisionId = this.options.root.querySelector<HTMLSelectElement>("[data-plan-revision-select]")?.value ?? null;
       this.state.planningWorkspace = selectRevision(this.state.planningWorkspace, revisionId);
       this.renderPreservingFocus();
     });
-    this.options.root.querySelector("[data-plan-save-artifact]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-plan-save-artifact]"), "plan-save-artifact", "click", () => {
       this.savePlanArtifact();
     });
-    this.options.root.querySelector("[data-plan-add-artifact]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-plan-add-artifact]"), "plan-add-artifact", "click", () => {
       this.addPlanArtifact();
     });
-    this.options.root.querySelector("[data-plan-artifact-content]")?.addEventListener("input", () => {
+    this.listen(this.options.root.querySelector("[data-plan-artifact-content]"), "plan-artifact-content", "input", () => {
       // Content is not persisted continuously; only saved on explicit save.
     });
 
     // Planning hierarchy editor
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-select]").forEach((row) => {
-      row.addEventListener("click", (event) => {
+      this.listen(row, "plan-node-select", "click", (event) => {
         if ((event.target as HTMLElement).closest(".os-node-actions, .os-plan-toggle, .os-plan-node-body input")) return;
         const nodeId = row.dataset.planNodeSelect;
         if (nodeId) {
@@ -2699,7 +2867,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-toggle]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-node-toggle", "click", () => {
         const nodeId = button.dataset.planNodeToggle;
         if (nodeId) {
           this.state.planningWorkspace = toggleNodeExpanded(this.state.planningWorkspace, nodeId);
@@ -2708,13 +2876,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-add-node]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-add-node", "click", () => {
         const kind = button.dataset.planAddNode as "milestone" | "issue" | "sub_issue";
         this.addPlanNode(kind, null);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-add-child]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-add-child", "click", () => {
         const parentId = button.dataset.planAddChild;
         if (!parentId) return;
         const parent = this.state.planningWorkspace.nodes.find((n) => n.node_id === parentId);
@@ -2724,7 +2892,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-edit]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-node-edit", "click", () => {
         const nodeId = button.dataset.planNodeEdit;
         if (!nodeId) return;
         const node = this.state.planningWorkspace.nodes.find((n) => n.node_id === nodeId);
@@ -2734,19 +2902,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-save]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-node-save", "click", () => {
         const nodeId = button.dataset.planNodeSave;
         if (nodeId) this.savePlanNodeEdit(nodeId);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-cancel]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-node-cancel", "click", () => {
         this.state.planningEdit = { ...emptyPlanningEditState };
         this.render();
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-remove-node]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-remove-node", "click", () => {
         const nodeId = button.dataset.planRemoveNode;
         if (nodeId) {
           this.state.planningWorkspace = removePlanningNode(this.state.planningWorkspace, nodeId);
@@ -2755,7 +2923,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-graph-node]").forEach((node) => {
-      node.addEventListener("click", () => {
+      this.listen(node, "plan-graph-node", "click", () => {
         const nodeId = node.dataset.planGraphNode;
         if (nodeId) {
           this.state.planningWorkspace = { ...this.state.planningWorkspace, selectedNodeId: nodeId };
@@ -2765,24 +2933,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
 
     // Planning dependency editor
-    this.options.root.querySelector("[data-plan-deps-node-select]")?.addEventListener("change", () => {
+    this.listen(this.options.root.querySelector("[data-plan-deps-node-select]"), "plan-deps-node-select", "change", () => {
       const nodeId = this.options.root.querySelector<HTMLSelectElement>("[data-plan-deps-node-select]")?.value ?? null;
       this.state.planningWorkspace = { ...this.state.planningWorkspace, selectedNodeId: nodeId };
       this.renderPreservingFocus();
     });
-    this.options.root.querySelector("[data-plan-deps-save]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-plan-deps-save]"), "plan-deps-save", "click", () => {
       this.savePlanDependencies();
     });
 
     // Planning acceptance criteria / verification editor
-    this.options.root.querySelector("[data-plan-criteria-add]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-plan-criteria-add]"), "plan-criteria-add", "click", () => {
       const text = this.options.root.querySelector<HTMLInputElement>("[data-plan-criteria-new]")?.value ?? "";
       if (!text.trim()) return;
       this.state.planningWorkspace = addCriterion(this.state.planningWorkspace, text);
       this.render();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-criteria-toggle]").forEach((checkbox) => {
-      checkbox.addEventListener("change", () => {
+      this.listen(checkbox, "plan-criteria-toggle", "change", () => {
         const id = checkbox.dataset.planCriteriaToggle;
         if (id) {
           this.state.planningWorkspace = toggleCriterion(this.state.planningWorkspace, id);
@@ -2791,7 +2959,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-criteria-text]").forEach((input) => {
-      input.addEventListener("input", () => {
+      this.listen(input, "plan-criteria-text", "input", () => {
         const id = input.dataset.planCriteriaText;
         const value = (input as HTMLInputElement).value;
         if (id) {
@@ -2801,7 +2969,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-criteria-remove]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-criteria-remove", "click", () => {
         const id = button.dataset.planCriteriaRemove;
         if (id) {
           this.state.planningWorkspace = removeCriterion(this.state.planningWorkspace, id);
@@ -2809,14 +2977,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
-    this.options.root.querySelector("[data-plan-verification-add]")?.addEventListener("click", () => {
+    this.listen(this.options.root.querySelector("[data-plan-verification-add]"), "plan-verification-add", "click", () => {
       const text = this.options.root.querySelector<HTMLInputElement>("[data-plan-verification-new]")?.value ?? "";
       if (!text.trim()) return;
       this.state.planningWorkspace = addVerification(this.state.planningWorkspace, text);
       this.render();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-verification-toggle]").forEach((checkbox) => {
-      checkbox.addEventListener("change", () => {
+      this.listen(checkbox, "plan-verification-toggle", "change", () => {
         const id = checkbox.dataset.planVerificationToggle;
         if (id) {
           this.state.planningWorkspace = toggleVerification(this.state.planningWorkspace, id);
@@ -2825,7 +2993,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-verification-text]").forEach((input) => {
-      input.addEventListener("input", () => {
+      this.listen(input, "plan-verification-text", "input", () => {
         const id = input.dataset.planVerificationText;
         const value = (input as HTMLInputElement).value;
         if (id) {
@@ -2835,7 +3003,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-verification-remove]").forEach((button) => {
-      button.addEventListener("click", () => {
+      this.listen(button, "plan-verification-remove", "click", () => {
         const id = button.dataset.planVerificationRemove;
         if (id) {
           this.state.planningWorkspace = removeVerification(this.state.planningWorkspace, id);
@@ -2846,20 +3014,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     // Planning validation links
     this.options.root.querySelectorAll<HTMLElement>("[data-plan-validation-link]").forEach((link) => {
-      link.addEventListener("click", () => {
+      this.listen(link, "plan-validation-link", "click", () => {
         this.followPlanValidationLink(link);
       });
     });
 
     // Planning diff revision selectors
-    this.options.root.querySelector("[data-plan-diff-left]")?.addEventListener("change", () => {
+    this.listen(this.options.root.querySelector("[data-plan-diff-left]"), "plan-diff-left", "change", () => {
       this.state.planningWorkspace = {
         ...this.state.planningWorkspace,
         diffLeftRevisionId: this.options.root.querySelector<HTMLSelectElement>("[data-plan-diff-left]")?.value ?? null,
       };
       this.renderPreservingFocus();
     });
-    this.options.root.querySelector("[data-plan-diff-right]")?.addEventListener("change", () => {
+    this.listen(this.options.root.querySelector("[data-plan-diff-right]"), "plan-diff-right", "change", () => {
       this.state.planningWorkspace = {
         ...this.state.planningWorkspace,
         diffRightRevisionId: this.options.root.querySelector<HTMLSelectElement>("[data-plan-diff-right]")?.value ?? null,
@@ -4342,6 +4510,16 @@ function stageSizeChanged(
   return Math.abs(previous.width - next.width) > 32 || Math.abs(previous.height - next.height) > 32;
 }
 
+/** Feather-style "link" glyph used for the connection settings toggle. */
+function connectionIconSvg(): string {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>`;
+}
+
+/** Feather-style "settings" gear glyph used for the model settings toggle. */
+function gearIconSvg(): string {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
+}
+
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
@@ -4351,13 +4529,14 @@ function appShellStyles(): string {
     .os-topbar { display: grid; grid-template-columns: minmax(180px, 0.9fr) auto minmax(420px, 2fr); align-items: center; gap: 18px; padding: 14px 18px; background: #ffffff; border-bottom: 1px solid #d8dee4; }
     .os-topbar h1 { margin: 0; font-size: 18px; line-height: 1.2; letter-spacing: 0; }
     .os-topbar p { margin: 5px 0 0; color: #5d6b78; font-size: 13px; }
-    .os-status-strip { min-width: 0; display: grid; grid-template-columns: auto auto minmax(120px, 0.8fr) minmax(170px, 1.1fr) minmax(150px, 1fr); gap: 8px; align-items: center; }
+    .os-status-strip { min-width: 0; display: grid; grid-template-columns: auto auto minmax(110px, 0.8fr) minmax(150px, 1.1fr) minmax(130px, 1fr); gap: 8px; align-items: center; }
     .os-status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cad3dd; border-radius: 6px; padding: 7px 10px; background: #f8fafc; font-size: 13px; white-space: nowrap; }
     .os-status span { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .os-status-connected span { background: #1f9d55; }
     .os-status-failed span { background: #c2410c; }
     .os-strip-metrics, .os-strip-connection, .os-strip-model, .os-event-mini { min-width: 0; min-height: 34px; display: flex; align-items: center; gap: 7px; border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 7px; background: #fbfcfd; font-size: 12px; color: #536170; }
-    .os-strip-metrics { flex-wrap: wrap; }
+    .os-strip-metrics { flex-wrap: nowrap; }
+    .os-strip-metrics span { white-space: nowrap; }
     .os-strip-metrics strong { color: #17202a; }
     .os-strip-connection > span, .os-strip-model > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-event-mini ol { min-width: 0; display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -4365,7 +4544,9 @@ function appShellStyles(): string {
     .os-event-mini time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; margin-right: 4px; }
     .os-event-mini span { color: #39708f; margin-right: 4px; }
     .os-icon-button { flex: 0 0 auto; min-height: 28px; padding: 4px 8px; font-size: 12px; }
-    .os-model-gear { width: 30px; padding: 0; font-size: 15px; }
+    .os-glyph-button { width: 32px; min-height: 32px; margin-left: auto; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: #536170; }
+    .os-glyph-button svg { display: block; }
+    .os-glyph-button:hover { color: #17202a; }
     .os-strip-alert { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 14px; align-items: start; }
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
@@ -4641,6 +4822,11 @@ function appShellStyles(): string {
     .os-view-tabs { display: inline-flex; gap: 6px; }
     .os-view-tab { min-height: 32px; padding: 6px 12px; font-size: 13px; border-radius: 6px; background: #f8fafc; border: 1px solid #cad3dd; }
     .os-view-tab-active { background: #e7f1f5; border-color: #39708f; font-weight: 600; }
+    .os-view-tab-preview { color: #8a97a3; }
+    .os-view-tab-preview.os-view-tab-active { color: #536170; }
+    .os-tab-badge { margin-left: 6px; padding: 1px 5px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; border-radius: 4px; background: #fef3c7; border: 1px solid #f0d48a; color: #92600a; vertical-align: 1px; }
+    .os-preview-banner { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; border: 1px solid #f0d48a; border-radius: 8px; background: #fef8e7; color: #92600a; font-size: 13px; }
+    .os-preview-banner strong { text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; white-space: nowrap; }
     .os-planning-panel { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 14px; }
     .os-planning-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
     .os-planning-head h2 { margin: 0; font-size: 16px; }
