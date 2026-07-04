@@ -1796,7 +1796,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const orgProject = state === "forbidden" ? "" : this.renderOrgProjectPlaceholder();
     if (state === "unauthenticated") {
       return `
-        ${this.renderProfiles()}
         <section class="os-panel os-auth-panel" data-testid="auth-placeholder" data-auth-state="unauthenticated">
           <div class="os-section-head"><h2>Sign in</h2><span>hosted</span></div>
           <div class="os-auth-body">
@@ -1813,7 +1812,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (state === "unauthorized") {
       return `
-        ${this.renderProfiles()}
         <section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="unauthorized">
           <div class="os-section-head"><h2>Access denied</h2><span>hosted</span></div>
           <div class="os-auth-body">
@@ -1829,7 +1827,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     // forbidden
     return `
-      ${this.renderProfiles()}
       <section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="forbidden">
         <div class="os-section-head"><h2>Access forbidden</h2><span>hosted</span></div>
         <div class="os-auth-body">

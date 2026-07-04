@@ -2691,6 +2691,38 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("renders one connection settings modal in hosted auth placeholders", async () => {
+    class AuthSnapshotTransport extends MockGatewayTransport {
+      override async snapshot(): Promise<DashboardSnapshot> {
+        throw { code: "unauthenticated", message: "sign in required" };
+      }
+    }
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: new AuthSnapshotTransport({
+        baseUri: "http://127.0.0.1:2468",
+        health: { ...capabilities, auth_modes: ["oauth"] },
+        snapshot: dashboard,
+        taskGraph,
+        runDetails: [runDetail],
+      }),
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='auth-placeholder']") !== null);
+    expect(root.querySelector("[data-testid='auth-placeholder']")?.getAttribute("data-auth-state")).toBe("unauthenticated");
+    expect(root.querySelector(".os-profile-panel")).toBeNull();
+
+    await expandSettingsPanel(root, "connection", "[data-profile-select]");
+
+    expect(root.querySelectorAll(".os-profile-panel")).toHaveLength(1);
+    expect(root.querySelectorAll("[data-profile-select]")).toHaveLength(1);
+
+    await handle.destroy();
+  });
+
   it("renders the profile panel and provided initial profile when no controller is set", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
