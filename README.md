@@ -228,8 +228,11 @@ be materialized with `--bundle-dir <path>` or
 relative `executable`, and `sha256` fields.
 Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
 different install root; the launcher still creates the versioned bundle beneath
-that root. The downloadable release-index and update prompt contract is defined
-in [Desktop App Installer And Auto-Update Spec](docs/specs/desktop-app-installer-auto-update-spec.md).
+that root. On a cache miss, the launcher downloads the release index from the
+matching GitHub release and installs the compatible asset; set
+`OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to point at a private or test index.
+The release-index and update prompt contract is defined in
+[Desktop App Installer And Auto-Update Spec](docs/specs/desktop-app-installer-auto-update-spec.md).
 
 ### Further Details
 

@@ -38,13 +38,18 @@ If you already run an external OpenHands agent-server, you can skip
 The desktop launcher is intentionally lazy. `opensymphony app` and its visible
 alias `opensymphony desktop` verify and launch a cached desktop bundle from
 `~/.opensymphony/desktop/<version>/` without making the normal Cargo install
-compile Tauri, npm, or platform desktop dependencies. For early local testing,
-pass `--bundle-dir <path>` or set `OPENSYMPHONY_DESKTOP_BUNDLE_DIR` to a bundle
-directory containing `opensymphony-desktop-manifest.json`. The manifest records
-the OpenSymphony version, platform, architecture, relative executable path, and
-executable SHA-256. Local bundle materialization copies regular files and
-directories; symlinked bundle entries should be packaged by a future signed or
-downloaded bundle format instead of this local smoke path.
+compile Tauri, npm, or platform desktop dependencies. On a cache miss, it reads
+`opensymphony-desktop-release-index.json` from the matching GitHub release,
+downloads the compatible archive, verifies the archive and installed manifest,
+then promotes the bundle into the versioned cache. Set
+`OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to test a fake release server or use a
+private mirror. For early local testing, pass `--bundle-dir <path>` or set
+`OPENSYMPHONY_DESKTOP_BUNDLE_DIR` to a bundle directory containing
+`opensymphony-desktop-manifest.json`. The manifest records the OpenSymphony
+version, platform, architecture, relative executable path, and executable
+SHA-256. Local bundle materialization copies regular files and directories;
+symlinked bundle entries should be packaged by the downloaded archive path
+instead of this local smoke path.
 
 Maintainers can build the current release bundle assets from a checkout:
 

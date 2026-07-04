@@ -6,15 +6,18 @@ use std::{
     io,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::{self, Command, ExitCode},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use clap::Args;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const MANIFEST_FILE: &str = "opensymphony-desktop-manifest.json";
+const RELEASE_INDEX_FILE: &str = "opensymphony-desktop-release-index.json";
 const DEFAULT_CACHE_RELATIVE: &str = ".opensymphony/desktop";
 
 #[derive(Debug, Args)]
@@ -41,6 +44,13 @@ pub struct AppArgs {
     cache_root: Option<PathBuf>,
     #[arg(
         long,
+        env = "OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL",
+        hide = true,
+        help = "Override the desktop release index URL; primarily for smoke tests"
+    )]
+    release_index_url: Option<String>,
+    #[arg(
+        long,
         help = "Verify the bundle and print the launch target without starting it"
     )]
     dry_run: bool,
@@ -55,15 +65,12 @@ struct DesktopBundleManifest {
     sha256: String,
 }
 
-// ponytail: parsed contract lives ahead of download logic; remove allow once COE-528 uses it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopReleaseIndex {
     schema_version: u32,
     assets: Vec<DesktopReleaseAsset>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopReleaseAsset {
     version: String,
@@ -74,14 +81,12 @@ struct DesktopReleaseAsset {
     launch_target: DesktopLaunchTarget,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopReleaseChecksum {
     algorithm: String,
     value: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopLaunchTarget {
     executable: PathBuf,
@@ -92,6 +97,7 @@ struct DesktopLaunchTarget {
 #[derive(Debug)]
 struct VerifiedBundle {
     executable: PathBuf,
+    manifest: DesktopBundleManifest,
 }
 
 pub async fn run_command(args: AppArgs) -> ExitCode {
@@ -116,7 +122,13 @@ fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
-    let verified = ensure_verified_bundle(&cache_root, &cache_dir, bundle_dir)?;
+    let release_index_url = selected_release_index_url(args.release_index_url);
+    let verified = ensure_verified_bundle(
+        &cache_root,
+        &cache_dir,
+        bundle_dir,
+        release_index_url.as_str(),
+    )?;
 
     if args.dry_run {
         println!(
@@ -140,6 +152,7 @@ fn ensure_verified_bundle(
     cache_root: &Path,
     cache_dir: &Path,
     bundle_dir: Option<&Path>,
+    release_index_url: &str,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
     match verify_bundle(cache_dir) {
         Ok(bundle) => Ok(bundle),
@@ -157,7 +170,7 @@ fn ensure_verified_bundle(
                 copy_dir_all(bundle_dir, cache_dir)?;
                 verify_bundle(cache_dir)
             } else {
-                Err(first_error)
+                install_release_bundle(cache_root, cache_dir, release_index_url, first_error)
             }
         }
     }
@@ -199,7 +212,10 @@ fn verify_bundle(cache_dir: &Path) -> Result<VerifiedBundle, DesktopLauncherErro
         });
     }
 
-    Ok(VerifiedBundle { executable })
+    Ok(VerifiedBundle {
+        executable,
+        manifest,
+    })
 }
 
 fn read_manifest(path: &Path) -> Result<DesktopBundleManifest, DesktopLauncherError> {
@@ -217,6 +233,260 @@ fn read_manifest(path: &Path) -> Result<DesktopBundleManifest, DesktopLauncherEr
 #[allow(dead_code)]
 fn parse_release_index(contents: &str) -> Result<DesktopReleaseIndex, serde_json::Error> {
     serde_json::from_str(contents)
+}
+
+fn selected_release_index_url(override_url: Option<String>) -> String {
+    override_url.unwrap_or_else(default_release_index_url)
+}
+
+fn default_release_index_url() -> String {
+    format!(
+        "https://github.com/kumanday/OpenSymphony/releases/download/v{}/{}",
+        desktop_version(),
+        RELEASE_INDEX_FILE
+    )
+}
+
+fn install_release_bundle(
+    cache_root: &Path,
+    cache_dir: &Path,
+    release_index_url: &str,
+    _cached_error: DesktopLauncherError,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
+    let index = download_release_index(release_index_url)?;
+    let asset = compatible_release_asset(&index, release_index_url)?;
+    let stage_dir = unique_stage_dir(cache_root);
+    let archive_path = stage_dir.join("bundle.tar.gz");
+
+    let result = (|| {
+        fs::create_dir_all(&stage_dir).map_err(|source| DesktopLauncherError::Repair {
+            path: stage_dir.clone(),
+            source,
+        })?;
+        download_file(&asset.url, &archive_path)?;
+        verify_archive_checksum(&archive_path, asset)?;
+        extract_release_archive(&archive_path, &stage_dir)?;
+        let verified = verify_bundle_matches_asset(&stage_dir, asset)?;
+        promote_verified_bundle(cache_root, cache_dir, &stage_dir)?;
+        verify_bundle(cache_dir).map(|promoted| VerifiedBundle {
+            executable: promoted.executable,
+            manifest: verified.manifest,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage_dir);
+    }
+    result
+}
+
+fn download_release_index(url: &str) -> Result<DesktopReleaseIndex, DesktopLauncherError> {
+    let body = reqwest::blocking::get(url)
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.text())
+        .map_err(|source| DesktopLauncherError::ReleaseIndexDownload {
+            url: url.to_string(),
+            source,
+        })?;
+    let index =
+        parse_release_index(&body).map_err(|source| DesktopLauncherError::InvalidReleaseIndex {
+            url: url.to_string(),
+            source,
+        })?;
+    if index.schema_version != 1 {
+        return Err(DesktopLauncherError::UnsupportedReleaseIndex {
+            url: url.to_string(),
+            schema_version: index.schema_version,
+        });
+    }
+    Ok(index)
+}
+
+fn compatible_release_asset<'a>(
+    index: &'a DesktopReleaseIndex,
+    release_index_url: &str,
+) -> Result<&'a DesktopReleaseAsset, DesktopLauncherError> {
+    index
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.version == desktop_version()
+                && asset.platform == current_platform()
+                && asset.arch == current_arch()
+        })
+        .ok_or_else(|| DesktopLauncherError::NoCompatibleReleaseAsset {
+            url: release_index_url.to_string(),
+            version: desktop_version().to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+        })
+        .and_then(|asset| {
+            if asset.checksum.algorithm != "sha256" {
+                return Err(DesktopLauncherError::UnsupportedReleaseChecksum {
+                    url: asset.url.clone(),
+                    algorithm: asset.checksum.algorithm.clone(),
+                });
+            }
+            if !asset.launch_target.args.is_empty() {
+                return Err(DesktopLauncherError::UnsupportedLaunchArgs {
+                    url: asset.url.clone(),
+                });
+            }
+            if asset.launch_target.executable.is_absolute()
+                || asset
+                    .launch_target
+                    .executable
+                    .components()
+                    .any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+            {
+                return Err(DesktopLauncherError::UnsafeExecutablePath {
+                    path: asset.launch_target.executable.clone(),
+                });
+            }
+            Ok(asset)
+        })
+}
+
+fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherError> {
+    let mut response = reqwest::blocking::get(url)
+        .and_then(|response| response.error_for_status())
+        .map_err(|source| DesktopLauncherError::ReleaseAssetDownload {
+            url: url.to_string(),
+            source,
+        })?;
+    let mut file =
+        File::create(destination).map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    io::copy(&mut response, &mut file).map_err(|source| {
+        DesktopLauncherError::ReleaseArchiveRead {
+            path: destination.to_path_buf(),
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+fn verify_archive_checksum(
+    archive_path: &Path,
+    asset: &DesktopReleaseAsset,
+) -> Result<(), DesktopLauncherError> {
+    let actual = raw_file_sha256(archive_path).map_err(|source| {
+        DesktopLauncherError::ReleaseArchiveRead {
+            path: archive_path.to_path_buf(),
+            source,
+        }
+    })?;
+    if !actual.eq_ignore_ascii_case(&asset.checksum.value) {
+        return Err(DesktopLauncherError::ReleaseArchiveChecksum {
+            path: archive_path.to_path_buf(),
+            expected: asset.checksum.value.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn extract_release_archive(
+    archive_path: &Path,
+    stage_dir: &Path,
+) -> Result<(), DesktopLauncherError> {
+    let file =
+        File::open(archive_path).map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+            path: archive_path.to_path_buf(),
+            source,
+        })?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive
+        .entries()
+        .map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+            path: archive_path.to_path_buf(),
+            source,
+        })?
+    {
+        let mut entry = entry.map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+            path: archive_path.to_path_buf(),
+            source,
+        })?;
+        let entry_path = entry
+            .path()
+            .map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+                path: archive_path.to_path_buf(),
+                source,
+            })?
+            .to_path_buf();
+        if entry_path.is_absolute()
+            || entry_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(DesktopLauncherError::UnsafeArchiveEntry { path: entry_path });
+        }
+        let entry_type = entry.header().entry_type();
+        if !(entry_type.is_file() || entry_type.is_dir()) {
+            return Err(DesktopLauncherError::UnsupportedBundleEntry { path: entry_path });
+        }
+        let unpacked = entry.unpack_in(stage_dir).map_err(|source| {
+            DesktopLauncherError::ReleaseArchiveRead {
+                path: archive_path.to_path_buf(),
+                source,
+            }
+        })?;
+        if !unpacked {
+            return Err(DesktopLauncherError::UnsafeArchiveEntry { path: entry_path });
+        }
+    }
+    fs::remove_file(archive_path).map_err(|source| DesktopLauncherError::ReleaseArchiveRead {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+fn verify_bundle_matches_asset(
+    stage_dir: &Path,
+    asset: &DesktopReleaseAsset,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
+    let verified = verify_bundle(stage_dir)?;
+    if verified.manifest.executable != asset.launch_target.executable {
+        return Err(DesktopLauncherError::LaunchTargetMismatch {
+            expected: asset.launch_target.executable.clone(),
+            actual: verified.manifest.executable.clone(),
+        });
+    }
+    Ok(verified)
+}
+
+fn promote_verified_bundle(
+    cache_root: &Path,
+    cache_dir: &Path,
+    stage_dir: &Path,
+) -> Result<(), DesktopLauncherError> {
+    validate_cache_dir(cache_root, cache_dir)?;
+    if cache_dir.exists() {
+        fs::remove_dir_all(cache_dir).map_err(|source| DesktopLauncherError::Repair {
+            path: cache_dir.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::rename(stage_dir, cache_dir).map_err(|source| DesktopLauncherError::Repair {
+        path: cache_dir.to_path_buf(),
+        source,
+    })
 }
 
 fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
@@ -274,25 +544,32 @@ fn reject_parent_components(path: &Path) -> Result<(), DesktopLauncherError> {
 }
 
 fn file_sha256(path: &Path) -> Result<String, DesktopLauncherError> {
-    let mut file = File::open(path).map_err(|source| DesktopLauncherError::MissingExecutable {
+    raw_file_sha256(path).map_err(|source| DesktopLauncherError::MissingExecutable {
         path: path.to_path_buf(),
         source,
-    })?;
+    })
+}
+
+fn raw_file_sha256(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0; 8192];
     loop {
-        let read =
-            file.read(&mut buffer)
-                .map_err(|source| DesktopLauncherError::MissingExecutable {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn unique_stage_dir(cache_root: &Path) -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    cache_root.join(format!(".tmp-desktop-install-{}-{millis}", process::id()))
 }
 
 fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
@@ -502,6 +779,60 @@ enum DesktopLauncherError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "failed to download desktop release index from {url}: {source}\nRepair: check network access, set OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL to a compatible release index, or use --bundle-dir <path> for a local bundle."
+    )]
+    ReleaseIndexDownload { url: String, source: reqwest::Error },
+    #[error(
+        "desktop release index {url} is invalid: {source}\nRepair: publish a schema_version 1 desktop release index or set OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL to one."
+    )]
+    InvalidReleaseIndex {
+        url: String,
+        source: serde_json::Error,
+    },
+    #[error(
+        "desktop release index {url} has unsupported schema version {schema_version}\nRepair: publish a schema_version 1 desktop release index."
+    )]
+    UnsupportedReleaseIndex { url: String, schema_version: u32 },
+    #[error(
+        "desktop release index {url} has no asset for version {version} platform {platform} architecture {arch}\nRepair: publish a compatible desktop asset or use --bundle-dir <path> for a local bundle."
+    )]
+    NoCompatibleReleaseAsset {
+        url: String,
+        version: String,
+        platform: String,
+        arch: String,
+    },
+    #[error(
+        "desktop release asset {url} uses unsupported checksum algorithm {algorithm}\nRepair: publish sha256 release metadata."
+    )]
+    UnsupportedReleaseChecksum { url: String, algorithm: String },
+    #[error(
+        "desktop release asset {url} declares launch arguments this launcher does not support yet\nRepair: publish an asset with an empty launch_target.args array."
+    )]
+    UnsupportedLaunchArgs { url: String },
+    #[error(
+        "failed to download desktop release asset from {url}: {source}\nRepair: check network access, publish the archive before the release index, or use --bundle-dir <path> for a local bundle."
+    )]
+    ReleaseAssetDownload { url: String, source: reqwest::Error },
+    #[error("failed to read desktop release archive {path}: {source}")]
+    ReleaseArchiveRead { path: PathBuf, source: io::Error },
+    #[error(
+        "desktop release archive checksum mismatch for {path}: expected {expected}, got {actual}\nRepair: publish a release index whose checksum matches the uploaded archive."
+    )]
+    ReleaseArchiveChecksum {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "desktop release archive entry {path} is unsafe\nRepair: publish an archive whose entries stay inside the bundle root."
+    )]
+    UnsafeArchiveEntry { path: PathBuf },
+    #[error(
+        "desktop release launch target mismatch: metadata expected {expected}, installed manifest used {actual}\nRepair: publish matching launch_target metadata and bundle manifest."
+    )]
+    LaunchTargetMismatch { expected: PathBuf, actual: PathBuf },
     #[error("failed to repair desktop cache at {path}: {source}")]
     Repair { path: PathBuf, source: io::Error },
     #[error("failed to launch desktop app at {path}: {source}")]
@@ -512,6 +843,14 @@ enum DesktopLauncherError {
 mod tests {
     use super::*;
     use clap::Parser;
+    use flate2::{Compression, write::GzEncoder};
+    use std::{
+        collections::HashMap,
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+    };
     use tempfile::TempDir;
 
     use super::super::{Cli, Command as CliCommand};
@@ -596,6 +935,105 @@ mod tests {
     }
 
     #[test]
+    fn remote_release_installs_to_custom_path_and_dry_runs() {
+        let archive = desktop_release_archive(b"fake desktop");
+        let archive_sha = sha256_bytes(&archive);
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body(base_url, archive_sha.as_str()).into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+
+        let executable = run_app(AppArgs {
+            bundle_dir: None,
+            install_path: Some(install_root.path().to_path_buf()),
+            cache_root: None,
+            release_index_url: Some(server.url("/index.json")),
+            dry_run: true,
+        })
+        .expect("remote release should install and dry-run");
+
+        let cache_dir = install_root.path().join(desktop_version());
+        assert_eq!(
+            executable,
+            cache_dir
+                .join("OpenSymphony")
+                .canonicalize()
+                .expect("installed executable")
+        );
+        assert!(cache_dir.join(MANIFEST_FILE).is_file());
+        assert_eq!(
+            server.requests(),
+            vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
+        );
+    }
+
+    #[test]
+    fn remote_checksum_failure_does_not_promote_bundle() {
+        let archive = desktop_release_archive(b"fake desktop");
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body(
+                        base_url,
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                    )
+                    .into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+
+        let error = ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            &server.url("/index.json"),
+        )
+        .expect_err("checksum mismatch should fail");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::ReleaseArchiveChecksum { .. }
+        ));
+        assert!(
+            !cache_dir.exists(),
+            "failed verification must not promote a versioned bundle"
+        );
+    }
+
+    #[test]
+    fn existing_verified_bundle_skips_release_download() {
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        write_installed_bundle(&cache_dir, b"fake desktop");
+
+        let verified = ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            "http://127.0.0.1:9/index.json",
+        )
+        .expect("verified cache should launch without remote discovery");
+
+        assert_eq!(
+            verified.executable,
+            cache_dir
+                .join("OpenSymphony")
+                .canonicalize()
+                .expect("installed executable")
+        );
+    }
+
+    #[test]
     fn platform_selection_uses_current_target() {
         assert_eq!(current_platform(), env::consts::OS);
         assert_eq!(current_arch(), env::consts::ARCH);
@@ -655,8 +1093,13 @@ mod tests {
         .expect("write manifest");
 
         let cache_dir = cache.path().join(desktop_version());
-        let verified = ensure_verified_bundle(cache.path(), &cache_dir, Some(source.path()))
-            .expect("bundle should materialize and verify");
+        let verified = ensure_verified_bundle(
+            cache.path(),
+            &cache_dir,
+            Some(source.path()),
+            "http://127.0.0.1:9/index.json",
+        )
+        .expect("bundle should materialize and verify");
 
         assert_eq!(
             verified.executable,
@@ -836,13 +1279,156 @@ mod tests {
         .expect("write manifest");
 
         let cache_dir = cache.path().join(desktop_version());
-        let verified = ensure_verified_bundle(cache.path(), &cache_dir, Some(source.path()))
-            .expect("bundle should materialize and verify");
+        let verified = ensure_verified_bundle(
+            cache.path(),
+            &cache_dir,
+            Some(source.path()),
+            "http://127.0.0.1:9/index.json",
+        )
+        .expect("bundle should materialize and verify");
         let mode = fs::metadata(&verified.executable)
             .expect("copied executable metadata")
             .permissions()
             .mode();
 
         assert_ne!(mode & 0o111, 0);
+    }
+
+    fn write_installed_bundle(cache_dir: &Path, executable_contents: &[u8]) {
+        fs::create_dir_all(cache_dir).expect("create cache dir");
+        let executable = cache_dir.join("OpenSymphony");
+        fs::write(&executable, executable_contents).expect("write fake executable");
+        let manifest = DesktopBundleManifest {
+            version: desktop_version().to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            executable: PathBuf::from("OpenSymphony"),
+            sha256: file_sha256(&executable).expect("hash fake executable"),
+        };
+        fs::write(
+            cache_dir.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+    }
+
+    fn desktop_release_archive(executable_contents: &[u8]) -> Vec<u8> {
+        let manifest = DesktopBundleManifest {
+            version: desktop_version().to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            executable: PathBuf::from("OpenSymphony"),
+            sha256: sha256_bytes(executable_contents),
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        append_bytes(&mut archive, MANIFEST_FILE, manifest_bytes.as_slice());
+        append_bytes(&mut archive, "OpenSymphony", executable_contents);
+        let encoder = archive.into_inner().expect("finish tar archive");
+        encoder.finish().expect("finish gzip archive")
+    }
+
+    fn append_bytes(archive: &mut tar::Builder<GzEncoder<Vec<u8>>>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, path, bytes)
+            .expect("append archive entry");
+    }
+
+    fn release_index_body(base_url: &str, archive_sha: &str) -> String {
+        serde_json::json!({
+            "schema_version": 1,
+            "assets": [{
+                "version": desktop_version(),
+                "platform": current_platform(),
+                "arch": current_arch(),
+                "url": format!("{base_url}/bundle.tar.gz"),
+                "checksum": {
+                    "algorithm": "sha256",
+                    "value": archive_sha
+                },
+                "launch_target": {
+                    "executable": "OpenSymphony",
+                    "args": []
+                }
+            }]
+        })
+        .to_string()
+    }
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    struct FakeReleaseServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeReleaseServer {
+        fn start<F>(routes: F) -> Self
+        where
+            F: FnOnce(&str) -> Vec<(&'static str, Vec<u8>)>,
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake release server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+            let routes: HashMap<String, Vec<u8>> = routes(&base_url)
+                .into_iter()
+                .map(|(path, body)| (path.to_string(), body))
+                .collect();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let thread_requests = Arc::clone(&requests);
+            thread::spawn(move || {
+                for stream in listener.incoming().take(routes.len()) {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone fake stream"));
+                    let mut first_line = String::new();
+                    if reader.read_line(&mut first_line).is_err() {
+                        continue;
+                    }
+                    let path = first_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    thread_requests
+                        .lock()
+                        .expect("requests lock")
+                        .push(path.clone());
+                    let body = routes.get(&path);
+                    match body {
+                        Some(body) => {
+                            write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                                body.len()
+                            )
+                            .expect("write response header");
+                            stream.write_all(body).expect("write response body");
+                        }
+                        None => {
+                            stream
+                                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                                .expect("write 404");
+                        }
+                    }
+                }
+            });
+            Self { base_url, requests }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("{}{}", self.base_url, path)
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("requests lock").clone()
+        }
     }
 }
