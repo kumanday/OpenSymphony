@@ -72,14 +72,16 @@ binary. The archive contains:
 
 The release index is the metadata asset consumed by the CLI download path. It
 uses schema version `1`, lists compatible assets by version/platform/arch, and
-records the archive URL, archive SHA-256, and launch target. When an existing
-release index is present in the output directory, the package command preserves
-other assets and unknown top-level metadata, then replaces only the matching
-version/platform/arch entry. Upload the archive asset first, then upload or replace
-`opensymphony-desktop-release-index.json` last. The packaging script follows the
-same rule locally: it stages all output, publishes the archive, and only then
-publishes the index, so a failed packaging run does not leave new metadata
-claiming an unavailable archive.
+records the archive URL, archive SHA-256, and launch target. By default,
+`opensymphony app` reads it from the matching GitHub release; set
+`OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` for a mirror or fake release server.
+When an existing release index is present in the output directory, the package
+command preserves other assets and unknown top-level metadata, then replaces
+only the matching version/platform/arch entry. Upload the archive asset first,
+then upload or replace `opensymphony-desktop-release-index.json` last. The
+packaging script follows the same rule locally: it stages all output, publishes
+the archive, and only then publishes the index, so a failed packaging run does
+not leave new metadata claiming an unavailable archive.
 
 The desktop bundle contract is intentionally small and lives in
 [Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).

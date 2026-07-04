@@ -219,6 +219,32 @@ fn install_help_explains_available_runtime_targets() {
 }
 
 #[test]
+fn app_help_explains_install_path() {
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["app", "--help"])
+        .output()
+        .expect("app help should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "app help should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    for snippet in [
+        "--install-path <DIR>",
+        "Install root for versioned desktop bundles",
+        "--bundle-dir <BUNDLE_DIR>",
+        "--dry-run",
+    ] {
+        assert!(
+            stdout.contains(snippet),
+            "app help should include `{snippet}`: stdout={stdout}",
+        );
+    }
+}
+
+#[test]
 fn doctor_help_explains_config_and_live_probe_options() {
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .args(["doctor", "--help"])
