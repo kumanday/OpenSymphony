@@ -77,18 +77,18 @@ stays read-only and reports when source build fallback would be required. For
 active desktop development, run the Tauri app from this checkout.
 
 ```bash
-# 1. Install frontend dependencies once from the workspace root.
-npm install
+# 1. Install pinned frontend dependencies once from the workspace root.
+npm ci
 
 # 2. Launch the Tauri shell.
 cd apps/desktop/src-tauri
 cargo run
 ```
 
-The frontend workspace intentionally does not commit an npm lockfile today:
-`package-lock.json` is listed in `.gitignore`, and CI installs from the
-workspace package manifests with `npm install`. Revisit that policy before
-release packaging or other supply-chain-sensitive frontend dependency changes.
+The frontend workspace commits the root `package-lock.json` so
+release-sensitive paths use a pinned dependency graph. The desktop source-build
+fallback requires that lockfile and installs frontend dependencies with `npm ci`
+before building.
 
 `cargo run` rebuilds the desktop frontend first, so local source changes under
 `apps/desktop` and shared frontend packages are reflected in the Tauri shell.

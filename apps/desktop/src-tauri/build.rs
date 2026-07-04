@@ -20,7 +20,7 @@ fn main() {
         .args(["run", "build"])
         .current_dir(desktop_dir)
         .status()
-        .expect("failed to run npm; install frontend dependencies with `npm install`");
+        .expect("failed to run npm; install frontend dependencies with `npm ci`");
     assert!(status.success(), "desktop frontend build failed");
 
     tauri_build::build()

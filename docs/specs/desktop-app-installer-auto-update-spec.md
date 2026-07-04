@@ -146,9 +146,10 @@ Unsupported or incomplete prerequisite installation fails before building and
 prints exact manual commands. macOS and Windows system prerequisite installers
 remain manual because they require OS-managed UI or administrator approval.
 
-The source fallback runs `npm install` from the source root, builds the desktop
-crate with `cargo build --release` from `apps/desktop/src-tauri`, copies the
-resulting `OpenSymphony` executable into a staging bundle, writes
+The source fallback requires the root `package-lock.json`, runs `npm ci` from
+the source root, builds the desktop crate with `cargo build --release` from
+`apps/desktop/src-tauri`, copies the resulting `OpenSymphony` executable into a
+staging bundle, writes
 `opensymphony-desktop-manifest.json`, verifies the staged bundle, promotes it to
 `<install-root>/<version>/`, and then uses the same installed manifest checks as
 downloaded or local bundles.

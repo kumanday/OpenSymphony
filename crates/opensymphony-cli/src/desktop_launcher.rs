@@ -836,8 +836,9 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     runner: &mut R,
 ) -> Result<(), DesktopLauncherError> {
     validate_source_archive_version(source_dir)?;
+    validate_frontend_lockfile(source_dir)?;
     println!("Installing desktop frontend dependencies.");
-    runner.run(&DesktopCommand::new("npm", &["install"]).in_dir(source_dir))?;
+    runner.run(&DesktopCommand::new("npm", &["ci"]).in_dir(source_dir))?;
     let tauri_dir = source_dir.join("apps/desktop/src-tauri");
     let source_target_dir = source_build_target_dir(source_dir);
     println!("Building desktop app from source.");
@@ -898,6 +899,15 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     })?;
     verify_bundle(bundle_dir)?;
     Ok(())
+}
+
+fn validate_frontend_lockfile(source_dir: &Path) -> Result<(), DesktopLauncherError> {
+    let path = source_dir.join("package-lock.json");
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(DesktopLauncherError::MissingFrontendLockfile { path })
+    }
 }
 
 fn source_build_target_dir(source_dir: &Path) -> PathBuf {
@@ -1249,6 +1259,8 @@ enum DesktopLauncherError {
         expected: String,
         actual: String,
     },
+    #[error("desktop source archive is missing pinned frontend dependencies at {path}")]
+    MissingFrontendLockfile { path: PathBuf },
     #[error("failed to run desktop source build command `{command}`: {source}")]
     SourceBuildCommandIo { command: String, source: io::Error },
     #[error("desktop source build command failed: `{command}` exited with {status}")]
@@ -1359,6 +1371,11 @@ mod tests {
             format!(r#"{{"version":"{version}"}}"#),
         )
         .expect("write tauri config metadata");
+        fs::write(
+            source.join("package-lock.json"),
+            r#"{"name":"opensymphony-frontend","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("write frontend lockfile");
     }
 
     #[test]
@@ -1719,9 +1736,30 @@ mod tests {
                 .canonicalize()
                 .expect("canonical installed executable")
         );
-        assert_eq!(runner.runs[0], "npm install");
+        assert_eq!(runner.runs[0], "npm ci");
         assert!(runner.runs[1].starts_with("cargo build --release --locked --target-dir "));
         assert!(runner.runs[1].contains(SOURCE_BUILD_TARGET_DIR));
+    }
+
+    #[test]
+    fn source_build_requires_frontend_lockfile_before_installing() {
+        let source = TempDir::new().expect("source tempdir");
+        let bundle = TempDir::new().expect("bundle tempdir");
+        write_source_metadata(source.path(), desktop_version());
+        fs::remove_file(source.path().join("package-lock.json")).expect("remove lockfile");
+        let mut runner = FakeRunner::default();
+
+        let error = build_source_bundle_from_source_dir(source.path(), bundle.path(), &mut runner)
+            .expect_err("missing package lock should abort source build");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::MissingFrontendLockfile { .. }
+        ));
+        assert!(
+            runner.runs.is_empty(),
+            "source fallback should not install dependencies without a lockfile"
+        );
     }
 
     #[test]
