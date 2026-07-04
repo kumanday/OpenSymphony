@@ -12,6 +12,7 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/specs/desktop-run-detail-operations-spec.md`
 - `docs/specs/tui-dependency-gutter-spec.md`
 - `docs/specs/opensymphony_tree_sitter_ast_spec.md`
+- `docs/specs/desktop-app-installer-auto-update-spec.md`
 
 ## M6: Gateway And Stream Contract
 
@@ -228,6 +229,19 @@ Tasks:
 - OSYM-857 Init Target Branch Prompt And Flag
 - OSYM-858 Update Workflow Settings Mode
 - OSYM-859 Template Docs And Settings Hardening
+
+## M12.8: Desktop App Installer And Auto-Update
+
+Goal: Make `opensymphony app` a user-friendly first-run desktop installer and launcher with a configurable install root, verified bundle downloads, source-build fallback, prerequisite handling, and default-yes auto-update prompts.
+
+Tasks:
+
+- OSYM-860 Desktop Installer Contract And Release Metadata
+- OSYM-861 Desktop Release Bundle Pipeline
+- OSYM-862 App Download Install And Launch Flow
+- OSYM-863 Source Build Fallback And Prerequisites
+- OSYM-864 Desktop Auto-Update Flow
+- OSYM-865 Installer Docs And End-To-End Validation
 
 ## M13: Hardening And Release Quality
 

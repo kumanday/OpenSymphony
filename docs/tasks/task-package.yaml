@@ -1,13 +1,17 @@
-planningWave: workflow-target-branch-configuration
+planningWave: desktop-app-installer-auto-update
 tasksDir: docs/tasks
 milestones:
-  - "M12.7: Workflow Target Branch Configuration"
+  - "M12.8: Desktop App Installer And Auto-Update"
 tasks:
-  - id: OSYM-856
-    file: docs/tasks/osym-856-workflow-target-branch-model-and-init-customization.md
-  - id: OSYM-857
-    file: docs/tasks/osym-857-init-target-branch-prompt-and-flag.md
-  - id: OSYM-858
-    file: docs/tasks/osym-858-update-workflow-settings-mode.md
-  - id: OSYM-859
-    file: docs/tasks/osym-859-template-docs-and-settings-hardening.md
+  - id: OSYM-860
+    file: docs/tasks/osym-860-desktop-installer-contract-and-release-metadata.md
+  - id: OSYM-861
+    file: docs/tasks/osym-861-desktop-release-bundle-pipeline.md
+  - id: OSYM-862
+    file: docs/tasks/osym-862-app-download-install-and-launch-flow.md
+  - id: OSYM-863
+    file: docs/tasks/osym-863-source-build-fallback-and-prerequisites.md
+  - id: OSYM-864
+    file: docs/tasks/osym-864-desktop-auto-update-flow.md
+  - id: OSYM-865
+    file: docs/tasks/osym-865-installer-docs-and-end-to-end-validation.md

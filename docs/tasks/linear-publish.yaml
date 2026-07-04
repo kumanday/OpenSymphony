@@ -1,28 +1,38 @@
-planningWave: workflow-target-branch-configuration
+planningWave: desktop-app-installer-auto-update
 linearProject: opensymphony-bootstrap-e7b957855cb7
-publishedAt: '2026-07-03T13:29:01.730091+00:00'
+publishedAt: '2026-07-04T01:53:34.233742+00:00'
 milestones:
-  'M12.7: Workflow Target Branch Configuration':
-    milestoneId: 76e14ee9-9a5d-469d-b240-a748b00efba9
-    name: 'M12.7: Workflow Target Branch Configuration'
+  'M12.8: Desktop App Installer And Auto-Update':
+    milestoneId: 2cd07f9d-e6ec-4eb8-8e12-152ba37d3f9c
+    name: 'M12.8: Desktop App Installer And Auto-Update'
 tasks:
-  OSYM-856:
-    issue: COE-521
-    issueId: 40feaff9-fc8a-4f88-93f7-f5ca07581ebd
-    url: https://linear.app/trilogy-ai-coe/issue/COE-521/workflow-target-branch-model-and-init-customization
-    file: docs/tasks/osym-856-workflow-target-branch-model-and-init-customization.md
-  OSYM-857:
-    issue: COE-522
-    issueId: 7c488de0-ae23-4325-bdc2-8243f7168829
-    url: https://linear.app/trilogy-ai-coe/issue/COE-522/init-target-branch-prompt-and-flag
-    file: docs/tasks/osym-857-init-target-branch-prompt-and-flag.md
-  OSYM-858:
-    issue: COE-523
-    issueId: 09aa7e54-533f-420a-8f53-e46f2a066231
-    url: https://linear.app/trilogy-ai-coe/issue/COE-523/update-workflow-settings-mode
-    file: docs/tasks/osym-858-update-workflow-settings-mode.md
-  OSYM-859:
-    issue: COE-524
-    issueId: e130bbca-29ba-4865-b18e-9c86fbd97363
-    url: https://linear.app/trilogy-ai-coe/issue/COE-524/template-docs-and-settings-hardening
-    file: docs/tasks/osym-859-template-docs-and-settings-hardening.md
+  OSYM-860:
+    issue: COE-525
+    issueId: 9facfcc8-0d50-4aff-a4e0-010332ebb70a
+    url: https://linear.app/trilogy-ai-coe/issue/COE-525/desktop-installer-contract-and-release-metadata
+    file: docs/tasks/osym-860-desktop-installer-contract-and-release-metadata.md
+  OSYM-861:
+    issue: COE-526
+    issueId: c8048e57-2a17-41d7-9986-25c68121e1f5
+    url: https://linear.app/trilogy-ai-coe/issue/COE-526/desktop-release-bundle-pipeline
+    file: docs/tasks/osym-861-desktop-release-bundle-pipeline.md
+  OSYM-863:
+    issue: COE-527
+    issueId: d0353676-5aba-418b-8f20-9565252f8156
+    url: https://linear.app/trilogy-ai-coe/issue/COE-527/source-build-fallback-and-prerequisites
+    file: docs/tasks/osym-863-source-build-fallback-and-prerequisites.md
+  OSYM-862:
+    issue: COE-528
+    issueId: df02d157-4173-4951-9de4-0c3b302d8447
+    url: https://linear.app/trilogy-ai-coe/issue/COE-528/app-download-install-and-launch-flow
+    file: docs/tasks/osym-862-app-download-install-and-launch-flow.md
+  OSYM-864:
+    issue: COE-529
+    issueId: 5a89bd0c-f039-435f-84e5-b3be1880984c
+    url: https://linear.app/trilogy-ai-coe/issue/COE-529/desktop-auto-update-flow
+    file: docs/tasks/osym-864-desktop-auto-update-flow.md
+  OSYM-865:
+    issue: COE-530
+    issueId: c057db0d-46d5-4c4f-a469-e02354cf6fcb
+    url: https://linear.app/trilogy-ai-coe/issue/COE-530/installer-docs-and-end-to-end-validation
+    file: docs/tasks/osym-865-installer-docs-and-end-to-end-validation.md
