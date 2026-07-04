@@ -103,9 +103,10 @@ When the installed version is older than a matching release-index asset:
   yes when the operator presses Enter.
 - TTY execution accepts an explicit no and launches the cached installed bundle
   when it still verifies.
-- Non-TTY execution does not prompt. It may update only when a future
-  non-interactive flag or config explicitly opts in; otherwise it launches the
-  cached verified bundle or follows the fallback order below.
+- Non-TTY execution does not prompt and updates by default when a newer
+  compatible release is available.
+- `--no-update` skips the update check and launches the cached installed bundle
+  when it still verifies.
 
 The launcher must never treat a failed prompt read as consent.
 
