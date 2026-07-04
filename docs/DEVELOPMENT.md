@@ -72,8 +72,9 @@ desktop bundles. It verifies the cache under
 `~/.opensymphony/desktop/<version>/`; early local bundles can be materialized
 with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. If no bundle
 verifies, the launcher can build the matching source archive after checking
-Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. For active
-desktop development, run the Tauri app from this checkout.
+Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. `--dry-run`
+stays read-only and reports when source build fallback would be required. For
+active desktop development, run the Tauri app from this checkout.
 
 ```bash
 # 1. Install frontend dependencies once from the workspace root.

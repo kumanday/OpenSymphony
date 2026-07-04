@@ -7,6 +7,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
+    time::Duration,
 };
 
 use clap::Args;
@@ -16,6 +17,16 @@ use thiserror::Error;
 
 const MANIFEST_FILE: &str = "opensymphony-desktop-manifest.json";
 const DEFAULT_CACHE_RELATIVE: &str = ".opensymphony/desktop";
+const SOURCE_ARCHIVE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const SOURCE_BUILD_TARGET_DIR: &str = "target-opensymphony-desktop";
+const LINUX_TAURI_PKG_CONFIG_ARGS: &[&str] = &[
+    "--exists",
+    "webkit2gtk-4.1",
+    "openssl",
+    "librsvg-2.0",
+    "xdo",
+    "ayatana-appindicator3-0.1",
+];
 
 #[derive(Debug, Args)]
 pub struct AppArgs {
@@ -205,16 +216,17 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
-    let verified = ensure_verified_bundle(&cache_root, &cache_dir, bundle_dir).await?;
 
     if args.dry_run {
+        let verified = dry_run_verified_bundle(&cache_dir, bundle_dir)?;
         println!(
-            "Dry run: would launch cached OpenSymphony desktop at {}",
+            "Dry run: would launch OpenSymphony desktop at {}",
             verified.executable.display()
         );
         return Ok(verified.executable);
     }
 
+    let verified = ensure_verified_bundle(&cache_root, &cache_dir, bundle_dir).await?;
     Command::new(&verified.executable)
         .current_dir(&cache_dir)
         .spawn()
@@ -223,6 +235,23 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
             source,
         })?;
     Ok(verified.executable)
+}
+
+fn dry_run_verified_bundle(
+    cache_dir: &Path,
+    bundle_dir: Option<&Path>,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
+    if let Ok(bundle) = verify_bundle(cache_dir) {
+        return Ok(bundle);
+    }
+    if let Some(bundle_dir) = bundle_dir {
+        return verify_bundle(bundle_dir);
+    }
+    Err(DesktopLauncherError::DryRunSourceBuildRequired {
+        version: desktop_version().to_string(),
+        platform: current_platform().to_string(),
+        arch: current_arch().to_string(),
+    })
 }
 
 async fn ensure_verified_bundle(
@@ -388,8 +417,17 @@ fn source_archive_url() -> String {
 }
 
 async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLauncherError> {
+    let client = reqwest::Client::builder()
+        .timeout(SOURCE_ARCHIVE_DOWNLOAD_TIMEOUT)
+        .build()
+        .map_err(|source| DesktopLauncherError::SourceDownload {
+            url: url.to_string(),
+            source,
+        })?;
     let response =
-        reqwest::get(url)
+        client
+            .get(url)
+            .send()
             .await
             .map_err(|source| DesktopLauncherError::SourceDownload {
                 url: url.to_string(),
@@ -495,14 +533,16 @@ fn platform_desktop_dependencies_ready<R: DesktopCommandRunner>(
         "macos" => runner.command_succeeds("xcode-select", &["-p"]),
         "linux" => {
             runner.program_exists("pkg-config")
-                && runner.command_succeeds(
-                    "pkg-config",
-                    &["--exists", "webkit2gtk-4.1", "openssl", "librsvg-2.0"],
-                )
+                && linux_build_toolchain_ready(runner)
+                && runner.command_succeeds("pkg-config", LINUX_TAURI_PKG_CONFIG_ARGS)
         }
         "windows" => runner.program_exists("cl"),
         _ => false,
     }
+}
+
+fn linux_build_toolchain_ready<R: DesktopCommandRunner>(runner: &R) -> bool {
+    runner.program_exists("cc") || runner.program_exists("gcc") || runner.program_exists("clang")
 }
 
 fn platform_prerequisite_name(platform: &str) -> &'static str {
@@ -674,10 +714,25 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     println!("Installing desktop frontend dependencies.");
     runner.run(&DesktopCommand::new("npm", &["install"]).in_dir(source_dir))?;
     let tauri_dir = source_dir.join("apps/desktop/src-tauri");
+    let source_target_dir = source_build_target_dir(source_dir);
+    let source_target_dir_arg =
+        source_target_dir
+            .to_str()
+            .ok_or_else(|| DesktopLauncherError::NonUtf8Path {
+                path: source_target_dir.clone(),
+            })?;
     println!("Building desktop app from source.");
-    runner.run(&DesktopCommand::new("cargo", &["build", "--release"]).in_dir(&tauri_dir))?;
+    runner.run(
+        &DesktopCommand::new(
+            "cargo",
+            &["build", "--release", "--target-dir", source_target_dir_arg],
+        )
+        .in_dir(&tauri_dir),
+    )?;
 
-    let built_executable = source_dir.join(source_build_executable_relative(current_platform()));
+    let built_executable = source_target_dir
+        .join("release")
+        .join(source_build_executable_name(current_platform()));
     let installed_executable = source_build_executable_name(current_platform());
     fs::create_dir_all(bundle_dir).map_err(|source| DesktopLauncherError::Repair {
         path: bundle_dir.to_path_buf(),
@@ -720,8 +775,8 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
     Ok(())
 }
 
-fn source_build_executable_relative(platform: &str) -> PathBuf {
-    Path::new("target/release").join(source_build_executable_name(platform))
+fn source_build_target_dir(source_dir: &Path) -> PathBuf {
+    source_dir.join(SOURCE_BUILD_TARGET_DIR)
 }
 
 fn source_build_executable_name(platform: &str) -> PathBuf {
@@ -1021,6 +1076,14 @@ enum DesktopLauncherError {
         "desktop source build prerequisites are missing.\nInstall the missing prerequisites, then rerun `opensymphony app`:\n{details}"
     )]
     MissingPrerequisites { details: String },
+    #[error(
+        "no compatible desktop bundle is installed for OpenSymphony {version} on {platform}/{arch}.\nDry run did not install prerequisites, download sources, or build locally. Rerun without --dry-run to build from source."
+    )]
+    DryRunSourceBuildRequired {
+        version: String,
+        platform: String,
+        arch: String,
+    },
     #[error("desktop source archive path is not valid UTF-8: {path}")]
     NonUtf8Path { path: PathBuf },
     #[error("failed to download desktop source archive from {url}: {source}")]
@@ -1254,12 +1317,58 @@ mod tests {
     }
 
     #[test]
+    fn linux_prerequisite_probe_requires_full_tauri_inputs() {
+        let mut runner =
+            FakeRunner::with_programs(&["cargo", "rustc", "node", "npm", "tar", "pkg-config"]);
+        runner
+            .successful_checks
+            .insert(command_key("pkg-config", LINUX_TAURI_PKG_CONFIG_ARGS));
+        let missing = probe_source_build_prerequisites("linux", &runner);
+
+        assert!(
+            missing
+                .iter()
+                .any(|issue| issue.name == "Linux desktop/Tauri dependencies"),
+            "missing C compiler should keep Linux prerequisites incomplete"
+        );
+
+        runner.programs.insert("cc".to_string());
+        let missing = probe_source_build_prerequisites("linux", &runner);
+
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dry_run_without_cached_bundle_does_not_build_from_source() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let error = run_app(AppArgs {
+            bundle_dir: None,
+            install_path: Some(cache.path().to_path_buf()),
+            cache_root: None,
+            dry_run: true,
+        })
+        .await
+        .expect_err("dry run should report missing source-build target without building");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::DryRunSourceBuildRequired { .. }
+        ));
+        assert!(!cache.path().join(desktop_version()).exists());
+    }
+
+    #[test]
     fn source_build_failure_reports_failed_command() {
         let source = TempDir::new().expect("source tempdir");
         let bundle = TempDir::new().expect("bundle tempdir");
         fs::create_dir_all(source.path().join("apps/desktop/src-tauri"))
             .expect("create fake source tree");
-        let mut runner = FakeRunner::default().fail_run("cargo", &["build", "--release"]);
+        let target_dir = source_build_target_dir(source.path());
+        let target_dir_arg = target_dir.to_str().expect("target dir utf8");
+        let mut runner = FakeRunner::default().fail_run(
+            "cargo",
+            &["build", "--release", "--target-dir", target_dir_arg],
+        );
 
         let error = build_source_bundle_from_source_dir(source.path(), bundle.path(), &mut runner)
             .expect_err("cargo build failure should abort source build");
@@ -1272,9 +1381,8 @@ mod tests {
     fn source_build_promotes_fake_build_and_verifies() {
         let source = TempDir::new().expect("source tempdir");
         let cache_root = TempDir::new().expect("cache tempdir");
-        let built_executable = source
-            .path()
-            .join("target/release")
+        let built_executable = source_build_target_dir(source.path())
+            .join("release")
             .join(source_build_executable_name(current_platform()));
         fs::create_dir_all(built_executable.parent().expect("target parent"))
             .expect("create fake target dir");
@@ -1299,7 +1407,9 @@ mod tests {
                 .canonicalize()
                 .expect("canonical installed executable")
         );
-        assert_eq!(runner.runs, ["npm install", "cargo build --release"]);
+        assert_eq!(runner.runs[0], "npm install");
+        assert!(runner.runs[1].starts_with("cargo build --release --target-dir "));
+        assert!(runner.runs[1].contains(SOURCE_BUILD_TARGET_DIR));
     }
 
     #[tokio::test]

@@ -37,8 +37,10 @@ it checks Rust/Cargo, Node/npm, source archive extraction, and platform
 desktop/Tauri prerequisites, attempts known safe Linux package-manager
 installation commands when available, prints exact manual commands otherwise,
 builds into staging, writes the installed manifest, and promotes only after the
-same verification path succeeds. Signed/downloaded desktop bundle distribution
-is still future installer work.
+same verification path succeeds. `--dry-run` does not install prerequisites,
+download sources, or build; it only verifies an existing cached/local bundle or
+reports that a normal run would need source build fallback. Signed/downloaded
+desktop bundle distribution is still future installer work.
 
 The desktop bundle contract is intentionally small and lives in
 [Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
