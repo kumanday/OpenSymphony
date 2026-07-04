@@ -2617,6 +2617,61 @@ INSERT INTO issues (
     }
 
     #[test]
+    fn capture_plan_prefers_merged_replacement_prs_in_capsules_and_docs() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut source = sample_source();
+        source.issues[0].linked_prs = vec![194, 195];
+        source.prs = vec![
+            PullRequestEvidence {
+                number: 194,
+                title: "COE-123 promote workspace graph surfaces".to_string(),
+                url: Some("https://github.com/example/repo/pull/194".to_string()),
+                branch: Some("feat/coe-123-graph".to_string()),
+                ..PullRequestEvidence::default()
+            },
+            PullRequestEvidence {
+                number: 195,
+                title: "COE-123 promote workspace graph surfaces".to_string(),
+                url: Some("https://github.com/example/repo/pull/195".to_string()),
+                branch: Some("feat/coe-123-graph-v2".to_string()),
+                merge_sha: Some("932991fbb1ab91f99741bd89fb0897ee1dba3a15".to_string()),
+                ..PullRequestEvidence::default()
+            },
+        ];
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+
+        let plan = plan_capture(&config, &source, &selection, true, false).expect("plan");
+
+        assert_eq!(
+            plan.selected[0]
+                .prs
+                .iter()
+                .map(|pr| pr.number)
+                .collect::<Vec<_>>(),
+            vec![195, 194]
+        );
+        let capsule = render_issue_capsule(&config, &plan.selected[0]).expect("capsule");
+        let merged = capsule.find("PR #195").expect("merged PR should render");
+        let stale = capsule.find("PR #194").expect("stale PR should render");
+        assert!(merged < stale, "merged PR should lead capsule: {capsule}");
+
+        write_capture_plan(&config, &plan, false).expect("write capture");
+        let docs = plan_docs_sync(&config, &selection, false, false).expect("docs plan");
+
+        assert!(
+            docs.targets[0]
+                .after
+                .contains("COE-123 contributed: PR #195"),
+            "topic doc should summarize the merged replacement PR: {}",
+            docs.targets[0].after
+        );
+    }
+
+    #[test]
     fn capsule_generation_omits_transcript_like_comments() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());

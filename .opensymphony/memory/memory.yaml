@@ -47,12 +47,14 @@ areas:
       - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   ai-pr-review-human-setup:
     title: OpenHands PR Review - Human Setup Guide
     docs_target: docs/ai-pr-review-human-setup.md
@@ -146,6 +148,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -158,6 +161,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   cli:
     title: Cli
@@ -209,6 +213,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       - cli
       linear_milestones:
@@ -221,6 +226,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   code-intelligence:
     title: Code Intelligence
@@ -256,12 +262,14 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   code-review:
     title: Code Review
     docs_target: docs/code-review.md
@@ -277,13 +285,16 @@ areas:
       - area:code-review
       - area:desktop
       - area:documentation
+      - area:graph-view
       - area:installer
       - area:release
       - area:template
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   codex:
     title: Codex
     docs_target: docs/codex.md
@@ -332,6 +343,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -344,6 +356,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   codex-app-server:
     title: Codex App-Server Harness
@@ -402,6 +415,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
@@ -409,6 +423,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -430,6 +445,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
+      - 'M12.9: Code Graph View'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9.5: Developer Build Acceleration'
@@ -482,6 +498,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -494,6 +511,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   deployment-modes:
     title: Deployment Modes
@@ -558,6 +576,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -570,6 +589,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   developer-experience:
     title: Developer Experience
@@ -620,6 +640,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -631,6 +652,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   development:
     title: Development Guide
@@ -718,6 +740,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -730,6 +753,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   documentation:
     title: Documentation
@@ -745,17 +769,20 @@ areas:
       - area:code-review
       - area:desktop
       - area:documentation
+      - area:graph-view
       - area:installer
       - area:operations
       - area:release
       - area:target-repo-bootstrap
       - area:template
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   duckdb:
     title: Duckdb
     docs_target: docs/duckdb.md
@@ -804,6 +831,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -816,6 +844,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   elixir-hierarchy-changes:
     title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
@@ -860,12 +889,14 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   gateway:
     title: Gateway
     docs_target: docs/gateway.md
@@ -914,6 +945,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -926,6 +958,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   graph-view:
     title: Graph View
@@ -961,12 +994,14 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   harness-runtime:
     title: Harness Runtime
     docs_target: docs/harness-runtime.md
@@ -1016,6 +1051,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1027,6 +1063,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   host-client-architecture:
     title: OpenSymphony Host-Client Architecture
@@ -1154,6 +1191,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1165,6 +1203,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   linear:
     title: Linear
@@ -1214,6 +1253,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1226,6 +1266,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   linear-and-tools:
     title: Linear and Tools
@@ -1290,6 +1331,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1301,6 +1343,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   memory:
     title: Project Memory
@@ -1356,6 +1399,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1368,6 +1412,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -1434,6 +1479,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1445,6 +1491,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   okf:
     title: Okf
@@ -1494,6 +1541,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1505,6 +1553,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   openhands-agent-server:
     title: OpenHands Agent-Server Integration
@@ -1569,6 +1618,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
@@ -1576,6 +1626,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   operations:
     title: Operations
     docs_target: docs/operations.md
@@ -1626,6 +1677,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       - operations
       linear_milestones:
@@ -1639,6 +1691,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -1693,6 +1746,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1705,6 +1759,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   prerequisites:
     title: Prerequisites
@@ -1755,12 +1810,14 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   release:
     title: Release
     docs_target: docs/release.md
@@ -1774,10 +1831,13 @@ areas:
       - area:cli
       - area:desktop
       - area:documentation
+      - area:graph-view
       - area:installer
       - area:release
+      - area:web
       linear_milestones:
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   repository-layout:
     title: Repository Layout
     docs_target: docs/repository-layout.md
@@ -1844,6 +1904,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1856,6 +1917,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   rust:
     title: Rust
@@ -1890,6 +1952,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1897,6 +1960,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   security:
     title: Security
     docs_target: docs/security.md
@@ -1945,6 +2009,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -1957,6 +2022,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   sources:
     title: Sources and Trust Notes
@@ -2004,14 +2070,17 @@ areas:
       - area:code-review
       - area:desktop
       - area:documentation
+      - area:graph-view
       - area:installer
       - area:release
       - area:target-repo-bootstrap
       - area:template
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   template:
     title: Template
     docs_target: docs/template.md
@@ -2025,13 +2094,16 @@ areas:
       - area:cli
       - area:desktop
       - area:documentation
+      - area:graph-view
       - area:installer
       - area:release
       - area:template
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   testing:
     title: Testing
     docs_target: docs/testing.md
@@ -2080,6 +2152,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -2092,6 +2165,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   testing-and-operations:
     title: Testing
@@ -2152,6 +2226,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -2159,6 +2234,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   threejs:
     title: Threejs
     docs_target: docs/threejs.md
@@ -2189,12 +2265,14 @@ areas:
       - area:template
       - area:testing
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   tui:
     title: Tui
     docs_target: docs/tui.md
@@ -2243,6 +2321,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -2254,6 +2333,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   ui:
     title: Ui
@@ -2303,6 +2383,7 @@ areas:
       - area:threejs
       - area:tui
       - area:ui
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -2314,6 +2395,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   ui-frankentui:
     title: FrankenTUI Operator UI
@@ -2330,6 +2412,21 @@ areas:
       linear_milestones:
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M9: Collaborative Planning Alpha'
+  web:
+    title: Web
+    docs_target: docs/web.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - web
+    source_refs:
+      linear_labels:
+      - area:desktop
+      - area:graph-view
+      - area:web
+      linear_milestones:
+      - 'M12.9: Code Graph View'
   websocket-runtime:
     title: WebSocket Runtime Contract
     docs_target: docs/websocket-runtime.md
@@ -2378,6 +2475,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:web
       - area:workflow
       linear_milestones:
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
@@ -2385,6 +2483,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
     docs_target: docs/workspace-and-lifecycle.md
