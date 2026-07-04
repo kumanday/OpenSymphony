@@ -70,7 +70,9 @@ The `opensymphony app` command, with visible alias `opensymphony desktop`, is
 implemented by COE-488 / OSYM-811 as a lazy cached launcher for released/local
 desktop bundles. It verifies the cache under
 `~/.opensymphony/desktop/<version>/`; early local bundles can be materialized
-with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. For active
+with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. If no bundle
+verifies, the launcher can build the matching source archive after checking
+Rust/Cargo, Node/npm, and platform desktop/Tauri prerequisites. For active
 desktop development, run the Tauri app from this checkout.
 
 ```bash

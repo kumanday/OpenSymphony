@@ -2,7 +2,7 @@
 
 This spec defines the durable contract for `opensymphony app` desktop bundle
 installation and update discovery. It does not define signed installer
-packaging, real asset publication, download implementation, or source builds.
+packaging, real asset publication, or download implementation.
 
 ## Release Index
 
@@ -117,13 +117,41 @@ The launcher must never treat a failed prompt read as consent.
    the installed manifest verifies.
 2. Use a matching prebuilt download from the release index when download support
    exists and update policy permits it.
-3. Use source-build fallback when that later feature is available and its
-   prerequisites pass.
+3. Use source-build fallback when prerequisites pass.
 4. Fail with a clear repair message.
 
 Early local `--bundle-dir <dir>` and `OPENSYMPHONY_DESKTOP_BUNDLE_DIR=<dir>`
 remain a smoke-test materialization path. They copy a local expanded bundle into
 `<install-root>/<version>/` and then run the same installed manifest checks.
+
+## Source Build Fallback
+
+When no installed bundle verifies and no local `--bundle-dir` is provided, the
+launcher may build the selected OpenSymphony desktop version from source. The
+default source archive is the matching GitHub tag archive:
+
+```text
+https://github.com/kumanday/OpenSymphony/archive/refs/tags/v<version>.tar.gz
+```
+
+`OPENSYMPHONY_DESKTOP_SOURCE_ARCHIVE_URL` may override this archive for release
+testing or emergency recovery. The fallback checks for Rust/Cargo, Node/npm, a
+source archive extractor, and platform desktop/Tauri dependencies before
+building. Linux package lists track the official Tauri prerequisites:
+<https://v2.tauri.app/start/prerequisites/>.
+
+On Linux, the launcher attempts known package-manager commands for platform
+desktop dependencies when `sudo` and a supported package manager are available.
+Unsupported or incomplete prerequisite installation fails before building and
+prints exact manual commands. macOS and Windows system prerequisite installers
+remain manual because they require OS-managed UI or administrator approval.
+
+The source fallback runs `npm install` from the source root, builds the desktop
+crate with `cargo build --release` from `apps/desktop/src-tauri`, copies the
+resulting `OpenSymphony` executable into a staging bundle, writes
+`opensymphony-desktop-manifest.json`, verifies the staged bundle, promotes it to
+`<install-root>/<version>/`, and then uses the same installed manifest checks as
+downloaded or local bundles.
 
 ## Path Safety
 
