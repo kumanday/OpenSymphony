@@ -291,9 +291,9 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
                 copy_dir_all(bundle_dir, cache_dir)?;
                 match verify_bundle(cache_dir) {
                     Ok(bundle) => Ok(bundle),
-                    Err(_) => {
+                    Err(source) => {
                         remove_cache_entry(cache_root, cache_dir)?;
-                        build_source_fallback(cache_root, cache_dir, runner).await
+                        Err(source)
                     }
                 }
             } else {
@@ -510,10 +510,7 @@ fn probe_source_build_prerequisites<R: DesktopCommandRunner>(
     if !runner.program_exists("cargo") || !runner.program_exists("rustc") {
         missing.push(PrerequisiteIssue {
             name: "Rust/Cargo",
-            manual_commands: vec![
-                "curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh".to_string(),
-                "restart your terminal, then run: cargo --version && rustc --version".to_string(),
-            ],
+            manual_commands: rust_manual_commands(platform),
         });
     }
     if !runner.program_exists("node") || !runner.program_exists("npm") {
@@ -540,6 +537,20 @@ fn probe_source_build_prerequisites<R: DesktopCommandRunner>(
         });
     }
     missing
+}
+
+fn rust_manual_commands(platform: &str) -> Vec<String> {
+    match platform {
+        "windows" => vec![
+            "winget install --id Rustlang.Rustup --source winget".to_string(),
+            "rustup default stable-msvc".to_string(),
+            "restart PowerShell, then run: cargo --version; rustc --version".to_string(),
+        ],
+        _ => vec![
+            "curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh".to_string(),
+            "restart your terminal, then run: cargo --version && rustc --version".to_string(),
+        ],
+    }
 }
 
 fn platform_desktop_dependencies_ready<R: DesktopCommandRunner>(
@@ -589,10 +600,11 @@ fn platform_install_plan<R: DesktopCommandRunner>(
 
     if runner.program_exists("apt-get") {
         return Some(vec![
-            DesktopCommand::new("sudo", &["apt-get", "update"]),
+            DesktopCommand::new("sudo", &["-n", "apt-get", "update"]),
             DesktopCommand::new(
                 "sudo",
                 &[
+                    "-n",
                     "apt-get",
                     "install",
                     "-y",
@@ -614,6 +626,7 @@ fn platform_install_plan<R: DesktopCommandRunner>(
         return Some(vec![DesktopCommand::new(
             "sudo",
             &[
+                "-n",
                 "pacman",
                 "-S",
                 "--needed",
@@ -637,6 +650,7 @@ fn platform_install_plan<R: DesktopCommandRunner>(
             DesktopCommand::new(
                 "sudo",
                 &[
+                    "-n",
                     "dnf",
                     "install",
                     "-y",
@@ -651,7 +665,10 @@ fn platform_install_plan<R: DesktopCommandRunner>(
                     "pkgconf-pkg-config",
                 ],
             ),
-            DesktopCommand::new("sudo", &["dnf", "group", "install", "-y", "c-development"]),
+            DesktopCommand::new(
+                "sudo",
+                &["-n", "dnf", "group", "install", "-y", "c-development"],
+            ),
         ]);
     }
     None
@@ -1446,15 +1463,41 @@ mod tests {
     }
 
     #[test]
+    fn windows_prerequisite_probe_uses_windows_rust_guidance() {
+        let runner = FakeRunner::default();
+        let missing = probe_source_build_prerequisites("windows", &runner);
+        let details = format_prerequisite_issues(&missing);
+
+        assert!(details.contains("winget install --id Rustlang.Rustup --source winget"));
+        assert!(details.contains("rustup default stable-msvc"));
+        assert!(!details.contains("https://sh.rustup.rs"));
+    }
+
+    #[test]
     fn apt_prerequisite_plan_uses_tauri_packages() {
         let runner = FakeRunner::with_programs(&["sudo", "apt-get"]);
         let commands = platform_install_plan("linux", &runner).expect("apt plan");
         let displays: Vec<_> = commands.iter().map(|command| command.display()).collect();
 
-        assert_eq!(displays[0], "sudo apt-get update");
+        assert_eq!(displays[0], "sudo -n apt-get update");
         assert!(displays[1].contains("libwebkit2gtk-4.1-dev"));
         assert!(displays[1].contains("libayatana-appindicator3-dev"));
         assert!(displays[1].contains("pkg-config"));
+    }
+
+    #[test]
+    fn platform_install_plan_uses_noninteractive_sudo() {
+        for manager in ["apt-get", "pacman", "dnf"] {
+            let runner = FakeRunner::with_programs(&["sudo", manager]);
+            let commands = platform_install_plan("linux", &runner).expect("linux plan");
+
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| command.args.first() == Some(&OsString::from("-n"))),
+                "{manager} plan should run sudo in noninteractive mode"
+            );
+        }
     }
 
     #[test]
@@ -1464,7 +1507,7 @@ mod tests {
         let displays: Vec<_> = commands.iter().map(|command| command.display()).collect();
 
         assert_eq!(displays.len(), 1);
-        assert!(displays[0].contains("pacman -S --needed --noconfirm"));
+        assert!(displays[0].contains("sudo -n pacman -S --needed --noconfirm"));
         assert!(!displays[0].contains("-Syu"));
     }
 
@@ -1583,7 +1626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_local_bundle_falls_back_to_source_prerequisite_probe() {
+    async fn invalid_local_bundle_reports_verification_error_without_source_fallback() {
         let local = TempDir::new().expect("local bundle tempdir");
         let cache = TempDir::new().expect("cache tempdir");
         let manifest = DesktopBundleManifest {
@@ -1604,15 +1647,19 @@ mod tests {
         let error =
             ensure_verified_bundle_with(cache.path(), &cache_dir, Some(local.path()), &mut runner)
                 .await
-                .expect_err("invalid local bundle should continue to source fallback");
+                .expect_err("invalid local bundle should report its verification error");
 
         assert!(matches!(
             error,
-            DesktopLauncherError::MissingPrerequisites { .. }
+            DesktopLauncherError::WrongVersion { ref actual, .. } if actual == "0.0.0"
         ));
         assert!(
             !cache_dir.exists(),
             "failed local bundle copy should not remain cached"
+        );
+        assert!(
+            runner.runs.is_empty(),
+            "explicit local bundle failure should not trigger source fallback"
         );
     }
 
