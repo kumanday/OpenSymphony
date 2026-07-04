@@ -21,6 +21,9 @@ opensymphony init
 - prompts before overwriting other conflicting files
 - fills the `WORKFLOW.md` clone hook from `git remote` when possible
 - offers to fill the Linear project slug/key in `WORKFLOW.md`
+- records the feature PR and sync target branch in `WORKFLOW.md` under
+  `## Branch target`; the default is `develop`, and `--target-branch main` or
+  `--target-branch release/next` can set another local branch name
 - creates or updates `.gitignore` so local OpenSymphony runtime state stays untracked
 - can optionally scaffold OpenHands AI PR review
 - can configure the GitHub Actions variables, label, and optional review secret
@@ -43,12 +46,29 @@ when it actually needs to. If the current directory already looks like an
 OpenSymphony target repo because it has both `WORKFLOW.md` and `config.yaml`,
 the command then refreshes changed or new files under `.agents/skills/`.
 
+When `--target-branch` or `--code-review` is present, `update` uses workflow
+settings mode instead of the normal maintenance path. It requires `WORKFLOW.md`
+and `config.yaml`, patches the managed workflow markers, rewrites known legacy
+branch-control phrases when the target branch changes, and skips Cargo
+self-update, template skill refresh, and memory bootstrap:
+
+```bash
+opensymphony update --target-branch develop
+opensymphony update --target-branch main
+opensymphony update --target-branch release/next
+opensymphony update --target-branch release/next --code-review openhands
+```
+
 The template repository is still the upstream source of those starter assets,
 but it is an implementation detail of `opensymphony init`, not a required
 manual setup step:
 
 - [kumanday/OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template)
 - [Raw template base](https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/WORKFLOW.md)
+
+Fresh init branch-target behavior is fully consistent only when that template
+repo's `WORKFLOW.md` and `pull`/`push`/`land` skills have the same marker-aware
+wording as this repository's local copies.
 
 ## Files Added By `init`
 
@@ -66,8 +86,8 @@ Core bootstrap payload:
 
 ## Refreshing Template Skills
 
-`opensymphony update` only refreshes template-managed files under
-`.agents/skills/`.
+Without workflow-setting flags, `opensymphony update` only refreshes
+template-managed files under `.agents/skills/`.
 
 It does not:
 
@@ -93,6 +113,15 @@ The chosen provider is recorded in `WORKFLOW.md` as
 `Active review provider:` under `## Automated AI PR review`, which tells
 agents how to re-trigger review after follow-up pushes (`review-this` label
 for openhands, an exact `@codex review` comment for codex).
+
+For initialized target repos, `opensymphony update --code-review openhands`
+updates the marker and attempts to enable an existing
+`.github/workflows/ai-pr-review.yml` through `gh workflow`. It does not create
+or repair that workflow when the file is missing. Switching with
+`--code-review codex` or `--code-review none` records the marker and attempts
+to disable an existing OpenHands review workflow. If `gh` is unavailable,
+unauthorized, or cannot access Actions, `update` warns and leaves the workflow
+state unchanged; verify or adjust it manually.
 
 ## Labels
 
@@ -121,6 +150,7 @@ Important fields:
 | Field | Description | Env Var | Example |
 |-------|-------------|---------|---------|
 | `tracker.project_slug` | Linear `Project.slugId` from the project URL | - | `my-project-5250e49b61f4` |
+| `WORKFLOW.md` `Target branch:` | Local branch name agents use as `origin/<target-branch>` for syncs and PR bases | - | `develop`, `main`, `release/next` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
 | `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
 | `openhands.conversation.agent.llm.credential_mode` | LLM credential adapter | - | `api_key` or `openai_subscription` |

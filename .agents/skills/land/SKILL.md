@@ -10,7 +10,7 @@ description:
 
 ## Goals
 
-- Ensure the PR is conflict-free with main.
+- Ensure the PR is conflict-free with the configured target branch.
 - Keep CI green and fix failures when they occur.
 - Address all review feedback.
 - Confirm PR is ready for merge (green CI, no unresolved comments).
@@ -27,9 +27,9 @@ description:
 2. Confirm the full gauntlet is green locally before any push.
 3. If the working tree has uncommitted changes, commit with the `commit` skill
    and push with the `push` skill before proceeding.
-4. Check mergeability and conflicts against main.
-5. If conflicts exist, use the `pull` skill to fetch/merge `origin/main` and
-   resolve conflicts, then use the `push` skill to publish the updated branch.
+4. Check mergeability and conflicts against the configured target branch.
+5. If conflicts exist, use the `pull` skill to fetch/merge `origin/<target-branch>`
+   and resolve conflicts, then use the `push` skill to publish the updated branch.
 6. Address any Linear issue comments and PR review comments before merging
    (see Review Handling below).
 7. Watch checks until complete.
@@ -60,6 +60,15 @@ branch=$(git branch --show-current)
 pr_number=$(gh pr view --json number -q .number)
 pr_title=$(gh pr view --json title -q .title)
 pr_body=$(gh pr view --json body -q .body)
+target_branch=$(awk -F': *' '/^Target branch:/ { branch=$2; gsub(/`/, "", branch); gsub(/\r/, "", branch); gsub(/^[ \t]+|[ \t]+$/, "", branch); print branch; exit }' WORKFLOW.md)
+if [ -z "$target_branch" ]; then
+  echo "WORKFLOW.md is missing a Target branch marker; run opensymphony update --target-branch <branch> before landing." >&2
+  exit 1
+fi
+current_base=$(gh pr view --json baseRefName -q .baseRefName)
+if [ "$current_base" != "$target_branch" ]; then
+  gh pr edit --base "$target_branch"
+fi
 
 # Check mergeability and conflicts
 mergeable=$(gh pr view --json mergeable -q .mergeable)
@@ -102,11 +111,12 @@ echo "**DO NOT MERGE** - the user reviews and merges."
 - Use judgment to identify flaky failures. If a failure is a flake (e.g., a
   timeout on only one platform), you may proceed without fixing it.
 - If CI pushes an auto-fix commit (authored by GitHub Actions), it does not
-  trigger a fresh CI run. Detect the updated PR head, pull locally, merge
-  `origin/main` if needed, add a real author commit, and force-push to retrigger
-  CI, then restart the checks loop.
+  trigger a fresh CI run. Detect the updated PR head, pull locally, merge the
+  configured target branch if needed, add a real author commit, and force-push
+  to retrigger CI, then restart the checks loop.
 - If all jobs fail with corrupted pnpm lockfile errors on the merge commit, the
-  remediation is to fetch latest `origin/main`, merge, force-push, and rerun CI.
+  remediation is to fetch latest `origin/<target-branch>`, merge, force-push,
+  and rerun CI.
 - If mergeability is `UNKNOWN`, wait and re-check.
 - Do not merge while review comments are outstanding.
 - Do not enable auto-merge; this repo has no required checks so auto-merge can
