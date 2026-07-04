@@ -116,6 +116,8 @@ const GATEWAY_WS_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
 const CODEX_READINESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEX_CLI_COMMAND: &str = "codex";
+const PR_URL_CACHE_TTL: Duration = Duration::from_secs(60);
+const PR_URL_COMMAND: &str = "gh";
 
 #[async_trait]
 pub trait LinearTaskGraphClient: Send + Sync + 'static {
@@ -266,6 +268,8 @@ pub struct GatewayState {
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     pub memory_config: Option<MemoryConfig>,
     pub codex_readiness_cache: Arc<CodexReadinessCache>,
+    pub workspace_scans: WorkspaceScans,
+    pub pr_urls: PrUrls,
 }
 
 impl Clone for GatewayState {
@@ -281,7 +285,146 @@ impl Clone for GatewayState {
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
+            workspace_scans: self.workspace_scans.clone(),
+            pr_urls: self.pr_urls.clone(),
         }
+    }
+}
+
+/// Coalesces concurrent workspace git scans so simultaneous
+/// `run_files`/`run_diffs`/`run_validation` requests for the same workspace
+/// share a single subprocess sweep instead of each spawning their own.
+///
+/// This is deliberately a coalescer rather than a TTL cache: results are
+/// never served after the computation that produced them finishes, so
+/// callers always observe the current working-tree state.
+#[derive(Clone, Default)]
+pub struct WorkspaceScans {
+    state: Arc<tokio::sync::Mutex<HashMap<PathBuf, WorkspaceScanReceiver>>>,
+}
+
+type WorkspaceScanReceiver = tokio::sync::watch::Receiver<Option<WorkspaceScanOutcome>>;
+
+/// Result of one workspace git sweep: the comparison base (when resolvable)
+/// and the changed-file listing derived from it.
+#[derive(Clone)]
+pub(crate) struct WorkspaceScanOutcome {
+    comparison_base: Option<WorkspaceComparisonBase>,
+    files: Result<Arc<Vec<WorkspaceRunFileChange>>, String>,
+}
+
+impl WorkspaceScans {
+    pub(crate) async fn scan(&self, workspace_path: PathBuf) -> WorkspaceScanOutcome {
+        let mut receiver = {
+            let mut state = self.state.lock().await;
+            if let Some(receiver) = state.get(&workspace_path) {
+                receiver.clone()
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                state.insert(workspace_path.clone(), receiver.clone());
+                let entries = self.state.clone();
+                let path = workspace_path.clone();
+                tokio::spawn(async move {
+                    let scan_path = path.clone();
+                    let outcome =
+                        tokio::task::spawn_blocking(move || compute_workspace_scan(&scan_path))
+                            .await
+                            .unwrap_or_else(|error| WorkspaceScanOutcome {
+                                comparison_base: None,
+                                files: Err(format!("workspace scan task failed: {error}")),
+                            });
+                    let _ = sender.send(Some(outcome));
+                    entries.lock().await.remove(&path);
+                });
+                receiver
+            }
+        };
+
+        if let Some(outcome) = receiver.borrow().clone() {
+            return outcome;
+        }
+        if receiver.changed().await.is_ok()
+            && let Some(outcome) = receiver.borrow().clone()
+        {
+            return outcome;
+        }
+        WorkspaceScanOutcome {
+            comparison_base: None,
+            files: Err("workspace scan ended before reporting a result".to_owned()),
+        }
+    }
+}
+
+fn compute_workspace_scan(workspace_path: &StdPath) -> WorkspaceScanOutcome {
+    match workspace_comparison_base(workspace_path) {
+        Ok(base) => {
+            let files =
+                build_workspace_run_file_changes_with_base(workspace_path, &base).map(Arc::new);
+            WorkspaceScanOutcome {
+                comparison_base: Some(base),
+                files,
+            }
+        }
+        Err(error) => WorkspaceScanOutcome {
+            comparison_base: None,
+            files: Err(error),
+        },
+    }
+}
+
+/// Cache of `gh pr view` lookups keyed by workspace path.
+///
+/// Resolving a PR URL shells out to `gh`, which performs a network round
+/// trip to the forge. That must never sit on the `run_detail` hot path (the
+/// dashboard polls run detail for every task-graph node), so lookups are
+/// resolved in the background: a request that misses the cache returns
+/// `None` immediately and a later poll picks up the resolved URL.
+#[derive(Clone, Default)]
+pub struct PrUrls {
+    state: Arc<Mutex<HashMap<PathBuf, PrUrlCacheEntry>>>,
+}
+
+struct PrUrlCacheEntry {
+    resolved_at: Option<Instant>,
+    url: Option<String>,
+    in_flight: bool,
+}
+
+impl PrUrls {
+    fn lookup(&self, workspace_path: PathBuf, program: impl Into<String>) -> Option<String> {
+        let program = program.into();
+        let mut state = self.state.lock().expect("pr url cache mutex poisoned");
+        let entry = state
+            .entry(workspace_path.clone())
+            .or_insert(PrUrlCacheEntry {
+                resolved_at: None,
+                url: None,
+                in_flight: false,
+            });
+        let fresh = entry
+            .resolved_at
+            .is_some_and(|resolved_at| resolved_at.elapsed() < PR_URL_CACHE_TTL);
+        if fresh || entry.in_flight {
+            return entry.url.clone();
+        }
+        entry.in_flight = true;
+        let stale_url = entry.url.clone();
+        drop(state);
+
+        let cache = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let url = workspace_pr_url_from_command(&workspace_path, &program);
+            let mut state = cache.lock().expect("pr url cache mutex poisoned");
+            state.insert(
+                workspace_path,
+                PrUrlCacheEntry {
+                    resolved_at: Some(Instant::now()),
+                    url,
+                    in_flight: false,
+                },
+            );
+        });
+        stale_url
     }
 }
 
@@ -305,6 +448,18 @@ struct CachedCodexReadiness {
 impl axum::extract::FromRef<GatewayState> for SnapshotStore {
     fn from_ref(state: &GatewayState) -> Self {
         state.store.clone()
+    }
+}
+
+impl axum::extract::FromRef<GatewayState> for WorkspaceScans {
+    fn from_ref(state: &GatewayState) -> Self {
+        state.workspace_scans.clone()
+    }
+}
+
+impl axum::extract::FromRef<GatewayState> for PrUrls {
+    fn from_ref(state: &GatewayState) -> Self {
+        state.pr_urls.clone()
     }
 }
 
@@ -460,6 +615,8 @@ impl GatewayServer {
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
+            workspace_scans: WorkspaceScans::default(),
+            pr_urls: PrUrls::default(),
         };
 
         // Abort any previous terminal ingest task associated with this server
@@ -1850,16 +2007,10 @@ fn workspace_path_for_issue(
     candidate.starts_with(&root).then_some(candidate)
 }
 
-fn issue_file_changes(
+fn snapshot_fallback_file_changes(
     envelope: &SnapshotEnvelope,
     issue: &ControlPlaneIssueSnapshot,
 ) -> Vec<WorkspaceRunFileChange> {
-    if let Some(workspace_path) = workspace_path_for_issue(envelope, issue)
-        && let Ok(files) = build_workspace_run_file_changes(&workspace_path)
-    {
-        return files;
-    }
-
     let workspace_root = &envelope.snapshot.daemon.workspace_root;
     issue
         .modified_files
@@ -1880,14 +2031,6 @@ fn issue_file_changes(
         .collect()
 }
 
-fn workspace_pr_url(
-    envelope: &SnapshotEnvelope,
-    issue: &ControlPlaneIssueSnapshot,
-) -> Option<String> {
-    let workspace_path = workspace_path_for_issue(envelope, issue)?;
-    workspace_pr_url_from_command(&workspace_path, "gh")
-}
-
 fn workspace_pr_url_from_command(workspace_path: &StdPath, program: &str) -> Option<String> {
     command_single_line(
         workspace_path,
@@ -1898,20 +2041,59 @@ fn workspace_pr_url_from_command(workspace_path: &StdPath, program: &str) -> Opt
     .filter(|url| !url.is_empty())
 }
 
-async fn issue_file_changes_async(
-    envelope: SnapshotEnvelope,
-    issue: ControlPlaneIssueSnapshot,
-) -> Result<Vec<WorkspaceRunFileChange>, String> {
-    tokio::task::spawn_blocking(move || issue_file_changes(&envelope, &issue))
-        .await
-        .map_err(|error| format!("workspace file change task failed: {error}"))
+/// Changed-file listing for one issue plus the comparison base the scan
+/// resolved, so callers producing diffs can reuse it instead of re-probing.
+struct IssueFileChangeSet {
+    comparison_base: Option<WorkspaceComparisonBase>,
+    files: Arc<Vec<WorkspaceRunFileChange>>,
 }
 
+/// Resolve the changed files for an issue: the git sweep runs on the
+/// blocking pool and concurrent requests for the same workspace share one
+/// sweep. Falls back to the snapshot's `modified_files` when the workspace
+/// cannot be scanned.
+async fn issue_file_changes_coalesced(
+    scans: &WorkspaceScans,
+    envelope: &SnapshotEnvelope,
+    issue: &ControlPlaneIssueSnapshot,
+) -> IssueFileChangeSet {
+    if let Some(workspace_path) = workspace_path_for_issue(envelope, issue) {
+        let outcome = scans.scan(workspace_path).await;
+        match outcome.files {
+            Ok(files) => {
+                return IssueFileChangeSet {
+                    comparison_base: outcome.comparison_base,
+                    files,
+                };
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    run_id = %issue.identifier,
+                    "workspace scan unavailable; falling back to snapshot file changes"
+                );
+            }
+        }
+    }
+    IssueFileChangeSet {
+        comparison_base: None,
+        files: Arc::new(snapshot_fallback_file_changes(envelope, issue)),
+    }
+}
+
+#[cfg(test)]
 fn build_workspace_run_file_changes(
     workspace_path: &StdPath,
 ) -> Result<Vec<WorkspaceRunFileChange>, String> {
     let comparison_base = workspace_comparison_base(workspace_path)?;
-    let mut files = tracked_workspace_file_changes(workspace_path, &comparison_base)?;
+    build_workspace_run_file_changes_with_base(workspace_path, &comparison_base)
+}
+
+fn build_workspace_run_file_changes_with_base(
+    workspace_path: &StdPath,
+    comparison_base: &WorkspaceComparisonBase,
+) -> Result<Vec<WorkspaceRunFileChange>, String> {
+    let mut files = tracked_workspace_file_changes(workspace_path, comparison_base)?;
     files.extend(untracked_workspace_file_changes(workspace_path)?);
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
@@ -1961,6 +2143,22 @@ fn tracked_workspace_file_changes(
             "--".to_owned(),
         ],
     )?;
+    // One batched numstat sweep for the whole tree. Running numstat per file
+    // spawns a git subprocess per changed path, which dominates request
+    // latency once a workspace accumulates more than a handful of edits.
+    let numstat_output = command_output_args(
+        workspace_path,
+        "git",
+        [
+            "diff".to_owned(),
+            "--numstat".to_owned(),
+            "-z".to_owned(),
+            "--find-renames".to_owned(),
+            comparison_base.merge_base.clone(),
+            "--".to_owned(),
+        ],
+    )?;
+    let line_counts = parse_git_numstat_z(&numstat_output);
     let mut fields = output
         .split('\0')
         .filter(|field| !field.is_empty())
@@ -1975,12 +2173,8 @@ fn tracked_workspace_file_changes(
             let query_path = fields
                 .next()
                 .ok_or_else(|| "missing current path for rename entry".to_owned())?;
-            let (lines_added, lines_removed) = git_numstat_for_change(
-                workspace_path,
-                comparison_base,
-                query_path,
-                Some(previous_path),
-            )?;
+            let (lines_added, lines_removed) =
+                line_counts.get(query_path).copied().unwrap_or((0, 0));
             files.push(WorkspaceRunFileChange {
                 path: query_path.to_owned(),
                 query_path: query_path.to_owned(),
@@ -1996,7 +2190,7 @@ fn tracked_workspace_file_changes(
                 .next()
                 .ok_or_else(|| "missing path for git diff entry".to_owned())?;
             let (lines_added, lines_removed) =
-                git_numstat_for_change(workspace_path, comparison_base, query_path, None)?;
+                line_counts.get(query_path).copied().unwrap_or((0, 0));
             files.push(WorkspaceRunFileChange {
                 path: query_path.to_owned(),
                 query_path: query_path.to_owned(),
@@ -2011,6 +2205,43 @@ fn tracked_workspace_file_changes(
     }
 
     Ok(files)
+}
+
+/// Parse `git diff --numstat -z` output into a map from current path to
+/// `(lines_added, lines_removed)`.
+///
+/// Entry formats with `-z`:
+/// - regular: `added\tremoved\tpath NUL`
+/// - rename/copy: `added\tremoved\t NUL source NUL dest NUL` (empty path
+///   field, followed by the two NUL-terminated paths)
+///
+/// Binary files report `-` for both counts and are recorded as `(0, 0)`.
+fn parse_git_numstat_z(output: &str) -> HashMap<String, (u32, u32)> {
+    let mut counts = HashMap::new();
+    let mut fields = output.split('\0').peekable();
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let mut columns = record.split('\t');
+        let lines_added = parse_numstat_count(columns.next());
+        let lines_removed = parse_numstat_count(columns.next());
+        match columns.next() {
+            Some(path) if !path.is_empty() => {
+                counts.insert(path.to_owned(), (lines_added, lines_removed));
+            }
+            Some(_) => {
+                // Rename/copy: the record's path column is empty and the
+                // source/destination paths follow as separate NUL fields.
+                let _source = fields.next();
+                if let Some(dest) = fields.next().filter(|dest| !dest.is_empty()) {
+                    counts.insert(dest.to_owned(), (lines_added, lines_removed));
+                }
+            }
+            None => {}
+        }
+    }
+    counts
 }
 
 fn untracked_workspace_file_changes(
@@ -2037,35 +2268,6 @@ fn untracked_workspace_file_changes(
     }
 
     Ok(files)
-}
-
-fn git_numstat_for_change(
-    workspace_path: &StdPath,
-    comparison_base: &WorkspaceComparisonBase,
-    query_path: &str,
-    previous_path: Option<&str>,
-) -> Result<(u32, u32), String> {
-    let mut args = vec![
-        "diff".to_owned(),
-        "--numstat".to_owned(),
-        "--find-renames".to_owned(),
-        comparison_base.merge_base.clone(),
-        "--".to_owned(),
-    ];
-    if let Some(previous_path) = previous_path {
-        args.push(previous_path.to_owned());
-    }
-    args.push(query_path.to_owned());
-
-    let output = command_output_args(workspace_path, "git", args)?;
-    let Some(line) = output.lines().find(|line| !line.trim().is_empty()) else {
-        return Ok((0, 0));
-    };
-    let mut fields = line.split('\t');
-    Ok((
-        parse_numstat_count(fields.next()),
-        parse_numstat_count(fields.next()),
-    ))
 }
 
 fn parse_numstat_count(field: Option<&str>) -> u32 {
@@ -2817,6 +3019,7 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
 
 async fn get_run_detail(
     State(store): State<SnapshotStore>,
+    State(pr_urls): State<PrUrls>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
@@ -2901,10 +3104,13 @@ async fn get_run_detail(
             _ => None,
         }
     };
-    let pr_url = issue
-        .pr_url
-        .clone()
-        .or_else(|| workspace_pr_url(&envelope, issue));
+    // `gh pr view` performs a network round trip, so it never runs inline:
+    // the cache answers immediately (possibly with `None` on first sight of a
+    // workspace) and resolves in the background for the next poll.
+    let pr_url = issue.pr_url.clone().or_else(|| {
+        workspace_path_for_issue(&envelope, issue)
+            .and_then(|workspace_path| pr_urls.lookup(workspace_path, PR_URL_COMMAND))
+    });
 
     (
         StatusCode::OK,
@@ -3056,34 +3262,23 @@ async fn get_run_events(
 
 async fn get_run_files(
     State(store): State<SnapshotStore>,
+    State(scans): State<WorkspaceScans>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
     let files: Vec<ChangedFileEntry> = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => match issue_file_changes_async(envelope.clone(), issue.clone()).await {
-            Ok(files) => files
-                .iter()
-                .map(|fc| ChangedFileEntry {
-                    path: fc.path.clone(),
-                    change_kind: map_file_change_kind(fc.change_kind),
-                    lines_added: fc.lines_added,
-                    lines_removed: fc.lines_removed,
-                    size_bytes: None,
-                })
-                .collect(),
-            Err(error) => {
-                tracing::warn!(%error, run_id = %issue.identifier, "failed to load run files");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(RunFilesPage {
-                        schema_version: SchemaVersion::v1(),
-                        run_id,
-                        next_cursor: None,
-                        files: Vec::new(),
-                    }),
-                );
-            }
-        },
+        Some(issue) => issue_file_changes_coalesced(&scans, &envelope, issue)
+            .await
+            .files
+            .iter()
+            .map(|fc| ChangedFileEntry {
+                path: fc.path.clone(),
+                change_kind: map_file_change_kind(fc.change_kind),
+                lines_added: fc.lines_added,
+                lines_removed: fc.lines_removed,
+                size_bytes: None,
+            })
+            .collect(),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -3110,6 +3305,7 @@ async fn get_run_files(
 
 async fn get_run_diffs(
     State(store): State<SnapshotStore>,
+    State(scans): State<WorkspaceScans>,
     AxumPath(run_id): AxumPath<String>,
     Query(query): Query<RunDiffQuery>,
 ) -> impl IntoResponse {
@@ -3132,36 +3328,21 @@ async fn get_run_diffs(
         }
     };
     let workspace_path = workspace_path_for_issue(&envelope, issue);
-    let all_files = match issue_file_changes_async(envelope.clone(), issue.clone()).await {
-        Ok(files) => files,
-        Err(error) => {
-            tracing::warn!(%error, run_id = %issue.identifier, "failed to load run diffs");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(FileDiffPage {
-                    schema_version: SchemaVersion::v1(),
-                    run_id,
-                    file_path: String::new(),
-                    next_cursor: None,
-                    hunks: Vec::new(),
-                    total_lines_added: 0,
-                    total_lines_removed: 0,
-                }),
-            );
-        }
-    };
+    let change_set = issue_file_changes_coalesced(&scans, &envelope, issue).await;
     let requested_path = query.file_path.as_deref().map(normalize_query_file_path);
     let files: Vec<WorkspaceRunFileChange> = match &requested_path {
-        Some(path) => all_files
-            .into_iter()
+        Some(path) => change_set
+            .files
+            .iter()
             .filter(|fc| fc.path == *path || fc.query_path == *path)
+            .cloned()
             .collect(),
-        None => all_files,
+        None => change_set.files.as_ref().clone(),
     };
 
-    let comparison_base = workspace_path
-        .as_ref()
-        .and_then(|path| workspace_comparison_base(path).ok());
+    // Reuse the base resolved by the coalesced scan instead of re-probing
+    // git references on every diff request.
+    let comparison_base = change_set.comparison_base;
     let mut hunks: Vec<DiffHunk> = Vec::new();
     for fc in &files {
         if let Some(path) = &workspace_path
@@ -3316,6 +3497,7 @@ fn build_synthetic_hunks(fc: &WorkspaceRunFileChange) -> Vec<DiffHunk> {
 
 async fn get_run_validation(
     State(store): State<SnapshotStore>,
+    State(scans): State<WorkspaceScans>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
@@ -3336,23 +3518,10 @@ async fn get_run_validation(
         }
     };
 
-    let has_file_changes = match issue_file_changes_async(envelope.clone(), issue.clone()).await {
-        Ok(files) => !files.is_empty(),
-        Err(error) => {
-            tracing::warn!(%error, run_id = %issue.identifier, "failed to load validation files");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(RunValidationSummary {
-                    schema_version: SchemaVersion::v1(),
-                    run_id,
-                    generated_at: Utc::now(),
-                    overall_status: ValidationStatus::Error,
-                    commands: Vec::new(),
-                    evidence: Vec::new(),
-                }),
-            );
-        }
-    };
+    let has_file_changes = !issue_file_changes_coalesced(&scans, &envelope, &issue)
+        .await
+        .files
+        .is_empty();
     let overall_status = validation_status_for_issue(&issue, has_file_changes);
 
     (
@@ -4427,6 +4596,105 @@ exit 2
                 .as_deref(),
             Some("https://github.com/kumanday/OpenSymphony/pull/461")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pr_url_cache_resolves_in_background_without_blocking_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("COE-461");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let fake_gh = temp.path().join("gh");
+        std::fs::write(
+            &fake_gh,
+            "#!/bin/sh\nprintf '%s\\n' 'https://github.com/kumanday/OpenSymphony/pull/461'\n",
+        )
+        .expect("write fake gh");
+        let mut perms = std::fs::metadata(&fake_gh)
+            .expect("fake gh metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_gh, perms).expect("chmod fake gh");
+        let fake_gh = fake_gh.to_str().expect("utf-8 path").to_owned();
+
+        let cache = PrUrls::default();
+        // First lookup misses: it must return immediately (no URL yet) and
+        // kick off the background resolution.
+        assert_eq!(cache.lookup(workspace.clone(), fake_gh.clone()), None);
+
+        let resolved = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(url) = cache.lookup(workspace.clone(), fake_gh.clone()) {
+                    return url;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background pr url resolution");
+        assert_eq!(
+            resolved,
+            "https://github.com/kumanday/OpenSymphony/pull/461"
+        );
+    }
+
+    #[test]
+    fn parse_git_numstat_z_handles_regular_rename_and_binary_entries() {
+        // Regular entry, rename entry (empty path column + two NUL paths),
+        // and a binary entry reporting `-` counts.
+        let output = "3\t1\tsrc/main.rs\0\
+                      5\t2\t\0src/old_name.rs\0src/new_name.rs\0\
+                      -\t-\tassets/logo.png\0";
+        let counts = parse_git_numstat_z(output);
+
+        assert_eq!(counts.get("src/main.rs"), Some(&(3, 1)));
+        assert_eq!(counts.get("src/new_name.rs"), Some(&(5, 2)));
+        assert_eq!(counts.get("assets/logo.png"), Some(&(0, 0)));
+        assert_eq!(counts.len(), 3);
+    }
+
+    #[test]
+    fn workspace_run_file_changes_report_batched_counts_for_renames() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join("src")).expect("create src");
+        let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(workspace.join("src/original.rs"), &body).expect("write original");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "main"]);
+        run_git(workspace, &["add", "src/original.rs"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+                "--no-gpg-sign",
+            ],
+        );
+
+        std::fs::rename(
+            workspace.join("src/original.rs"),
+            workspace.join("src/renamed.rs"),
+        )
+        .expect("rename file");
+        std::fs::write(workspace.join("src/renamed.rs"), format!("{body}tail\n"))
+            .expect("modify renamed file");
+        run_git(workspace, &["add", "-A"]);
+
+        let changes = build_workspace_run_file_changes(workspace).expect("build workspace changes");
+        let renamed = changes
+            .iter()
+            .find(|change| change.path == "src/renamed.rs")
+            .expect("renamed change");
+        assert_eq!(renamed.previous_path.as_deref(), Some("src/original.rs"));
+        assert_eq!(renamed.lines_added, 1);
+        assert_eq!(renamed.lines_removed, 0);
     }
 
     #[test]
