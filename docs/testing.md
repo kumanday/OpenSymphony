@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-28T06:08:14.403748+00:00
 
 ## Current model
 
-- COE-531 contributed: PR #195: Promote workspace graph surfaces into hero shell (merge `932991f`)
+- PR-196 contributed: PR #196: perf(desktop): fix task/diff click latency and live-refresh selection clobbering (merge `428acc9`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-28T06:08:14.403748+00:00
 
 ## Recent changes
 
-- COE-531: Workspace Shell Graph Hero And Surface State
+- PR-196: Desktop task and diff latency plus live-refresh UX fixes
 
 ## Source refs
 
-- COE-531
+- PR-196
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
