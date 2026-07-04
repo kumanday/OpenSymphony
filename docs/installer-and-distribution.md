@@ -55,7 +55,9 @@ fails before writing release metadata if `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml`, or `apps/desktop/src-tauri/tauri.conf.json`
 declare a different desktop version. `PLATFORM`/`ARCH` use the same strings the
 CLI verifies (`macos`, `linux`, `windows`, `aarch64`, `x86_64`, and so on). The
-archive contains:
+desktop Cargo build runs with `--locked`, so lockfile drift fails packaging
+instead of producing a release from an uncommitted dependency graph. The archive
+contains:
 
 - `opensymphony-desktop-manifest.json`, with version, platform, architecture,
   relative executable path, and executable SHA-256.

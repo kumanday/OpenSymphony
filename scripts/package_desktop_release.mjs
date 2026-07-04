@@ -65,6 +65,7 @@ async function main(options) {
     run("cargo", [
       "build",
       "--release",
+      "--locked",
       "--manifest-path",
       "apps/desktop/src-tauri/Cargo.toml",
       "--target-dir",
