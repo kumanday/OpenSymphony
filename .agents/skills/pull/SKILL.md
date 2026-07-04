@@ -27,7 +27,11 @@ description:
    - This pulls branch updates made remotely (for example, a GitHub auto-commit)
      before merging the configured target branch.
 6. Merge in order:
-   - Prefer `git -c merge.conflictstyle=zdiff3 merge origin/<target-branch>`
+   - Extract the configured target branch before merging:
+     `target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)`
+   - If the marker is missing, stop and ask for the target branch to be added
+     to `WORKFLOW.md`; do not guess.
+   - Prefer `git -c merge.conflictstyle=zdiff3 merge "origin/$target_branch"`
      for clearer conflict context.
 7. If conflicts appear, resolve them (see conflict guidance below), then:
    - `git add <files>`

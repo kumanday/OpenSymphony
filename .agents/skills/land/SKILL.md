@@ -60,6 +60,15 @@ branch=$(git branch --show-current)
 pr_number=$(gh pr view --json number -q .number)
 pr_title=$(gh pr view --json title -q .title)
 pr_body=$(gh pr view --json body -q .body)
+target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)
+if [ -z "$target_branch" ]; then
+  echo "WORKFLOW.md is missing a Target branch marker; run opensymphony update --target-branch <branch> before landing." >&2
+  exit 1
+fi
+current_base=$(gh pr view --json baseRefName -q .baseRefName)
+if [ "$current_base" != "$target_branch" ]; then
+  gh pr edit --base "$target_branch"
+fi
 
 # Check mergeability and conflicts
 mergeable=$(gh pr view --json mergeable -q .mergeable)

@@ -151,16 +151,18 @@ opensymphony init
 can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` ignores local OpenSymphony runtime state.
 The generated workflow records a target branch marker for feature PRs and syncs.
 The default is `develop`; non-interactive setup can choose a repository-specific
-branch:
+branch after the shared target-repo template has the same marker-aware
+`WORKFLOW.md` and `pull`/`push`/`land` guidance:
 
 ```bash
 opensymphony init --non-interactive --target-branch main
 opensymphony init --non-interactive --target-branch release/next
 ```
 
-Fresh init fetches target-repo assets from `kumanday/OpenSymphony-template`;
-that template's `WORKFLOW.md` and `pull`/`push`/`land` skills must carry the
-same marker-aware wording before these branch examples are release-ready.
+Fresh init fetches target-repo assets from `kumanday/OpenSymphony-template`.
+Until that template sync lands, treat the examples above as the intended
+post-sync form; otherwise fresh repos can record the marker while copied skills
+still use older branch guidance.
 
 If `AGENTS.md` already exists during first-time setup, `init` leaves it alone
 and writes the starter guidance to `AGENTS-example.md` for review.

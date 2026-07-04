@@ -91,7 +91,10 @@ git push --force-with-lease origin HEAD
 
 # Ensure a PR exists (create only if missing)
 target_branch=$(awk -F': *' '/^Target branch:/ { gsub(/`/, "", $2); print $2; exit }' WORKFLOW.md)
-target_branch=${target_branch:-develop}
+if [ -z "$target_branch" ]; then
+  echo "WORKFLOW.md is missing a Target branch marker; run opensymphony update --target-branch <branch> before creating or retargeting a PR." >&2
+  exit 1
+fi
 pr_state=$(gh pr view --json state -q .state 2>/dev/null || true)
 if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
   echo "Current branch is tied to a closed PR; create a new branch + PR." >&2
