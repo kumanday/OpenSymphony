@@ -45,6 +45,11 @@ the OpenSymphony version, platform, architecture, relative executable path, and
 executable SHA-256. Local bundle materialization copies regular files and
 directories; symlinked bundle entries should be packaged by a future signed or
 downloaded bundle format instead of this local smoke path.
+Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
+custom install root. That root contains versioned bundles such as
+`<dir>/<version>/`; it is not the bundle directory itself. Download metadata,
+auto-update prompting, fallback order, and path-safety rules are defined in
+[Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
 
 Important `init` behavior:
 
