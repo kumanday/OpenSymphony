@@ -573,25 +573,7 @@ mod tests {
 
     #[test]
     fn release_index_parses_download_contract() {
-        let raw = r#"{
-            "schema_version": 1,
-            "assets": [
-                {
-                    "version": "2.7.0",
-                    "platform": "macos",
-                    "arch": "aarch64",
-                    "url": "https://downloads.example.invalid/opensymphony/2.7.0/macos-aarch64.zip",
-                    "checksum": {
-                        "algorithm": "sha256",
-                        "value": "0123456789abcdef"
-                    },
-                    "launch_target": {
-                        "executable": "OpenSymphony.app/Contents/MacOS/OpenSymphony",
-                        "args": []
-                    }
-                }
-            ]
-        }"#;
+        let raw = include_str!("../tests/fixtures/desktop-release-index.json");
 
         let index = parse_release_index(raw).expect("release index should parse");
         let asset = &index.assets[0];
@@ -602,13 +584,13 @@ mod tests {
         assert_eq!(asset.arch, "aarch64");
         assert_eq!(
             asset.url,
-            "https://downloads.example.invalid/opensymphony/2.7.0/macos-aarch64.zip"
+            "https://github.com/kumanday/OpenSymphony/releases/download/v2.7.0/opensymphony-desktop-v2.7.0-macos-aarch64.tar.gz"
         );
         assert_eq!(asset.checksum.algorithm, "sha256");
-        assert_eq!(asset.checksum.value, "0123456789abcdef");
+        assert_eq!(asset.checksum.value.len(), 64);
         assert_eq!(
             asset.launch_target.executable,
-            PathBuf::from("OpenSymphony.app/Contents/MacOS/OpenSymphony")
+            PathBuf::from("OpenSymphony")
         );
         assert!(asset.launch_target.args.is_empty());
     }

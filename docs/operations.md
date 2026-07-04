@@ -45,6 +45,20 @@ the OpenSymphony version, platform, architecture, relative executable path, and
 executable SHA-256. Local bundle materialization copies regular files and
 directories; symlinked bundle entries should be packaged by a future signed or
 downloaded bundle format instead of this local smoke path.
+
+Maintainers can build the current release bundle assets from a checkout:
+
+```bash
+npm run build --workspace=@opensymphony/desktop
+npm run package:release --workspace=@opensymphony/desktop
+```
+
+The package command writes
+`dist/desktop-release/opensymphony-desktop-v<VERSION>-<PLATFORM>-<ARCH>.tar.gz`
+and `dist/desktop-release/opensymphony-desktop-release-index.json`. Upload the
+archive first and the release index last. The index is the CLI-consumable
+metadata file; it should never be published before the referenced archive is
+available.
 Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
 custom install root. That root contains versioned bundles such as
 `<dir>/<version>/`; it is not the bundle directory itself. Download metadata,

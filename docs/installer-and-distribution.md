@@ -36,6 +36,36 @@ launcher does not make `cargo install opensymphony` compile Tauri, npm, or
 platform desktop dependencies; signed/downloaded desktop bundle distribution is
 still future installer work.
 
+Maintainers can produce the current early desktop release assets from a source
+checkout with the desktop workspace script:
+
+```bash
+npm run build --workspace=@opensymphony/desktop
+npm run package:release --workspace=@opensymphony/desktop
+```
+
+The package command builds the Tauri desktop binary for the current platform,
+then writes these files under `dist/desktop-release/`:
+
+- `opensymphony-desktop-v<VERSION>-<PLATFORM>-<ARCH>.tar.gz`
+- `opensymphony-desktop-release-index.json`
+
+`VERSION` is the root Cargo workspace package version, and `PLATFORM`/`ARCH`
+use the same strings the CLI verifies (`macos`, `linux`, `windows`, `aarch64`,
+`x86_64`, and so on). The archive contains:
+
+- `opensymphony-desktop-manifest.json`, with version, platform, architecture,
+  relative executable path, and executable SHA-256.
+- the launch target named by that manifest.
+
+The release index is the metadata asset consumed by the CLI download path. It
+uses schema version `1`, lists compatible assets by version/platform/arch, and
+records the archive URL, archive SHA-256, and launch target. Upload the archive
+asset first, then upload or replace `opensymphony-desktop-release-index.json`
+last. The packaging script follows the same rule locally: it stages all output,
+publishes the archive, and only then publishes the index, so a failed packaging
+run does not leave new metadata claiming an unavailable archive.
+
 The desktop bundle contract is intentionally small and lives in
 [Desktop App Installer And Auto-Update Spec](specs/desktop-app-installer-auto-update-spec.md).
 The release index selects assets by OpenSymphony version, platform,

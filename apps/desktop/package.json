@@ -7,7 +7,8 @@
   "scripts": {
     "type-check": "tsc --noEmit",
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "build": "vite build"
+    "build": "vite build",
+    "package:release": "node ../../scripts/package_desktop_release.mjs"
   },
   "dependencies": {
     "@opensymphony/api-client": "*",
