@@ -353,7 +353,8 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
     let no_update = args.no_update;
-    let skip_update = no_update || bundle_dir.is_some();
+    let cached_before_launch = bundle_dir.is_none()
+        && latest_current_or_newer_verified_cached_bundle(&cache_root).is_some();
     if args.dry_run {
         let verified = dry_run_verified_bundle(&cache_root, &cache_dir, bundle_dir)?;
         println!(
@@ -378,7 +379,7 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
         &cache_root,
         verified,
         update_release_index_url.as_str(),
-        skip_update,
+        !should_check_for_desktop_update(no_update, bundle_dir, cached_before_launch),
     )
     .await;
     Command::new(&verified.executable)
@@ -397,7 +398,7 @@ fn dry_run_verified_bundle(
     bundle_dir: Option<&Path>,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
     if bundle_dir.is_none()
-        && let Some(bundle) = latest_verified_cached_bundle(cache_root)
+        && let Some(bundle) = latest_current_or_newer_verified_cached_bundle(cache_root)
     {
         return Ok(bundle);
     }
@@ -457,12 +458,12 @@ async fn maybe_update_verified_bundle(
     let Some(asset) = candidate else {
         return verified;
     };
-    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
     if interactive {
         let stdin = io::stdin();
-        let stdout = io::stdout();
+        let stderr = io::stderr();
         let mut reader = stdin.lock();
-        let mut writer = stdout.lock();
+        let mut writer = stderr.lock();
         match prompt_update_decision(
             &mut reader,
             &mut writer,
@@ -496,7 +497,8 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
     runner: &mut R,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
     let cached = if bundle_dir.is_none() {
-        latest_verified_cached_bundle(cache_root).or_else(|| verify_bundle(cache_dir).ok())
+        latest_current_or_newer_verified_cached_bundle(cache_root)
+            .or_else(|| verify_bundle(cache_dir).ok())
     } else {
         verify_bundle(cache_dir).ok()
     };
@@ -531,6 +533,14 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
             Err(error) => Err(error),
         }
     }
+}
+
+fn should_check_for_desktop_update(
+    no_update: bool,
+    bundle_dir: Option<&Path>,
+    cached_before_launch: bool,
+) -> bool {
+    !no_update && bundle_dir.is_none() && cached_before_launch
 }
 
 fn release_error_allows_source_fallback(error: &DesktopLauncherError) -> bool {
@@ -613,7 +623,17 @@ where
     }
 }
 
-fn latest_verified_cached_bundle(cache_root: &Path) -> Option<VerifiedBundle> {
+fn latest_current_or_newer_verified_cached_bundle(cache_root: &Path) -> Option<VerifiedBundle> {
+    latest_verified_cached_bundle_with_minimum(
+        cache_root,
+        SemanticVersion::parse(desktop_version()),
+    )
+}
+
+fn latest_verified_cached_bundle_with_minimum(
+    cache_root: &Path,
+    minimum_version: Option<SemanticVersion>,
+) -> Option<VerifiedBundle> {
     fs::read_dir(cache_root)
         .ok()?
         .filter_map(|entry| {
@@ -623,6 +643,12 @@ fn latest_verified_cached_bundle(cache_root: &Path) -> Option<VerifiedBundle> {
             let manifest = read_manifest(&cache_dir.join(MANIFEST_FILE)).ok()?;
             validate_cache_dir_for_version(cache_root, &cache_dir, &manifest.version).ok()?;
             let version = SemanticVersion::parse(&manifest.version)?;
+            if minimum_version
+                .as_ref()
+                .is_some_and(|minimum_version| &version < minimum_version)
+            {
+                return None;
+            }
             let verified = verify_bundle_for_version(&cache_dir, Some(&manifest.version)).ok()?;
             Some((version, verified))
         })
@@ -2590,6 +2616,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn older_cached_bundle_does_not_satisfy_current_cache_miss() {
+        let archive = desktop_release_archive(b"current desktop");
+        let archive_sha = sha256_bytes(&archive);
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body(base_url, archive_sha.as_str()).into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        write_installed_bundle_for_version(
+            &install_root.path().join("2.6.0"),
+            "2.6.0",
+            b"old desktop",
+        );
+
+        let verified = ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            &server.url("/index.json"),
+            false,
+        )
+        .await
+        .expect("current bundle should install instead of launching stale cache");
+
+        assert_eq!(verified.manifest.version, desktop_version());
+        assert_eq!(verified.bundle_dir, cache_dir);
+        assert_eq!(
+            server.requests(),
+            vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn current_cached_bundle_checks_index_without_asset_download() {
         let archive = desktop_release_archive(b"fake desktop");
         let archive_sha = sha256_bytes(&archive);
@@ -2638,6 +2703,42 @@ mod tests {
 
         assert_eq!(verified.manifest.version, "2.7.1");
         assert_eq!(verified.bundle_dir, install_root.path().join("2.7.1"));
+    }
+
+    #[test]
+    fn dry_run_ignores_older_cached_bundle_when_current_missing() {
+        let install_root = TempDir::new().expect("install root");
+        write_installed_bundle_for_version(
+            &install_root.path().join("2.6.0"),
+            "2.6.0",
+            b"old desktop",
+        );
+
+        let error = dry_run_verified_bundle(
+            install_root.path(),
+            &install_root.path().join(desktop_version()),
+            None,
+        )
+        .expect_err("older cache should not satisfy current dry-run launch");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::DryRunSourceBuildRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn update_policy_only_checks_after_existing_cached_launch() {
+        let override_bundle = Path::new("/tmp/desktop-bundle");
+
+        assert!(should_check_for_desktop_update(false, None, true));
+        assert!(!should_check_for_desktop_update(true, None, true));
+        assert!(!should_check_for_desktop_update(
+            false,
+            Some(override_bundle),
+            true
+        ));
+        assert!(!should_check_for_desktop_update(false, None, false));
     }
 
     #[tokio::test]
