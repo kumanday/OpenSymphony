@@ -19,13 +19,12 @@ const MANIFEST_FILE: &str = "opensymphony-desktop-manifest.json";
 const DEFAULT_CACHE_RELATIVE: &str = ".opensymphony/desktop";
 const SOURCE_ARCHIVE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const SOURCE_BUILD_TARGET_DIR: &str = "target-opensymphony-desktop";
-const LINUX_TAURI_PKG_CONFIG_ARGS: &[&str] = &[
-    "--exists",
-    "webkit2gtk-4.1",
-    "openssl",
-    "librsvg-2.0",
-    "xdo",
-    "ayatana-appindicator3-0.1",
+const LINUX_TAURI_PKG_CONFIG_MODULES: &[&[&str]] = &[
+    &["webkit2gtk-4.1"],
+    &["openssl"],
+    &["librsvg-2.0"],
+    &["xdo", "libxdo"],
+    &["ayatana-appindicator3-0.1", "appindicator3-0.1"],
 ];
 
 #[derive(Debug, Args)]
@@ -283,7 +282,19 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
                     })?;
                 }
                 copy_dir_all(bundle_dir, cache_dir)?;
-                verify_bundle(cache_dir)
+                match verify_bundle(cache_dir) {
+                    Ok(bundle) => Ok(bundle),
+                    Err(_) => {
+                        validate_cache_dir(cache_root, cache_dir)?;
+                        fs::remove_dir_all(cache_dir).map_err(|source| {
+                            DesktopLauncherError::Repair {
+                                path: cache_dir.to_path_buf(),
+                                source,
+                            }
+                        })?;
+                        build_source_fallback(cache_root, cache_dir, runner).await
+                    }
+                }
             } else {
                 build_source_fallback(cache_root, cache_dir, runner).await
             }
@@ -380,7 +391,10 @@ async fn build_source_fallback<R: DesktopCommandRunner>(
 
     let archive = staging.path().join("opensymphony-source.tar.gz");
     let url = source_archive_url();
-    println!("Downloading OpenSymphony source archive: {url}");
+    println!(
+        "Downloading OpenSymphony source archive: {}",
+        source_archive_display_url(&url)
+    );
     download_source_archive(&url, &archive).await?;
 
     println!("Extracting OpenSymphony source archive.");
@@ -415,12 +429,24 @@ fn source_archive_url() -> String {
     })
 }
 
+fn source_archive_display_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "<invalid source archive URL>".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
 async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLauncherError> {
+    let display_url = source_archive_display_url(url);
     let client = reqwest::Client::builder()
         .timeout(SOURCE_ARCHIVE_DOWNLOAD_TIMEOUT)
         .build()
         .map_err(|source| DesktopLauncherError::SourceDownload {
-            url: url.to_string(),
+            url: display_url.clone(),
             source,
         })?;
     let response =
@@ -429,13 +455,13 @@ async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLa
             .send()
             .await
             .map_err(|source| DesktopLauncherError::SourceDownload {
-                url: url.to_string(),
+                url: display_url.clone(),
                 source,
             })?;
     let status = response.status();
     if !status.is_success() {
         return Err(DesktopLauncherError::SourceDownloadStatus {
-            url: url.to_string(),
+            url: display_url,
             status: status.as_u16(),
         });
     }
@@ -443,7 +469,7 @@ async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLa
         .bytes()
         .await
         .map_err(|source| DesktopLauncherError::SourceDownload {
-            url: url.to_string(),
+            url: source_archive_display_url(url),
             source,
         })?;
     fs::write(path, body).map_err(|source| DesktopLauncherError::Repair {
@@ -533,7 +559,7 @@ fn platform_desktop_dependencies_ready<R: DesktopCommandRunner>(
         "linux" => {
             runner.program_exists("pkg-config")
                 && linux_build_toolchain_ready(runner)
-                && runner.command_succeeds("pkg-config", LINUX_TAURI_PKG_CONFIG_ARGS)
+                && linux_pkg_config_modules_ready(runner)
         }
         "windows" => runner.program_exists("cl"),
         _ => false,
@@ -542,6 +568,14 @@ fn platform_desktop_dependencies_ready<R: DesktopCommandRunner>(
 
 fn linux_build_toolchain_ready<R: DesktopCommandRunner>(runner: &R) -> bool {
     runner.program_exists("cc") || runner.program_exists("gcc") || runner.program_exists("clang")
+}
+
+fn linux_pkg_config_modules_ready<R: DesktopCommandRunner>(runner: &R) -> bool {
+    LINUX_TAURI_PKG_CONFIG_MODULES.iter().all(|alternatives| {
+        alternatives
+            .iter()
+            .any(|module| runner.command_succeeds("pkg-config", &["--exists", module]))
+    })
 }
 
 fn platform_prerequisite_name(platform: &str) -> &'static str {
@@ -1269,6 +1303,20 @@ mod tests {
         }
     }
 
+    fn mark_pkg_config_module_ready(runner: &mut FakeRunner, module: &str) {
+        runner
+            .successful_checks
+            .insert(command_key("pkg-config", &["--exists", module]));
+    }
+
+    fn mark_linux_tauri_modules_ready(runner: &mut FakeRunner) {
+        mark_pkg_config_module_ready(runner, "webkit2gtk-4.1");
+        mark_pkg_config_module_ready(runner, "openssl");
+        mark_pkg_config_module_ready(runner, "librsvg-2.0");
+        mark_pkg_config_module_ready(runner, "libxdo");
+        mark_pkg_config_module_ready(runner, "appindicator3-0.1");
+    }
+
     fn write_source_metadata(source: &Path, version: &str) {
         fs::create_dir_all(source.join("apps/desktop/src-tauri")).expect("create fake tauri dir");
         fs::create_dir_all(source.join("apps/desktop")).expect("create fake desktop dir");
@@ -1428,9 +1476,7 @@ mod tests {
     fn linux_prerequisite_probe_requires_full_tauri_inputs() {
         let mut runner =
             FakeRunner::with_programs(&["cargo", "rustc", "node", "npm", "tar", "pkg-config"]);
-        runner
-            .successful_checks
-            .insert(command_key("pkg-config", LINUX_TAURI_PKG_CONFIG_ARGS));
+        mark_linux_tauri_modules_ready(&mut runner);
         let missing = probe_source_build_prerequisites("linux", &runner);
 
         assert!(
@@ -1444,6 +1490,33 @@ mod tests {
         let missing = probe_source_build_prerequisites("linux", &runner);
 
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn linux_prerequisite_probe_accepts_distro_pkg_config_names() {
+        let mut runner = FakeRunner::with_programs(&[
+            "cargo",
+            "rustc",
+            "node",
+            "npm",
+            "tar",
+            "pkg-config",
+            "cc",
+        ]);
+        mark_linux_tauri_modules_ready(&mut runner);
+
+        let missing = probe_source_build_prerequisites("linux", &runner);
+
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn source_archive_display_url_redacts_credentials_query_and_fragment() {
+        let display = source_archive_display_url(
+            "https://user:secret@example.com/archive.tar.gz?token=secret#frag",
+        );
+
+        assert_eq!(display, "https://example.com/archive.tar.gz");
     }
 
     #[tokio::test]
@@ -1463,6 +1536,40 @@ mod tests {
             DesktopLauncherError::DryRunSourceBuildRequired { .. }
         ));
         assert!(!cache.path().join(desktop_version()).exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_local_bundle_falls_back_to_source_prerequisite_probe() {
+        let local = TempDir::new().expect("local bundle tempdir");
+        let cache = TempDir::new().expect("cache tempdir");
+        let manifest = DesktopBundleManifest {
+            version: "0.0.0".to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            executable: PathBuf::from("OpenSymphony"),
+            sha256: "bad".to_string(),
+        };
+        fs::write(
+            local.path().join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write invalid manifest");
+
+        let cache_dir = cache.path().join(desktop_version());
+        let mut runner = FakeRunner::default();
+        let error =
+            ensure_verified_bundle_with(cache.path(), &cache_dir, Some(local.path()), &mut runner)
+                .await
+                .expect_err("invalid local bundle should continue to source fallback");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::MissingPrerequisites { .. }
+        ));
+        assert!(
+            !cache_dir.exists(),
+            "failed local bundle copy should not remain cached"
+        );
     }
 
     #[test]
@@ -1570,6 +1677,39 @@ mod tests {
         server.await.expect("server task should finish");
 
         assert_eq!(fs::read(archive).expect("read archive"), b"archive");
+    }
+
+    #[tokio::test]
+    async fn source_archive_download_error_redacts_credentials_and_query() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut buffer = [0; 512];
+            let _ = stream.read(&mut buffer).await.expect("read request");
+            stream
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write response");
+        });
+        let temp = TempDir::new().expect("download tempdir");
+        let archive = temp.path().join("archive.tar.gz");
+        let error = download_source_archive(
+            &format!("http://user:secret@{addr}/archive.tar.gz?token=secret"),
+            &archive,
+        )
+        .await
+        .expect_err("403 should fail");
+        server.await.expect("server task should finish");
+        let message = error.to_string();
+
+        assert!(message.contains(&format!("http://{addr}/archive.tar.gz")));
+        assert!(!message.contains("user:secret"));
+        assert!(!message.contains("token=secret"));
     }
 
     #[test]
