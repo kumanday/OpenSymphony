@@ -226,6 +226,12 @@ be materialized with `--bundle-dir <path>` or
 `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`; the bundle must include
 `opensymphony-desktop-manifest.json` with `version`, `platform`, `arch`,
 relative `executable`, and `sha256` fields.
+When no installed or local bundle verifies, the launcher falls back to a local
+source build, checks Rust/Cargo, Node/npm, source archive extraction, and
+platform desktop/Tauri prerequisites first, and prints the exact manual
+commands when it cannot install prerequisites automatically. `--dry-run` is
+read-only: it verifies an existing cached or local bundle and reports when a
+normal run would need to build from source.
 Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
 different install root; the launcher still creates the versioned bundle beneath
 that root. On a cache miss, the launcher downloads the release index from the
