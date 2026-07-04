@@ -458,7 +458,7 @@ async fn maybe_update_verified_bundle(
     let Some(asset) = candidate else {
         return verified;
     };
-    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    let interactive = !cfg!(test) && io::stdin().is_terminal() && io::stderr().is_terminal();
     if interactive {
         let stdin = io::stdin();
         let stderr = io::stderr();
