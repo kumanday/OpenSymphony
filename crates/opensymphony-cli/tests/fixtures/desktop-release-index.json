@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "version": "2.7.0",
+      "platform": "macos",
+      "arch": "aarch64",
+      "url": "https://github.com/kumanday/OpenSymphony/releases/download/v2.7.0/opensymphony-desktop-v2.7.0-macos-aarch64.tar.gz",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "launch_target": {
+        "executable": "OpenSymphony",
+        "args": []
+      }
+    }
+  ]
+}

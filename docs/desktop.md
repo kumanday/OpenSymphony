@@ -68,6 +68,23 @@ in one terminal and `cargo run` from `apps/desktop/src-tauri` in another.
 Plain `cargo run` rebuilds and reads the current `apps/desktop/dist` bundle; it
 does not start Vite.
 
+## Release Bundle
+
+The first release asset format is a tarball consumed by the lazy CLI launcher.
+Build and package it from the repository root:
+
+```bash
+npm run build --workspace=@opensymphony/desktop
+npm run package:release --workspace=@opensymphony/desktop
+```
+
+The package step writes a stable archive name and release index under
+`dist/desktop-release/`. The archive includes
+`opensymphony-desktop-manifest.json` plus the launch target named in that
+manifest. If an index already exists, the package step keeps other
+platform/architecture entries and replaces only the current asset entry. Upload
+the archive before replacing `opensymphony-desktop-release-index.json`.
+
 ## Task Graph Project Groups
 
 When the gateway task graph includes Linear project metadata, the desktop task
