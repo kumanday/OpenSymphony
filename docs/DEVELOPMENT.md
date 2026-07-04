@@ -66,10 +66,12 @@ entry points live under `apps/`:
 
 ### Running the desktop alpha locally
 
-The desktop app is currently a repo-clone development flow. There is no
-released `opensymphony app` or `opensymphony desktop` installer/launcher yet;
-that work is tracked by COE-488 / OSYM-811. Until then, run the Tauri app from
-this checkout.
+The `opensymphony app` command, with visible alias `opensymphony desktop`, is
+implemented by COE-488 / OSYM-811 as a lazy cached launcher for released/local
+desktop bundles. It verifies the cache under
+`~/.opensymphony/desktop/<version>/`; early local bundles can be materialized
+with `--bundle-dir <path>` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. For active
+desktop development, run the Tauri app from this checkout.
 
 ```bash
 # 1. Install frontend dependencies once from the workspace root.
