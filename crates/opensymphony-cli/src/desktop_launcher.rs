@@ -2523,7 +2523,8 @@ mod tests {
             vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
         );
 
-        let update_server = fake_release_server_for_version("2.7.1", b"updated desktop");
+        let update_version = next_patch_version(desktop_version());
+        let update_server = fake_release_server_for_version(&update_version, b"updated desktop");
         let updated = maybe_update_verified_bundle(
             install_root.path(),
             installed,
@@ -2531,9 +2532,9 @@ mod tests {
             false,
         )
         .await;
-        let update_dir = install_root.path().join("2.7.1");
+        let update_dir = install_root.path().join(&update_version);
 
-        assert_eq!(updated.manifest.version, "2.7.1");
+        assert_eq!(updated.manifest.version, update_version);
         assert_eq!(updated.bundle_dir, update_dir);
         assert_eq!(
             fs::read(&updated.executable).expect("read updated executable"),
@@ -3765,6 +3766,13 @@ mod tests {
                 ("/bundle.tar.gz", archive),
             ]
         })
+    }
+
+    fn next_patch_version(version: &str) -> String {
+        let parts: Vec<_> = version.split('.').collect();
+        assert_eq!(parts.len(), 3, "test version should be major.minor.patch");
+        let patch = parts[2].parse::<u64>().expect("patch version");
+        format!("{}.{}.{}", parts[0], parts[1], patch + 1)
     }
 
     fn desktop_release_asset(version: &str, url: &str, checksum: &str) -> DesktopReleaseAsset {
