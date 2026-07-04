@@ -226,6 +226,10 @@ be materialized with `--bundle-dir <path>` or
 `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`; the bundle must include
 `opensymphony-desktop-manifest.json` with `version`, `platform`, `arch`,
 relative `executable`, and `sha256` fields.
+Use `--install-path <dir>` or `OPENSYMPHONY_DESKTOP_INSTALL_PATH` to choose a
+different install root; the launcher still creates the versioned bundle beneath
+that root. The downloadable release-index and update prompt contract is defined
+in [Desktop App Installer And Auto-Update Spec](docs/specs/desktop-app-installer-auto-update-spec.md).
 
 ### Further Details
 

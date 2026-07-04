@@ -27,6 +27,13 @@ pub struct AppArgs {
     bundle_dir: Option<PathBuf>,
     #[arg(
         long,
+        env = "OPENSYMPHONY_DESKTOP_INSTALL_PATH",
+        value_name = "DIR",
+        help = "Install root for versioned desktop bundles"
+    )]
+    install_path: Option<PathBuf>,
+    #[arg(
+        long,
         env = "OPENSYMPHONY_DESKTOP_CACHE_ROOT",
         hide = true,
         help = "Override the desktop cache root; primarily for smoke tests"
@@ -46,6 +53,40 @@ struct DesktopBundleManifest {
     arch: String,
     executable: PathBuf,
     sha256: String,
+}
+
+// ponytail: parsed contract lives ahead of download logic; remove allow once COE-528 uses it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopReleaseIndex {
+    schema_version: u32,
+    assets: Vec<DesktopReleaseAsset>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopReleaseAsset {
+    version: String,
+    platform: String,
+    arch: String,
+    url: String,
+    checksum: DesktopReleaseChecksum,
+    launch_target: DesktopLaunchTarget,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopReleaseChecksum {
+    algorithm: String,
+    value: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopLaunchTarget {
+    executable: PathBuf,
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -70,7 +111,11 @@ pub async fn run_command(args: AppArgs) -> ExitCode {
 }
 
 fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
-    let cache_root = normalize_cache_root(args.cache_root.unwrap_or(default_cache_root()?))?;
+    let cache_root = normalize_cache_root(
+        args.install_path
+            .or(args.cache_root)
+            .unwrap_or(default_cache_root()?),
+    )?;
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
@@ -170,6 +215,11 @@ fn read_manifest(path: &Path) -> Result<DesktopBundleManifest, DesktopLauncherEr
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[allow(dead_code)]
+fn parse_release_index(contents: &str) -> Result<DesktopReleaseIndex, serde_json::Error> {
+    serde_json::from_str(contents)
 }
 
 fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
@@ -381,13 +431,13 @@ fn current_arch() -> &'static str {
 #[derive(Debug, Error)]
 enum DesktopLauncherError {
     #[error(
-        "could not find HOME; set OPENSYMPHONY_DESKTOP_CACHE_ROOT to choose a desktop cache directory"
+        "could not find HOME; pass --install-path or set OPENSYMPHONY_DESKTOP_INSTALL_PATH to choose a desktop install root"
     )]
     MissingHome,
-    #[error("failed to determine current directory for desktop cache root: {0}")]
+    #[error("failed to determine current directory for desktop install root: {0}")]
     CurrentDir(io::Error),
     #[error(
-        "refusing unsafe desktop cache root {path}\nRepair: choose a non-root cache directory under ~/.opensymphony/desktop or another app-owned directory."
+        "refusing unsafe desktop install root {path}\nRepair: choose a non-root install directory under ~/.opensymphony/desktop or another app-owned directory."
     )]
     DangerousCacheRoot { path: PathBuf },
     #[error(
@@ -482,6 +532,70 @@ mod tests {
                 desktop_version()
             ))
         );
+    }
+
+    #[test]
+    fn install_path_is_a_versioned_bundle_root() {
+        let cli = Cli::try_parse_from([
+            "opensymphony",
+            "app",
+            "--install-path",
+            "/tmp/opensymphony-desktop",
+            "--dry-run",
+        ])
+        .expect("app command should parse");
+        let CliCommand::App(args) = cli.command else {
+            panic!("app command expected");
+        };
+        let root = normalize_cache_root(args.install_path.expect("install path"))
+            .expect("install path should normalize");
+
+        assert_eq!(
+            root.join(desktop_version()),
+            PathBuf::from(format!("/tmp/opensymphony-desktop/{}", desktop_version()))
+        );
+    }
+
+    #[test]
+    fn release_index_parses_download_contract() {
+        let raw = r#"{
+            "schema_version": 1,
+            "assets": [
+                {
+                    "version": "2.7.0",
+                    "platform": "macos",
+                    "arch": "aarch64",
+                    "url": "https://downloads.example.invalid/opensymphony/2.7.0/macos-aarch64.zip",
+                    "checksum": {
+                        "algorithm": "sha256",
+                        "value": "0123456789abcdef"
+                    },
+                    "launch_target": {
+                        "executable": "OpenSymphony.app/Contents/MacOS/OpenSymphony",
+                        "args": []
+                    }
+                }
+            ]
+        }"#;
+
+        let index = parse_release_index(raw).expect("release index should parse");
+        let asset = &index.assets[0];
+
+        assert_eq!(index.schema_version, 1);
+        assert_eq!(asset.version, "2.7.0");
+        assert_eq!(asset.platform, "macos");
+        assert_eq!(asset.arch, "aarch64");
+        assert_eq!(
+            asset.url,
+            "https://downloads.example.invalid/opensymphony/2.7.0/macos-aarch64.zip"
+        );
+        assert_eq!(asset.checksum.algorithm, "sha256");
+        assert_eq!(asset.checksum.value, "0123456789abcdef");
+        assert_eq!(
+            asset.launch_target.executable,
+            PathBuf::from("OpenSymphony.app/Contents/MacOS/OpenSymphony")
+        );
+        assert!(asset.launch_target.args.is_empty());
     }
 
     #[test]
