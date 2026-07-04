@@ -273,25 +273,13 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
         Err(_first_error) => {
             if let Some(bundle_dir) = bundle_dir {
                 if cache_dir.exists() {
-                    validate_cache_dir(cache_root, cache_dir)?;
-                    fs::remove_dir_all(cache_dir).map_err(|source| {
-                        DesktopLauncherError::Repair {
-                            path: cache_dir.to_path_buf(),
-                            source,
-                        }
-                    })?;
+                    remove_cache_entry(cache_root, cache_dir)?;
                 }
                 copy_dir_all(bundle_dir, cache_dir)?;
                 match verify_bundle(cache_dir) {
                     Ok(bundle) => Ok(bundle),
                     Err(_) => {
-                        validate_cache_dir(cache_root, cache_dir)?;
-                        fs::remove_dir_all(cache_dir).map_err(|source| {
-                            DesktopLauncherError::Repair {
-                                path: cache_dir.to_path_buf(),
-                                source,
-                            }
-                        })?;
+                        remove_cache_entry(cache_root, cache_dir)?;
                         build_source_fallback(cache_root, cache_dir, runner).await
                     }
                 }
@@ -447,7 +435,7 @@ async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLa
         .build()
         .map_err(|source| DesktopLauncherError::SourceDownload {
             url: display_url.clone(),
-            source,
+            source: source.without_url(),
         })?;
     let response =
         client
@@ -456,7 +444,7 @@ async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLa
             .await
             .map_err(|source| DesktopLauncherError::SourceDownload {
                 url: display_url.clone(),
-                source,
+                source: source.without_url(),
             })?;
     let status = response.status();
     if !status.is_success() {
@@ -470,7 +458,7 @@ async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLa
         .await
         .map_err(|source| DesktopLauncherError::SourceDownload {
             url: source_archive_display_url(url),
-            source,
+            source: source.without_url(),
         })?;
     fs::write(path, body).map_err(|source| DesktopLauncherError::Repair {
         path: path.to_path_buf(),
@@ -723,6 +711,10 @@ fn validate_source_archive_version(source_dir: &Path) -> Result<(), DesktopLaunc
     validate_source_metadata_version(
         &source_dir.join("apps/desktop/package.json"),
         json_package_version(&source_dir.join("apps/desktop/package.json"))?,
+    )?;
+    validate_source_metadata_version(
+        &source_dir.join("apps/desktop/src-tauri/tauri.conf.json"),
+        json_package_version(&source_dir.join("apps/desktop/src-tauri/tauri.conf.json"))?,
     )
 }
 
@@ -804,11 +796,7 @@ fn install_source_built_bundle_from_source_dir<R: DesktopCommandRunner>(
     build_source_bundle_from_source_dir(source_dir, &staged_bundle, runner)?;
 
     if cache_dir.exists() {
-        validate_cache_dir(cache_root, cache_dir)?;
-        fs::remove_dir_all(cache_dir).map_err(|source| DesktopLauncherError::Repair {
-            path: cache_dir.to_path_buf(),
-            source,
-        })?;
+        remove_cache_entry(cache_root, cache_dir)?;
     }
     fs::rename(&staged_bundle, cache_dir).map_err(|source| DesktopLauncherError::Repair {
         path: cache_dir.to_path_buf(),
@@ -949,6 +937,24 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
         }
     }
     Ok(())
+}
+
+fn remove_cache_entry(cache_root: &Path, cache_dir: &Path) -> Result<(), DesktopLauncherError> {
+    validate_cache_dir(cache_root, cache_dir)?;
+    let metadata =
+        fs::symlink_metadata(cache_dir).map_err(|source| DesktopLauncherError::Repair {
+            path: cache_dir.to_path_buf(),
+            source,
+        })?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(cache_dir)
+    } else {
+        fs::remove_file(cache_dir)
+    }
+    .map_err(|source| DesktopLauncherError::Repair {
+        path: cache_dir.to_path_buf(),
+        source,
+    })
 }
 
 fn reject_parent_components(path: &Path) -> Result<(), DesktopLauncherError> {
@@ -1335,6 +1341,11 @@ mod tests {
             format!(r#"{{"version":"{version}"}}"#),
         )
         .expect("write desktop package metadata");
+        fs::write(
+            source.join("apps/desktop/src-tauri/tauri.conf.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .expect("write tauri config metadata");
     }
 
     #[test]
@@ -1710,6 +1721,86 @@ mod tests {
         assert!(message.contains(&format!("http://{addr}/archive.tar.gz")));
         assert!(!message.contains("user:secret"));
         assert!(!message.contains("token=secret"));
+    }
+
+    #[tokio::test]
+    async fn source_archive_transport_error_redacts_reqwest_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unused port");
+        let addr = listener.local_addr().expect("test server addr");
+        drop(listener);
+        let temp = TempDir::new().expect("download tempdir");
+        let archive = temp.path().join("archive.tar.gz");
+        let error = download_source_archive(
+            &format!("http://user:secret@{addr}/archive.tar.gz?token=secret"),
+            &archive,
+        )
+        .await
+        .expect_err("closed listener should fail before status");
+        let message = error.to_string();
+
+        assert!(message.contains(&format!("http://{addr}/archive.tar.gz")));
+        assert!(!message.contains("user:secret"));
+        assert!(!message.contains("token=secret"));
+    }
+
+    #[test]
+    fn source_build_rejects_mismatched_tauri_config_version_before_caching() {
+        let source = TempDir::new().expect("source tempdir");
+        let bundle = TempDir::new().expect("bundle tempdir");
+        write_source_metadata(source.path(), desktop_version());
+        fs::write(
+            source.path().join("apps/desktop/src-tauri/tauri.conf.json"),
+            r#"{"version":"0.0.0"}"#,
+        )
+        .expect("write mismatched tauri config");
+        let mut runner = FakeRunner::default();
+
+        let error = build_source_bundle_from_source_dir(source.path(), bundle.path(), &mut runner)
+            .expect_err("mismatched tauri metadata should abort source build");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::SourceVersionMismatch { ref path, .. }
+                if path.ends_with("tauri.conf.json")
+        ));
+        assert!(runner.runs.is_empty());
+        assert!(!bundle.path().join(MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn source_build_promotion_repairs_file_cache_entry() {
+        let source = TempDir::new().expect("source tempdir");
+        let cache_root = TempDir::new().expect("cache tempdir");
+        write_source_metadata(source.path(), desktop_version());
+        let built_executable = source_build_target_dir(source.path())
+            .join("release")
+            .join(source_build_executable_name(current_platform()));
+        fs::create_dir_all(built_executable.parent().expect("target parent"))
+            .expect("create fake target dir");
+        fs::write(&built_executable, b"fake source-built desktop")
+            .expect("write fake built executable");
+        let cache_dir = cache_root.path().join(desktop_version());
+        fs::write(&cache_dir, b"corrupt cache entry").expect("write file cache entry");
+        let mut runner = FakeRunner::default();
+
+        let verified = install_source_built_bundle_from_source_dir(
+            cache_root.path(),
+            &cache_dir,
+            source.path(),
+            &mut runner,
+        )
+        .expect("file cache entry should be repaired by source promotion");
+
+        assert!(cache_dir.is_dir());
+        assert_eq!(
+            verified.executable,
+            cache_dir
+                .join(source_build_executable_name(current_platform()))
+                .canonicalize()
+                .expect("canonical installed executable")
+        );
     }
 
     #[test]
