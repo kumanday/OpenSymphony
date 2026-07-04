@@ -638,8 +638,7 @@ fn selected_release_index_url(override_url: Option<String>) -> String {
 
 fn default_release_index_url() -> String {
     format!(
-        "https://github.com/kumanday/OpenSymphony/releases/download/v{}/{}",
-        desktop_version(),
+        "https://github.com/kumanday/OpenSymphony/releases/latest/download/{}",
         RELEASE_INDEX_FILE
     )
 }
@@ -2175,6 +2174,14 @@ mod tests {
             release_url_display_url("https://user:secret@example.com/index.json?token=secret#frag");
 
         assert_eq!(display, "https://example.com/index.json");
+    }
+
+    #[test]
+    fn default_release_index_uses_stable_latest_url() {
+        assert_eq!(
+            default_release_index_url(),
+            "https://github.com/kumanday/OpenSymphony/releases/latest/download/opensymphony-desktop-release-index.json"
+        );
     }
 
     #[test]

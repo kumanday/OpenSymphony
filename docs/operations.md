@@ -39,7 +39,7 @@ The desktop launcher is intentionally lazy. `opensymphony app` and its visible
 alias `opensymphony desktop` verify and launch a cached desktop bundle from
 `~/.opensymphony/desktop/<version>/` without making the normal Cargo install
 compile Tauri, npm, or platform desktop dependencies. On a cache miss, it reads
-`opensymphony-desktop-release-index.json` from the matching GitHub release,
+`opensymphony-desktop-release-index.json` from the latest GitHub release,
 downloads the compatible archive, verifies the archive and installed manifest,
 then promotes the bundle into the versioned cache. Set
 `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` to test a fake release server or use a

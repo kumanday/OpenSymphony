@@ -73,7 +73,7 @@ binary. The archive contains:
 The release index is the metadata asset consumed by the CLI download path. It
 uses schema version `1`, lists compatible assets by version/platform/arch, and
 records the archive URL, archive SHA-256, and launch target. By default,
-`opensymphony app` reads it from the matching GitHub release; set
+`opensymphony app` reads it from the latest GitHub release; set
 `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` for a mirror or fake release server.
 When an existing release index is present in the output directory, the package
 command preserves other assets and unknown top-level metadata, then replaces
