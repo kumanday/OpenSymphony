@@ -2147,7 +2147,7 @@ mod tests {
     fn newer_than_desktop_version() -> String {
         let version =
             SemanticVersion::parse(desktop_version()).expect("desktop version should be semantic");
-        format!("{}.{}.0", version.major, version.minor + 1)
+        format!("{}.{}.{}", version.major, version.minor, version.patch + 1)
     }
 
     fn command_key(program: &str, args: &[&str]) -> String {
