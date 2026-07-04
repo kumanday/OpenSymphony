@@ -1,10 +1,11 @@
 use std::{
+    cmp::Ordering,
     env,
     ffi::OsString,
     fs,
     fs::File,
     io,
-    io::Read,
+    io::{BufRead, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::Duration,
@@ -64,6 +65,11 @@ pub struct AppArgs {
         help = "Verify the bundle and print the launch target without starting it"
     )]
     dry_run: bool,
+    #[arg(
+        long,
+        help = "Launch the cached desktop bundle without checking for updates first"
+    )]
+    no_update: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,8 +112,120 @@ struct DesktopLaunchTarget {
 
 #[derive(Debug)]
 struct VerifiedBundle {
+    bundle_dir: PathBuf,
     executable: PathBuf,
     manifest: DesktopBundleManifest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SemanticVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre_release: Option<Vec<PreReleaseIdentifier>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreReleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+impl SemanticVersion {
+    fn parse(value: &str) -> Option<Self> {
+        let without_build = value.split_once('+').map_or(value, |(core, _)| core);
+        let (core, pre_release) = without_build
+            .split_once('-')
+            .map_or((without_build, None), |(core, pre_release)| {
+                (core, Some(pre_release))
+            });
+        let mut parts = core.split('.');
+        let major = parse_version_part(parts.next()?)?;
+        let minor = parse_version_part(parts.next()?)?;
+        let patch = parse_version_part(parts.next()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let pre_release = match pre_release {
+            Some(value) => Some(parse_pre_release(value)?),
+            None => None,
+        }
+        .filter(|identifiers| !identifiers.is_empty());
+        Some(Self {
+            major,
+            minor,
+            patch,
+            pre_release,
+        })
+    }
+}
+
+impl Ord for SemanticVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| compare_pre_release(&self.pre_release, &other.pre_release))
+    }
+}
+
+impl PartialOrd for SemanticVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn parse_version_part(part: &str) -> Option<u64> {
+    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok()
+}
+
+fn parse_pre_release(value: &str) -> Option<Vec<PreReleaseIdentifier>> {
+    value
+        .split('.')
+        .map(|identifier| {
+            if identifier.is_empty() {
+                return None;
+            }
+            if identifier.bytes().all(|byte| byte.is_ascii_digit()) {
+                Some(PreReleaseIdentifier::Numeric(identifier.parse().ok()?))
+            } else {
+                Some(PreReleaseIdentifier::Text(identifier.to_string()))
+            }
+        })
+        .collect()
+}
+
+fn compare_pre_release(
+    left: &Option<Vec<PreReleaseIdentifier>>,
+    right: &Option<Vec<PreReleaseIdentifier>>,
+) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => left
+            .iter()
+            .zip(right.iter())
+            .map(|(left, right)| compare_pre_release_identifier(left, right))
+            .find(|ordering| *ordering != Ordering::Equal)
+            .unwrap_or_else(|| left.len().cmp(&right.len())),
+    }
+}
+
+fn compare_pre_release_identifier(
+    left: &PreReleaseIdentifier,
+    right: &PreReleaseIdentifier,
+) -> Ordering {
+    match (left, right) {
+        (PreReleaseIdentifier::Numeric(left), PreReleaseIdentifier::Numeric(right)) => {
+            left.cmp(right)
+        }
+        (PreReleaseIdentifier::Numeric(_), PreReleaseIdentifier::Text(_)) => Ordering::Less,
+        (PreReleaseIdentifier::Text(_), PreReleaseIdentifier::Numeric(_)) => Ordering::Greater,
+        (PreReleaseIdentifier::Text(left), PreReleaseIdentifier::Text(right)) => left.cmp(right),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,8 +352,11 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
+    let no_update = args.no_update;
+    let cached_before_launch = bundle_dir.is_none()
+        && latest_current_or_newer_verified_cached_bundle(&cache_root).is_some();
     if args.dry_run {
-        let verified = dry_run_verified_bundle(&cache_dir, bundle_dir)?;
+        let verified = dry_run_verified_bundle(&cache_root, &cache_dir, bundle_dir)?;
         println!(
             "Dry run: would launch OpenSymphony desktop at {}",
             verified.executable.display()
@@ -243,18 +364,26 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
         return Ok(verified.executable);
     }
 
-    let release_index_url = selected_release_index_url(args.release_index_url);
+    let (install_release_index_url, update_release_index_url) =
+        selected_release_index_urls(args.release_index_url);
 
     let verified = ensure_verified_bundle(
         &cache_root,
         &cache_dir,
         bundle_dir,
-        release_index_url.as_str(),
+        install_release_index_url.as_str(),
         true,
     )
     .await?;
+    let verified = maybe_update_verified_bundle(
+        &cache_root,
+        verified,
+        update_release_index_url.as_str(),
+        !should_check_for_desktop_update(no_update, bundle_dir, cached_before_launch),
+    )
+    .await;
     Command::new(&verified.executable)
-        .current_dir(&cache_dir)
+        .current_dir(&verified.bundle_dir)
         .spawn()
         .map_err(|source| DesktopLauncherError::Launch {
             path: verified.executable.clone(),
@@ -264,9 +393,15 @@ async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
 }
 
 fn dry_run_verified_bundle(
+    cache_root: &Path,
     cache_dir: &Path,
     bundle_dir: Option<&Path>,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
+    if bundle_dir.is_none()
+        && let Some(bundle) = latest_current_or_newer_verified_cached_bundle(cache_root)
+    {
+        return Ok(bundle);
+    }
     if let Ok(bundle) = verify_bundle(cache_dir) {
         return Ok(bundle);
     }
@@ -299,6 +434,60 @@ async fn ensure_verified_bundle(
     .await
 }
 
+async fn maybe_update_verified_bundle(
+    cache_root: &Path,
+    verified: VerifiedBundle,
+    release_index_url: &str,
+    no_update: bool,
+) -> VerifiedBundle {
+    if no_update {
+        return verified;
+    }
+    let candidate = match latest_update_candidate(
+        release_index_url,
+        verified.manifest.version.as_str(),
+    )
+    .await
+    {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            eprintln!("Desktop update check failed; launching installed bundle: {error}");
+            return verified;
+        }
+    };
+    let Some(asset) = candidate else {
+        return verified;
+    };
+    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    if interactive {
+        let stdin = io::stdin();
+        let stderr = io::stderr();
+        let mut reader = stdin.lock();
+        let mut writer = stderr.lock();
+        match prompt_update_decision(
+            &mut reader,
+            &mut writer,
+            true,
+            verified.manifest.version.as_str(),
+            asset.version.as_str(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => return verified,
+            Err(source) => {
+                eprintln!("Desktop update prompt failed; launching installed bundle: {source}");
+                return verified;
+            }
+        }
+    }
+    match install_release_asset(cache_root, asset).await {
+        Ok(updated) => updated,
+        Err(error) => {
+            eprintln!("Desktop update failed; launching installed bundle: {error}");
+            verified
+        }
+    }
+}
+
 async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
     cache_root: &Path,
     cache_dir: &Path,
@@ -307,41 +496,51 @@ async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
     allow_source_build: bool,
     runner: &mut R,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
-    match verify_bundle(cache_dir) {
-        Ok(bundle) => Ok(bundle),
-        Err(_first_error) => {
-            if let Some(bundle_dir) = bundle_dir {
-                if cache_dir.exists() {
-                    remove_cache_entry(cache_root, cache_dir)?;
-                }
-                copy_dir_all(bundle_dir, cache_dir)?;
-                match verify_bundle(cache_dir) {
-                    Ok(bundle) => Ok(bundle),
-                    Err(source) => {
-                        remove_cache_entry(cache_root, cache_dir)?;
-                        Err(source)
-                    }
-                }
-            } else {
-                match install_release_bundle(cache_root, cache_dir, release_index_url).await {
-                    Ok(bundle) => Ok(bundle),
-                    Err(error)
-                        if allow_source_build && release_error_allows_source_fallback(&error) =>
-                    {
-                        build_source_fallback(cache_root, cache_dir, runner).await
-                    }
-                    Err(error) if release_error_allows_source_fallback(&error) => {
-                        Err(DesktopLauncherError::DryRunSourceBuildRequired {
-                            version: desktop_version().to_string(),
-                            platform: current_platform().to_string(),
-                            arch: current_arch().to_string(),
-                        })
-                    }
-                    Err(error) => Err(error),
-                }
+    let cached = if bundle_dir.is_none() {
+        latest_current_or_newer_verified_cached_bundle(cache_root)
+            .or_else(|| verify_bundle(cache_dir).ok())
+    } else {
+        verify_bundle(cache_dir).ok()
+    };
+    if let Some(bundle) = cached {
+        return Ok(bundle);
+    }
+    if let Some(bundle_dir) = bundle_dir {
+        if cache_dir.exists() {
+            remove_cache_entry(cache_root, cache_dir)?;
+        }
+        copy_dir_all(bundle_dir, cache_dir)?;
+        match verify_bundle(cache_dir) {
+            Ok(bundle) => Ok(bundle),
+            Err(source) => {
+                remove_cache_entry(cache_root, cache_dir)?;
+                Err(source)
             }
         }
+    } else {
+        match install_release_bundle(cache_root, cache_dir, release_index_url).await {
+            Ok(bundle) => Ok(bundle),
+            Err(error) if allow_source_build && release_error_allows_source_fallback(&error) => {
+                build_source_fallback(cache_root, cache_dir, runner).await
+            }
+            Err(error) if release_error_allows_source_fallback(&error) => {
+                Err(DesktopLauncherError::DryRunSourceBuildRequired {
+                    version: desktop_version().to_string(),
+                    platform: current_platform().to_string(),
+                    arch: current_arch().to_string(),
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
+}
+
+fn should_check_for_desktop_update(
+    no_update: bool,
+    bundle_dir: Option<&Path>,
+    cached_before_launch: bool,
+) -> bool {
+    !no_update && bundle_dir.is_none() && cached_before_launch
 }
 
 fn release_error_allows_source_fallback(error: &DesktopLauncherError) -> bool {
@@ -355,14 +554,125 @@ fn release_error_allows_source_fallback(error: &DesktopLauncherError) -> bool {
     )
 }
 
+async fn latest_update_candidate(
+    release_index_url: &str,
+    installed_version: &str,
+) -> Result<Option<DesktopReleaseAsset>, DesktopLauncherError> {
+    let index = download_release_index_task(release_index_url).await?;
+    Ok(newest_compatible_release_asset(&index, installed_version).cloned())
+}
+
+async fn download_release_index_task(
+    release_index_url: &str,
+) -> Result<DesktopReleaseIndex, DesktopLauncherError> {
+    let release_index_url = release_index_url.to_string();
+    tokio::task::spawn_blocking(move || download_release_index(&release_index_url))
+        .await
+        .map_err(|source| DesktopLauncherError::ReleaseInstallTask { source })?
+}
+
+fn newest_compatible_release_asset<'a>(
+    index: &'a DesktopReleaseIndex,
+    installed_version: &str,
+) -> Option<&'a DesktopReleaseAsset> {
+    let installed_version = SemanticVersion::parse(installed_version)?;
+    index
+        .assets
+        .iter()
+        .filter(|asset| asset.platform == current_platform() && asset.arch == current_arch())
+        .filter(|asset| validate_release_asset(asset).is_ok())
+        .filter_map(|asset| Some((SemanticVersion::parse(&asset.version)?, asset)))
+        .filter(|(version, _)| *version > installed_version)
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, asset)| asset)
+}
+
+fn prompt_update_decision<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    interactive: bool,
+    installed_version: &str,
+    update_version: &str,
+) -> io::Result<bool>
+where
+    R: BufRead,
+    W: Write,
+{
+    if !interactive {
+        return Ok(true);
+    }
+    writeln!(
+        writer,
+        "OpenSymphony desktop {update_version} is available; installed version is {installed_version}."
+    )?;
+    loop {
+        write!(writer, "Update before launch? [Y/n] ")?;
+        writer.flush()?;
+        let mut response = String::new();
+        if reader.read_line(&mut response)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "update prompt closed before a response",
+            ));
+        }
+        match response.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => writeln!(writer, "Please answer with `yes` or `no`.")?,
+        }
+    }
+}
+
+fn latest_current_or_newer_verified_cached_bundle(cache_root: &Path) -> Option<VerifiedBundle> {
+    latest_verified_cached_bundle_with_minimum(
+        cache_root,
+        SemanticVersion::parse(desktop_version()),
+    )
+}
+
+fn latest_verified_cached_bundle_with_minimum(
+    cache_root: &Path,
+    minimum_version: Option<SemanticVersion>,
+) -> Option<VerifiedBundle> {
+    fs::read_dir(cache_root)
+        .ok()?
+        .filter_map(|entry| {
+            let cache_dir = entry.ok()?.path();
+            reject_symlink(cache_root).ok()?;
+            reject_symlink(&cache_dir).ok()?;
+            let manifest = read_manifest(&cache_dir.join(MANIFEST_FILE)).ok()?;
+            validate_cache_dir_for_version(cache_root, &cache_dir, &manifest.version).ok()?;
+            let version = SemanticVersion::parse(&manifest.version)?;
+            if minimum_version
+                .as_ref()
+                .is_some_and(|minimum_version| &version < minimum_version)
+            {
+                return None;
+            }
+            let verified = verify_bundle_for_version(&cache_dir, Some(&manifest.version)).ok()?;
+            Some((version, verified))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, verified)| verified)
+}
+
 fn verify_bundle(cache_dir: &Path) -> Result<VerifiedBundle, DesktopLauncherError> {
+    verify_bundle_for_version(cache_dir, Some(desktop_version()))
+}
+
+fn verify_bundle_for_version(
+    cache_dir: &Path,
+    expected_version: Option<&str>,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
     let manifest_path = cache_dir.join(MANIFEST_FILE);
     let manifest = read_manifest(&manifest_path)?;
 
-    if manifest.version != desktop_version() {
+    if let Some(expected) = expected_version
+        && manifest.version != expected
+    {
         return Err(DesktopLauncherError::WrongVersion {
             path: manifest_path,
-            expected: desktop_version().to_string(),
+            expected: expected.to_string(),
             actual: manifest.version,
         });
     }
@@ -392,6 +702,7 @@ fn verify_bundle(cache_dir: &Path) -> Result<VerifiedBundle, DesktopLauncherErro
     }
 
     Ok(VerifiedBundle {
+        bundle_dir: cache_dir.to_path_buf(),
         executable,
         manifest,
     })
@@ -414,14 +725,27 @@ fn parse_release_index(contents: &str) -> Result<DesktopReleaseIndex, serde_json
     serde_json::from_str(contents)
 }
 
-fn selected_release_index_url(override_url: Option<String>) -> String {
-    override_url.unwrap_or_else(default_release_index_url)
+fn selected_release_index_urls(override_url: Option<String>) -> (String, String) {
+    match override_url {
+        Some(url) => (url.clone(), url),
+        None => (
+            default_install_release_index_url(),
+            default_update_release_index_url(),
+        ),
+    }
 }
 
-fn default_release_index_url() -> String {
+fn default_install_release_index_url() -> String {
     format!(
         "https://github.com/kumanday/OpenSymphony/releases/download/v{}/{}",
         desktop_version(),
+        RELEASE_INDEX_FILE
+    )
+}
+
+fn default_update_release_index_url() -> String {
+    format!(
+        "https://github.com/kumanday/OpenSymphony/releases/latest/download/{}",
         RELEASE_INDEX_FILE
     )
 }
@@ -459,6 +783,28 @@ fn install_release_bundle_blocking(
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
     let index = download_release_index(release_index_url)?;
     let asset = compatible_release_asset(&index, release_index_url)?;
+    install_release_asset_blocking(cache_root, cache_dir, asset)
+}
+
+async fn install_release_asset(
+    cache_root: &Path,
+    asset: DesktopReleaseAsset,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
+    let cache_root = cache_root.to_path_buf();
+    let cache_dir = cache_root.join(&asset.version);
+    tokio::task::spawn_blocking(move || {
+        install_release_asset_blocking(&cache_root, &cache_dir, &asset)
+    })
+    .await
+    .map_err(|source| DesktopLauncherError::ReleaseInstallTask { source })?
+}
+
+fn install_release_asset_blocking(
+    cache_root: &Path,
+    cache_dir: &Path,
+    asset: &DesktopReleaseAsset,
+) -> Result<VerifiedBundle, DesktopLauncherError> {
+    validate_cache_dir_for_version(cache_root, cache_dir, &asset.version)?;
     fs::create_dir_all(cache_root).map_err(|source| DesktopLauncherError::Repair {
         path: cache_root.to_path_buf(),
         source,
@@ -478,8 +824,9 @@ fn install_release_bundle_blocking(
         verify_archive_checksum(&archive_path, asset)?;
         extract_release_archive(&archive_path, &stage_dir)?;
         let verified = verify_bundle_matches_asset(&stage_dir, asset)?;
-        promote_verified_bundle(cache_root, cache_dir, &stage_dir)?;
-        verify_bundle(cache_dir).map(|promoted| VerifiedBundle {
+        promote_verified_bundle(cache_root, cache_dir, &stage_dir, &asset.version)?;
+        verify_bundle_for_version(cache_dir, Some(&asset.version)).map(|promoted| VerifiedBundle {
+            bundle_dir: promoted.bundle_dir,
             executable: promoted.executable,
             manifest: verified.manifest,
         })
@@ -536,38 +883,43 @@ fn compatible_release_asset<'a>(
             arch: current_arch().to_string(),
         })
         .and_then(|asset| {
-            let display_asset_url = release_url_display_url(&asset.url);
-            if asset.checksum.algorithm != "sha256" {
-                return Err(DesktopLauncherError::UnsupportedReleaseChecksum {
-                    url: display_asset_url,
-                    algorithm: asset.checksum.algorithm.clone(),
-                });
-            }
-            if !asset.launch_target.args.is_empty() {
-                return Err(DesktopLauncherError::UnsupportedLaunchArgs {
-                    url: display_asset_url,
-                });
-            }
-            if asset.launch_target.executable.is_absolute()
-                || asset
-                    .launch_target
-                    .executable
-                    .components()
-                    .any(|component| {
-                        matches!(
-                            component,
-                            std::path::Component::ParentDir
-                                | std::path::Component::RootDir
-                                | std::path::Component::Prefix(_)
-                        )
-                    })
-            {
-                return Err(DesktopLauncherError::UnsafeExecutablePath {
-                    path: asset.launch_target.executable.clone(),
-                });
-            }
+            validate_release_asset(asset)?;
             Ok(asset)
         })
+}
+
+fn validate_release_asset(asset: &DesktopReleaseAsset) -> Result<(), DesktopLauncherError> {
+    let display_asset_url = release_url_display_url(&asset.url);
+    if asset.checksum.algorithm != "sha256" {
+        return Err(DesktopLauncherError::UnsupportedReleaseChecksum {
+            url: display_asset_url,
+            algorithm: asset.checksum.algorithm.clone(),
+        });
+    }
+    if !asset.launch_target.args.is_empty() {
+        return Err(DesktopLauncherError::UnsupportedLaunchArgs {
+            url: display_asset_url,
+        });
+    }
+    if asset.launch_target.executable.is_absolute()
+        || asset
+            .launch_target
+            .executable
+            .components()
+            .any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+    {
+        return Err(DesktopLauncherError::UnsafeExecutablePath {
+            path: asset.launch_target.executable.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn download_file(url: &str, destination: &Path) -> Result<(), DesktopLauncherError> {
@@ -690,7 +1042,7 @@ fn verify_bundle_matches_asset(
     stage_dir: &Path,
     asset: &DesktopReleaseAsset,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
-    let verified = verify_bundle(stage_dir)?;
+    let verified = verify_bundle_for_version(stage_dir, Some(&asset.version))?;
     if verified.manifest.executable != asset.launch_target.executable {
         return Err(DesktopLauncherError::LaunchTargetMismatch {
             expected: asset.launch_target.executable.clone(),
@@ -704,10 +1056,11 @@ fn promote_verified_bundle(
     cache_root: &Path,
     cache_dir: &Path,
     stage_dir: &Path,
+    version: &str,
 ) -> Result<(), DesktopLauncherError> {
-    validate_cache_dir(cache_root, cache_dir)?;
+    validate_cache_dir_for_version(cache_root, cache_dir, version)?;
     if cache_dir.exists() {
-        remove_cache_entry(cache_root, cache_dir)?;
+        remove_cache_entry_for_version(cache_root, cache_dir, version)?;
     }
     fs::rename(stage_dir, cache_dir).map_err(|source| DesktopLauncherError::Repair {
         path: cache_dir.to_path_buf(),
@@ -1352,7 +1705,15 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
 }
 
 fn remove_cache_entry(cache_root: &Path, cache_dir: &Path) -> Result<(), DesktopLauncherError> {
-    validate_cache_dir(cache_root, cache_dir)?;
+    remove_cache_entry_for_version(cache_root, cache_dir, desktop_version())
+}
+
+fn remove_cache_entry_for_version(
+    cache_root: &Path,
+    cache_dir: &Path,
+    version: &str,
+) -> Result<(), DesktopLauncherError> {
+    validate_cache_dir_for_version(cache_root, cache_dir, version)?;
     let metadata =
         fs::symlink_metadata(cache_dir).map_err(|source| DesktopLauncherError::Repair {
             path: cache_dir.to_path_buf(),
@@ -1464,13 +1825,21 @@ fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> 
 }
 
 fn validate_cache_dir(cache_root: &Path, cache_dir: &Path) -> Result<(), DesktopLauncherError> {
+    validate_cache_dir_for_version(cache_root, cache_dir, desktop_version())
+}
+
+fn validate_cache_dir_for_version(
+    cache_root: &Path,
+    cache_dir: &Path,
+    version: &str,
+) -> Result<(), DesktopLauncherError> {
     reject_parent_components(cache_root)?;
     reject_parent_components(cache_dir)?;
     reject_symlink(cache_root)?;
     reject_symlink(cache_dir)?;
     if cache_root.parent().is_none()
         || !cache_dir.starts_with(cache_root)
-        || cache_dir.file_name().and_then(|name| name.to_str()) != Some(desktop_version())
+        || cache_dir.file_name().and_then(|name| name.to_str()) != Some(version)
     {
         return Err(DesktopLauncherError::DangerousCacheRoot {
             path: cache_root.to_path_buf(),
@@ -1915,6 +2284,29 @@ mod tests {
     }
 
     #[test]
+    fn default_release_index_urls_keep_installs_versioned_and_updates_latest() {
+        assert_eq!(
+            default_install_release_index_url(),
+            "https://github.com/kumanday/OpenSymphony/releases/download/v2.7.0/opensymphony-desktop-release-index.json"
+        );
+        assert_eq!(
+            default_update_release_index_url(),
+            "https://github.com/kumanday/OpenSymphony/releases/latest/download/opensymphony-desktop-release-index.json"
+        );
+    }
+
+    #[test]
+    fn release_index_override_applies_to_install_and_update() {
+        assert_eq!(
+            selected_release_index_urls(Some("http://example.com/index.json".to_string())),
+            (
+                "http://example.com/index.json".to_string(),
+                "http://example.com/index.json".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn release_index_download_error_redacts_reqwest_url() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused port");
         let addr = listener.local_addr().expect("local address");
@@ -1928,6 +2320,89 @@ mod tests {
         assert!(!message.contains("user:secret"));
         assert!(!message.contains("token=secret"));
         assert!(!message.contains("#fragment"));
+    }
+
+    #[test]
+    fn semver_selection_treats_numeric_segments_as_numbers() {
+        let index = DesktopReleaseIndex {
+            schema_version: 1,
+            assets: vec![
+                desktop_release_asset("2.9.9", "http://example.com/2.9.9.tar.gz", "0"),
+                desktop_release_asset("2.10.0", "http://example.com/2.10.0.tar.gz", "0"),
+            ],
+        };
+
+        let asset =
+            newest_compatible_release_asset(&index, "2.8.0").expect("newer asset should exist");
+
+        assert_eq!(asset.version, "2.10.0");
+    }
+
+    #[test]
+    fn semver_selection_treats_stable_as_newer_than_prerelease() {
+        let index = DesktopReleaseIndex {
+            schema_version: 1,
+            assets: vec![desktop_release_asset(
+                "2.8.0",
+                "http://example.com/2.8.0.tar.gz",
+                "0",
+            )],
+        };
+
+        let asset = newest_compatible_release_asset(&index, "2.8.0-beta.1")
+            .expect("stable release should be newer than prerelease");
+
+        assert_eq!(asset.version, "2.8.0");
+    }
+
+    #[test]
+    fn update_selection_skips_unsupported_highest_asset() {
+        let mut unsupported =
+            desktop_release_asset("2.9.0", "http://example.com/2.9.0.tar.gz", "0");
+        unsupported.launch_target.args = vec!["--future".to_string()];
+        let index = DesktopReleaseIndex {
+            schema_version: 1,
+            assets: vec![
+                desktop_release_asset("2.8.0", "http://example.com/2.8.0.tar.gz", "0"),
+                unsupported,
+            ],
+        };
+
+        let asset = newest_compatible_release_asset(&index, "2.7.0")
+            .expect("compatible update should exist");
+
+        assert_eq!(asset.version, "2.8.0");
+    }
+
+    #[test]
+    fn update_prompt_defaults_enter_to_yes() {
+        let mut output = Vec::new();
+        let accepted = prompt_update_decision(&mut &b"\n"[..], &mut output, true, "2.7.0", "2.7.1")
+            .expect("prompt should succeed");
+        let rendered = String::from_utf8(output).expect("prompt output utf8");
+
+        assert!(accepted);
+        assert!(rendered.contains("Update before launch? [Y/n]"));
+    }
+
+    #[test]
+    fn update_prompt_accepts_explicit_no() {
+        let mut output = Vec::new();
+        let accepted =
+            prompt_update_decision(&mut &b"n\n"[..], &mut output, true, "2.7.0", "2.7.1")
+                .expect("prompt should succeed");
+
+        assert!(!accepted);
+    }
+
+    #[test]
+    fn noninteractive_update_prompt_defaults_to_yes_without_reading() {
+        let mut output = Vec::new();
+        let accepted = prompt_update_decision(&mut &b""[..], &mut output, false, "2.7.0", "2.7.1")
+            .expect("noninteractive default should succeed");
+
+        assert!(accepted);
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -2140,6 +2615,204 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn older_cached_bundle_does_not_satisfy_current_cache_miss() {
+        let archive = desktop_release_archive(b"current desktop");
+        let archive_sha = sha256_bytes(&archive);
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body(base_url, archive_sha.as_str()).into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        write_installed_bundle_for_version(
+            &install_root.path().join("2.6.0"),
+            "2.6.0",
+            b"old desktop",
+        );
+
+        let verified = ensure_verified_bundle(
+            install_root.path(),
+            &cache_dir,
+            None,
+            &server.url("/index.json"),
+            false,
+        )
+        .await
+        .expect("current bundle should install instead of launching stale cache");
+
+        assert_eq!(verified.manifest.version, desktop_version());
+        assert_eq!(verified.bundle_dir, cache_dir);
+        assert_eq!(
+            server.requests(),
+            vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn current_cached_bundle_checks_index_without_asset_download() {
+        let archive = desktop_release_archive(b"fake desktop");
+        let archive_sha = sha256_bytes(&archive);
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![(
+                "/index.json",
+                release_index_body(base_url, archive_sha.as_str()).into_bytes(),
+            )]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        write_installed_bundle(&cache_dir, b"fake desktop");
+        let verified = verify_bundle(&cache_dir).expect("cache should verify");
+
+        let launched = maybe_update_verified_bundle(
+            install_root.path(),
+            verified,
+            &server.url("/index.json"),
+            false,
+        )
+        .await;
+
+        assert_eq!(launched.manifest.version, desktop_version());
+        assert_eq!(server.requests(), vec!["/index.json".to_string()]);
+    }
+
+    #[test]
+    fn dry_run_uses_latest_verified_cached_bundle() {
+        let install_root = TempDir::new().expect("install root");
+        write_installed_bundle(
+            &install_root.path().join(desktop_version()),
+            b"current desktop",
+        );
+        write_installed_bundle_for_version(
+            &install_root.path().join("2.7.1"),
+            "2.7.1",
+            b"updated desktop",
+        );
+
+        let verified = dry_run_verified_bundle(
+            install_root.path(),
+            &install_root.path().join(desktop_version()),
+            None,
+        )
+        .expect("dry-run should use latest cached bundle");
+
+        assert_eq!(verified.manifest.version, "2.7.1");
+        assert_eq!(verified.bundle_dir, install_root.path().join("2.7.1"));
+    }
+
+    #[test]
+    fn dry_run_ignores_older_cached_bundle_when_current_missing() {
+        let install_root = TempDir::new().expect("install root");
+        write_installed_bundle_for_version(
+            &install_root.path().join("2.6.0"),
+            "2.6.0",
+            b"old desktop",
+        );
+
+        let error = dry_run_verified_bundle(
+            install_root.path(),
+            &install_root.path().join(desktop_version()),
+            None,
+        )
+        .expect_err("older cache should not satisfy current dry-run launch");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::DryRunSourceBuildRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn update_policy_only_checks_after_existing_cached_launch() {
+        let override_bundle = Path::new("/tmp/desktop-bundle");
+
+        assert!(should_check_for_desktop_update(false, None, true));
+        assert!(!should_check_for_desktop_update(true, None, true));
+        assert!(!should_check_for_desktop_update(
+            false,
+            Some(override_bundle),
+            true
+        ));
+        assert!(!should_check_for_desktop_update(false, None, false));
+    }
+
+    #[tokio::test]
+    async fn failed_update_launches_existing_verified_bundle() {
+        let archive = desktop_release_archive_for_version("2.7.1", b"updated desktop");
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body_for_version(
+                        base_url,
+                        "2.7.1",
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                    )
+                    .into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        write_installed_bundle(&cache_dir, b"fake desktop");
+        let verified = verify_bundle(&cache_dir).expect("cache should verify");
+
+        let launched = maybe_update_verified_bundle(
+            install_root.path(),
+            verified,
+            &server.url("/index.json"),
+            false,
+        )
+        .await;
+
+        assert_eq!(launched.manifest.version, desktop_version());
+        assert!(cache_dir.join(MANIFEST_FILE).is_file());
+        assert!(!install_root.path().join("2.7.1").exists());
+    }
+
+    #[tokio::test]
+    async fn newer_release_promotes_and_launches_updated_bundle() {
+        let archive = desktop_release_archive_for_version("2.7.1", b"updated desktop");
+        let archive_sha = sha256_bytes(&archive);
+        let server = FakeReleaseServer::start(|base_url| {
+            vec![
+                (
+                    "/index.json",
+                    release_index_body_for_version(base_url, "2.7.1", archive_sha.as_str())
+                        .into_bytes(),
+                ),
+                ("/bundle.tar.gz", archive),
+            ]
+        });
+        let install_root = TempDir::new().expect("install root");
+        let cache_dir = install_root.path().join(desktop_version());
+        write_installed_bundle(&cache_dir, b"fake desktop");
+        let verified = verify_bundle(&cache_dir).expect("cache should verify");
+
+        let launched = maybe_update_verified_bundle(
+            install_root.path(),
+            verified,
+            &server.url("/index.json"),
+            false,
+        )
+        .await;
+
+        let updated_dir = install_root.path().join("2.7.1");
+        assert_eq!(launched.manifest.version, "2.7.1");
+        assert_eq!(launched.bundle_dir, updated_dir);
+        assert!(updated_dir.join(MANIFEST_FILE).is_file());
+        assert_eq!(
+            server.requests(),
+            vec!["/index.json".to_string(), "/bundle.tar.gz".to_string()]
+        );
+    }
+
     #[test]
     fn platform_selection_uses_current_target() {
         assert_eq!(current_platform(), env::consts::OS);
@@ -2341,6 +3014,7 @@ mod tests {
             cache_root: None,
             release_index_url: Some(server.url("/index.json")),
             dry_run: true,
+            no_update: false,
         })
         .await
         .expect_err("dry run should report missing source-build target without building");
@@ -2924,11 +3598,19 @@ mod tests {
     }
 
     fn write_installed_bundle(cache_dir: &Path, executable_contents: &[u8]) {
+        write_installed_bundle_for_version(cache_dir, desktop_version(), executable_contents);
+    }
+
+    fn write_installed_bundle_for_version(
+        cache_dir: &Path,
+        version: &str,
+        executable_contents: &[u8],
+    ) {
         fs::create_dir_all(cache_dir).expect("create cache dir");
         let executable = cache_dir.join("OpenSymphony");
         fs::write(&executable, executable_contents).expect("write fake executable");
         let manifest = DesktopBundleManifest {
-            version: desktop_version().to_string(),
+            version: version.to_string(),
             platform: current_platform().to_string(),
             arch: current_arch().to_string(),
             executable: PathBuf::from("OpenSymphony"),
@@ -2942,8 +3624,12 @@ mod tests {
     }
 
     fn desktop_release_archive(executable_contents: &[u8]) -> Vec<u8> {
+        desktop_release_archive_for_version(desktop_version(), executable_contents)
+    }
+
+    fn desktop_release_archive_for_version(version: &str, executable_contents: &[u8]) -> Vec<u8> {
         let manifest = DesktopBundleManifest {
-            version: desktop_version().to_string(),
+            version: version.to_string(),
             platform: current_platform().to_string(),
             arch: current_arch().to_string(),
             executable: PathBuf::from("OpenSymphony"),
@@ -2969,10 +3655,14 @@ mod tests {
     }
 
     fn release_index_body(base_url: &str, archive_sha: &str) -> String {
+        release_index_body_for_version(base_url, desktop_version(), archive_sha)
+    }
+
+    fn release_index_body_for_version(base_url: &str, version: &str, archive_sha: &str) -> String {
         serde_json::json!({
             "schema_version": 1,
             "assets": [{
-                "version": desktop_version(),
+                "version": version,
                 "platform": current_platform(),
                 "arch": current_arch(),
                 "url": format!("{base_url}/bundle.tar.gz"),
@@ -2987,6 +3677,23 @@ mod tests {
             }]
         })
         .to_string()
+    }
+
+    fn desktop_release_asset(version: &str, url: &str, checksum: &str) -> DesktopReleaseAsset {
+        DesktopReleaseAsset {
+            version: version.to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            url: url.to_string(),
+            checksum: DesktopReleaseChecksum {
+                algorithm: "sha256".to_string(),
+                value: checksum.to_string(),
+            },
+            launch_target: DesktopLaunchTarget {
+                executable: PathBuf::from("OpenSymphony"),
+                args: Vec::new(),
+            },
+        }
     }
 
     fn sha256_bytes(bytes: &[u8]) -> String {

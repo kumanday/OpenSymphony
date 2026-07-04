@@ -103,9 +103,10 @@ When the installed version is older than a matching release-index asset:
   yes when the operator presses Enter.
 - TTY execution accepts an explicit no and launches the cached installed bundle
   when it still verifies.
-- Non-TTY execution does not prompt. It may update only when a future
-  non-interactive flag or config explicitly opts in; otherwise it launches the
-  cached verified bundle or follows the fallback order below.
+- Non-TTY execution does not prompt and updates by default when a newer
+  compatible release is available.
+- `--no-update` skips the update check and launches the cached installed bundle
+  when it still verifies.
 
 The launcher must never treat a failed prompt read as consent.
 
@@ -116,9 +117,10 @@ The launcher must never treat a failed prompt read as consent.
 1. Use the cached installed bundle for the requested OpenSymphony version when
    the installed manifest verifies.
 2. Use a matching prebuilt download from the release index when update policy
-   permits it. The default index URL is the matching GitHub release asset named
-   `opensymphony-desktop-release-index.json`; test and mirror flows can set
-   `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL`.
+   permits it. Cache-miss installs default to the versioned GitHub release for
+   the running CLI. Update checks default to the latest GitHub release asset
+   named `opensymphony-desktop-release-index.json`; test and mirror flows can
+   set `OPENSYMPHONY_DESKTOP_RELEASE_INDEX_URL` for both paths.
 3. Use source-build fallback when prerequisites pass.
 4. Fail with a clear repair message.
 
