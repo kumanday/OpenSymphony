@@ -185,7 +185,7 @@ struct PrerequisiteIssue {
 
 pub async fn run_command(args: AppArgs) -> ExitCode {
     let dry_run = args.dry_run;
-    match run_app(args) {
+    match run_app(args).await {
         Ok(executable) => {
             if !dry_run {
                 println!("OpenSymphony desktop ready: {}", executable.display());
@@ -199,13 +199,13 @@ pub async fn run_command(args: AppArgs) -> ExitCode {
     }
 }
 
-fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
+async fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     let cache_root =
         normalize_cache_root(selected_install_root(args.install_path, args.cache_root)?)?;
     let cache_dir = cache_root.join(desktop_version());
     validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
-    let verified = ensure_verified_bundle(&cache_root, &cache_dir, bundle_dir)?;
+    let verified = ensure_verified_bundle(&cache_root, &cache_dir, bundle_dir).await?;
 
     if args.dry_run {
         println!(
@@ -225,16 +225,16 @@ fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     Ok(verified.executable)
 }
 
-fn ensure_verified_bundle(
+async fn ensure_verified_bundle(
     cache_root: &Path,
     cache_dir: &Path,
     bundle_dir: Option<&Path>,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
     let mut runner = RealCommandRunner;
-    ensure_verified_bundle_with(cache_root, cache_dir, bundle_dir, &mut runner)
+    ensure_verified_bundle_with(cache_root, cache_dir, bundle_dir, &mut runner).await
 }
 
-fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
+async fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
     cache_root: &Path,
     cache_dir: &Path,
     bundle_dir: Option<&Path>,
@@ -256,7 +256,7 @@ fn ensure_verified_bundle_with<R: DesktopCommandRunner>(
                 copy_dir_all(bundle_dir, cache_dir)?;
                 verify_bundle(cache_dir)
             } else {
-                build_source_fallback(cache_root, cache_dir, runner)
+                build_source_fallback(cache_root, cache_dir, runner).await
             }
         }
     }
@@ -318,7 +318,7 @@ fn parse_release_index(contents: &str) -> Result<DesktopReleaseIndex, serde_json
     serde_json::from_str(contents)
 }
 
-fn build_source_fallback<R: DesktopCommandRunner>(
+async fn build_source_fallback<R: DesktopCommandRunner>(
     cache_root: &Path,
     cache_dir: &Path,
     runner: &mut R,
@@ -352,7 +352,7 @@ fn build_source_fallback<R: DesktopCommandRunner>(
     let archive = staging.path().join("opensymphony-source.tar.gz");
     let url = source_archive_url();
     println!("Downloading OpenSymphony source archive: {url}");
-    download_source_archive(&url, &archive)?;
+    download_source_archive(&url, &archive).await?;
 
     println!("Extracting OpenSymphony source archive.");
     runner.run(&DesktopCommand::new(
@@ -387,12 +387,14 @@ fn source_archive_url() -> String {
     })
 }
 
-fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLauncherError> {
-    let mut response =
-        reqwest::blocking::get(url).map_err(|source| DesktopLauncherError::SourceDownload {
-            url: url.to_string(),
-            source,
-        })?;
+async fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLauncherError> {
+    let response =
+        reqwest::get(url)
+            .await
+            .map_err(|source| DesktopLauncherError::SourceDownload {
+                url: url.to_string(),
+                source,
+            })?;
     let status = response.status();
     if !status.is_success() {
         return Err(DesktopLauncherError::SourceDownloadStatus {
@@ -400,16 +402,17 @@ fn download_source_archive(url: &str, path: &Path) -> Result<(), DesktopLauncher
             status: status.as_u16(),
         });
     }
-    let mut file = File::create(path).map_err(|source| DesktopLauncherError::Repair {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    response
-        .copy_to(&mut file)
+    let body = response
+        .bytes()
+        .await
         .map_err(|source| DesktopLauncherError::SourceDownload {
             url: url.to_string(),
             source,
         })?;
+    fs::write(path, body).map_err(|source| DesktopLauncherError::Repair {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -418,9 +421,13 @@ fn ensure_source_build_prerequisites<R: DesktopCommandRunner>(
     runner: &mut R,
 ) -> Result<(), DesktopLauncherError> {
     let initial = probe_source_build_prerequisites(platform, runner);
-    if initial
-        .iter()
-        .any(|issue| issue.name == platform_prerequisite_name(platform))
+    let platform_name = platform_prerequisite_name(platform);
+    if initial.iter().any(|issue| issue.name != platform_name) {
+        return Err(DesktopLauncherError::MissingPrerequisites {
+            details: format_prerequisite_issues(&initial),
+        });
+    }
+    if initial.iter().any(|issue| issue.name == platform_name)
         && let Some(commands) = platform_install_plan(platform, runner)
     {
         println!("Installing desktop platform prerequisites with detected package manager.");
@@ -539,29 +546,26 @@ fn platform_install_plan<R: DesktopCommandRunner>(
         ]);
     }
     if runner.program_exists("pacman") {
-        return Some(vec![
-            DesktopCommand::new("sudo", &["pacman", "-Syu", "--noconfirm"]),
-            DesktopCommand::new(
-                "sudo",
-                &[
-                    "pacman",
-                    "-S",
-                    "--needed",
-                    "--noconfirm",
-                    "webkit2gtk-4.1",
-                    "base-devel",
-                    "curl",
-                    "wget",
-                    "file",
-                    "openssl",
-                    "appmenu-gtk-module",
-                    "libappindicator-gtk3",
-                    "librsvg",
-                    "xdotool",
-                    "pkgconf",
-                ],
-            ),
-        ]);
+        return Some(vec![DesktopCommand::new(
+            "sudo",
+            &[
+                "pacman",
+                "-S",
+                "--needed",
+                "--noconfirm",
+                "webkit2gtk-4.1",
+                "base-devel",
+                "curl",
+                "wget",
+                "file",
+                "openssl",
+                "appmenu-gtk-module",
+                "libappindicator-gtk3",
+                "librsvg",
+                "xdotool",
+                "pkgconf",
+            ],
+        )]);
     }
     if runner.program_exists("dnf") {
         return Some(vec![
@@ -717,7 +721,7 @@ fn build_source_bundle_from_source_dir<R: DesktopCommandRunner>(
 }
 
 fn source_build_executable_relative(platform: &str) -> PathBuf {
-    Path::new("apps/desktop/src-tauri/target/release").join(source_build_executable_name(platform))
+    Path::new("target/release").join(source_build_executable_name(platform))
 }
 
 fn source_build_executable_name(platform: &str) -> PathBuf {
@@ -1228,6 +1232,28 @@ mod tests {
     }
 
     #[test]
+    fn pacman_prerequisite_plan_does_not_upgrade_system() {
+        let runner = FakeRunner::with_programs(&["sudo", "pacman"]);
+        let commands = platform_install_plan("linux", &runner).expect("pacman plan");
+        let displays: Vec<_> = commands.iter().map(|command| command.display()).collect();
+
+        assert_eq!(displays.len(), 1);
+        assert!(displays[0].contains("pacman -S --needed --noconfirm"));
+        assert!(!displays[0].contains("-Syu"));
+    }
+
+    #[test]
+    fn automatic_platform_install_waits_for_other_prerequisites() {
+        let mut runner = FakeRunner::with_programs(&["sudo", "apt-get"]);
+        let error = ensure_source_build_prerequisites("linux", &mut runner)
+            .expect_err("missing build tools should stop before platform install");
+
+        assert!(runner.runs.is_empty());
+        assert!(error.to_string().contains("Rust/Cargo"));
+        assert!(error.to_string().contains("Node/npm"));
+    }
+
+    #[test]
     fn source_build_failure_reports_failed_command() {
         let source = TempDir::new().expect("source tempdir");
         let bundle = TempDir::new().expect("bundle tempdir");
@@ -1248,7 +1274,8 @@ mod tests {
         let cache_root = TempDir::new().expect("cache tempdir");
         let built_executable = source
             .path()
-            .join(source_build_executable_relative(current_platform()));
+            .join("target/release")
+            .join(source_build_executable_name(current_platform()));
         fs::create_dir_all(built_executable.parent().expect("target parent"))
             .expect("create fake target dir");
         fs::write(&built_executable, b"fake source-built desktop")
@@ -1273,6 +1300,34 @@ mod tests {
                 .expect("canonical installed executable")
         );
         assert_eq!(runner.runs, ["npm install", "cargo build --release"]);
+    }
+
+    #[tokio::test]
+    async fn source_archive_download_runs_inside_tokio_runtime() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut buffer = [0; 512];
+            let _ = stream.read(&mut buffer).await.expect("read request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\narchive")
+                .await
+                .expect("write response");
+        });
+        let temp = TempDir::new().expect("download tempdir");
+        let archive = temp.path().join("archive.tar.gz");
+
+        download_source_archive(&format!("http://{addr}/archive.tar.gz"), &archive)
+            .await
+            .expect("archive should download");
+        server.await.expect("server task should finish");
+
+        assert_eq!(fs::read(archive).expect("read archive"), b"archive");
     }
 
     #[test]
@@ -1309,8 +1364,8 @@ mod tests {
         assert_eq!(home, PathBuf::from("C:\\Users\\alice"));
     }
 
-    #[test]
-    fn local_bundle_materializes_and_verifies_from_manifest() {
+    #[tokio::test]
+    async fn local_bundle_materializes_and_verifies_from_manifest() {
         let source = TempDir::new().expect("source tempdir");
         let cache = TempDir::new().expect("cache tempdir");
         let executable = source.path().join("OpenSymphony");
@@ -1330,6 +1385,7 @@ mod tests {
 
         let cache_dir = cache.path().join(desktop_version());
         let verified = ensure_verified_bundle(cache.path(), &cache_dir, Some(source.path()))
+            .await
             .expect("bundle should materialize and verify");
 
         assert_eq!(
@@ -1486,8 +1542,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn local_bundle_copy_preserves_executable_mode() {
+    #[tokio::test]
+    async fn local_bundle_copy_preserves_executable_mode() {
         use std::os::unix::fs::PermissionsExt;
 
         let source = TempDir::new().expect("source tempdir");
@@ -1511,6 +1567,7 @@ mod tests {
 
         let cache_dir = cache.path().join(desktop_version());
         let verified = ensure_verified_bundle(cache.path(), &cache_dir, Some(source.path()))
+            .await
             .expect("bundle should materialize and verify");
         let mode = fs::metadata(&verified.executable)
             .expect("copied executable metadata")
