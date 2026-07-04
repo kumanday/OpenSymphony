@@ -19,6 +19,15 @@ openhands:
 
 Work the assigned issue inside this repository and keep changes small and reviewable.
 
+## Branch target
+
+Target branch: `develop`
+
+<!-- Set by `opensymphony init` or `opensymphony update --target-branch`.
+     Value is a local branch name, not an `origin/...` ref. Agents should use
+     `origin/<target-branch>` when syncing, creating replacement branches, and
+     preparing PRs. -->
+
 Repository context precedence for this example target repo:
 
 1. Follow this `WORKFLOW.md`.
