@@ -65,18 +65,31 @@ function renderInline(text: string): string {
   // The whole line is escaped up front (escapeHtml also covers quotes), so
   // captured fragments are already safe in both text and attribute position;
   // escaping again here would double-encode ampersands.
-  let html = escapeHtml(text);
-  // Wiki links first: their targets may contain characters the other
-  // patterns would otherwise chew on.
-  html = html.replace(/\[\[([^\]]+)\]\]/g, (_match, target: string) => {
+  //
+  // Each pass stashes its generated HTML behind a NUL-delimited placeholder
+  // so later passes only ever see source text — otherwise a wiki target
+  // containing markdown-link/bold/code syntax would be rewritten inside the
+  // generated attribute markup and corrupt it. NUL cannot occur
+  // legitimately; incoming ones are stripped so they cannot alias a
+  // placeholder.
+  const generated: string[] = [];
+  const stash = (html: string): string => {
+    generated.push(html);
+    return `\u0000${generated.length - 1}\u0000`;
+  };
+  let html = escapeHtml(text).replaceAll("\u0000", "");
+  // Non-greedy up to the first "]]" so targets may contain single brackets
+  // (e.g. markdown-link syntax inside a title) without escaping the wiki
+  // pass and getting chewed by the passes below.
+  html = html.replace(/\[\[(.+?)\]\]/g, (_match, target: string) => {
     const label = target.split("/").at(-1) ?? target;
-    return `<button type="button" class="os-kg-capsule-link" data-kg-link-target="${target}">${label}</button>`;
+    return stash(`<button type="button" class="os-kg-capsule-link" data-kg-link-target="${target}">${label}</button>`);
   });
   html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label: string, href: string) => {
     if (!/^https?:\/\//.test(href)) return match;
-    return `<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`;
+    return stash(`<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`);
   });
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  return html;
+  html = html.replace(/\*\*([^*]+)\*\*/g, (_match, body: string) => stash(`<strong>${body}</strong>`));
+  html = html.replace(/`([^`]+)`/g, (_match, body: string) => stash(`<code>${body}</code>`));
+  return html.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => generated[Number(index)]);
 }

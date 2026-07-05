@@ -471,9 +471,20 @@ export function applyGraphFilters(
   const neighborhood = mode === "neighborhood" && focusedNodeId
     ? collectNeighborhood(snapshot.edges, focusedNodeId, neighborhoodDepth)
     : null;
+  // Communities are membership lists, not just primary assignments: a
+  // multi-area concept carries one community in metrics but appears in every
+  // area's node_ids. Drilling into an area must keep those secondary members
+  // (they are part of the hull the operator clicked).
+  const communityMembers = normalized.communities.length > 0
+    ? new Set(
+      snapshot.communities
+        .filter((community) => normalized.communities.includes(community.id))
+        .flatMap((community) => community.node_ids),
+    )
+    : null;
   const nodes = snapshot.nodes.filter((node) => {
     if (neighborhood && !neighborhood.has(node.id)) return false;
-    return matchesNodeFilters(node, normalized);
+    return matchesNodeFilters(node, normalized, communityMembers);
   });
   const nodeKindById = new Map(nodes.map((node) => [node.id, node.kind]));
   const edges = snapshot.edges.filter((edge) => {
@@ -1035,7 +1046,11 @@ function mostCommon<T extends string>(values: readonly T[]): T | undefined {
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || compareStrings(a[0], b[0]))[0]?.[0];
 }
 
-function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boolean {
+function matchesNodeFilters(
+  node: MemoryGraphNode,
+  filters: GraphFilters,
+  communityMembers: ReadonlySet<string> | null = null,
+): boolean {
   if (filters.bundleIds.length > 0 && (!node.bundle_id || !filters.bundleIds.includes(node.bundle_id))) return false;
   if (filters.nodeKinds.length > 0 && !filters.nodeKinds.includes(node.kind)) return false;
   if (filters.tags.length > 0 && !filters.tags.some((tag) => node.tags.includes(tag))) return false;
@@ -1043,7 +1058,11 @@ function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boole
   if (filters.freshness.length > 0 && (!node.freshness || !filters.freshness.includes(node.freshness))) return false;
   if (filters.warning === "with_warnings" && node.warning_count <= 0) return false;
   if (filters.warning === "without_warnings" && node.warning_count > 0) return false;
-  if (filters.communities.length > 0 && (!node.metrics?.community_id || !filters.communities.includes(node.metrics.community_id))) return false;
+  if (filters.communities.length > 0) {
+    const primaryMatch = node.metrics?.community_id !== undefined
+      && filters.communities.includes(node.metrics.community_id);
+    if (!primaryMatch && !communityMembers?.has(node.id)) return false;
+  }
   if (filters.areas.length > 0 && !hasAny(node, "area", filters.areas)) return false;
   if (filters.projects.length > 0 && !hasAny(node, "project", filters.projects)) return false;
   if (filters.milestones.length > 0 && !hasAny(node, "milestone", filters.milestones)) return false;

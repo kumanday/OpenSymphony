@@ -1080,12 +1080,14 @@ describe("OpenSymphonyApp mount", () => {
       // Breadcrumb reflects the drill trail back to the atlas.
       expect(root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent).toContain("COE-465");
 
-      // Following a capsule link selects the linked node.
+      // Following a capsule link selects the linked node and drills into
+      // its area, even when starting from the atlas.
       (root.querySelector("[data-kg-link-target='tag:graph-view']") as HTMLButtonElement).click();
       await flushUntil(() =>
         root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent === "graph-view",
       );
       expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("tag");
+      expect(root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent).toContain("Graph View");
     } finally {
       await handle.destroy();
     }
@@ -1165,11 +1167,11 @@ describe("OpenSymphonyApp mount", () => {
       await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
       expect(root.querySelector("[data-testid='knowledge-graph-capsule-body']")?.textContent).toContain("Summary");
 
-      // The drilled view is filtered to the area's primary members (a
-      // multi-area concept keeps its primary community in metrics).
-      const areaConceptCount = graphVizFixtureSnapshot.nodes
-        .filter((node) => node.metrics.community_id === "area:code-intelligence").length;
-      expect(root.querySelectorAll("[data-testid='knowledge-graph-node-list'] li").length).toBe(areaConceptCount);
+      // The drilled view is filtered to the area's full membership,
+      // including multi-area concepts whose primary community differs.
+      const areaMemberCount = graphVizFixtureSnapshot.communities
+        .find((community) => community.id === "area:code-intelligence")!.node_ids.length;
+      expect(root.querySelectorAll("[data-testid='knowledge-graph-node-list'] li").length).toBe(areaMemberCount);
 
       // Escape pops one level at a time: capsule → area → atlas.
       root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));

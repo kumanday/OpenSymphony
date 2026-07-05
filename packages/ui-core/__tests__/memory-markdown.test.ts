@@ -48,4 +48,22 @@ describe("renderMemoryMarkdown", () => {
     expect(attr).not.toContain("<img");
     expect(attr).toContain("&gt;");
   });
+
+  it("never reprocesses generated HTML with later inline passes", () => {
+    // A wiki target containing markdown-link syntax must land verbatim in
+    // the attribute, not be rewritten into a nested anchor.
+    const html = renderMemoryMarkdown("[[foo [docs](https://example.com)]]");
+    expect(html).toContain(`data-kg-link-target="foo [docs](https://example.com)"`);
+    expect(html).not.toContain("<a ");
+
+    // Bold/code markers inside link labels and hrefs also stay verbatim.
+    const bold = renderMemoryMarkdown("[**label**](https://example.com/a**b**c)");
+    expect(bold).toContain(`href="https://example.com/a**b**c"`);
+    expect(bold).not.toContain("<strong>");
+
+    // Stray NUL bytes in the source cannot alias placeholder tokens.
+    const nul = renderMemoryMarkdown("a\u00001\u0000b **x**");
+    expect(nul).toContain("a1b");
+    expect(nul).toContain("<strong>x</strong>");
+  });
 });

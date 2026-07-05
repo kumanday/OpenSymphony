@@ -2693,18 +2693,28 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.selectKnowledgeNode(node);
   }
 
+  /**
+   * Select a node reached by navigation (capsule link, deep link) and land
+   * where manual drilling would have: inside the node's area. From the
+   * atlas this drills in; from another area it re-drills — unless the node
+   * is already visible in the current area (secondary membership counts).
+   * Nodes outside every area (e.g. the bundle node) widen back to the atlas.
+   */
   private selectKnowledgeNode(node: MemoryGraphNode): void {
     const graph = this.state.knowledgeGraph;
     const targetCommunity = node.metrics?.community_id ?? null;
     const currentCommunity = graph.filters.communities[0] ?? null;
+    const snapshot = currentGraphSnapshot(graph);
+    const visibleInCurrentArea = currentCommunity !== null && (
+      targetCommunity === currentCommunity
+      || (snapshot?.communities.find((community) => community.id === currentCommunity)?.node_ids.includes(node.id) ?? false)
+    );
     let relayout = false;
     this.state.knowledgeGraph = graphReducer(graph, { type: "NODE_FOCUSED", nodeId: null });
-    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: currentCommunity || targetCommunity ? "community" : "atlas" });
-    if (currentCommunity !== null && targetCommunity !== null && currentCommunity !== targetCommunity) {
+    if (targetCommunity !== null && !visibleInCurrentArea) {
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: targetCommunity });
-      relayout = true;
-    } else if (currentCommunity !== null && targetCommunity === null) {
-      // Target lives outside every area (e.g. the bundle node): widen back out.
+      relayout = currentCommunity !== targetCommunity;
+    } else if (targetCommunity === null && currentCommunity !== null) {
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "FILTERS_SET", filters: { communities: [] } });
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: "atlas" });
       relayout = true;
@@ -2848,12 +2858,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.render();
         return false;
       }
-      // Land drilled into the concept's area with the capsule open, exactly
+      // Lands drilled into the concept's area with the capsule open, exactly
       // where manual navigation would have ended up.
-      if (node.metrics?.community_id) {
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: node.metrics.community_id });
-        this.invalidateKnowledgeGraphLayout();
-      }
       this.selectKnowledgeNode(node);
       return true;
     }

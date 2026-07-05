@@ -1,4 +1,5 @@
 import {
+  applyGraphFilters,
   cachedConceptDetail,
   createFixtureGraphAdapter,
   createInitialGraphState,
@@ -6,6 +7,7 @@ import {
   graphReducer,
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
+  initialGraphFilters,
   memoryDeepLinkForGraphNode,
   memoryDeepLinkToGraphState,
   parseMemoryDeepLink,
@@ -61,6 +63,48 @@ describe("memory deep links", () => {
     expect(() => formatMemoryDeepLink({ bundleId: "" })).toThrow(/bundle id/);
   });
 
+  it("keeps community ids with slashes in a single segment", () => {
+    // Directory-derived communities ("directory:path/to") must round-trip:
+    // multi-segment community paths are rejected by the parser.
+    const link = formatMemoryDeepLink({ bundleId: "b", communityId: "directory:path/to" });
+    expect(link).toBe("opensymphony://memory/b/communities/directory%3Apath%2Fto");
+    expect(parseMemoryDeepLink(link)).toEqual({
+      bundleId: "b",
+      conceptId: null,
+      communityId: "directory:path/to",
+    });
+  });
+
+  it("strips the community graph-node prefix when addressing communities", () => {
+    // Server snapshots emit community nodes as "community:<id>" while the
+    // community list carries the bare id; links address the bare id.
+    const link = memoryDeepLinkForGraphNode("b", {
+      kind: "community",
+      id: "community:area:graph-view",
+      concept_id: undefined,
+    })!;
+    expect(parseMemoryDeepLink(link)?.communityId).toBe("area:graph-view");
+
+    const prefixedSnapshot = {
+      ...graphVizFixtureSnapshot,
+      nodes: [
+        ...graphVizFixtureSnapshot.nodes,
+        {
+          ...graphVizFixtureSnapshot.nodes[0],
+          id: "community:area:code-intelligence",
+          kind: "community" as const,
+          label: "Code Intelligence",
+        },
+      ],
+    };
+    const resolved = resolveMemoryDeepLinkNode(prefixedSnapshot, {
+      bundleId: prefixedSnapshot.bundle_id,
+      conceptId: null,
+      communityId: "area:code-intelligence",
+    });
+    expect(resolved?.id).toBe("community:area:code-intelligence");
+  });
+
   it("builds node deep links only for addressable node kinds", () => {
     const snapshot = graphVizFixtureSnapshot;
     const concept = snapshot.nodes.find((node) => node.kind === "concept")!;
@@ -93,6 +137,34 @@ describe("memory deep links", () => {
       communityId: null,
     });
     expect(conceptState.mode).toBe("atlas");
+  });
+});
+
+describe("community drill filtering", () => {
+  it("keeps secondary members when filtering by a community", () => {
+    // A multi-area concept carries only its primary community in metrics
+    // but belongs to every listed area's node_ids; drilling into the
+    // secondary area must keep it (it is part of the clicked hull).
+    const secondaryMember = graphVizFixtureSnapshot.nodes.find((node) => {
+      const areas = node.frontmatter_summary.areas as string[] | undefined;
+      return node.kind === "concept" && (areas?.length ?? 0) > 1;
+    });
+    expect(secondaryMember).toBeDefined();
+    const areas = secondaryMember!.frontmatter_summary.areas as string[];
+    const secondaryArea = `area:${areas[1]}`;
+    expect(secondaryMember!.metrics.community_id).not.toBe(secondaryArea);
+
+    const filtered = applyGraphFilters(graphVizFixtureSnapshot, {
+      ...initialGraphFilters,
+      communities: [secondaryArea],
+    });
+    const memberIds = new Set(filtered.nodes.map((node) => node.id));
+    expect(memberIds.has(secondaryMember!.id)).toBe(true);
+    // Every hull member survives the drill filter.
+    const community = graphVizFixtureSnapshot.communities.find((candidate) => candidate.id === secondaryArea)!;
+    for (const nodeId of community.node_ids) {
+      expect(memberIds.has(nodeId)).toBe(true);
+    }
   });
 });
 

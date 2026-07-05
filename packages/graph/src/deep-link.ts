@@ -12,11 +12,14 @@ import type { GraphDeepLinkState } from "./index.js";
  *   opensymphony://memory/<bundleId>/communities/<communityId>
  *   opensymphony://memory/<bundleId>/concepts/<conceptId>
  *
- * Every path segment is percent-encoded; concept ids keep their internal
+ * Every path segment is percent-encoded. Concept ids keep their internal
  * slashes (`issues/COE-399` becomes `concepts/issues/COE-399`), matching the
- * gateway's wildcard concept route. Parsing is strict: unknown collections,
- * empty segments, or query/fragment suffixes are rejected rather than
- * guessed at, so a link either resolves exactly or not at all.
+ * gateway's wildcard concept route; community ids encode as a single segment
+ * (a directory-derived community like `directory:path/to` must round-trip
+ * through the one-segment `/communities/<id>` form). Parsing is strict:
+ * unknown collections, empty segments, or query/fragment suffixes are
+ * rejected rather than guessed at, so a link either resolves exactly or not
+ * at all.
  */
 
 export const memoryDeepLinkPrefix = "opensymphony://memory/";
@@ -40,7 +43,7 @@ export function formatMemoryDeepLink(link: {
     return `${base}/concepts/${encodeSegments(link.conceptId)}`;
   }
   if (link.communityId) {
-    return `${base}/communities/${encodeSegments(link.communityId)}`;
+    return `${base}/communities/${encodeURIComponent(link.communityId)}`;
   }
   return base;
 }
@@ -85,12 +88,20 @@ export function memoryDeepLinkForGraphNode(
     return formatMemoryDeepLink({ bundleId, conceptId: node.concept_id });
   }
   if (node.kind === "community") {
-    return formatMemoryDeepLink({ bundleId, communityId: node.id });
+    // Server snapshots prefix community graph nodes ("community:area:x")
+    // while the community list carries the bare id ("area:x"); links always
+    // address the bare community id.
+    return formatMemoryDeepLink({ bundleId, communityId: bareCommunityId(node.id) });
   }
   if (node.kind === "bundle") {
     return formatMemoryDeepLink({ bundleId });
   }
   return null;
+}
+
+/** Strip the graph-node prefix from a community node id, if present. */
+export function bareCommunityId(nodeId: string): string {
+  return nodeId.startsWith("community:") ? nodeId.slice("community:".length) : nodeId;
 }
 
 /** Find the snapshot node a parsed deep link points at. */
@@ -104,7 +115,9 @@ export function resolveMemoryDeepLinkNode(
       ?? null;
   }
   if (link.communityId) {
-    return snapshot.nodes.find((node) => node.id === link.communityId) ?? null;
+    return snapshot.nodes.find((node) => node.id === link.communityId)
+      ?? snapshot.nodes.find((node) => node.id === `community:${link.communityId}`)
+      ?? null;
   }
   return snapshot.nodes.find((node) => node.kind === "bundle" && node.bundle_id === link.bundleId) ?? null;
 }
