@@ -1090,7 +1090,11 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
       <h4>Citations</h4>
       <ul class="os-kg-capsule-links" data-testid="knowledge-graph-capsule-citations">
         ${detail.citations.map((citation) => `
-          <li><button type="button" class="os-kg-capsule-link" data-kg-link-target="${escapeAttr(citation.target)}">${escapeHtml(citation.label ?? citation.target)}</button></li>
+          <li>${/^https?:\/\//.test(citation.target)
+            // Real OKF citations often carry a URL target with a short
+            // label; those are external evidence, not graph nodes.
+            ? `<a href="${escapeAttr(citation.target)}" target="_blank" rel="noreferrer">${escapeHtml(citation.label ?? citation.id)}</a>`
+            : `<button type="button" class="os-kg-capsule-link" data-kg-link-target="${escapeAttr(citation.target)}">${escapeHtml(citation.label ?? citation.target)}</button>`}</li>
         `).join("")}
       </ul>
     `

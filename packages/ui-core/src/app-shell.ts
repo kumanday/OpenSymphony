@@ -2692,9 +2692,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private openKnowledgeCapsuleLink(target: string): void {
     const snapshot = currentGraphSnapshot(this.state.knowledgeGraph);
     if (!snapshot) return;
+    // OKF capsules store link targets verbatim, often as relative markdown
+    // paths ("../issues/COE-124.md") that the snapshot has already resolved
+    // to bare ids ("issues/COE-124") — normalize before matching.
+    const normalized = target.replace(/^(\.\.?\/)+/, "").replace(/\.md$/i, "");
+    const tail = normalized.split("/").at(-1) ?? normalized;
     const node = snapshot.nodes.find((candidate) => candidate.id === target)
       ?? snapshot.nodes.find((candidate) => candidate.concept_id === target)
-      ?? snapshot.nodes.find((candidate) => candidate.concept_id?.split("/").at(-1) === target)
+      ?? snapshot.nodes.find((candidate) => candidate.concept_id === normalized)
+      ?? snapshot.nodes.find((candidate) => candidate.concept_id?.split("/").at(-1) === tail)
       ?? snapshot.nodes.find((candidate) => candidate.label === target)
       ?? null;
     if (!node) return;

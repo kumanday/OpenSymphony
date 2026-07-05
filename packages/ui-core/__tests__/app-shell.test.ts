@@ -1130,6 +1130,60 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("resolves deep links whose bundle is queued behind an in-flight graph load", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const bundleB = {
+      ...fixtureGraphSnapshot,
+      bundle_id: "bundle-b",
+      cursor: { sequence: 1, partition: "memory-graph:bundle-b" },
+      nodes: fixtureGraphSnapshot.nodes.map((node) => ({ ...node, bundle_id: "bundle-b" })),
+    };
+    let releaseFirstSnapshot: (() => void) | null = null;
+    const firstSnapshotGate = new Promise<void>((resolve) => {
+      releaseFirstSnapshot = resolve;
+    });
+    let snapshotCalls = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async listBundles() {
+        return {
+          schema_version: schemaVersionV1(),
+          bundles: [
+            { id: "local-default", title: "Default", okf_version: "0.1", visibility: "private" as const, concept_count: 1 },
+            { id: "bundle-b", title: "Bundle B", okf_version: "0.1", visibility: "private" as const, concept_count: 1 },
+          ],
+        };
+      },
+      async getGraphSnapshot(bundleId) {
+        snapshotCalls += 1;
+        if (snapshotCalls === 1) await firstSnapshotGate;
+        return bundleId === "bundle-b" ? bundleB : fixtureGraphSnapshot;
+      },
+      async getConceptDetail(bundleId, conceptId) {
+        return { ...fixtureConceptDetail, bundle_id: bundleId, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport: buildTransport(), graphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+      // Opening the pane starts a default-bundle load; the deep link lands
+      // while that load is still in flight, so its bundle gets queued.
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      const openPromise = handle.openMemoryDeepLink("opensymphony://memory/bundle-b/concepts/issues/COE-465");
+      await flushAsync();
+      releaseFirstSnapshot?.();
+
+      expect(await openPromise).toBe(true);
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent)
+        .toContain("COE-465");
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("discards in-flight capsule responses superseded by an accepted graph refresh", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1478,6 +1532,72 @@ describe("OpenSymphonyApp mount", () => {
       disposeKnowledgeGraphRenderer(root);
       root.remove();
     }
+  });
+
+  it("resolves relative markdown capsule link targets against snapshot nodes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    // OKF capsules can store link targets verbatim as relative markdown
+    // paths ("../concepts/x.md"); the graph snapshot only knows the
+    // resolved concept id ("concepts/x").
+    const graphAdapter = createFixtureGraphAdapter({
+      bundles: graphVizFixtureBundleList,
+      snapshot: graphVizFixtureSnapshot,
+      communities: graphVizFixtureCommunityList,
+      conceptDetail: (_bundleId, conceptId) => {
+        const detail = graphVizFixtureConceptDetail(conceptId);
+        if (!detail) return null;
+        return {
+          ...detail,
+          links: detail.links.map((link) => ({ ...link, target: `../${link.target}.md` })),
+        };
+      },
+    });
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport: buildTransport(), graphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      expect(await handle.openMemoryDeepLink(
+        "opensymphony://memory/viz-workbench/concepts/concepts/code-intelligence-01",
+      )).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule'] [data-kg-link-target^='../']") !== null);
+
+      const link = root.querySelector<HTMLElement>("[data-testid='knowledge-graph-capsule'] [data-kg-link-target^='../']")!;
+      const target = link.dataset.kgLinkTarget!;
+      const resolvedConceptId = target.replace(/^(\.\.\/)+/, "").replace(/\.md$/, "");
+      const expectedLabel = graphVizFixtureSnapshot.nodes.find((node) => node.concept_id === resolvedConceptId)!.label;
+
+      link.click();
+      await flushUntil(() =>
+        root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent === expectedLabel,
+      );
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("renders URL citation targets as external links, not graph buttons", () => {
+    const concept = fixtureGraphSnapshot.nodes.find((node) => node.kind === "concept")!;
+    const html = renderKnowledgeGraphInspector({
+      snapshot: fixtureGraphSnapshot,
+      layout: null,
+      state: { ...initialGraphState, selectedNodeIds: [concept.id] },
+      conceptDetail: {
+        ...fixtureConceptDetail,
+        citations: [
+          { id: "1", target: "https://linear.app/x/issue/COE-200", label: "COE-200" },
+          { id: "2", target: "issues/COE-465", label: "in-graph citation" },
+        ],
+      },
+    });
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const citations = root.querySelector("[data-testid='knowledge-graph-capsule-citations']")!;
+    const anchor = citations.querySelector("a")!;
+    expect(anchor.getAttribute("href")).toBe("https://linear.app/x/issue/COE-200");
+    expect(anchor.textContent).toBe("COE-200");
+    const buttons = Array.from(citations.querySelectorAll<HTMLElement>("[data-kg-link-target]"));
+    expect(buttons.map((button) => button.dataset.kgLinkTarget)).toEqual(["issues/COE-465"]);
   });
 
   it("renders capsule citations as navigable graph links", () => {

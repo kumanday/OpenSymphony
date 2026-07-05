@@ -14,6 +14,7 @@ import {
   graphVizFixtureCommunityList,
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
+  memoryDeepLinkPrefix,
   type MemoryBundleList,
   type MemoryCommunityList,
   type MemoryConceptDetail,
@@ -638,10 +639,15 @@ function fixtureWorkbenchRequested(): boolean {
  */
 function openMemoryDeepLinkFromLocation(app: OpenSymphonyAppHandle): void {
   try {
-    const link = new URLSearchParams(globalThis.location?.search ?? "").get("memory");
-    if (link) {
-      void app.openMemoryDeepLink(link);
-    }
+    // URLSearchParams.get() percent-decodes the value, which would collapse
+    // load-bearing %2F/%3A escapes inside a raw pasted link's bundle or
+    // community ids. Read the raw parameter instead; a link that was itself
+    // encodeURIComponent-ed as a whole (so it doesn't start with the plain
+    // scheme) is restored with one explicit decode.
+    const raw = /[?&]memory=([^&]*)/.exec(globalThis.location?.search ?? "")?.[1];
+    if (!raw) return;
+    const link = raw.startsWith(memoryDeepLinkPrefix) ? raw : decodeURIComponent(raw);
+    void app.openMemoryDeepLink(link);
   } catch {
     // No usable location (tests, packaged builds without query strings).
   }
