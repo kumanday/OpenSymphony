@@ -112,6 +112,7 @@ import {
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
 import {
+  createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   type KnowledgeGraphViewState,
   mountKnowledgeGraphRenderer,
@@ -305,7 +306,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private graphLayoutAdapter: GraphLayoutAdapter = createGraphLayoutAdapter(() => null);
   private pendingGraphLayoutAdapter: GraphLayoutAdapter | null = null;
   private graphLayoutRun = 0;
-  private knowledgeGraphView: KnowledgeGraphViewState = { scale: 1, dx: 0, dy: 0 };
+  private knowledgeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
   /**
    * Monotonic counter bumped by every user-initiated navigation (task click,
@@ -786,7 +787,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const previousGraph = this.state.knowledgeGraph;
     this.state.knowledgeGraph = graphReducer(previousGraph, { type: "SNAPSHOT_LOADED", snapshot });
     const acceptedSnapshot = this.state.knowledgeGraph !== previousGraph;
-    if (acceptedSnapshot || !this.state.knowledgeGraph.staleBundleIds.includes(bundleId)) {
+    // Only invalidate the layout when the reducer actually accepted a newer
+    // snapshot. Re-layouting on every identical poll churned the whole
+    // graph surface every five seconds (and reset in-progress hover/zoom).
+    if (acceptedSnapshot) {
       this.state.knowledgeGraphLayout = null;
       this.knowledgeGraphLayoutSize = null;
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
@@ -1207,11 +1211,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const run = ++this.graphLayoutRun;
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
     const { width, height } = size;
+    // The layout runs on a canvas larger than the stage: the 3D camera fits
+    // whatever extent the layout produces, and the extra room lets the force
+    // layout separate clusters instead of packing them into the viewport.
+    const layoutScale = Math.min(2, Math.max(1.4, Math.sqrt((visibleGraphSnapshot(this.state.knowledgeGraph)?.nodes.length ?? 60) / 40)));
     void this.graphLayoutAdapter.layout(snapshot, {
       kind: graphLayoutKindForMode(this.state.knowledgeGraph.mode),
       focusedNodeId: this.state.knowledgeGraph.focusedNodeId,
-      width,
-      height,
+      width: Math.round(Math.max(1280, width * layoutScale)),
+      height: Math.round(Math.max(900, height * layoutScale)),
     }).then((layout) => {
       if (this.destroyed || run !== this.graphLayoutRun) return;
       this.state.knowledgeGraphLayout = layout;
@@ -4611,11 +4619,20 @@ function appShellStyles(): string {
     .os-knowledge-toolbar span { color: #667788; font-size: 12px; }
     .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
     .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
-    .os-knowledge-stage { position: relative; height: clamp(260px, 38vh, 460px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #e7ebef; }
-    .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+    .os-knowledge-stage { position: relative; height: clamp(320px, 52vh, 680px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #eef1f4; }
+    .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; cursor: grab; }
+    .os-knowledge-canvas[data-kg-pointer="pan"], .os-knowledge-canvas[data-kg-pointer="orbit"] { cursor: grabbing; }
+    .os-knowledge-canvas[data-kg-pointer="drag-node"] { cursor: move; }
     .os-knowledge-labels { position: absolute; inset: 0; pointer-events: none; }
-    .os-kg-label { position: absolute; transform: translate(-50%, calc(-100% - 10px)); max-width: min(180px, 42%); min-height: 24px; padding: 3px 7px; border-color: rgba(57, 112, 143, 0.28); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); }
+    .os-kg-label { position: absolute; transform: translate(-50%, 0); max-width: min(200px, 46%); min-height: 22px; padding: 2px 7px; border: 1px solid rgba(57, 112, 143, 0.24); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); transition: opacity 0.16s ease; }
     .os-kg-label.is-selected { border-color: #c2410c; color: #9a3412; background: #fff7ed; }
+    .os-kg-label.is-hovered { border-color: #c2410c; color: #9a3412; }
+    .os-kg-area-label { position: absolute; transform: translate(-50%, -50%); font-size: 17px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.75); transition: opacity 0.18s ease; pointer-events: none; white-space: nowrap; }
+    .os-kg-tooltip { position: absolute; transform: translate(-50%, -100%); display: grid; gap: 2px; max-width: 260px; padding: 8px 10px; border: 1px solid #cbd5df; border-radius: 8px; background: rgba(255, 255, 255, 0.97); box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16); pointer-events: none; z-index: 3; }
+    .os-kg-tooltip strong { font-size: 12px; line-height: 1.25; white-space: normal; }
+    .os-kg-tooltip span { color: #536170; font-size: 11px; }
+    .os-kg-tooltip em { color: #23566f; font-size: 11px; font-style: normal; }
+    .os-kg-controls-hint { position: absolute; right: 8px; bottom: 6px; color: #8a97a3; font-size: 10.5px; letter-spacing: 0.02em; pointer-events: none; user-select: none; }
     .os-kg-list { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; max-height: 160px; overflow: auto; }
     .os-kg-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 6px 8px; background: #ffffff; }
     .os-kg-list li.is-selected { border-color: #c2410c; background: #fff7ed; }

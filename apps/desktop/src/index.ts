@@ -1,13 +1,18 @@
 import {
   HttpGatewayTransport,
+  createGraphVizDemoTransport,
   type ActionCapableTransport,
   type ActionDispatch,
   type ActionReceipt,
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import {
+  createFixtureGraphAdapter,
   createGatewayGraphAdapter,
   createTauriNativeGraphAdapter,
+  graphVizFixtureBundleList,
+  graphVizFixtureCommunityList,
+  graphVizFixtureSnapshot,
   type MemoryBundleList,
   type MemoryCommunityList,
   type MemoryConceptDetail,
@@ -609,8 +614,36 @@ async function createTransportForGateway(gatewayUrl: string): Promise<TauriTrans
   return transport;
 }
 
+/**
+ * Fixture workbench mode: `?fixtures` mounts the app on deterministic demo
+ * data (dense knowledge graph + dependency-heavy task graph) instead of the
+ * local gateway. Used for graph-visualization iteration and screenshots via
+ * the vite dev server; a packaged Tauri build never carries a query string,
+ * so production behavior is unchanged. See docs/graph-view.md.
+ */
+function fixtureWorkbenchRequested(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").has("fixtures");
+  } catch {
+    return false;
+  }
+}
+
 const root = document.getElementById("root");
-if (root) {
+if (root && fixtureWorkbenchRequested()) {
+  renderOpenSymphonyApp({
+    root,
+    mode: "desktop",
+    title: "OpenSymphony Desktop (fixtures)",
+    transport: createGraphVizDemoTransport(),
+    graphAdapter: createFixtureGraphAdapter({
+      bundles: graphVizFixtureBundleList,
+      snapshot: graphVizFixtureSnapshot,
+      communities: graphVizFixtureCommunityList,
+    }),
+    modelProfileController: createDesktopModelProfileController(),
+  });
+} else if (root) {
   const transport = createDesktopTransport();
   void transport.attach();
   renderOpenSymphonyApp({
