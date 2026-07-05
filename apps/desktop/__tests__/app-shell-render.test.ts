@@ -108,6 +108,7 @@ describe("desktop app shell render", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),

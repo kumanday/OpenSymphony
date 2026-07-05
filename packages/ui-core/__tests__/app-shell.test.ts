@@ -16,6 +16,7 @@ import {
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
+  createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   mountKnowledgeGraphRenderer,
   renderKnowledgeGraphSurface,
@@ -812,6 +813,7 @@ describe("OpenSymphonyApp mount", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),
@@ -832,7 +834,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
       expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
       expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
-      expect(fillStyles).toContain("#e7ebef");
+      expect(fillStyles).toContain("#eef1f4");
       expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
       expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain(`${fixtureGraphSnapshot.nodes.length} nodes`);
       const fallbackButtons = Array.from(root.querySelectorAll<HTMLButtonElement>(".os-kg-list [data-kg-node-id]"));
@@ -886,6 +888,7 @@ describe("OpenSymphonyApp mount", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),
@@ -1026,6 +1029,7 @@ describe("OpenSymphonyApp mount", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),
@@ -1042,7 +1046,7 @@ describe("OpenSymphonyApp mount", () => {
         snapshot: fixtureGraphSnapshot,
         layout,
         selectedNodeIds: [],
-        view: { scale: 1, dx: 0, dy: 0 },
+        view: createKnowledgeGraphViewState(),
         onSelect: jest.fn(),
         onFocus: jest.fn(),
       });
@@ -1083,9 +1087,23 @@ describe("OpenSymphonyApp mount", () => {
       },
     });
     document.body.appendChild(root);
-    const labels = root.querySelectorAll(".os-kg-label");
-    expect(labels.length).toBeLessThanOrEqual(80);
-    expect(root.querySelector(".os-kg-label[data-kg-node-id='bundle:scale-5000']")?.textContent).toContain("Scale fixture");
+    // Labels are created imperatively by the renderer with zoom-based LOD;
+    // the server-rendered surface starts with an empty overlay layer, and
+    // selected nodes always earn a label regardless of zoom.
+    expect(root.querySelectorAll(".os-kg-label").length).toBe(0);
+    mountKnowledgeGraphRenderer(root, {
+      snapshot,
+      layout,
+      selectedNodeIds: [selectedNodeId],
+      view: createKnowledgeGraphViewState(),
+      onSelect: jest.fn(),
+      onFocus: jest.fn(),
+    });
+    expect(root.querySelectorAll(".os-kg-label").length).toBeLessThanOrEqual(80);
+    expect(
+      root.querySelector(`.os-kg-label[data-kg-node-id='${selectedNodeId}']`)?.classList.contains("is-selected"),
+    ).toBe(true);
+    disposeKnowledgeGraphRenderer(root);
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl div")).toBeNull();
     expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
@@ -1120,7 +1138,7 @@ describe("OpenSymphonyApp mount", () => {
         snapshot,
         layout,
         selectedNodeIds: [selectedNodeId],
-        view: { scale: 1, dx: 0, dy: 0 },
+        view: createKnowledgeGraphViewState(),
         onSelect: jest.fn(),
         onFocus: jest.fn(),
       });
