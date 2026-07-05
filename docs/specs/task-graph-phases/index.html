@@ -129,9 +129,55 @@
 </style>
 <header>
   <h1>Task Graph Phase Concepts</h1>
-  <p>Design exploration for Done as artifact lookup, Current as the active dispatch graph, and Backlog as dependency-path planning. Click any thumbnail for a near-full-screen view.</p>
+  <p>Design exploration for Done as artifact lookup, Current as the active dispatch graph, and Backlog as a nested dependency graph. Click any thumbnail for a near-full-screen view.</p>
 </header>
 <main>
+  <section>
+    <h2>Final Candidate</h2>
+    <div class="grid" data-gallery-section>
+      <button class="card" data-image="concept-13-final-default-done-expanded.png" data-title="13 - Final default, Done expanded" data-note="Earlier final pass with expanded Done ledger and phase graph layout.">
+        <img class="thumb" src="concept-13-final-default-done-expanded.png" alt="">
+        <span class="title">13 - Final default, Done expanded</span>
+        <span class="note">Earlier final pass with expanded Done ledger and phase graph layout.</span>
+      </button>
+      <button class="card" data-image="concept-14-final-done-collapsed.png" data-title="14 - Final default, Done collapsed" data-note="Earlier final pass with Done collapsed and Current given more room.">
+        <img class="thumb" src="concept-14-final-done-collapsed.png" alt="">
+        <span class="title">14 - Final default, Done collapsed</span>
+        <span class="note">Earlier final pass with Done collapsed and Current given more room.</span>
+      </button>
+      <button class="card" data-image="concept-15-final-current-selected.png" data-title="15 - Final selected current task" data-note="Earlier selected-current pass retained for comparison against V2 edge semantics.">
+        <img class="thumb" src="concept-15-final-current-selected.png" alt="">
+        <span class="title">15 - Final selected current task</span>
+        <span class="note">Earlier selected-current pass retained for comparison against V2 edge semantics.</span>
+      </button>
+      <button class="card" data-image="concept-16-final-backlog-ancestry.png" data-title="16 - Final selected backlog ancestry" data-note="Earlier backlog-ancestry pass retained for comparison against V2 critical-path tracing.">
+        <img class="thumb" src="concept-16-final-backlog-ancestry.png" alt="">
+        <span class="title">16 - Final selected backlog ancestry</span>
+        <span class="note">Earlier backlog-ancestry pass retained for comparison against V2 critical-path tracing.</span>
+      </button>
+      <button class="card" data-image="concept-17-v2-default-done-expanded.png" data-title="17 - V2 default, Done expanded" data-note="Deterministic mockup: Done search/sort/pagination; Current and Backlog both have dependency-depth indentation and gutters.">
+        <img class="thumb" src="concept-17-v2-default-done-expanded.png" alt="">
+        <span class="title">17 - V2 default, Done expanded</span>
+        <span class="note">Deterministic mockup: Done search/sort/pagination; Current and Backlog both have dependency-depth indentation and gutters.</span>
+      </button>
+      <button class="card" data-image="concept-18-v2-current-selected.png" data-title="18 - V2 current selected" data-note="Selected Current task keeps all many-to-many edges visible while bolding downstream Current and Backlog dependents.">
+        <img class="thumb" src="concept-18-v2-current-selected.png" alt="">
+        <span class="title">18 - V2 current selected</span>
+        <span class="note">Selected Current task keeps all many-to-many edges visible while bolding downstream Current and Backlog dependents.</span>
+      </button>
+      <button class="card" data-image="concept-19-v2-backlog-collapsed.png" data-title="19 - V2 Backlog collapsed" data-note="Backlog collapses to an icon/count rail, giving Current the full graph width.">
+        <img class="thumb" src="concept-19-v2-backlog-collapsed.png" alt="">
+        <span class="title">19 - V2 Backlog collapsed</span>
+        <span class="note">Backlog collapses to an icon/count rail, giving Current the full graph width.</span>
+      </button>
+      <button class="card" data-image="concept-20-v2-backlog-ancestry.png" data-title="20 - V2 Backlog ancestry" data-note="Selected Backlog task traces ancestry: A to D to H and F to G to H, with unrelated paths muted.">
+        <img class="thumb" src="concept-20-v2-backlog-ancestry.png" alt="">
+        <span class="title">20 - V2 Backlog ancestry</span>
+        <span class="note">Selected Backlog task traces ancestry: A to D to H and F to G to H, with unrelated paths muted.</span>
+      </button>
+    </div>
+  </section>
+
   <section>
     <h2>Baselines</h2>
     <div class="grid" data-gallery-section>
