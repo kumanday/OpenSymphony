@@ -87,6 +87,48 @@ hovering a task spotlights its incident arrows. See
 `renderTaskGraphLink`/`buildTaskGraphLinks` in
 `packages/ui-core/src/app-shell.ts`.
 
+### Drill-down navigation
+
+The knowledge graph navigates through three levels, mirroring the Obsidian
+LLM-wiki experience (areas → concepts/tags → issue capsules) and back out:
+
+- **Atlas → area**: a stationary click on an area cloud (while zoomed out
+  enough that its title is visible) drills into that community — the view
+  re-lays out around only its members (`COMMUNITY_SELECTED` + community
+  filter). Dragging on the same cloud still pans.
+- **Area → capsule**: selecting a concept lazily fetches its memory capsule
+  through `GraphDataAdapter.getConceptDetail` and renders it in the
+  inspector: frontmatter chips, the markdown body
+  (`packages/ui-core/src/memory-markdown.ts`, escaped-first allowlist
+  renderer), linked concepts, citations, and source refs. Capsule links
+  (including `[[wiki-links]]` in the body) navigate the graph to their
+  target node, re-drilling across areas when needed.
+- **Back out**: a breadcrumb (`Atlas › area › concept`) pops individual
+  levels, Escape steps back one level at a time, and the "Show full graph"
+  button still jumps straight home.
+
+### Memory deep links
+
+`packages/graph/src/deep-link.ts` defines the stable address format for
+memory locations, designed to be embedded outside the graph UI (task-graph
+artifacts, notifications, docs):
+
+```
+opensymphony://memory/<bundleId>
+opensymphony://memory/<bundleId>/communities/<communityId>
+opensymphony://memory/<bundleId>/concepts/<conceptId>   # conceptId keeps its slashes: issues/COE-399
+```
+
+`formatMemoryDeepLink`/`parseMemoryDeepLink` round-trip these strictly
+(unknown shapes are rejected, never guessed). The app shell exposes
+`OpenSymphonyAppHandle.openMemoryDeepLink(url)` — it switches to the
+Knowledge Graph pane, loads the bundle, drills into the concept's area, and
+opens its capsule; this is the wiring point for task-graph artifact links.
+The inspector's "Copy deep link" button emits the same links. For manual
+testing, `?memory=<deep-link>` on the desktop dev server (composable with
+`?fixtures`) opens a link at boot, e.g.
+`?fixtures&memory=opensymphony://memory/viz-workbench/concepts/concepts/code-intelligence-01`.
+
 ### Tests that gate this area
 
 - `packages/ui-core/__tests__/knowledge-graph-scene.test.ts` — projector ↔
@@ -94,7 +136,15 @@ hovering a task spotlights its incident arrows. See
   label LOD, hover emphasis, hit-tests, fixture density/determinism.
 - `packages/ui-core/__tests__/app-shell.test.ts` — surface markup, LOD label
   budget through the real mount, arrow routing shape (`os-tg-hue-*`,
-  rounded gutter paths), WebGL smoke via Playwright when available.
+  rounded gutter paths), WebGL smoke via Playwright when available, plus the
+  drill-down flows: area-cloud click drilling, capsule fetch/render/retry,
+  capsule-link navigation, breadcrumbs, stepwise Escape, and
+  `openMemoryDeepLink` end to end.
+- `packages/graph/__tests__/deep-link.test.ts` — deep-link round-trips and
+  strict rejection, node addressing, fixture capsule determinism and link
+  resolvability.
+- `packages/ui-core/__tests__/memory-markdown.test.ts` — capsule markdown
+  allowlist rendering and escaping.
 
 When iterating on visuals, extend these fixtures and tests rather than
 creating throwaway data; `AGENTS.md` ("UI separation") points here.

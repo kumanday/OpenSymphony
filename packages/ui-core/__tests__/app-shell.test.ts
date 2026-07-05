@@ -10,7 +10,12 @@ import {
   computeGraphLayout,
   createFixtureGraphAdapter,
   createScaleGraphSnapshot,
+  fixtureConceptDetail,
   fixtureGraphSnapshot,
+  graphVizFixtureBundleList,
+  graphVizFixtureCommunityList,
+  graphVizFixtureConceptDetail,
+  graphVizFixtureSnapshot,
   initialGraphState,
   type GraphDataAdapter,
 } from "@opensymphony/graph";
@@ -21,6 +26,7 @@ import {
   mountKnowledgeGraphRenderer,
   renderKnowledgeGraphSurface,
 } from "../src/knowledge-graph-renderer.js";
+import { hitTestHull, hitTestScene, type GraphScene } from "../src/knowledge-graph-scene.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -1037,6 +1043,145 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("renders the selected concept's memory capsule and follows capsule links", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+
+      const capsule = root.querySelector("[data-testid='knowledge-graph-capsule']");
+      expect(capsule?.textContent).toContain("Shared graph frontend package and reducers");
+      expect(capsule?.textContent).toContain("issue: COE-465");
+      expect(fixtureConceptDetail.links[0]?.target).toBe("tag:graph-view");
+
+      // The capsule carries a copyable deep link to itself.
+      const copy = root.querySelector<HTMLButtonElement>("[data-testid='knowledge-graph-copy-deeplink']");
+      expect(copy?.dataset.kgCopyDeeplink).toBe("opensymphony://memory/local-default/concepts/issues/COE-465");
+
+      // Breadcrumb reflects the drill trail back to the atlas.
+      expect(root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent).toContain("COE-465");
+
+      // Following a capsule link selects the linked node.
+      (root.querySelector("[data-kg-link-target='tag:graph-view']") as HTMLButtonElement).click();
+      await flushUntil(() =>
+        root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent === "graph-view",
+      );
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("tag");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("surfaces capsule fetch failures with a retry that recovers", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    let failures = 1;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getConceptDetail(bundleId, conceptId) {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("capsule endpoint offline");
+        }
+        return { ...fixtureConceptDetail, bundle_id: bundleId, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter,
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-error']") !== null);
+      expect(root.querySelector("[data-testid='knowledge-graph-capsule-error']")?.textContent).toContain("capsule endpoint offline");
+
+      (root.querySelector("[data-testid='knowledge-graph-capsule-retry']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("navigates memory deep links into a drilled capsule and steps back out with Escape", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter({
+        bundles: graphVizFixtureBundleList,
+        snapshot: graphVizFixtureSnapshot,
+        communities: graphVizFixtureCommunityList,
+        conceptDetail: (_bundleId, conceptId) => graphVizFixtureConceptDetail(conceptId),
+      }),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+
+      expect(await handle.openMemoryDeepLink("not-a-deep-link")).toBe(false);
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/concepts/missing")).toBe(false);
+
+      const opened = await handle.openMemoryDeepLink(
+        "opensymphony://memory/viz-workbench/concepts/concepts/code-intelligence-01",
+      );
+      expect(opened).toBe(true);
+
+      // The deep link lands on the Knowledge Graph pane, drilled into the
+      // concept's area with the capsule open.
+      expect(root.querySelector("[data-testid='graph-hero']")?.getAttribute("data-active-graph-surface")).toBe("knowledge");
+      const breadcrumb = () => root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent ?? "";
+      expect(breadcrumb()).toContain("Code Intelligence");
+      expect(breadcrumb()).toContain("Tree-sitter Provider Skeleton");
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent)
+        .toBe("Tree-sitter Provider Skeleton");
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+      expect(root.querySelector("[data-testid='knowledge-graph-capsule-body']")?.textContent).toContain("Summary");
+
+      // The drilled view is filtered to the area's primary members (a
+      // multi-area concept keeps its primary community in metrics).
+      const areaConceptCount = graphVizFixtureSnapshot.nodes
+        .filter((node) => node.metrics.community_id === "area:code-intelligence").length;
+      expect(root.querySelectorAll("[data-testid='knowledge-graph-node-list'] li").length).toBe(areaConceptCount);
+
+      // Escape pops one level at a time: capsule → area → atlas.
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushUntil(() => !breadcrumb().includes("Tree-sitter Provider Skeleton"));
+      expect(breadcrumb()).toContain("Code Intelligence");
+
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-breadcrumb']") === null);
+      expect(root.querySelectorAll("[data-testid='knowledge-graph-node-list'] li").length)
+        .toBe(graphVizFixtureSnapshot.nodes.length);
+
+      // Community deep links drill straight into the area.
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
+      await flushUntil(() => breadcrumb().includes("Gateway"));
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("refreshes the Knowledge Graph on memory_graph_updated events", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1164,6 +1309,63 @@ describe("OpenSymphonyApp mount", () => {
       } else {
         delete (globalThis as { cancelAnimationFrame?: typeof cancelAnimationFrame }).cancelAnimationFrame;
       }
+      root.remove();
+    }
+  });
+
+  it("drills into an area when a stationary click lands on its cloud", () => {
+    const root = document.createElement("div");
+    const layout = computeGraphLayout(graphVizFixtureSnapshot, { kind: "force", width: 1280, height: 900 });
+    root.innerHTML = renderKnowledgeGraphSurface({
+      snapshot: graphVizFixtureSnapshot,
+      layout,
+      state: { ...initialGraphState, layoutStatus: "ready" },
+    });
+    document.body.appendChild(root);
+    const onSelectArea = jest.fn();
+    try {
+      mountKnowledgeGraphRenderer(root, {
+        snapshot: graphVizFixtureSnapshot,
+        layout,
+        selectedNodeIds: [],
+        view: createKnowledgeGraphViewState(),
+        onSelect: jest.fn(),
+        onFocus: jest.fn(),
+        onSelectArea,
+      });
+      const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']")!;
+      const scene = (canvas as HTMLCanvasElement & { __kgDebug?: { scene: GraphScene } }).__kgDebug!.scene;
+      expect(scene.hulls.length).toBeGreaterThan(0);
+
+      // Find a point that lies on an area cloud but not on any node, so the
+      // click resolves as a drill instead of a node selection.
+      let target: { x: number; y: number; areaId: string } | null = null;
+      for (let y = 4; y < 360 && !target; y += 8) {
+        for (let x = 4; x < 640 && !target; x += 8) {
+          const hull = hitTestHull(scene, x, y);
+          if (hull && hull.labelAlpha > 0.05 && hitTestScene(scene, x, y) === null) {
+            target = { x, y, areaId: hull.areaId };
+          }
+        }
+      }
+      expect(target).not.toBeNull();
+
+      // jsdom does not route dispatched pointer events through on* handler
+      // properties, so invoke the renderer's handlers directly.
+      const pointer = (type: string, x: number, y: number) =>
+        new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }) as PointerEvent;
+      canvas.onpointerdown!(pointer("pointerdown", target!.x, target!.y));
+      canvas.onpointerup!(pointer("pointerup", target!.x, target!.y));
+      expect(onSelectArea).toHaveBeenCalledWith(target!.areaId);
+
+      // The same gesture with movement stays a pan and never drills.
+      onSelectArea.mockClear();
+      canvas.onpointerdown!(pointer("pointerdown", target!.x, target!.y));
+      canvas.onpointermove!(pointer("pointermove", target!.x + 24, target!.y + 18));
+      canvas.onpointerup!(pointer("pointerup", target!.x + 24, target!.y + 18));
+      expect(onSelectArea).not.toHaveBeenCalled();
+    } finally {
+      disposeKnowledgeGraphRenderer(root);
       root.remove();
     }
   });

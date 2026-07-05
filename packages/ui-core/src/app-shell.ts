@@ -24,16 +24,21 @@ import type {
   MemoryGraphUpdatedEvent,
 } from "@opensymphony/gateway-schema";
 import {
+  cachedConceptDetail,
   createGraphLayoutAdapter,
   createInitialGraphState,
   graphLayoutKindForMode,
   graphReducer,
   currentGraphSnapshot,
+  parseMemoryDeepLink,
+  resolveMemoryDeepLinkNode,
   visibleGraphSnapshot,
   type GraphDataAdapter,
   type GraphLayoutAdapter,
   type GraphLayoutResult,
   type GraphState,
+  type MemoryConceptDetail,
+  type MemoryGraphNode,
 } from "@opensymphony/graph";
 import {
   authStateFromError,
@@ -184,6 +189,14 @@ export interface OpenSymphonyAppOptions {
 export interface OpenSymphonyAppHandle {
   refresh(): Promise<void>;
   destroy(): Promise<void>;
+  /**
+   * Navigate to a memory deep link (opensymphony://memory/...): switches to
+   * the Knowledge Graph pane, loads the linked bundle, drills into the
+   * community, and selects the linked concept capsule. Resolves false when
+   * the link does not parse or its target is not present in the graph.
+   * External surfaces (task graph artifacts, notifications) call this.
+   */
+  openMemoryDeepLink(url: string): Promise<boolean>;
 }
 
 type ConnectionMode = "connecting" | "connected" | "failed";
@@ -309,6 +322,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private graphLayoutRun = 0;
   private knowledgeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
+  /** Concept-detail request currently in flight, keyed `${bundleId}:${conceptId}`. */
+  private knowledgeCapsuleRequest: string | null = null;
+  /** Last failed concept-detail request; keyed so a new selection is unaffected. */
+  private knowledgeCapsuleError: { key: string; message: string } | null = null;
   /**
    * Monotonic counter bumped by every user-initiated navigation (task click,
    * project switch, diff-file click, full refresh). Background work snapshots
@@ -397,8 +414,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const graph = this.state.knowledgeGraph;
-    if (graph.mode !== "atlas" || graph.focusedNodeId || graph.selectedNodeIds.length > 0) {
-      this.resetKnowledgeGraphView();
+    if (
+      graph.mode !== "atlas"
+      || graph.focusedNodeId
+      || graph.selectedNodeIds.length > 0
+      || graph.filters.communities.length > 0
+    ) {
+      // Escape pops one drill level (concept → area → atlas) instead of
+      // jumping straight home; repeated presses still land on the atlas.
+      this.stepBackKnowledgeGraphView();
     }
   };
 
@@ -646,6 +670,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.knowledgeGraphLayoutSize = null;
     this.knowledgeGraphLoadInFlight = null;
     this.knowledgeGraphLoadQueuedBundleId = undefined;
+    this.knowledgeCapsuleRequest = null;
+    this.knowledgeCapsuleError = null;
     // A different bundle/gateway is different content: drop the camera and
     // any node drag overrides along with the graph state.
     this.knowledgeGraphView = createKnowledgeGraphViewState();
@@ -1168,6 +1194,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private bindKnowledgeGraph(): void {
     const root = this.options.root.querySelector<HTMLElement>("[data-testid='knowledge-graph-renderer']");
     if (!root) return;
+    this.bindKnowledgeGraphNavigation(root);
+    void this.ensureSelectedConceptDetail();
     const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
     const stageSize = measureKnowledgeGraphStage(root);
     if (
@@ -1199,10 +1227,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
         this.render();
         if (this.state.knowledgeGraph.mode !== "neighborhood") return;
-        this.state.knowledgeGraphLayout = null;
-        this.knowledgeGraphLayoutSize = null;
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
-        this.scheduleKnowledgeGraphLayout();
+        this.invalidateKnowledgeGraphLayout();
+      },
+      onSelectArea: (areaId) => {
+        this.drillIntoKnowledgeArea(areaId);
       },
     });
   }
@@ -2251,6 +2279,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
           layout: this.state.knowledgeGraphLayout,
           state: this.state.knowledgeGraph,
+          ...this.selectedKnowledgeCapsule(),
         })
         : this.renderCodeGraphPlaceholder();
     return `
@@ -2590,11 +2619,241 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId: null });
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: "atlas" });
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "FILTERS_SET", filters: { communities: [] } });
     this.state.knowledgeGraphLayout = null;
     this.knowledgeGraphLayoutSize = null;
     this.knowledgeGraphView.camera = null;
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
     this.render();
+  }
+
+  /**
+   * One drill level back: selected concept → its area, drilled area → the
+   * atlas. Bound to Escape so the same key that narrows never strands the
+   * operator; the "Show full graph" button still jumps straight home.
+   */
+  private stepBackKnowledgeGraphView(): void {
+    const graph = this.state.knowledgeGraph;
+    const drilled = graph.filters.communities.length > 0;
+    if (graph.selectedNodeIds.length > 0 || graph.focusedNodeId !== null) {
+      const wasNeighborhood = graph.mode === "neighborhood";
+      this.state.knowledgeGraph = graphReducer(graph, { type: "NODE_FOCUSED", nodeId: null });
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [] });
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: drilled ? "community" : "atlas" });
+      if (wasNeighborhood) {
+        this.invalidateKnowledgeGraphLayout();
+      }
+      this.render();
+      return;
+    }
+    if (drilled) {
+      this.state.knowledgeGraph = graphReducer(graph, { type: "FILTERS_SET", filters: { communities: [] } });
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: "atlas" });
+      this.invalidateKnowledgeGraphLayout();
+      this.render();
+      return;
+    }
+    this.resetKnowledgeGraphView();
+  }
+
+  /** Drill into an area cloud: community mode filtered to that area's members. */
+  private drillIntoKnowledgeArea(areaId: string): void {
+    const graph = this.state.knowledgeGraph;
+    if (graph.mode === "community" && graph.filters.communities.length === 1 && graph.filters.communities[0] === areaId) {
+      return;
+    }
+    this.state.knowledgeGraph = graphReducer(graph, { type: "NODE_FOCUSED", nodeId: null });
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: areaId });
+    this.invalidateKnowledgeGraphLayout();
+    this.render();
+  }
+
+  /**
+   * Follow a capsule link (wiki link or the Linked concepts list) to its
+   * node. Targets arrive as node ids ("tag:x"), concept ids
+   * ("issues/COE-399"), bare issue keys, or labels — resolve in that order.
+   * Following a link across areas re-drills into the target's community so
+   * the selected node is always visible.
+   */
+  private openKnowledgeCapsuleLink(target: string): void {
+    const snapshot = currentGraphSnapshot(this.state.knowledgeGraph);
+    if (!snapshot) return;
+    const node = snapshot.nodes.find((candidate) => candidate.id === target)
+      ?? snapshot.nodes.find((candidate) => candidate.concept_id === target)
+      ?? snapshot.nodes.find((candidate) => candidate.concept_id?.split("/").at(-1) === target)
+      ?? snapshot.nodes.find((candidate) => candidate.label === target)
+      ?? null;
+    if (!node) return;
+    this.selectKnowledgeNode(node);
+  }
+
+  private selectKnowledgeNode(node: MemoryGraphNode): void {
+    const graph = this.state.knowledgeGraph;
+    const targetCommunity = node.metrics?.community_id ?? null;
+    const currentCommunity = graph.filters.communities[0] ?? null;
+    let relayout = false;
+    this.state.knowledgeGraph = graphReducer(graph, { type: "NODE_FOCUSED", nodeId: null });
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: currentCommunity || targetCommunity ? "community" : "atlas" });
+    if (currentCommunity !== null && targetCommunity !== null && currentCommunity !== targetCommunity) {
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: targetCommunity });
+      relayout = true;
+    } else if (currentCommunity !== null && targetCommunity === null) {
+      // Target lives outside every area (e.g. the bundle node): widen back out.
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "FILTERS_SET", filters: { communities: [] } });
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: "atlas" });
+      relayout = true;
+    }
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [node.id] });
+    if (relayout) {
+      this.invalidateKnowledgeGraphLayout();
+    }
+    this.render();
+  }
+
+  private invalidateKnowledgeGraphLayout(): void {
+    this.state.knowledgeGraphLayout = null;
+    this.knowledgeGraphLayoutSize = null;
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+    this.scheduleKnowledgeGraphLayout();
+  }
+
+  /** Selected concept's capsule detail + error, for the inspector render. */
+  private selectedKnowledgeCapsule(): { conceptDetail: MemoryConceptDetail | null; conceptDetailError: string | null } {
+    const graph = this.state.knowledgeGraph;
+    const bundleId = graph.selectedBundleId;
+    const node = this.selectedKnowledgeConcept();
+    if (!bundleId || !node?.concept_id) {
+      return { conceptDetail: null, conceptDetailError: null };
+    }
+    const key = `${bundleId}:${node.concept_id}`;
+    return {
+      conceptDetail: cachedConceptDetail(graph, bundleId, node.concept_id),
+      conceptDetailError: this.knowledgeCapsuleError?.key === key ? this.knowledgeCapsuleError.message : null,
+    };
+  }
+
+  private selectedKnowledgeConcept(): MemoryGraphNode | null {
+    const snapshot = currentGraphSnapshot(this.state.knowledgeGraph);
+    if (!snapshot) return null;
+    const selected = new Set(this.state.knowledgeGraph.selectedNodeIds);
+    return snapshot.nodes.find((node) => selected.has(node.id) && node.kind === "concept" && node.concept_id) ?? null;
+  }
+
+  /**
+   * Lazily fetch the selected concept's capsule. Idempotent per render:
+   * cached details and in-flight or failed requests are not re-requested (the
+   * failure is keyed, so selecting a different node retries cleanly and the
+   * inline Retry button clears it explicitly).
+   */
+  private async ensureSelectedConceptDetail(): Promise<void> {
+    const graph = this.state.knowledgeGraph;
+    const bundleId = graph.selectedBundleId;
+    const node = this.selectedKnowledgeConcept();
+    if (!this.graphAdapter || !bundleId || !node?.concept_id) return;
+    const conceptId = node.concept_id;
+    if (cachedConceptDetail(graph, bundleId, conceptId)) return;
+    const key = `${bundleId}:${conceptId}`;
+    if (this.knowledgeCapsuleRequest === key || this.knowledgeCapsuleError?.key === key) return;
+    this.knowledgeCapsuleRequest = key;
+    try {
+      const detail = await this.graphAdapter.getConceptDetail(bundleId, conceptId);
+      if (this.destroyed) return;
+      // Cache under the id we asked for: a server echoing an alias id would
+      // otherwise miss the cache and refetch on every render.
+      const normalized = detail.concept_id === conceptId ? detail : { ...detail, concept_id: conceptId };
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "CONCEPT_DETAIL_LOADED", detail: normalized });
+    } catch (error) {
+      if (this.destroyed) return;
+      this.knowledgeCapsuleError = { key, message: errorMessage(error) };
+    } finally {
+      if (this.knowledgeCapsuleRequest === key) {
+        this.knowledgeCapsuleRequest = null;
+      }
+    }
+    this.render();
+  }
+
+  /**
+   * Idempotent property handlers (the DOM morph preserves elements across
+   * renders) for the drill affordances that live outside the canvas:
+   * breadcrumbs, capsule links, capsule retry, and the deep-link copy button.
+   */
+  private bindKnowledgeGraphNavigation(root: HTMLElement): void {
+    root.querySelectorAll<HTMLElement>("[data-kg-crumb]").forEach((button) => {
+      button.onclick = () => {
+        if (button.dataset.kgCrumb === "atlas") {
+          this.resetKnowledgeGraphView();
+        } else {
+          this.stepBackKnowledgeGraphView();
+        }
+      };
+    });
+    root.querySelectorAll<HTMLElement>("[data-kg-link-target]").forEach((button) => {
+      button.onclick = () => {
+        const target = button.dataset.kgLinkTarget;
+        if (target) this.openKnowledgeCapsuleLink(target);
+      };
+    });
+    const retry = root.querySelector<HTMLElement>("[data-kg-capsule-retry]");
+    if (retry) {
+      retry.onclick = () => {
+        this.knowledgeCapsuleError = null;
+        void this.ensureSelectedConceptDetail();
+        this.render();
+      };
+    }
+    const copy = root.querySelector<HTMLButtonElement>("[data-kg-copy-deeplink]");
+    if (copy) {
+      copy.onclick = () => {
+        const link = copy.dataset.kgCopyDeeplink;
+        if (!link) return;
+        void navigator.clipboard?.writeText(link).catch(() => undefined);
+        copy.textContent = "Copied";
+        setTimeout(() => {
+          if (copy.isConnected) copy.textContent = "Copy deep link";
+        }, 1_200);
+      };
+    }
+  }
+
+  async openMemoryDeepLink(url: string): Promise<boolean> {
+    const link = parseMemoryDeepLink(url);
+    if (!link || !this.graphAdapter) return false;
+    this.state.activeView = "dashboard";
+    this.state.graphPaneView = "knowledge";
+    await this.loadKnowledgeGraph(link.bundleId);
+    if (this.destroyed) return false;
+    const snapshot = currentGraphSnapshot(this.state.knowledgeGraph);
+    if (!snapshot || snapshot.bundle_id !== link.bundleId) {
+      this.render();
+      return false;
+    }
+    if (link.communityId) {
+      if (!snapshot.communities.some((community) => community.id === link.communityId)) {
+        this.render();
+        return false;
+      }
+      this.drillIntoKnowledgeArea(link.communityId);
+      return true;
+    }
+    if (link.conceptId) {
+      const node = resolveMemoryDeepLinkNode(snapshot, link);
+      if (!node) {
+        this.render();
+        return false;
+      }
+      // Land drilled into the concept's area with the capsule open, exactly
+      // where manual navigation would have ended up.
+      if (node.metrics?.community_id) {
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: node.metrics.community_id });
+        this.invalidateKnowledgeGraphLayout();
+      }
+      this.selectKnowledgeNode(node);
+      return true;
+    }
+    this.resetKnowledgeGraphView();
+    return true;
   }
 
   private setTaskGraphLinkEmphasis(nodeButton: HTMLElement, active: boolean): void {
@@ -4772,6 +5031,25 @@ function appShellStyles(): string {
     .os-kg-inspector dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
     .os-kg-inspector dt { color: #667788; font-size: 11px; }
     .os-kg-inspector dd { margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .os-kg-breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 12px; min-height: 20px; flex-wrap: wrap; }
+    .os-kg-breadcrumb button { border: none; background: transparent; padding: 0; color: #23566f; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    .os-kg-breadcrumb span[aria-current] { color: #1d2833; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32ch; }
+    .os-kg-crumb-sep { color: #98a6b3; }
+    .os-kg-inspector-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .os-kg-inspector-header h3 { margin: 0 0 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-kg-copy-deeplink { flex: 0 0 auto; border: 1px solid #cdd6de; border-radius: 5px; background: #f4f7f9; color: #2c4356; font-size: 11px; padding: 2px 8px; cursor: pointer; }
+    .os-kg-capsule { margin-top: 8px; border-top: 1px solid #e3e8ee; padding-top: 8px; display: grid; gap: 6px; }
+    .os-kg-capsule h4 { margin: 4px 0 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #667788; }
+    .os-kg-capsule-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+    .os-kg-chip { border: 1px solid #d8dee4; border-radius: 999px; background: #f4f7f9; color: #405568; font-size: 11px; padding: 1px 8px; }
+    .os-kg-capsule-body { max-height: 220px; overflow: auto; font-size: 12px; line-height: 1.5; color: #2b3947; }
+    .os-kg-capsule-body h4, .os-kg-capsule-body h5, .os-kg-capsule-body h6 { margin: 8px 0 2px; font-size: 12px; text-transform: none; letter-spacing: 0; color: #1d2833; }
+    .os-kg-capsule-body p { margin: 4px 0; }
+    .os-kg-capsule-body ul { margin: 4px 0; padding-left: 18px; }
+    .os-kg-capsule-body code { background: #eef1f4; border-radius: 3px; padding: 0 3px; font-size: 11px; }
+    .os-kg-capsule-links, .os-kg-capsule-sources { display: flex; flex-wrap: wrap; gap: 4px 8px; list-style: none; margin: 0; padding: 0; font-size: 12px; }
+    .os-kg-capsule-link { border: none; background: transparent; padding: 0; color: #23566f; font-size: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    .os-kg-capsule-error { color: #b3372a; font-size: 12px; margin: 0; }
     .os-code-graph-placeholder { min-height: clamp(260px, 36vh, 460px); display: grid; place-content: center; gap: 5px; border: 1px dashed #afbac5; border-radius: 6px; background: #f8fafc; text-align: center; }
     .os-code-graph-placeholder strong { color: #23566f; font-size: 15px; }
     .os-code-graph-placeholder span { color: #667788; font-size: 12px; }
@@ -5052,6 +5330,17 @@ function appShellStyles(): string {
       .os-kg-list li.is-selected button, .os-kg-inspector h3, .os-kg-inspector dd { color: #f2f7fb; }
       .os-kg-list li.is-selected span { color: #fdba74; }
       .os-kg-inspector dt, .os-kg-inspector p { color: #94a3b3; }
+      .os-kg-breadcrumb button, .os-kg-capsule-link { color: #8bd0e6; }
+      .os-kg-breadcrumb span[aria-current] { color: #f2f7fb; }
+      .os-kg-crumb-sep { color: #5b6b7a; }
+      .os-kg-copy-deeplink { background: #111820; border-color: #2a3440; color: #d9e2ea; }
+      .os-kg-capsule { border-top-color: #2a3440; }
+      .os-kg-capsule h4 { color: #94a3b3; }
+      .os-kg-chip { background: #111820; border-color: #2a3440; color: #b8c6d2; }
+      .os-kg-capsule-body { color: #c4d0da; }
+      .os-kg-capsule-body h4, .os-kg-capsule-body h5, .os-kg-capsule-body h6 { color: #f2f7fb; }
+      .os-kg-capsule-body code { background: #1c2630; }
+      .os-kg-capsule-error { color: #fca5a5; }
       .os-run-meta-row code { color: #d9e2ea; }
       .os-run-meta-row a { color: #8bd0e6; }
       .os-run-meta-row em { color: #94a3b3; }

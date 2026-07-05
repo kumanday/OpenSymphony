@@ -12,6 +12,7 @@ import {
   createTauriNativeGraphAdapter,
   graphVizFixtureBundleList,
   graphVizFixtureCommunityList,
+  graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
   type MemoryBundleList,
   type MemoryCommunityList,
@@ -31,6 +32,7 @@ import {
   renderOpenSymphonyApp,
   type EditableProfileInput,
   type ModelProfileController,
+  type OpenSymphonyAppHandle,
   type ProfileController,
 } from "@opensymphony/ui-core";
 
@@ -629,9 +631,25 @@ function fixtureWorkbenchRequested(): boolean {
   }
 }
 
+/**
+ * `?memory=opensymphony://memory/...` opens the app on a memory deep link —
+ * the same entry point task-graph artifacts will use once they carry capsule
+ * links. Handy for testing links end to end from the fixture workbench.
+ */
+function openMemoryDeepLinkFromLocation(app: OpenSymphonyAppHandle): void {
+  try {
+    const link = new URLSearchParams(globalThis.location?.search ?? "").get("memory");
+    if (link) {
+      void app.openMemoryDeepLink(link);
+    }
+  } catch {
+    // No usable location (tests, packaged builds without query strings).
+  }
+}
+
 const root = document.getElementById("root");
 if (root && fixtureWorkbenchRequested()) {
-  renderOpenSymphonyApp({
+  const app = renderOpenSymphonyApp({
     root,
     mode: "desktop",
     title: "OpenSymphony Desktop (fixtures)",
@@ -640,13 +658,15 @@ if (root && fixtureWorkbenchRequested()) {
       bundles: graphVizFixtureBundleList,
       snapshot: graphVizFixtureSnapshot,
       communities: graphVizFixtureCommunityList,
+      conceptDetail: (_bundleId, conceptId) => graphVizFixtureConceptDetail(conceptId),
     }),
     modelProfileController: createDesktopModelProfileController(),
   });
+  openMemoryDeepLinkFromLocation(app);
 } else if (root) {
   const transport = createDesktopTransport();
   void transport.attach();
-  renderOpenSymphonyApp({
+  const app = renderOpenSymphonyApp({
     root,
     mode: "desktop",
     title: "OpenSymphony Desktop",
@@ -668,4 +688,5 @@ if (root && fixtureWorkbenchRequested()) {
     onGatewayUrlChanged: createTransportForGateway,
     onGraphGatewayUrlChanged: createDesktopGraphAdapter,
   });
+  openMemoryDeepLinkFromLocation(app);
 }

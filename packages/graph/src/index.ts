@@ -26,6 +26,7 @@ export type {
   MemoryBundleList,
   MemoryCommunityList,
   MemoryConceptDetail,
+  MemoryGraphNode,
   MemoryGraphSnapshot,
   MemorySearchResponse,
 } from "@opensymphony/gateway-schema";
@@ -40,8 +41,18 @@ export {
 export {
   graphVizFixtureBundleList,
   graphVizFixtureCommunityList,
+  graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
 } from "./viz-fixture.js";
+export {
+  formatMemoryDeepLink,
+  memoryDeepLinkForGraphNode,
+  memoryDeepLinkPrefix,
+  memoryDeepLinkToGraphState,
+  parseMemoryDeepLink,
+  resolveMemoryDeepLinkNode,
+  type MemoryDeepLink,
+} from "./deep-link.js";
 
 export type GraphMode =
   | "atlas"
@@ -374,6 +385,15 @@ export function currentGraphSnapshot(state: GraphState): MemoryGraphSnapshot | n
   return bundleId ? state.snapshots[bundleId] ?? null : null;
 }
 
+/** Cached capsule detail for a concept, or null until CONCEPT_DETAIL_LOADED lands. */
+export function cachedConceptDetail(
+  state: GraphState,
+  bundleId: string,
+  conceptId: string,
+): MemoryConceptDetail | null {
+  return state.conceptDetails[conceptDetailKey(bundleId, conceptId)] ?? null;
+}
+
 export function visibleGraphSnapshot(state: GraphState): MemoryGraphSnapshot | null {
   const snapshot = currentGraphSnapshot(state);
   if (!snapshot) return null;
@@ -656,7 +676,8 @@ export function createTauriNativeGraphAdapter(api: NativeGraphApi): GraphDataAda
 export function createFixtureGraphAdapter(fixtures: {
   bundles?: MemoryBundleList;
   snapshot?: MemoryGraphSnapshot;
-  conceptDetail?: MemoryConceptDetail;
+  /** Static detail for every concept, or a resolver (null → reject like a gateway 404). */
+  conceptDetail?: MemoryConceptDetail | ((bundleId: string, conceptId: string) => MemoryConceptDetail | null);
   communities?: MemoryCommunityList;
   search?: MemorySearchResponse;
 } = {}): GraphDataAdapter {
@@ -668,7 +689,13 @@ export function createFixtureGraphAdapter(fixtures: {
   return {
     listBundles: async () => bundles,
     getGraphSnapshot: async () => snapshot,
-    getConceptDetail: async () => conceptDetail,
+    getConceptDetail: async (bundleId, conceptId) => {
+      const detail = typeof conceptDetail === "function"
+        ? conceptDetail(bundleId, conceptId)
+        : conceptDetail;
+      if (!detail) throw new Error(`Concept not found: ${conceptId}`);
+      return detail;
+    },
     getCommunities: async () => communities,
     search: async (query, options) => {
       const results = options?.bundleId && options.bundleId !== snapshot.bundle_id

@@ -56,6 +56,7 @@ export type { ActionBarItem } from "./run-actions.js";
 export {
   renderOpenSymphonyApp,
 } from "./app-shell.js";
+export { renderMemoryMarkdown } from "./memory-markdown.js";
 export type {
   EditableProfileInput,
   GatewayReader,
