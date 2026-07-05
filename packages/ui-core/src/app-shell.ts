@@ -5029,10 +5029,13 @@ function appShellStyles(): string {
     .os-kg-tooltip em { color: #23566f; font-size: 11px; font-style: normal; }
     .os-kg-controls-hint { position: absolute; right: 8px; bottom: 6px; color: #8a97a3; font-size: 10.5px; letter-spacing: 0.02em; pointer-events: none; user-select: none; }
     .os-kg-list { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; max-height: 160px; overflow: auto; }
-    .os-kg-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 6px 8px; background: #ffffff; }
+    .os-kg-list li { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 8px; background: #ffffff; }
     .os-kg-list li.is-selected { border-color: #c2410c; background: #fff7ed; }
-    .os-kg-list button { min-width: 0; min-height: 24px; padding: 0; border: none; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .os-kg-list span { color: #667788; font-size: 11px; text-transform: uppercase; }
+    .os-kg-list button { min-width: 0; min-height: 22px; padding: 0; border: none; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+    .os-kg-list span { color: #667788; font-size: 10px; text-transform: uppercase; }
+    /* Truncated entity names surface instantly on hover (data-kg-overflow is
+       set only for rows that actually ellipsize; title stays as fallback). */
+    .os-kg-list button[data-kg-overflow]:hover::after { content: attr(data-kg-overflow); position: absolute; left: 4px; top: calc(100% + 2px); z-index: 40; max-width: min(320px, 90vw); white-space: normal; background: #1d2833; color: #f2f7fb; font-size: 11.5px; line-height: 1.35; padding: 4px 8px; border-radius: 5px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25); pointer-events: none; }
     .os-kg-inspector { border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 10px; background: #ffffff; }
     .os-kg-inspector h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0; }
     .os-kg-inspector dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
@@ -5342,6 +5345,7 @@ function appShellStyles(): string {
       .os-kg-list li.is-selected button, .os-kg-inspector h3, .os-kg-inspector dd { color: #f2f7fb; }
       .os-kg-list li.is-selected span { color: #fdba74; }
       .os-kg-inspector dt, .os-kg-inspector p { color: #94a3b3; }
+      .os-kg-list button[data-kg-overflow]:hover::after { background: #2a3542; color: #f2f7fb; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55); }
       .os-kg-breadcrumb button, .os-kg-capsule-link { color: #8bd0e6; }
       .os-kg-breadcrumb span[aria-current] { color: #f2f7fb; }
       .os-kg-crumb-sep { color: #5b6b7a; }

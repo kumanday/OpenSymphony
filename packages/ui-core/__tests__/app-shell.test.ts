@@ -21,6 +21,7 @@ import {
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
+  bindKnowledgeGraphListNavigation,
   createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   mountKnowledgeGraphRenderer,
@@ -1387,6 +1388,36 @@ describe("OpenSymphonyApp mount", () => {
       expect(after.pitch).toBeGreaterThan(before.pitch);
     } finally {
       disposeKnowledgeGraphRenderer(root);
+      root.remove();
+    }
+  });
+
+  it("flags only truncated entity-list names for the instant hover tooltip", () => {
+    const root = document.createElement("div");
+    root.innerHTML = renderKnowledgeGraphNodeList(fixtureGraphSnapshot, []);
+    document.body.appendChild(root);
+    try {
+      const buttons = Array.from(root.querySelectorAll<HTMLElement>(".os-kg-list [data-kg-node-id]"));
+      expect(buttons.length).toBeGreaterThan(1);
+      const [truncated, fitting] = buttons;
+      // jsdom has no layout; emulate one ellipsized and one fitting row.
+      Object.defineProperty(truncated, "scrollWidth", { value: 300, configurable: true });
+      Object.defineProperty(truncated, "clientWidth", { value: 180, configurable: true });
+      Object.defineProperty(fitting, "scrollWidth", { value: 120, configurable: true });
+      Object.defineProperty(fitting, "clientWidth", { value: 180, configurable: true });
+
+      bindKnowledgeGraphListNavigation(root, { onSelect: jest.fn(), onFocus: jest.fn() });
+      expect(truncated.dataset.kgOverflow).toBe(truncated.textContent);
+      expect(truncated.getAttribute("title")).toBe(truncated.textContent);
+      expect(fitting.dataset.kgOverflow).toBeUndefined();
+      expect(fitting.getAttribute("title")).toBeNull();
+
+      // A relayout that makes the name fit clears the tooltip again.
+      Object.defineProperty(truncated, "scrollWidth", { value: 100, configurable: true });
+      bindKnowledgeGraphListNavigation(root, { onSelect: jest.fn(), onFocus: jest.fn() });
+      expect(truncated.dataset.kgOverflow).toBeUndefined();
+      expect(truncated.getAttribute("title")).toBeNull();
+    } finally {
       root.remove();
     }
   });

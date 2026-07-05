@@ -473,7 +473,25 @@ export interface KnowledgeGraphListOptions {
 export function bindKnowledgeGraphListNavigation(root: HTMLElement, options: KnowledgeGraphListOptions): void {
   root.querySelectorAll<HTMLElement>("[data-kg-node-id]").forEach((button) => {
     bindNodeButton(root, button, options);
+    markTruncatedListLabel(button);
   });
+}
+
+/**
+ * Entity-list rows ellipsize long names; flag the ones that actually
+ * overflow so CSS can surface the full name in an instant (no-delay)
+ * hover tooltip. `title` is kept in sync as the assistive/native fallback.
+ */
+function markTruncatedListLabel(button: HTMLElement): void {
+  if (!button.closest(".os-kg-list")) return;
+  const label = button.textContent ?? "";
+  if (button.scrollWidth > button.clientWidth && label) {
+    button.dataset.kgOverflow = label;
+    button.title = label;
+  } else {
+    delete button.dataset.kgOverflow;
+    button.removeAttribute("title");
+  }
 }
 
 const bindListNavigation = bindKnowledgeGraphListNavigation;
