@@ -279,6 +279,11 @@ path. Because the system aliases link whatever Homebrew exposes at
 results. Before release-sensitive, packaging, or dependency changes, also run the
 default bundled-mode validation commands such as
 `cargo clippy --all-targets -- -D warnings` and `cargo test`.
+For any release version bump, keep the root crate and desktop app metadata in
+lock-step before tagging or publishing, including `apps/desktop/package.json`,
+`apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/Cargo.lock`, and
+`apps/desktop/src-tauri/tauri.conf.json`; verify the parity guard with
+`npm run package:release --workspace=@opensymphony/desktop -- --dry-run`.
 
 ## Required tests by subsystem
 
