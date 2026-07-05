@@ -24,6 +24,8 @@ import {
   createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   mountKnowledgeGraphRenderer,
+  renderKnowledgeGraphInspector,
+  renderKnowledgeGraphNodeList,
   renderKnowledgeGraphSurface,
 } from "../src/knowledge-graph-renderer.js";
 import { hitTestHull, hitTestScene, type GraphScene } from "../src/knowledge-graph-scene.js";
@@ -861,9 +863,12 @@ describe("OpenSymphonyApp mount", () => {
       fallbackButtons[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
       expect(nextFocus).toHaveBeenCalled();
       nextFocus.mockRestore();
-      expect(root.querySelector(".os-graph-hero-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
-      expect(root.querySelector("[data-testid='knowledge-lower-list']")).not.toBeNull();
-      expect(root.querySelector("[data-testid='knowledge-lower-detail']")).not.toBeNull();
+      // Entity list and inspector live in the lower workspace columns, not
+      // inside the graph hero, so the stage keeps the full hero height.
+      expect(root.querySelector(".os-graph-hero-panel .os-kg-list")).toBeNull();
+      expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-inspector']")).toBeNull();
+      expect(root.querySelector(".os-knowledge-lower-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.querySelector(".os-knowledge-lower-panel [data-testid='knowledge-graph-inspector']")).not.toBeNull();
       expect(root.textContent).not.toContain("unknown_frontmatter");
       expect(root.textContent).not.toContain("frontmatter_summary");
       // TODO(COE-471): migrate the COE-468 search/filter/inspector/raw-frontmatter controls
@@ -933,11 +938,12 @@ describe("OpenSymphonyApp mount", () => {
 
       (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector("[data-kg-node-id='concept:coe-465']") !== null);
-      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("50%");
+      // Knowledge defaults to a narrow entity list beside the inspector.
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("34%");
       (root.querySelector("[data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
       resizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
-      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("32%");
 
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
@@ -950,7 +956,7 @@ describe("OpenSymphonyApp mount", () => {
 
       (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
-      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("32%");
     } finally {
       getContext.mockRestore();
       await handle.destroy();
@@ -1375,15 +1381,15 @@ describe("OpenSymphonyApp mount", () => {
     const layout = computeGraphLayout(snapshot, { kind: "force", width: 1280, height: 720 });
     const selectedNodeId = "concept:scale-1";
     const root = document.createElement("div");
-    root.innerHTML = renderKnowledgeGraphSurface({
-      snapshot,
-      layout,
-      state: {
-        ...initialGraphState,
-        selectedNodeIds: [selectedNodeId],
-        layoutStatus: "ready",
-      },
-    });
+    // The list and inspector render in the lower workspace columns; compose
+    // them alongside the surface the way the app shell does.
+    const composeView = (selectedIds: string[]) => {
+      const state = { ...initialGraphState, selectedNodeIds: selectedIds, layoutStatus: "ready" as const };
+      return renderKnowledgeGraphSurface({ snapshot, layout, state })
+        + renderKnowledgeGraphInspector({ snapshot, layout, state })
+        + renderKnowledgeGraphNodeList(snapshot, selectedIds);
+    };
+    root.innerHTML = composeView([selectedNodeId]);
     document.body.appendChild(root);
     // Labels are created imperatively by the renderer with zoom-based LOD;
     // the server-rendered surface starts with an empty overlay layer, and
@@ -1405,15 +1411,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl div")).toBeNull();
     expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
-    root.innerHTML = renderKnowledgeGraphSurface({
-      snapshot,
-      layout,
-      state: {
-        ...initialGraphState,
-        selectedNodeIds: [],
-        layoutStatus: "ready",
-      },
-    });
+    root.innerHTML = composeView([]);
     expect(root.querySelector("[data-testid='knowledge-graph-inspector']")?.textContent).toContain("No node selected");
 
     const originalMatchMedia = globalThis.matchMedia;

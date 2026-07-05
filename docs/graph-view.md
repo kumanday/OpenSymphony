@@ -102,7 +102,10 @@ LLM-wiki experience (areas → concepts/tags → issue capsules) and back out:
   (`packages/ui-core/src/memory-markdown.ts`, escaped-first allowlist
   renderer), linked concepts, citations, and source refs. Capsule links
   (including `[[wiki-links]]` in the body) navigate the graph to their
-  target node, re-drilling across areas when needed.
+  target node, re-drilling across areas when needed. The clickable entity
+  list and the inspector live in the resizable lower workspace columns
+  (narrow list left, capsule right), so the graph stage, the entities, and
+  the capsule content share the fold.
 - **Back out**: a breadcrumb (`Atlas › area › concept`) pops individual
   levels, Escape steps back one level at a time, and the "Show full graph"
   button still jumps straight home.

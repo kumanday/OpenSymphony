@@ -87,8 +87,6 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
         <div class="os-knowledge-labels" data-kg-labels data-morph-ignore-children></div>
         <span class="os-kg-controls-hint" aria-hidden="true">drag pan &middot; &#8997;-drag orbit &middot; scroll zoom &middot; click area to drill in &middot; esc to back out</span>
       </div>
-      ${renderSelectedInspector(surface)}
-      ${renderFallbackList(snapshot, surface.state.selectedNodeIds)}
     </div>
   `;
 }
@@ -454,16 +452,28 @@ function drillableHullAt(scene: GraphScene, x: number, y: number): { areaId: str
   return hull && hull.labelAlpha > 0.05 ? hull : null;
 }
 
-function bindListNavigation(root: HTMLElement, options: KnowledgeGraphMountOptions): void {
-  // Handler properties (not addEventListener) so re-mounting after every
-  // render stays idempotent: the DOM morph preserves these buttons across
-  // renders, and stacked listeners would fire once per past render.
+/** The subset of mount callbacks the node list/labels need. */
+export interface KnowledgeGraphListOptions {
+  onSelect(nodeId: string): void;
+  onFocus(nodeId: string): void;
+}
+
+/**
+ * Bind click/keyboard/focus behavior for every node button under `root`
+ * (overlay labels and the entity-list column alike). Handler properties
+ * (not addEventListener) so re-binding after every render stays idempotent:
+ * the DOM morph preserves these buttons across renders, and stacked
+ * listeners would fire once per past render.
+ */
+export function bindKnowledgeGraphListNavigation(root: HTMLElement, options: KnowledgeGraphListOptions): void {
   root.querySelectorAll<HTMLElement>("[data-kg-node-id]").forEach((button) => {
     bindNodeButton(root, button, options);
   });
 }
 
-function bindNodeButton(root: HTMLElement, button: HTMLElement, options: KnowledgeGraphMountOptions): void {
+const bindListNavigation = bindKnowledgeGraphListNavigation;
+
+function bindNodeButton(root: HTMLElement, button: HTMLElement, options: KnowledgeGraphListOptions): void {
   button.onclick = () => {
     const nodeId = button.dataset.kgNodeId;
     if (nodeId) options.onSelect(nodeId);
@@ -981,7 +991,12 @@ function renderStatus(state: GraphState): string {
   return `<span class="os-kg-status" data-testid="knowledge-graph-status">Idle</span>`;
 }
 
-function renderSelectedInspector(surface: KnowledgeGraphSurface): string {
+/**
+ * Inspector card for the selected node: metadata, frontmatter chips, and the
+ * concept's memory capsule. Rendered in the lower-right workspace column so
+ * the graph stage and capsule content share the fold.
+ */
+export function renderKnowledgeGraphInspector(surface: KnowledgeGraphSurface): string {
   const { snapshot, state } = surface;
   const selected = new Set(state.selectedNodeIds);
   const node = snapshot?.nodes.find((candidate) => selected.has(candidate.id)) ?? null;
@@ -1078,7 +1093,12 @@ function chipText(value: unknown): string {
   return Array.isArray(value) ? value.join(", ") : String(value);
 }
 
-function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
+/**
+ * Clickable entity list for the visible snapshot (also the keyboard/screen-
+ * reader path into the graph). Rendered in the narrow lower-left workspace
+ * column; bind with bindKnowledgeGraphListNavigation.
+ */
+export function renderKnowledgeGraphNodeList(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
   if (!snapshot || snapshot.nodes.length === 0) {
     return `<div class="os-empty">No graph data available.</div>`;
   }

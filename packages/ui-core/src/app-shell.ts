@@ -118,10 +118,13 @@ import {
   type PlanningEditState,
 } from "./planning-workspace-ui.js";
 import {
+  bindKnowledgeGraphListNavigation,
   createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   type KnowledgeGraphViewState,
   mountKnowledgeGraphRenderer,
+  renderKnowledgeGraphInspector,
+  renderKnowledgeGraphNodeList,
   renderKnowledgeGraphSurface,
 } from "./knowledge-graph-renderer.js";
 import { morphChildren } from "./dom-morph.js";
@@ -1194,7 +1197,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private bindKnowledgeGraph(): void {
     const root = this.options.root.querySelector<HTMLElement>("[data-testid='knowledge-graph-renderer']");
     if (!root) return;
-    this.bindKnowledgeGraphNavigation(root);
+    // Navigation affordances span the hero (breadcrumb) and the lower
+    // columns (entity list, inspector capsule), so bind at the app root.
+    this.bindKnowledgeGraphNavigation(this.options.root);
+    bindKnowledgeGraphListNavigation(this.options.root, {
+      onSelect: this.onKnowledgeNodeSelected,
+      onFocus: this.onKnowledgeNodeFocused,
+    });
     void this.ensureSelectedConceptDetail();
     const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
     const stageSize = measureKnowledgeGraphStage(root);
@@ -1219,21 +1228,25 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       layout: this.state.knowledgeGraphLayout,
       selectedNodeIds: this.state.knowledgeGraph.selectedNodeIds,
       view: this.knowledgeGraphView,
-      onSelect: (nodeId) => {
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [nodeId] });
-        this.render();
-      },
-      onFocus: (nodeId) => {
-        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
-        this.render();
-        if (this.state.knowledgeGraph.mode !== "neighborhood") return;
-        this.invalidateKnowledgeGraphLayout();
-      },
+      onSelect: this.onKnowledgeNodeSelected,
+      onFocus: this.onKnowledgeNodeFocused,
       onSelectArea: (areaId) => {
         this.drillIntoKnowledgeArea(areaId);
       },
     });
   }
+
+  private onKnowledgeNodeSelected = (nodeId: string): void => {
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [nodeId] });
+    this.render();
+  };
+
+  private onKnowledgeNodeFocused = (nodeId: string): void => {
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId });
+    this.render();
+    if (this.state.knowledgeGraph.mode !== "neighborhood") return;
+    this.invalidateKnowledgeGraphLayout();
+  };
 
   private installBrowserGraphLayoutAdapter(): void {
     if (typeof Worker === "undefined") return;
@@ -2279,7 +2292,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
           layout: this.state.knowledgeGraphLayout,
           state: this.state.knowledgeGraph,
-          ...this.selectedKnowledgeCapsule(),
         })
         : this.renderCodeGraphPlaceholder();
     return `
@@ -2397,38 +2409,31 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
+  /**
+   * Narrow lower-left column: the clickable entity list for the visible
+   * graph (drilled views list only the drilled area's members). Lives beside
+   * the inspector so the graph stage, the entities, and the selected
+   * capsule all share the fold.
+   */
   private renderKnowledgeGraphListColumn(): string {
     const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
-    const selected = new Set(this.state.knowledgeGraph.selectedNodeIds);
-    const nodes = snapshot?.nodes.slice(0, 12).map((node) => `
-      <li class="${selected.has(node.id) ? "is-selected" : ""}">
-        <strong>${escapeHtml(node.label)}</strong>
-        <span>${escapeHtml(node.kind)}</span>
-      </li>
-    `).join("");
     return panel(
-      "Neighborhood",
-      nodes
-        ? `<ul class="os-surface-list" data-testid="knowledge-lower-list">${nodes}</ul>`
-        : `<div class="os-empty" data-testid="knowledge-lower-list">Load the Knowledge Graph to populate this surface list</div>`,
+      "Entities",
+      renderKnowledgeGraphNodeList(snapshot, this.state.knowledgeGraph.selectedNodeIds),
       "os-knowledge-lower-panel",
     );
   }
 
+  /** Lower-right column: the selected node's inspector card and memory capsule. */
   private renderKnowledgeGraphDetailColumn(): string {
-    const snapshot = visibleGraphSnapshot(this.state.knowledgeGraph);
-    const selectedId = this.state.knowledgeGraph.selectedNodeIds[0] ?? null;
-    const node = selectedId ? snapshot?.nodes.find((candidate) => candidate.id === selectedId) : null;
     return panel(
-      "Concept",
-      node
-        ? `
-          <div class="os-surface-detail" data-testid="knowledge-lower-detail">
-            <strong>${escapeHtml(node.label)}</strong>
-            <span>${escapeHtml(node.kind)}</span>
-          </div>
-        `
-        : `<div class="os-empty" data-testid="knowledge-lower-detail">Select a Knowledge Graph node to inspect it here</div>`,
+      "Inspector",
+      renderKnowledgeGraphInspector({
+        snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
+        layout: this.state.knowledgeGraphLayout,
+        state: this.state.knowledgeGraph,
+        ...this.selectedKnowledgeCapsule(),
+      }),
       "os-knowledge-lower-panel",
     );
   }
@@ -3884,7 +3889,9 @@ function isWorkspacePaneResizeHandle(value: string | undefined): value is Worksp
 function createDefaultWorkspacePaneSizes(): WorkspacePaneSizesBySurface {
   return {
     task: { ...defaultWorkspacePaneSizes },
-    knowledge: { ...defaultWorkspacePaneSizes },
+    // Entity list left, inspector capsule right: the list only needs to fit
+    // titles, the capsule carries the content.
+    knowledge: { left: 34, right: 66 },
     code: { ...defaultWorkspacePaneSizes },
   };
 }
@@ -5050,6 +5057,11 @@ function appShellStyles(): string {
     .os-kg-capsule-links, .os-kg-capsule-sources { display: flex; flex-wrap: wrap; gap: 4px 8px; list-style: none; margin: 0; padding: 0; font-size: 12px; }
     .os-kg-capsule-link { border: none; background: transparent; padding: 0; color: #23566f; font-size: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
     .os-kg-capsule-error { color: #b3372a; font-size: 12px; margin: 0; }
+    /* Lower-column layout: the panel is the single scroll context — inner
+       caps (sized for the old in-hero inspector) would nest scrollbars. */
+    .os-knowledge-lower-panel .os-kg-list { max-height: none; overflow: visible; }
+    .os-knowledge-lower-panel .os-kg-inspector { border: none; padding: 0; background: transparent; }
+    .os-knowledge-lower-panel .os-kg-capsule-body { max-height: none; overflow: visible; }
     .os-code-graph-placeholder { min-height: clamp(260px, 36vh, 460px); display: grid; place-content: center; gap: 5px; border: 1px dashed #afbac5; border-radius: 6px; background: #f8fafc; text-align: center; }
     .os-code-graph-placeholder strong { color: #23566f; font-size: 15px; }
     .os-code-graph-placeholder span { color: #667788; font-size: 12px; }
