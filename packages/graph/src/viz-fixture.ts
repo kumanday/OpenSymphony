@@ -1,6 +1,7 @@
 import type {
   MemoryBundleList,
   MemoryCommunityList,
+  MemoryConceptDetail,
   MemoryGraphEdge,
   MemoryGraphNode,
   MemoryGraphSnapshot,
@@ -409,3 +410,77 @@ export const graphVizFixtureCommunityList: MemoryCommunityList = {
   communities: graphVizFixtureSnapshot.communities,
   generated_at,
 };
+
+/**
+ * Capsule detail for a fixture concept, derived from the snapshot's own
+ * edges so every link inside a capsule resolves to a real node in the graph.
+ * Returns null for unknown concept ids, mirroring the gateway's 404.
+ * Accepts either the concept_id ("concepts/memory-graph-01") or node id.
+ */
+export function graphVizFixtureConceptDetail(conceptId: string): MemoryConceptDetail | null {
+  const snapshot = graphVizFixtureSnapshot;
+  const node = snapshot.nodes.find(
+    (candidate) => candidate.kind === "concept"
+      && (candidate.concept_id === conceptId || candidate.id === conceptId),
+  );
+  if (!node) return null;
+  const nodesById = new Map(snapshot.nodes.map((candidate) => [candidate.id, candidate]));
+  const linkTargets: Array<{ target: string; label?: string }> = [];
+  const citations: MemoryConceptDetail["citations"] = [];
+  const sourceRefs: MemoryConceptDetail["source_refs"] = [];
+  for (const edge of snapshot.edges) {
+    if (edge.source_id !== node.id && edge.target_id !== node.id) continue;
+    const otherId = edge.source_id === node.id ? edge.target_id : edge.source_id;
+    const other = nodesById.get(otherId);
+    if (!other) continue;
+    if (edge.kind === "markdown_link" && other.kind === "concept") {
+      linkTargets.push({ target: other.concept_id ?? other.id, label: other.label });
+    } else if (edge.kind === "cites" && other.kind === "concept") {
+      citations.push({ id: `cite:${other.id}`, target: other.concept_id ?? other.id, label: other.label });
+    } else if (edge.kind === "source_supported_by" && other.kind === "source_ref") {
+      sourceRefs.push({ kind: "task", id: other.label, url: `https://example.invalid/tasks/${other.label}` });
+    }
+  }
+  const areas = (node.frontmatter_summary.areas as string[] | undefined) ?? [];
+  const related = linkTargets.slice(0, 4);
+  const body = [
+    `## Summary`,
+    ``,
+    `${node.label} — deterministic fixture capsule for drill-down and deep-link work. It plays the role of an issue memory capsule: frontmatter, sections, and links behave like the real vault content.`,
+    ``,
+    `## Decisions and actions`,
+    ``,
+    `- Anchored under ${areas.map((area) => `**${area}**`).join(", ") || "no area"} in the fixture graph.`,
+    `- Tagged ${node.tags.map((tag) => `\`${tag}\``).join(", ") || "with nothing"}.`,
+    ...(related.length > 0
+      ? [
+        ``,
+        `## Relationships`,
+        ``,
+        ...related.map((link) => `- Links to [[${link.target}]] (${link.label ?? link.target})`),
+      ]
+      : []),
+    ``,
+    `## Validation evidence`,
+    ``,
+    `- Deterministic content: regenerating the fixture never changes this capsule.`,
+  ].join("\n");
+  return {
+    schema_version,
+    bundle_id: bundleId,
+    concept_id: node.concept_id ?? node.id,
+    frontmatter_view: {
+      primary: { title: node.label, type: "issue-capsule" },
+      opensymphony: {
+        areas,
+        state: node.freshness === "stale" ? "Stale" : "Done",
+        visibility: node.visibility ?? "private",
+      },
+      unknown: {},
+    },
+    body_markdown: body,
+    links: linkTargets,
+    citations,
+    source_refs: sourceRefs,
+  };
+}

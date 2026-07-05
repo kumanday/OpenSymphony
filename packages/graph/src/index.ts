@@ -26,6 +26,7 @@ export type {
   MemoryBundleList,
   MemoryCommunityList,
   MemoryConceptDetail,
+  MemoryGraphNode,
   MemoryGraphSnapshot,
   MemorySearchResponse,
 } from "@opensymphony/gateway-schema";
@@ -40,8 +41,18 @@ export {
 export {
   graphVizFixtureBundleList,
   graphVizFixtureCommunityList,
+  graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
 } from "./viz-fixture.js";
+export {
+  formatMemoryDeepLink,
+  memoryDeepLinkForGraphNode,
+  memoryDeepLinkPrefix,
+  memoryDeepLinkToGraphState,
+  parseMemoryDeepLink,
+  resolveMemoryDeepLinkNode,
+  type MemoryDeepLink,
+} from "./deep-link.js";
 
 export type GraphMode =
   | "atlas"
@@ -275,8 +286,15 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         const warningBundleIds = action.snapshot.metrics && action.snapshot.metrics.warning_count > 0
           ? uniqueSorted([...state.warningBundleIds, action.snapshot.bundle_id])
           : state.warningBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
+        // An accepted (strictly newer) snapshot may reflect capsule edits:
+        // drop the bundle's cached concept details so open capsules refetch
+        // instead of rendering stale markdown against a current graph.
+        const conceptDetails = Object.fromEntries(
+          Object.entries(state.conceptDetails).filter(([key]) => !key.startsWith(`${action.snapshot.bundle_id}:`)),
+        );
         return {
           ...state,
+          conceptDetails,
           snapshots: { ...state.snapshots, [action.snapshot.bundle_id]: action.snapshot },
           selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
           lastUpdatedAt: action.snapshot.generated_at,
@@ -374,6 +392,15 @@ export function currentGraphSnapshot(state: GraphState): MemoryGraphSnapshot | n
   return bundleId ? state.snapshots[bundleId] ?? null : null;
 }
 
+/** Cached capsule detail for a concept, or null until CONCEPT_DETAIL_LOADED lands. */
+export function cachedConceptDetail(
+  state: GraphState,
+  bundleId: string,
+  conceptId: string,
+): MemoryConceptDetail | null {
+  return state.conceptDetails[conceptDetailKey(bundleId, conceptId)] ?? null;
+}
+
 export function visibleGraphSnapshot(state: GraphState): MemoryGraphSnapshot | null {
   const snapshot = currentGraphSnapshot(state);
   if (!snapshot) return null;
@@ -451,9 +478,20 @@ export function applyGraphFilters(
   const neighborhood = mode === "neighborhood" && focusedNodeId
     ? collectNeighborhood(snapshot.edges, focusedNodeId, neighborhoodDepth)
     : null;
+  // Communities are membership lists, not just primary assignments: a
+  // multi-area concept carries one community in metrics but appears in every
+  // area's node_ids. Drilling into an area must keep those secondary members
+  // (they are part of the hull the operator clicked).
+  const communityMembers = normalized.communities.length > 0
+    ? new Set(
+      snapshot.communities
+        .filter((community) => normalized.communities.includes(community.id))
+        .flatMap((community) => community.node_ids),
+    )
+    : null;
   const nodes = snapshot.nodes.filter((node) => {
     if (neighborhood && !neighborhood.has(node.id)) return false;
-    return matchesNodeFilters(node, normalized);
+    return matchesNodeFilters(node, normalized, communityMembers);
   });
   const nodeKindById = new Map(nodes.map((node) => [node.id, node.kind]));
   const edges = snapshot.edges.filter((edge) => {
@@ -656,7 +694,8 @@ export function createTauriNativeGraphAdapter(api: NativeGraphApi): GraphDataAda
 export function createFixtureGraphAdapter(fixtures: {
   bundles?: MemoryBundleList;
   snapshot?: MemoryGraphSnapshot;
-  conceptDetail?: MemoryConceptDetail;
+  /** Static detail for every concept, or a resolver (null → reject like a gateway 404). */
+  conceptDetail?: MemoryConceptDetail | ((bundleId: string, conceptId: string) => MemoryConceptDetail | null);
   communities?: MemoryCommunityList;
   search?: MemorySearchResponse;
 } = {}): GraphDataAdapter {
@@ -668,7 +707,13 @@ export function createFixtureGraphAdapter(fixtures: {
   return {
     listBundles: async () => bundles,
     getGraphSnapshot: async () => snapshot,
-    getConceptDetail: async () => conceptDetail,
+    getConceptDetail: async (bundleId, conceptId) => {
+      const detail = typeof conceptDetail === "function"
+        ? conceptDetail(bundleId, conceptId)
+        : conceptDetail;
+      if (!detail) throw new Error(`Concept not found: ${conceptId}`);
+      return detail;
+    },
     getCommunities: async () => communities,
     search: async (query, options) => {
       const results = options?.bundleId && options.bundleId !== snapshot.bundle_id
@@ -1008,7 +1053,11 @@ function mostCommon<T extends string>(values: readonly T[]): T | undefined {
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || compareStrings(a[0], b[0]))[0]?.[0];
 }
 
-function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boolean {
+function matchesNodeFilters(
+  node: MemoryGraphNode,
+  filters: GraphFilters,
+  communityMembers: ReadonlySet<string> | null = null,
+): boolean {
   if (filters.bundleIds.length > 0 && (!node.bundle_id || !filters.bundleIds.includes(node.bundle_id))) return false;
   if (filters.nodeKinds.length > 0 && !filters.nodeKinds.includes(node.kind)) return false;
   if (filters.tags.length > 0 && !filters.tags.some((tag) => node.tags.includes(tag))) return false;
@@ -1016,7 +1065,11 @@ function matchesNodeFilters(node: MemoryGraphNode, filters: GraphFilters): boole
   if (filters.freshness.length > 0 && (!node.freshness || !filters.freshness.includes(node.freshness))) return false;
   if (filters.warning === "with_warnings" && node.warning_count <= 0) return false;
   if (filters.warning === "without_warnings" && node.warning_count > 0) return false;
-  if (filters.communities.length > 0 && (!node.metrics?.community_id || !filters.communities.includes(node.metrics.community_id))) return false;
+  if (filters.communities.length > 0) {
+    const primaryMatch = node.metrics?.community_id !== undefined
+      && filters.communities.includes(node.metrics.community_id);
+    if (!primaryMatch && !communityMembers?.has(node.id)) return false;
+  }
   if (filters.areas.length > 0 && !hasAny(node, "area", filters.areas)) return false;
   if (filters.projects.length > 0 && !hasAny(node, "project", filters.projects)) return false;
   if (filters.milestones.length > 0 && !hasAny(node, "milestone", filters.milestones)) return false;
