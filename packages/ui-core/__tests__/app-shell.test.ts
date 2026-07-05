@@ -729,7 +729,10 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-project-group-header")).toBeNull();
     expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
     expect(root.querySelector(".os-task-graph-link-skip")).not.toBeNull();
-    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \d+ V \d+ H /);
+    // Skip arrows route through the left gutter with rounded corners and a
+    // per-source hue/lane instead of sharp L-shapes.
+    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \S+ Q .+ V .+ Q .+ H /);
+    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("class")).toMatch(/os-tg-hue-\d/);
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-indent")).toBe("34px");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-height")).toBe("78px");

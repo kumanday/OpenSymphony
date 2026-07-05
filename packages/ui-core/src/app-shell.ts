@@ -2550,6 +2550,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     element.addEventListener(type, handler);
   }
 
+  private setTaskGraphLinkEmphasis(nodeButton: HTMLElement, active: boolean): void {
+    const nodeId = nodeButton.dataset.nodeId;
+    const svg = nodeButton.closest(".os-task-graph-stage")?.querySelector<SVGElement>(".os-task-graph-links");
+    if (!nodeId || !svg) {
+      return;
+    }
+    svg.classList.toggle("os-links-hover", active);
+    svg.querySelectorAll(".os-task-graph-link.is-active").forEach((path) => {
+      path.classList.remove("is-active");
+    });
+    if (active) {
+      const escaped = cssEscape(nodeId);
+      svg.querySelectorAll(`[data-link-from="${escaped}"], [data-link-to="${escaped}"]`).forEach((path) => {
+        path.classList.add("is-active");
+      });
+    }
+  }
+
   private bindEvents(): void {
     this.listen(this.options.root.querySelector("[data-save-profile]"), "save-profile", "click", () => {
       void this.saveProfile();
@@ -2636,6 +2654,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             this.render();
           }
         }
+      });
+      // Hovering a task spotlights its dependency arrows: pure class
+      // toggling on the already-rendered SVG, no re-render involved.
+      this.listen(button, "node-id-hover", "pointerenter", () => {
+        this.setTaskGraphLinkEmphasis(button, true);
+      });
+      this.listen(button, "node-id-hover", "pointerleave", () => {
+        this.setTaskGraphLinkEmphasis(button, false);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-group-toggle]").forEach((button) => {
@@ -4037,12 +4063,23 @@ interface TaskGraphLink {
   to: TaskGraphRenderModel;
   routeLane: number;
   span: number;
+  hue: number;
 }
 
 const taskGraphRowHeight = 78;
 const taskGraphRowGap = 8;
+/**
+ * Skip-level dependency arrows route through a dedicated left gutter, one
+ * lane and one hue per blocker, so several long-range dependencies stay
+ * readable instead of conflating into a single L-shaped rail.
+ */
+const taskGraphRouteGutterWidth = 62;
+const taskGraphSkipLaneGap = 11;
+const taskGraphSkipLaneCount = 5;
+const taskGraphLinkHues = ["#39708f", "#7c3aed", "#0f766e", "#b0762f", "#a05577"] as const;
 const taskGraphLaneWidth = 34;
-const taskGraphRailX = 21;
+// Node rows sit right of the routing gutter (see .os-node-graph-list padding).
+const taskGraphRailX = 21 + taskGraphRouteGutterWidth;
 
 function buildDependencySignals(
   allNodes: TaskGraphNode[],
@@ -4173,7 +4210,7 @@ function renderTaskGraphVisualization(
   const links = buildTaskGraphLinks(models);
   const graphHeight = models.length * taskGraphRowHeight + Math.max(0, models.length - 1) * taskGraphRowGap;
   const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
-  const graphWidth = Math.max(620, 360 + maxLane * taskGraphLaneWidth);
+  const graphWidth = Math.max(620, 360 + maxLane * taskGraphLaneWidth) + taskGraphRouteGutterWidth;
   const svgLinks = links.map((link) => renderTaskGraphLink(link)).join("");
   const renderedNodes = models.map((model) => renderReadOnlyTaskGraphNode(
     model,
@@ -4188,6 +4225,10 @@ function renderTaskGraphVisualization(
           <marker id="os-task-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
             <path d="M 0 0 L 8 4 L 0 8 z"></path>
           </marker>
+          ${taskGraphLinkHues.map((hue, index) => `
+          <marker id="os-task-arrow-${index}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 0 0 L 8 4 L 0 8 z" fill="${escapeAttr(hue)}"></path>
+          </marker>`).join("")}
         </defs>
         ${svgLinks}
       </svg>
@@ -4306,22 +4347,28 @@ function buildTaskGraphRenderModels(
 
 function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
   const byId = new Map(models.map((model) => [model.node.node_id, model]));
-  const links: TaskGraphLink[] = [];
+  const links: Array<Omit<TaskGraphLink, "routeLane" | "hue">> = [];
   for (const model of models) {
     for (const upstream of model.signal.upstreamVisible) {
       const from = byId.get(upstream.node_id);
       if (from) {
-        const span = Math.abs(model.index - from.index);
-        links.push({
-          from,
-          to: model,
-          span,
-          routeLane: Math.max(0, Math.min(3, span - 2)),
-        });
+        links.push({ from, to: model, span: Math.abs(model.index - from.index) });
       }
     }
   }
-  return links;
+  // Every skip-level source gets its own gutter lane and hue (in row order),
+  // shared by all of that blocker's arrows: same-source fans stay visually
+  // grouped while different blockers never share a rail.
+  const skipSources = [...new Set(
+    links.filter((link) => link.span > 1)
+      .sort((a, b) => a.from.index - b.from.index)
+      .map((link) => link.from.node.node_id),
+  )];
+  const laneBySource = new Map(skipSources.map((sourceId, index) => [sourceId, index % taskGraphSkipLaneCount]));
+  return links.map((link) => {
+    const lane = link.span > 1 ? laneBySource.get(link.from.node.node_id) ?? 0 : 0;
+    return { ...link, routeLane: lane, hue: lane % taskGraphLinkHues.length };
+  });
 }
 
 function renderTaskGraphLink(
@@ -4331,14 +4378,24 @@ function renderTaskGraphLink(
   const x2 = taskGraphRailX + link.to.lane * taskGraphLaneWidth;
   const y1 = link.from.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
   const y2 = link.to.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
+  const linkAttrs = `data-testid="task-graph-link" data-link-from="${escapeAttr(link.from.node.node_id)}" data-link-to="${escapeAttr(link.to.node.node_id)}"`;
   if (link.span > 1) {
-    const routeX = Math.max(4, taskGraphRailX - 9 - link.routeLane * 7);
-    const d = `M ${x1} ${y1} H ${routeX} V ${y2} H ${x2}`;
-    return `<path class="os-task-graph-link os-task-graph-link-skip" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
+    const routeX = Math.max(4, taskGraphRailX - 16 - link.routeLane * taskGraphSkipLaneGap);
+    const turn = Math.min(14, Math.abs(y2 - y1) / 2, Math.max(4, x1 - routeX));
+    const direction = y2 > y1 ? 1 : -1;
+    const d = [
+      `M ${x1} ${y1}`,
+      `H ${routeX + turn}`,
+      `Q ${routeX} ${y1} ${routeX} ${y1 + turn * direction}`,
+      `V ${y2 - turn * direction}`,
+      `Q ${routeX} ${y2} ${routeX + turn} ${y2}`,
+      `H ${x2}`,
+    ].join(" ");
+    return `<path class="os-task-graph-link os-task-graph-link-skip os-tg-hue-${link.hue}" ${linkAttrs} marker-end="url(#os-task-arrow-${link.hue})" d="${escapeAttr(d)}"></path>`;
   }
   const bend = Math.max(34, Math.abs(y2 - y1) * 0.24);
   const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${Math.max(x2 - bend, x1 + 18)} ${y2}, ${x2} ${y2}`;
-  return `<path class="os-task-graph-link" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
+  return `<path class="os-task-graph-link" ${linkAttrs} d="${escapeAttr(d)}"></path>`;
 }
 
 function dependencySuffix(
@@ -4608,10 +4665,18 @@ function appShellStyles(): string {
     .os-list-item, .os-node { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px; background: #ffffff; }
     .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
     .os-task-graph-links { position: absolute; z-index: 3; inset: 2px auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
-    .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); }
-    .os-task-graph-link-skip { opacity: 0.78; }
-    .os-task-graph-links marker path { fill: #39708f; }
-    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
+    .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); transition: opacity 0.14s ease, stroke-width 0.14s ease; }
+    .os-task-graph-link-skip { opacity: 0.72; }
+    .os-task-graph-link.os-tg-hue-0 { stroke: #39708f; }
+    .os-task-graph-link.os-tg-hue-1 { stroke: #7c3aed; }
+    .os-task-graph-link.os-tg-hue-2 { stroke: #0f766e; }
+    .os-task-graph-link.os-tg-hue-3 { stroke: #b0762f; }
+    .os-task-graph-link.os-tg-hue-4 { stroke: #a05577; }
+    .os-task-graph-links.os-links-hover .os-task-graph-link { opacity: 0.1; }
+    .os-task-graph-links.os-links-hover .os-task-graph-link.is-active { opacity: 1; stroke-width: 2.5; }
+    .os-task-graph-links marker path:not([fill]) { fill: #39708f; }
+    /* Reserve the skip-arrow routing gutter (taskGraphRouteGutterWidth). */
+    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; padding-left: 62px; }
     .os-knowledge-graph { display: grid; gap: 10px; min-width: 0; }
     .os-knowledge-toolbar { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
     .os-knowledge-toolbar div { display: grid; gap: 2px; min-width: 0; }
