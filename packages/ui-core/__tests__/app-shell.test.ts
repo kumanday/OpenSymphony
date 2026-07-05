@@ -16,6 +16,7 @@ import {
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
+  createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   mountKnowledgeGraphRenderer,
   renderKnowledgeGraphSurface,
@@ -728,7 +729,17 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-project-group-header")).toBeNull();
     expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
     expect(root.querySelector(".os-task-graph-link-skip")).not.toBeNull();
-    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \d+ V \d+ H /);
+    // Skip arrows route through the left gutter with rounded corners and a
+    // per-source hue/lane instead of sharp L-shapes.
+    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \S+ Q .+ V .+ Q .+ H /);
+    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("class")).toMatch(/os-tg-hue-\d/);
+    // The hue marker is applied via CSS, not an inline `marker-end` that the
+    // base `.os-task-graph-link` rule would override to the default arrow.
+    expect(root.querySelector(".os-task-graph-link-skip")?.hasAttribute("marker-end")).toBe(false);
+    const shellStyleText = Array.from(root.querySelectorAll("style"))
+      .map((style) => style.textContent ?? "")
+      .join("\n");
+    expect(shellStyleText).toMatch(/\.os-tg-hue-0 \{[^}]*marker-end: url\(#os-task-arrow-0\)/);
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-indent")).toBe("34px");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-height")).toBe("78px");
@@ -812,6 +823,7 @@ describe("OpenSymphonyApp mount", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),
@@ -832,7 +844,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-graph-view='knowledge']")?.classList.contains("is-selected")).toBe(true);
       expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-canvas']")).not.toBeNull();
       expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
-      expect(fillStyles).toContain("#e7ebef");
+      expect(fillStyles).toContain("#eef1f4");
       expect(getContext.mock.calls.some(([contextId]) => String(contextId).startsWith("webgl"))).toBe(true);
       expect(root.querySelector("[data-testid='knowledge-graph-metrics']")?.textContent).toContain(`${fixtureGraphSnapshot.nodes.length} nodes`);
       const fallbackButtons = Array.from(root.querySelectorAll<HTMLButtonElement>(".os-kg-list [data-kg-node-id]"));
@@ -886,6 +898,7 @@ describe("OpenSymphonyApp mount", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),
@@ -934,6 +947,92 @@ describe("OpenSymphonyApp mount", () => {
       expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
     } finally {
       getContext.mockRestore();
+      await handle.destroy();
+    }
+  });
+
+  it("gives every skip-level blocker its own routing lane, beyond the hue palette", async () => {
+    const sourceCount = 7;
+    const nodeFor = (index: number, overrides: Partial<TaskGraphNode>): TaskGraphNode => ({
+      schema_version: schemaVersionV1(),
+      node_id: `lane-node-${index}`,
+      kind: "issue",
+      identifier: `LANE-${index}`,
+      title: `Lane test ${index}`,
+      state: "In Progress",
+      state_category: "in_progress",
+      children: [],
+      blocked_by: [],
+      labels: [],
+      ...overrides,
+    });
+    const sources = Array.from({ length: sourceCount }, (_, index) => nodeFor(index, {}));
+    // Targets sit far below their blockers so every link is a skip (span > 1).
+    const targets = Array.from({ length: sourceCount }, (_, index) => nodeFor(100 + index, {
+      state: "Todo",
+      state_category: "todo",
+      blocked_by: [`LANE-${index}`],
+    }));
+    const laneGraph: TaskGraphSnapshot = {
+      schema_version: schemaVersionV1(),
+      project_id: "proj-alpha",
+      generated_at: "2025-09-01T00:00:00Z",
+      root_ids: [sources[0].node_id],
+      nodes: [...sources, ...targets],
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: laneGraph }),
+    });
+
+    try {
+      await flushUntil(() => root.querySelectorAll(".os-task-graph-link-skip").length >= sourceCount);
+      const skips = Array.from(root.querySelectorAll(".os-task-graph-link-skip"));
+      const routeXs = new Set(skips.map((path) => path.getAttribute("d")?.match(/Q (\S+) /)?.[1]));
+      // Seven blockers → seven distinct gutter rails, even though the hue
+      // palette (5 entries) cycles.
+      expect(routeXs.size).toBe(sourceCount);
+      const stage = root.querySelector<HTMLElement>("[data-testid='task-graph-visualization']");
+      const gutter = Number.parseInt(stage?.style.getPropertyValue("--os-tg-gutter") ?? "0", 10);
+      expect(gutter).toBeGreaterThanOrEqual(30 + sourceCount * 11);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("offers a home path back to the full Knowledge Graph after narrowing", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+      expect(root.querySelector("[data-testid='knowledge-graph-reset']")).toBeNull();
+
+      // Keyboard focus narrows to the neighborhood; the home button appears.
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).focus();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") !== null);
+
+      (root.querySelector("[data-testid='knowledge-graph-reset']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") === null);
+      expect(root.querySelector(".os-kg-list li.is-selected")).toBeNull();
+
+      // Escape offers the same escape hatch.
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") !== null);
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") === null);
+    } finally {
       await handle.destroy();
     }
   });
@@ -1026,6 +1125,7 @@ describe("OpenSymphonyApp mount", () => {
         setTransform: jest.fn(),
         fillRect: jest.fn(),
         beginPath: jest.fn(),
+        closePath: jest.fn(),
         moveTo: jest.fn(),
         lineTo: jest.fn(),
         stroke: jest.fn(),
@@ -1042,7 +1142,7 @@ describe("OpenSymphonyApp mount", () => {
         snapshot: fixtureGraphSnapshot,
         layout,
         selectedNodeIds: [],
-        view: { scale: 1, dx: 0, dy: 0 },
+        view: createKnowledgeGraphViewState(),
         onSelect: jest.fn(),
         onFocus: jest.fn(),
       });
@@ -1083,9 +1183,23 @@ describe("OpenSymphonyApp mount", () => {
       },
     });
     document.body.appendChild(root);
-    const labels = root.querySelectorAll(".os-kg-label");
-    expect(labels.length).toBeLessThanOrEqual(80);
-    expect(root.querySelector(".os-kg-label[data-kg-node-id='bundle:scale-5000']")?.textContent).toContain("Scale fixture");
+    // Labels are created imperatively by the renderer with zoom-based LOD;
+    // the server-rendered surface starts with an empty overlay layer, and
+    // selected nodes always earn a label regardless of zoom.
+    expect(root.querySelectorAll(".os-kg-label").length).toBe(0);
+    mountKnowledgeGraphRenderer(root, {
+      snapshot,
+      layout,
+      selectedNodeIds: [selectedNodeId],
+      view: createKnowledgeGraphViewState(),
+      onSelect: jest.fn(),
+      onFocus: jest.fn(),
+    });
+    expect(root.querySelectorAll(".os-kg-label").length).toBeLessThanOrEqual(80);
+    expect(
+      root.querySelector(`.os-kg-label[data-kg-node-id='${selectedNodeId}']`)?.classList.contains("is-selected"),
+    ).toBe(true);
+    disposeKnowledgeGraphRenderer(root);
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl div")).toBeNull();
     expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
@@ -1120,7 +1234,7 @@ describe("OpenSymphonyApp mount", () => {
         snapshot,
         layout,
         selectedNodeIds: [selectedNodeId],
-        view: { scale: 1, dx: 0, dy: 0 },
+        view: createKnowledgeGraphViewState(),
         onSelect: jest.fn(),
         onFocus: jest.fn(),
       });

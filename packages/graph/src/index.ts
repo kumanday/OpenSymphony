@@ -37,6 +37,11 @@ export {
   fixtureSearchResponse,
   createScaleGraphSnapshot,
 } from "./fixture.js";
+export {
+  graphVizFixtureBundleList,
+  graphVizFixtureCommunityList,
+  graphVizFixtureSnapshot,
+} from "./viz-fixture.js";
 
 export type GraphMode =
   | "atlas"
@@ -252,9 +257,13 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
       {
         const staleCursor = state.staleCursors[action.snapshot.bundle_id];
         const existingSnapshot = state.snapshots[action.snapshot.bundle_id];
+        // Same-partition snapshots must be strictly newer to replace the
+        // current one: polls frequently redeliver the identical sequence,
+        // and treating those as fresh data forced a full re-layout (and
+        // reset hover/zoom) every refresh cycle.
         const isOlderSamePartitionSnapshot = existingSnapshot !== undefined
           && existingSnapshot.cursor.partition === action.snapshot.cursor.partition
-          && action.snapshot.cursor.sequence < existingSnapshot.cursor.sequence;
+          && action.snapshot.cursor.sequence <= existingSnapshot.cursor.sequence;
         const isStaleSnapshot = (staleCursor !== undefined && isCursorBefore(action.snapshot.cursor, staleCursor))
           || isOlderSamePartitionSnapshot;
         if (isStaleSnapshot) {
@@ -707,29 +716,69 @@ function forceLayout(
   height: number,
 ): GraphLayoutNode[] {
   if (nodes.length > 400) return progressiveCommunityLayout(nodes, width, height);
+  if (nodes.length === 0) return [];
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const tickCount = nodes.length > 160 ? 45 : 90;
-  const points = nodes.map((node, index) => ({
-    id: node.id,
-    x: width / 2 + Math.cos(index) * 80,
-    y: height / 2 + Math.sin(index) * 80,
-    vx: 0,
-    vy: 0,
-  }));
+  const tickCount = nodes.length > 160 ? 140 : 220;
+  // Fruchterman–Reingold ideal spacing: nodes should spread over the whole
+  // canvas instead of contracting into a center clump, which made zoomed-out
+  // views an unreadable label pile.
+  const k = 0.6 * Math.sqrt((width * height) / nodes.length);
+  const communityById = new Map(nodes.map((node) => [node.id, node.metrics?.community_id]));
+  // Communities get fixed anchors on an ellipse so clusters occupy distinct
+  // regions; without this, cross-community edges shuffle every community
+  // across the whole canvas and cluster hulls all overlap.
+  const communityIds = [...new Set(
+    nodes.map((node) => node.metrics?.community_id).filter((id): id is string => Boolean(id)),
+  )].sort(compareStrings);
+  const communityAnchors = new Map<string, { x: number; y: number }>(
+    communityIds.map((communityId, index) => {
+      const angle = (index / Math.max(1, communityIds.length)) * Math.PI * 2 - Math.PI / 2;
+      return [communityId, {
+        x: width / 2 + Math.cos(angle) * width * 0.26,
+        y: height / 2 + Math.sin(angle) * height * 0.26,
+      }];
+    }),
+  );
+  // Deterministic golden-angle spiral seed around each node's community
+  // anchor: clusters start separated so the simulated annealing only has to
+  // refine locally instead of untangling an interleaved global spiral.
+  const seedCounters = new Map<string, number>();
+  const points = nodes.map((node) => {
+    const communityId = node.metrics?.community_id ?? "";
+    const anchor = communityAnchors.get(communityId) ?? { x: width / 2, y: height / 2 };
+    const seedIndex = seedCounters.get(communityId) ?? 0;
+    seedCounters.set(communityId, seedIndex + 1);
+    const angle = seedIndex * 2.399963; // golden angle
+    const radius = 8 + Math.sqrt(seedIndex) * k * 0.42;
+    return {
+      id: node.id,
+      x: clamp(anchor.x + Math.cos(angle) * radius, 28, width - 28),
+      y: clamp(anchor.y + Math.sin(angle) * radius, 28, height - 28),
+      vx: 0,
+      vy: 0,
+    };
+  });
   const byId = new Map(points.map((point) => [point.id, point]));
+  let temperature = Math.max(width, height) / 10;
+  const cooling = 0.975;
   for (let tick = 0; tick < tickCount; tick += 1) {
+    const repulsionRange = k * 3;
     for (let i = 0; i < points.length; i += 1) {
       for (let j = i + 1; j < points.length; j += 1) {
         const a = points[i];
         const b = points[j];
         const dx = a.x - b.x || 0.01;
         const dy = a.y - b.y || 0.01;
-        const distance = Math.max(24, Math.hypot(dx, dy));
-        const push = 70 / (distance * distance);
-        a.vx += (dx / distance) * push;
-        a.vy += (dy / distance) * push;
-        b.vx -= (dx / distance) * push;
-        b.vy -= (dy / distance) * push;
+        const distance = Math.max(6, Math.hypot(dx, dy));
+        // Short-range repulsion only: distant pairs contribute nothing, so
+        // the summed outward pressure cannot overpower the community
+        // anchors and pin every node against the canvas walls.
+        if (distance > repulsionRange) continue;
+        const push = (k * k) / distance / distance;
+        a.vx += dx * push;
+        a.vy += dy * push;
+        b.vx -= dx * push;
+        b.vy -= dy * push;
       }
     }
     for (const edge of edges) {
@@ -738,21 +787,34 @@ function forceLayout(
       if (!source || !target) continue;
       const dx = target.x - source.x;
       const dy = target.y - source.y;
-      const distance = Math.max(1, Math.hypot(dx, dy));
-      const pull = (distance - 95) * 0.004;
+      const distance = Math.max(6, Math.hypot(dx, dy));
+      // Same-community edges pull a little harder so clusters condense
+      // around their areas while distinct areas stay apart.
+      const sameCommunity = communityById.get(edge.source_id) !== undefined
+        && communityById.get(edge.source_id) === communityById.get(edge.target_id);
+      const pull = (distance * distance) / k * (sameCommunity ? 0.0016 : 0.0006);
       source.vx += (dx / distance) * pull;
       source.vy += (dy / distance) * pull;
       target.vx -= (dx / distance) * pull;
       target.vy -= (dy / distance) * pull;
     }
     for (const point of points) {
-      point.vx += (width / 2 - point.x) * 0.002;
-      point.vy += (height / 2 - point.y) * 0.002;
-      point.x = clamp(point.x + point.vx, 28, width - 28);
-      point.y = clamp(point.y + point.vy, 28, height - 28);
-      point.vx *= 0.82;
-      point.vy *= 0.82;
+      const anchor = communityAnchors.get(communityById.get(point.id) ?? "");
+      if (anchor) {
+        point.vx += (anchor.x - point.x) * 0.05;
+        point.vy += (anchor.y - point.y) * 0.05;
+      } else {
+        point.vx += (width / 2 - point.x) * 0.0012;
+        point.vy += (height / 2 - point.y) * 0.0012;
+      }
+      const speed = Math.hypot(point.vx, point.vy);
+      const limited = speed > temperature ? temperature / speed : 1;
+      point.x = clamp(point.x + point.vx * limited, 28, width - 28);
+      point.y = clamp(point.y + point.vy * limited, 28, height - 28);
+      point.vx = 0;
+      point.vy = 0;
     }
+    temperature = Math.max(2.5, temperature * cooling);
   }
   return points.map((point) => {
     const node = nodesById.get(point.id)!;
