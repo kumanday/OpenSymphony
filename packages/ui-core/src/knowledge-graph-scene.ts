@@ -466,7 +466,10 @@ function paddedHullOutline(
 ): Array<{ x: number; y: number }> {
   const hull = convexHull(members.map((point) => ({ x: point.x, y: point.y })));
   if (hull.length < 3) {
-    return circleOutline({ x: hull[0]?.x ?? 0, y: hull[0]?.y ?? 0, z: 0 }, padding);
+    // Two members or collinear members: build a stadium around ALL points
+    // (hull of padded circles) so every member stays inside the blob.
+    const samples = members.flatMap((point) => circleOutline({ x: point.x, y: point.y, z: 0 }, padding));
+    return chaikinSmooth(convexHull(samples));
   }
   const centroid = {
     x: hull.reduce((sum, point) => sum + point.x, 0) / hull.length,

@@ -944,6 +944,58 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("gives every skip-level blocker its own routing lane, beyond the hue palette", async () => {
+    const sourceCount = 7;
+    const nodeFor = (index: number, overrides: Partial<TaskGraphNode>): TaskGraphNode => ({
+      schema_version: schemaVersionV1(),
+      node_id: `lane-node-${index}`,
+      kind: "issue",
+      identifier: `LANE-${index}`,
+      title: `Lane test ${index}`,
+      state: "In Progress",
+      state_category: "in_progress",
+      children: [],
+      blocked_by: [],
+      labels: [],
+      ...overrides,
+    });
+    const sources = Array.from({ length: sourceCount }, (_, index) => nodeFor(index, {}));
+    // Targets sit far below their blockers so every link is a skip (span > 1).
+    const targets = Array.from({ length: sourceCount }, (_, index) => nodeFor(100 + index, {
+      state: "Todo",
+      state_category: "todo",
+      blocked_by: [`LANE-${index}`],
+    }));
+    const laneGraph: TaskGraphSnapshot = {
+      schema_version: schemaVersionV1(),
+      project_id: "proj-alpha",
+      generated_at: "2025-09-01T00:00:00Z",
+      root_ids: [sources[0].node_id],
+      nodes: [...sources, ...targets],
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: laneGraph }),
+    });
+
+    try {
+      await flushUntil(() => root.querySelectorAll(".os-task-graph-link-skip").length >= sourceCount);
+      const skips = Array.from(root.querySelectorAll(".os-task-graph-link-skip"));
+      const routeXs = new Set(skips.map((path) => path.getAttribute("d")?.match(/Q (\S+) /)?.[1]));
+      // Seven blockers → seven distinct gutter rails, even though the hue
+      // palette (5 entries) cycles.
+      expect(routeXs.size).toBe(sourceCount);
+      const stage = root.querySelector<HTMLElement>("[data-testid='task-graph-visualization']");
+      const gutter = Number.parseInt(stage?.style.getPropertyValue("--os-tg-gutter") ?? "0", 10);
+      expect(gutter).toBeGreaterThanOrEqual(30 + sourceCount * 11);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("offers a home path back to the full Knowledge Graph after narrowing", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

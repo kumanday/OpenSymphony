@@ -201,6 +201,26 @@ describe("area hulls", () => {
     expect(hulls[0].memberNodeIds).toContain("remote");
   });
 
+  it("encloses both members of a two-node area", () => {
+    const members = [
+      { nodeId: "near", x: 0, y: 0, z: 0, radius: 9, label: "near", kind: "concept", degree: 1 },
+      { nodeId: "far", x: 300, y: 40, z: 0, radius: 9, label: "far", kind: "concept", degree: 1 },
+    ];
+    const hulls = buildAreaHulls(
+      members,
+      [{ id: "area:pair", label: "Pair", node_ids: ["near", "far"] }],
+    );
+    expect(hulls).toHaveLength(1);
+    const xs = hulls[0].outline.map((point) => point.x);
+    const ys = hulls[0].outline.map((point) => point.y);
+    // The stadium outline must wrap both endpoints (plus padding), not just
+    // a fixed-radius circle around the first member.
+    expect(Math.min(...xs)).toBeLessThan(0);
+    expect(Math.max(...xs)).toBeGreaterThan(300);
+    expect(Math.min(...ys)).toBeLessThan(0);
+    expect(Math.max(...ys)).toBeGreaterThan(40);
+  });
+
   it("feeds one node into every area hull it belongs to", () => {
     const shared = { nodeId: "shared", x: 0, y: 0, z: 0, radius: 9, label: "s", kind: "concept", degree: 1 };
     const hulls = buildAreaHulls(

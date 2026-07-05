@@ -645,6 +645,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.knowledgeGraphLayoutSize = null;
     this.knowledgeGraphLoadInFlight = null;
     this.knowledgeGraphLoadQueuedBundleId = undefined;
+    // A different bundle/gateway is different content: drop the camera and
+    // any node drag overrides along with the graph state.
+    this.knowledgeGraphView = createKnowledgeGraphViewState();
   }
 
   /**
@@ -772,8 +775,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.render();
       return;
     }
-    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
-    this.render();
+    // Only surface the loading state before anything is on screen. A
+    // background refresh over an already-rendered graph stays silent: if the
+    // incoming snapshot is identical (the common poll case) nothing resets
+    // the status, and a dangling "loading" would block resize relayouts and
+    // pin the status pill on "Stabilizing" forever.
+    const hasRenderedGraph = Boolean(visibleGraphSnapshot(this.state.knowledgeGraph) && this.state.knowledgeGraphLayout);
+    if (!hasRenderedGraph) {
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
+      this.render();
+    }
     try {
       if (!this.state.knowledgeGraph.bundles) {
         const bundles = await this.graphAdapter.listBundles();
@@ -4104,15 +4115,19 @@ const taskGraphRowGap = 8;
 /**
  * Skip-level dependency arrows route through a dedicated left gutter, one
  * lane and one hue per blocker, so several long-range dependencies stay
- * readable instead of conflating into a single L-shaped rail.
+ * readable instead of conflating into a single L-shaped rail. The gutter
+ * widens with the number of distinct blockers so lanes are never reused
+ * (hues cycle, lanes do not).
  */
-const taskGraphRouteGutterWidth = 62;
+const taskGraphMinRouteGutterWidth = 62;
 const taskGraphSkipLaneGap = 11;
-const taskGraphSkipLaneCount = 5;
 const taskGraphLinkHues = ["#39708f", "#7c3aed", "#0f766e", "#b0762f", "#a05577"] as const;
+
+function taskGraphRouteGutterWidth(links: readonly TaskGraphLink[]): number {
+  const laneCount = links.reduce((max, link) => Math.max(max, link.routeLane + 1), 0);
+  return Math.max(taskGraphMinRouteGutterWidth, 30 + laneCount * taskGraphSkipLaneGap);
+}
 const taskGraphLaneWidth = 34;
-// Node rows sit right of the routing gutter (see .os-node-graph-list padding).
-const taskGraphRailX = 21 + taskGraphRouteGutterWidth;
 
 function buildDependencySignals(
   allNodes: TaskGraphNode[],
@@ -4243,8 +4258,9 @@ function renderTaskGraphVisualization(
   const links = buildTaskGraphLinks(models);
   const graphHeight = models.length * taskGraphRowHeight + Math.max(0, models.length - 1) * taskGraphRowGap;
   const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
-  const graphWidth = Math.max(620, 360 + maxLane * taskGraphLaneWidth) + taskGraphRouteGutterWidth;
-  const svgLinks = links.map((link) => renderTaskGraphLink(link)).join("");
+  const gutterWidth = taskGraphRouteGutterWidth(links);
+  const graphWidth = Math.max(620, 360 + maxLane * taskGraphLaneWidth) + gutterWidth;
+  const svgLinks = links.map((link) => renderTaskGraphLink(link, gutterWidth)).join("");
   const renderedNodes = models.map((model) => renderReadOnlyTaskGraphNode(
     model,
     selectedNodeId,
@@ -4252,7 +4268,7 @@ function renderTaskGraphVisualization(
   )).join("");
 
   return `
-    <div class="os-task-graph-stage" data-testid="task-graph-visualization" style="--os-graph-height: ${graphHeight}px; --os-graph-width: ${graphWidth}px;">
+    <div class="os-task-graph-stage" data-testid="task-graph-visualization" style="--os-graph-height: ${graphHeight}px; --os-graph-width: ${graphWidth}px; --os-tg-gutter: ${gutterWidth}px;">
       <svg class="os-task-graph-links" data-testid="task-graph-links" viewBox="0 0 ${graphWidth} ${graphHeight}" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker id="os-task-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
@@ -4397,7 +4413,9 @@ function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
       .sort((a, b) => a.from.index - b.from.index)
       .map((link) => link.from.node.node_id),
   )];
-  const laneBySource = new Map(skipSources.map((sourceId, index) => [sourceId, index % taskGraphSkipLaneCount]));
+  // Lanes are never reused: every distinct blocker gets its own rail and
+  // the gutter widens to fit (taskGraphRouteGutterWidth). Hues cycle.
+  const laneBySource = new Map(skipSources.map((sourceId, index) => [sourceId, index]));
   return links.map((link) => {
     const lane = link.span > 1 ? laneBySource.get(link.from.node.node_id) ?? 0 : 0;
     return { ...link, routeLane: lane, hue: lane % taskGraphLinkHues.length };
@@ -4406,14 +4424,17 @@ function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
 
 function renderTaskGraphLink(
   link: TaskGraphLink,
+  gutterWidth: number,
 ): string {
-  const x1 = taskGraphRailX + link.from.lane * taskGraphLaneWidth;
-  const x2 = taskGraphRailX + link.to.lane * taskGraphLaneWidth;
+  // Node rows sit right of the routing gutter (see .os-node-graph-list padding).
+  const railX = 21 + gutterWidth;
+  const x1 = railX + link.from.lane * taskGraphLaneWidth;
+  const x2 = railX + link.to.lane * taskGraphLaneWidth;
   const y1 = link.from.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
   const y2 = link.to.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
   const linkAttrs = `data-testid="task-graph-link" data-link-from="${escapeAttr(link.from.node.node_id)}" data-link-to="${escapeAttr(link.to.node.node_id)}"`;
   if (link.span > 1) {
-    const routeX = Math.max(4, taskGraphRailX - 16 - link.routeLane * taskGraphSkipLaneGap);
+    const routeX = Math.max(4, railX - 16 - link.routeLane * taskGraphSkipLaneGap);
     const turn = Math.min(14, Math.abs(y2 - y1) / 2, Math.max(4, x1 - routeX));
     const direction = y2 > y1 ? 1 : -1;
     const d = [
@@ -4709,7 +4730,7 @@ function appShellStyles(): string {
     .os-task-graph-links.os-links-hover .os-task-graph-link.is-active { opacity: 1; stroke-width: 2.5; }
     .os-task-graph-links marker path:not([fill]) { fill: #39708f; }
     /* Reserve the skip-arrow routing gutter (taskGraphRouteGutterWidth). */
-    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; padding-left: 62px; }
+    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; padding-left: var(--os-tg-gutter, 62px); }
     .os-knowledge-graph { display: grid; gap: 10px; min-width: 0; }
     .os-knowledge-toolbar { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
     .os-knowledge-toolbar div { display: grid; gap: 2px; min-width: 0; }

@@ -163,19 +163,32 @@ export function mountKnowledgeGraphRenderer(
     if (state.layoutIdentity !== layoutIdentity) {
       state.layoutIdentity = layoutIdentity;
       state.hoveredNodeId = null;
-      // A structurally different layout (mode switch, resize relayout) gets
-      // reframed; small refreshes keep the operator's camera.
-      if (!options.view.camera) {
-        state.camera = defaultCameraForLayout(options.layout, viewport);
-        state.goal = state.camera;
-      }
+      // A new layout means the content genuinely changed (identical
+      // snapshots no longer trigger relayouts): mode switches, bundle
+      // switches, and resize relayouts all reposition nodes, so glide the
+      // camera toward framing the new layout instead of keeping a view
+      // that may point entirely off-frame.
+      state.goal = defaultCameraForLayout(options.layout, viewport);
     }
   }
   options.view.camera = state.camera;
 
   attachCanvasHandlers(canvas, root, stage, state);
-  drawFrame(canvas, root, stage, state);
+  if (cameraDiffers(state.camera, state.goal)) {
+    startAnimation(canvas, root, stage, state);
+  } else {
+    drawFrame(canvas, root, stage, state);
+  }
   bindListNavigation(root, options);
+}
+
+function cameraDiffers(a: GraphCameraState, b: GraphCameraState): boolean {
+  return a.targetX !== b.targetX
+    || a.targetY !== b.targetY
+    || a.targetZ !== b.targetZ
+    || a.distance !== b.distance
+    || a.yaw !== b.yaw
+    || a.pitch !== b.pitch;
 }
 
 export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
@@ -624,7 +637,7 @@ function positionTooltip(tooltip: HTMLElement, x: number, y: number): void {
 interface ThreeCanvasState {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
-  camera: THREE.PerspectiveCamera;
+  camera: THREE.OrthographicCamera;
   graph: THREE.Group;
   viewportKey: string | null;
   contentKey: string | null;
