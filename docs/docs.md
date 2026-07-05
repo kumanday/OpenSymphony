@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-24T03:31:40.851743+00:00
 
 ## Current model
 
-- COE-531 contributed: PR #195: Promote workspace graph surfaces into hero shell (merge `932991f`)
+- PR-197 contributed: PR #197: feat(graph): 3D knowledge-graph command center, differentiated task-graph arrows, shared viz fixtures (merge `8e341b5`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-24T03:31:40.851743+00:00
 
 ## Recent changes
 
-- COE-531: Workspace Shell Graph Hero And Surface State
+- PR-197: Graph visualization command center and shared fixtures
 
 ## Source refs
 
-- COE-531
+- PR-197
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
