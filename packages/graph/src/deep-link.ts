@@ -1,5 +1,5 @@
 import type { MemoryGraphNode, MemoryGraphSnapshot } from "@opensymphony/gateway-schema";
-import type { GraphDeepLinkState } from "./index.js";
+import { createInitialGraphFilters, type GraphDeepLinkState } from "./index.js";
 
 /**
  * Memory deep links address a location in the knowledge graph — a bundle, a
@@ -14,12 +14,12 @@ import type { GraphDeepLinkState } from "./index.js";
  *
  * Every path segment is percent-encoded. Concept ids keep their internal
  * slashes (`issues/COE-399` becomes `concepts/issues/COE-399`), matching the
- * gateway's wildcard concept route; community ids encode as a single segment
- * (a directory-derived community like `directory:path/to` must round-trip
- * through the one-segment `/communities/<id>` form). Parsing is strict:
- * unknown collections, empty segments, or query/fragment suffixes are
- * rejected rather than guessed at, so a link either resolves exactly or not
- * at all.
+ * gateway's wildcard concept route; bundle and community ids encode as a
+ * single segment (a hosted bundle id like `team/a` or a directory-derived
+ * community like `directory:path/to` must round-trip through their
+ * one-segment position). Parsing is strict: unknown collections, empty
+ * segments, or query/fragment suffixes are rejected rather than guessed at,
+ * so a link either resolves exactly or not at all.
  */
 
 export const memoryDeepLinkPrefix = "opensymphony://memory/";
@@ -38,7 +38,7 @@ export function formatMemoryDeepLink(link: {
   if (!link.bundleId) {
     throw new Error("Memory deep links require a bundle id");
   }
-  const base = `${memoryDeepLinkPrefix}${encodeSegments(link.bundleId)}`;
+  const base = `${memoryDeepLinkPrefix}${encodeURIComponent(link.bundleId)}`;
   if (link.conceptId) {
     return `${base}/concepts/${encodeSegments(link.conceptId)}`;
   }
@@ -126,7 +126,9 @@ export function resolveMemoryDeepLinkNode(
  * Translate a parsed deep link into the partial graph state applied through
  * the HISTORY_RESTORED reducer action. Node resolution happens against the
  * loaded snapshot (see resolveMemoryDeepLinkNode); this only carries the
- * navigation shape.
+ * navigation shape. Filters are always included: visibility is driven by
+ * `filters.communities` (mode alone filters nothing), so a community link
+ * must install its filter and every other link must clear a stale one.
  */
 export function memoryDeepLinkToGraphState(link: MemoryDeepLink): Partial<GraphDeepLinkState> {
   return {
@@ -135,6 +137,10 @@ export function memoryDeepLinkToGraphState(link: MemoryDeepLink): Partial<GraphD
     focusedNodeId: null,
     selectedNodeIds: [],
     searchQuery: "",
+    filters: {
+      ...createInitialGraphFilters(),
+      communities: link.communityId ? [link.communityId] : [],
+    },
   };
 }
 

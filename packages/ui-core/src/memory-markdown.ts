@@ -78,6 +78,9 @@ function renderInline(text: string): string {
     return `\u0000${generated.length - 1}\u0000`;
   };
   let html = escapeHtml(text).replaceAll("\u0000", "");
+  // Code spans first: their content is literal, so markdown-looking text
+  // inside backticks must be hidden before any other pass can rewrite it.
+  html = html.replace(/`([^`]+)`/g, (_match, body: string) => stash(`<code>${body}</code>`));
   // Non-greedy up to the first "]]" so targets may contain single brackets
   // (e.g. markdown-link syntax inside a title) without escaping the wiki
   // pass and getting chewed by the passes below.
@@ -90,6 +93,12 @@ function renderInline(text: string): string {
     return stash(`<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`);
   });
   html = html.replace(/\*\*([^*]+)\*\*/g, (_match, body: string) => stash(`<strong>${body}</strong>`));
-  html = html.replace(/`([^`]+)`/g, (_match, body: string) => stash(`<code>${body}</code>`));
-  return html.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => generated[Number(index)]);
+  // A stashed fragment can itself contain an earlier pass's placeholder
+  // (e.g. a code span captured inside a wiki target), so restore until no
+  // markers remain; indices only ever point at earlier tokens, so this
+  // terminates within generated.length rounds.
+  for (let round = 0; round <= generated.length && html.includes("\u0000"); round += 1) {
+    html = html.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => generated[Number(index)]);
+  }
+  return html;
 }

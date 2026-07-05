@@ -1085,6 +1085,16 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
       </ul>
     `
     : "";
+  const citations = detail.citations.length > 0
+    ? `
+      <h4>Citations</h4>
+      <ul class="os-kg-capsule-links" data-testid="knowledge-graph-capsule-citations">
+        ${detail.citations.map((citation) => `
+          <li><button type="button" class="os-kg-capsule-link" data-kg-link-target="${escapeAttr(citation.target)}">${escapeHtml(citation.label ?? citation.target)}</button></li>
+        `).join("")}
+      </ul>
+    `
+    : "";
   const sources = detail.source_refs.length > 0
     ? `
       <h4>Sources</h4>
@@ -1102,6 +1112,7 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
       ${chips ? `<div class="os-kg-capsule-chips">${chips}</div>` : ""}
       <div class="os-kg-capsule-body" data-testid="knowledge-graph-capsule-body">${renderMemoryMarkdown(detail.body_markdown)}</div>
       ${links}
+      ${citations}
       ${sources}
     </div>
   `;

@@ -1394,6 +1394,29 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("renders capsule citations as navigable graph links", () => {
+    const concept = graphVizFixtureSnapshot.nodes.find(
+      (node) => node.kind === "concept" && (graphVizFixtureConceptDetail(node.concept_id!)?.citations.length ?? 0) > 0,
+    );
+    expect(concept).toBeDefined();
+    const detail = graphVizFixtureConceptDetail(concept!.concept_id!)!;
+    const html = renderKnowledgeGraphInspector({
+      snapshot: graphVizFixtureSnapshot,
+      layout: null,
+      state: { ...initialGraphState, selectedNodeIds: [concept!.id] },
+      conceptDetail: detail,
+    });
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const citationButtons = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-testid='knowledge-graph-capsule-citations'] [data-kg-link-target]"),
+    );
+    expect(citationButtons.length).toBe(detail.citations.length);
+    expect(citationButtons.map((button) => button.dataset.kgLinkTarget)).toEqual(
+      detail.citations.map((citation) => citation.target),
+    );
+  });
+
   it("flags only truncated entity-list names for the instant hover tooltip", () => {
     const root = document.createElement("div");
     root.innerHTML = renderKnowledgeGraphNodeList(fixtureGraphSnapshot, []);

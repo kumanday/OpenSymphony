@@ -66,4 +66,22 @@ describe("renderMemoryMarkdown", () => {
     expect(nul).toContain("a1b");
     expect(nul).toContain("<strong>x</strong>");
   });
+
+  it("keeps code span content literal against other inline syntax", () => {
+    // Code spans run first: markdown-looking content inside backticks must
+    // render as literal code, never as placeholders or nested markup.
+    const bold = renderMemoryMarkdown("run `**flag**` now");
+    expect(bold).toContain("<code>**flag**</code>");
+    expect(bold).not.toContain("\u0000");
+    expect(bold).not.toContain("<strong>");
+
+    const link = renderMemoryMarkdown("see `[docs](https://example.com)` here");
+    expect(link).toContain("<code>[docs](https://example.com)</code>");
+    expect(link).not.toContain("<a ");
+
+    // Placeholders nested inside later-stashed fragments still resolve.
+    const nested = renderMemoryMarkdown("[[target `code` name]] and `x`");
+    expect(nested).not.toContain("\u0000");
+    expect(nested).toContain("<code>x</code>");
+  });
 });

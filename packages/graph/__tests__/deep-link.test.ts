@@ -63,6 +63,23 @@ describe("memory deep links", () => {
     expect(() => formatMemoryDeepLink({ bundleId: "" })).toThrow(/bundle id/);
   });
 
+  it("keeps bundle ids with slashes in a single segment", () => {
+    // Hosted/path-qualified bundle ids ("team/a") must round-trip: a second
+    // raw segment would be parsed as a collection name and rejected.
+    const link = formatMemoryDeepLink({ bundleId: "team/a", conceptId: "issues/COE-1" });
+    expect(link).toBe("opensymphony://memory/team%2Fa/concepts/issues/COE-1");
+    expect(parseMemoryDeepLink(link)).toEqual({
+      bundleId: "team/a",
+      conceptId: "issues/COE-1",
+      communityId: null,
+    });
+    expect(parseMemoryDeepLink(formatMemoryDeepLink({ bundleId: "team/a" }))).toEqual({
+      bundleId: "team/a",
+      conceptId: null,
+      communityId: null,
+    });
+  });
+
   it("keeps community ids with slashes in a single segment", () => {
     // Directory-derived communities ("directory:path/to") must round-trip:
     // multi-segment community paths are rejected by the parser.
@@ -130,6 +147,9 @@ describe("memory deep links", () => {
     });
     expect(communityState.mode).toBe("community");
     expect(communityState.bundleId).toBe("viz-workbench");
+    // Visibility filters on filters.communities, not mode: the restored
+    // state must install the community filter or the link shows the atlas.
+    expect(communityState.filters?.communities).toEqual(["area:gateway"]);
 
     const conceptState = memoryDeepLinkToGraphState({
       bundleId: "viz-workbench",
@@ -137,6 +157,7 @@ describe("memory deep links", () => {
       communityId: null,
     });
     expect(conceptState.mode).toBe("atlas");
+    expect(conceptState.filters?.communities).toEqual([]);
   });
 });
 
@@ -219,5 +240,27 @@ describe("fixture graph adapter concept resolution", () => {
     expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toBeNull();
     state = graphReducer(state, { type: "CONCEPT_DETAIL_LOADED", detail });
     expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toEqual(detail);
+  });
+
+  it("drops the bundle's cached details when a newer snapshot is accepted", () => {
+    const concept = graphVizFixtureSnapshot.nodes.find((node) => node.kind === "concept")!;
+    const detail = graphVizFixtureConceptDetail(concept.concept_id!)!;
+    const otherBundleDetail = { ...detail, bundle_id: "other-bundle" };
+    let state = graphReducer(createInitialGraphState(), { type: "SNAPSHOT_LOADED", snapshot: graphVizFixtureSnapshot });
+    state = graphReducer(state, { type: "CONCEPT_DETAIL_LOADED", detail });
+    state = graphReducer(state, { type: "CONCEPT_DETAIL_LOADED", detail: otherBundleDetail });
+
+    // A redelivered (same-sequence) snapshot keeps the cache.
+    state = graphReducer(state, { type: "SNAPSHOT_LOADED", snapshot: graphVizFixtureSnapshot });
+    expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toEqual(detail);
+
+    // An accepted, strictly newer snapshot may reflect capsule edits: the
+    // bundle's cached details are invalidated, other bundles' survive.
+    state = graphReducer(state, {
+      type: "SNAPSHOT_LOADED",
+      snapshot: { ...graphVizFixtureSnapshot, cursor: { ...graphVizFixtureSnapshot.cursor, sequence: 2 } },
+    });
+    expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toBeNull();
+    expect(cachedConceptDetail(state, "other-bundle", detail.concept_id)).toEqual(otherBundleDetail);
   });
 });

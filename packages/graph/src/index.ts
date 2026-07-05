@@ -286,8 +286,15 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         const warningBundleIds = action.snapshot.metrics && action.snapshot.metrics.warning_count > 0
           ? uniqueSorted([...state.warningBundleIds, action.snapshot.bundle_id])
           : state.warningBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
+        // An accepted (strictly newer) snapshot may reflect capsule edits:
+        // drop the bundle's cached concept details so open capsules refetch
+        // instead of rendering stale markdown against a current graph.
+        const conceptDetails = Object.fromEntries(
+          Object.entries(state.conceptDetails).filter(([key]) => !key.startsWith(`${action.snapshot.bundle_id}:`)),
+        );
         return {
           ...state,
+          conceptDetails,
           snapshots: { ...state.snapshots, [action.snapshot.bundle_id]: action.snapshot },
           selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
           lastUpdatedAt: action.snapshot.generated_at,
