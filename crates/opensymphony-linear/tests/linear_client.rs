@@ -1176,7 +1176,9 @@ fn project_issues_response(issues: &[(&str, &str, &str)]) -> String {
     project_issues_response_with_states(
         &issues
             .iter()
-            .map(|(issue_id, identifier, title)| (*issue_id, *identifier, *title, "Done", "completed"))
+            .map(|(issue_id, identifier, title)| {
+                (*issue_id, *identifier, *title, "Done", "completed")
+            })
             .collect::<Vec<_>>(),
     )
 }

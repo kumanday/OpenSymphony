@@ -131,10 +131,7 @@ pub trait LinearTaskGraphClient: Send + Sync + 'static {
     /// The requested identifiers plus every backlog-state issue in the
     /// project, from one scan. Defaults to the plain identifier lookup so
     /// fakes without backlog data keep working unchanged.
-    async fn task_graph_issues(
-        &self,
-        identifiers: &[String],
-    ) -> Result<Vec<TrackerIssue>, String> {
+    async fn task_graph_issues(&self, identifiers: &[String]) -> Result<Vec<TrackerIssue>, String> {
         self.issues_by_identifiers(identifiers).await
     }
 }
@@ -150,10 +147,7 @@ impl LinearTaskGraphClient for crate::opensymphony_linear::LinearClient {
             .map_err(|error| error.to_string())
     }
 
-    async fn task_graph_issues(
-        &self,
-        identifiers: &[String],
-    ) -> Result<Vec<TrackerIssue>, String> {
+    async fn task_graph_issues(&self, identifiers: &[String]) -> Result<Vec<TrackerIssue>, String> {
         self.project_task_graph_issues(identifiers)
             .await
             .map_err(|error| error.to_string())
@@ -1318,8 +1312,10 @@ async fn get_memory_completed_tasks(
         .map(|row| row.issue_key.to_ascii_uppercase())
         .collect::<HashSet<_>>();
     for issue in &envelope.snapshot.issues {
-        if !matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Completed)
-            || captured.contains(&issue.identifier.to_ascii_uppercase())
+        if !matches!(
+            issue.runtime_state,
+            ControlPlaneIssueRuntimeState::Completed
+        ) || captured.contains(&issue.identifier.to_ascii_uppercase())
         {
             continue;
         }
@@ -4267,18 +4263,24 @@ mod tests {
         ];
         sort_completed_tasks(&mut rows, CompletedTasksSort::CompletedDesc);
         assert_eq!(
-            rows.iter().map(|row| row.issue_key.as_str()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| row.issue_key.as_str())
+                .collect::<Vec<_>>(),
             vec!["COE-99", "COE-100", "COE-2"],
         );
         sort_completed_tasks(&mut rows, CompletedTasksSort::CompletedAsc);
         assert_eq!(
-            rows.iter().map(|row| row.issue_key.as_str()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| row.issue_key.as_str())
+                .collect::<Vec<_>>(),
             vec!["COE-100", "COE-99", "COE-2"],
         );
         // Natural key order: COE-99 before COE-100 despite lexicographic order.
         sort_completed_tasks(&mut rows, CompletedTasksSort::IdAsc);
         assert_eq!(
-            rows.iter().map(|row| row.issue_key.as_str()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| row.issue_key.as_str())
+                .collect::<Vec<_>>(),
             vec!["COE-2", "COE-99", "COE-100"],
         );
     }

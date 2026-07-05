@@ -89,10 +89,7 @@ impl LinearTaskGraphClient for BacklogLinearTaskGraphClient {
             .collect())
     }
 
-    async fn task_graph_issues(
-        &self,
-        identifiers: &[String],
-    ) -> Result<Vec<TrackerIssue>, String> {
+    async fn task_graph_issues(&self, identifiers: &[String]) -> Result<Vec<TrackerIssue>, String> {
         let mut issues = self.issues_by_identifiers(identifiers).await?;
         issues.extend(self.backlog.iter().cloned());
         Ok(issues)
@@ -2193,8 +2190,7 @@ async fn gateway_serves_memory_completed_tasks() {
     completed_issue.tracker_state = "Done".to_owned();
     completed_issue.runtime_state = IssueRuntimeState::Completed;
     completed_issue.finished_at = Some(Utc::now());
-    completed_issue.pr_url =
-        Some("https://github.com/kumanday/OpenSymphony/pull/370".to_owned());
+    completed_issue.pr_url = Some("https://github.com/kumanday/OpenSymphony/pull/370".to_owned());
     snapshot.issues.push(completed_issue);
 
     let store = SnapshotStore::new(snapshot);
