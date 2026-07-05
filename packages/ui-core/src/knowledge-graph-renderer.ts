@@ -1,10 +1,14 @@
-import type {
-  GraphLayoutResult,
-  GraphState,
-  MemoryGraphSnapshot,
+import {
+  memoryDeepLinkForGraphNode,
+  type GraphLayoutResult,
+  type GraphState,
+  type MemoryConceptDetail,
+  type MemoryGraphNode,
+  type MemoryGraphSnapshot,
 } from "@opensymphony/graph";
 import * as THREE from "three";
 import { escapeAttr, escapeHtml } from "./html.js";
+import { renderMemoryMarkdown } from "./memory-markdown.js";
 import {
   advanceCameraToward,
   buildGraphScene,
@@ -35,6 +39,9 @@ export interface KnowledgeGraphSurface {
   snapshot: MemoryGraphSnapshot | null;
   layout: GraphLayoutResult | null;
   state: GraphState;
+  /** Cached capsule detail for the selected concept (null while loading). */
+  conceptDetail?: MemoryConceptDetail | null;
+  conceptDetailError?: string | null;
 }
 
 export interface KnowledgeGraphMountOptions {
@@ -44,6 +51,8 @@ export interface KnowledgeGraphMountOptions {
   view: KnowledgeGraphViewState;
   onSelect(nodeId: string): void;
   onFocus(nodeId: string): void;
+  /** Click on an area cloud in the zoomed-out view: drill into that community. */
+  onSelectArea?(areaId: string): void;
 }
 
 export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): string {
@@ -72,14 +81,47 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
         ${resetButton}
         ${renderStatus(surface.state)}
       </div>
+      ${renderBreadcrumb(surface)}
       <div class="os-knowledge-stage" data-kg-stage>
         <canvas class="os-knowledge-canvas" data-testid="knowledge-graph-canvas" aria-label="Knowledge Graph canvas"></canvas>
         <div class="os-knowledge-labels" data-kg-labels data-morph-ignore-children></div>
-        <span class="os-kg-controls-hint" aria-hidden="true">drag pan &middot; &#8997;-drag orbit &middot; scroll zoom &middot; double-click frame</span>
+        <span class="os-kg-controls-hint" aria-hidden="true">drag pan &middot; &#8997;-drag orbit &middot; scroll zoom &middot; click area to drill in &middot; esc to back out</span>
       </div>
-      ${renderSelectedInspector(snapshot, surface.state.selectedNodeIds)}
-      ${renderFallbackList(snapshot, surface.state.selectedNodeIds)}
     </div>
+  `;
+}
+
+/**
+ * Drill trail: Atlas › area › concept. Each ancestor is a button that pops
+ * the view back to that level; the current level renders as plain text.
+ * Hidden entirely at the atlas level so the default view stays quiet.
+ */
+function renderBreadcrumb(surface: KnowledgeGraphSurface): string {
+  const { snapshot, state } = surface;
+  const communityId = state.filters.communities[0] ?? null;
+  const community = communityId
+    ? snapshot?.communities.find((candidate) => candidate.id === communityId) ?? null
+    : null;
+  const selected = new Set(state.selectedNodeIds);
+  const node = snapshot?.nodes.find((candidate) => selected.has(candidate.id)) ?? null;
+  if (!community && !node) return "";
+  const crumbs: string[] = [
+    `<button type="button" data-kg-crumb="atlas">Atlas</button>`,
+  ];
+  if (community) {
+    crumbs.push(
+      node
+        ? `<button type="button" data-kg-crumb="community">${escapeHtml(community.label)}</button>`
+        : `<span aria-current="location">${escapeHtml(community.label)}</span>`,
+    );
+  }
+  if (node) {
+    crumbs.push(`<span aria-current="location">${escapeHtml(node.label)}</span>`);
+  }
+  return `
+    <nav class="os-kg-breadcrumb" data-testid="knowledge-graph-breadcrumb" aria-label="Knowledge Graph drill path">
+      ${crumbs.join(`<span class="os-kg-crumb-sep" aria-hidden="true">&rsaquo;</span>`)}
+    </nav>
   `;
 }
 
@@ -293,7 +335,7 @@ function attachCanvasHandlers(
         state.hoveredNodeId = nodeId;
         drawFrame(canvas, root, stage, state);
       }
-      canvas.style.cursor = nodeId ? "pointer" : "grab";
+      canvas.style.cursor = nodeId || drillableHullAt(scene, point.x, point.y) ? "pointer" : "grab";
       return;
     }
     const deltaX = event.clientX - state.pointer.lastX;
@@ -305,7 +347,12 @@ function attachCanvasHandlers(
       state.camera = panCamera(state.camera, viewport, deltaX, deltaY);
       state.goal = state.camera;
     } else if (state.pointer.mode === "orbit") {
-      state.camera = orbitCamera(state.camera, deltaX * 0.005, deltaY * 0.004);
+      // Grab-the-scene orbit, tuned by feel: dragging right swings the
+      // scene right (yaw inverted from the raw delta), and dragging up
+      // tilts the scene away/up (pitch follows the raw delta). Signs are
+      // deliberate — both once mapped straight onto yaw/pitch and read
+      // reversed horizontally; a full inversion read reversed vertically.
+      state.camera = orbitCamera(state.camera, -deltaX * 0.005, deltaY * 0.004);
       state.goal = state.camera;
     } else if (state.pointer.mode === "drag-node" && state.pointer.nodeId && state.options.layout) {
       const worldNode = worldNodesFor(state.options.layout, state.options.view.overrides)
@@ -342,6 +389,16 @@ function attachCanvasHandlers(
     canvas.style.cursor = "grab";
     if (!moved && mode === "drag-node" && nodeId) {
       state.options.onSelect(nodeId);
+      return;
+    }
+    if (!moved && mode === "pan") {
+      // A stationary click on an area cloud drills into that community; the
+      // same gesture with movement stays a pan.
+      const viewport = canvasViewport(stage);
+      const scene = state.lastScene ?? rebuildScene(state, viewport);
+      const point = canvasPointFromEvent(canvas, event);
+      const hull = drillableHullAt(scene, point.x, point.y);
+      if (hull) state.options.onSelectArea?.(hull.areaId);
     }
   };
   canvas.onpointerleave = () => {
@@ -389,16 +446,57 @@ function attachCanvasHandlers(
   };
 }
 
-function bindListNavigation(root: HTMLElement, options: KnowledgeGraphMountOptions): void {
-  // Handler properties (not addEventListener) so re-mounting after every
-  // render stays idempotent: the DOM morph preserves these buttons across
-  // renders, and stacked listeners would fire once per past render.
+/**
+ * Hull under the cursor, but only while the view is zoomed out enough that
+ * areas read as navigable clouds (their titles are visible). Zoomed in, the
+ * hulls still exist underneath every node and a background click should not
+ * yank the operator into a different community.
+ */
+function drillableHullAt(scene: GraphScene, x: number, y: number): { areaId: string } | null {
+  const hull = hitTestHull(scene, x, y);
+  return hull && hull.labelAlpha > 0.05 ? hull : null;
+}
+
+/** The subset of mount callbacks the node list/labels need. */
+export interface KnowledgeGraphListOptions {
+  onSelect(nodeId: string): void;
+  onFocus(nodeId: string): void;
+}
+
+/**
+ * Bind click/keyboard/focus behavior for every node button under `root`
+ * (overlay labels and the entity-list column alike). Handler properties
+ * (not addEventListener) so re-binding after every render stays idempotent:
+ * the DOM morph preserves these buttons across renders, and stacked
+ * listeners would fire once per past render.
+ */
+export function bindKnowledgeGraphListNavigation(root: HTMLElement, options: KnowledgeGraphListOptions): void {
   root.querySelectorAll<HTMLElement>("[data-kg-node-id]").forEach((button) => {
     bindNodeButton(root, button, options);
+    markTruncatedListLabel(button);
   });
 }
 
-function bindNodeButton(root: HTMLElement, button: HTMLElement, options: KnowledgeGraphMountOptions): void {
+/**
+ * Entity-list rows ellipsize long names; flag the ones that actually
+ * overflow so CSS can surface the full name in an instant (no-delay)
+ * hover tooltip. `title` is kept in sync as the assistive/native fallback.
+ */
+function markTruncatedListLabel(button: HTMLElement): void {
+  if (!button.closest(".os-kg-list")) return;
+  const label = button.textContent ?? "";
+  if (button.scrollWidth > button.clientWidth && label) {
+    button.dataset.kgOverflow = label;
+    button.title = label;
+  } else {
+    delete button.dataset.kgOverflow;
+    button.removeAttribute("title");
+  }
+}
+
+const bindListNavigation = bindKnowledgeGraphListNavigation;
+
+function bindNodeButton(root: HTMLElement, button: HTMLElement, options: KnowledgeGraphListOptions): void {
   button.onclick = () => {
     const nodeId = button.dataset.kgNodeId;
     if (nodeId) options.onSelect(nodeId);
@@ -916,8 +1014,14 @@ function renderStatus(state: GraphState): string {
   return `<span class="os-kg-status" data-testid="knowledge-graph-status">Idle</span>`;
 }
 
-function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
-  const selected = new Set(selectedNodeIds);
+/**
+ * Inspector card for the selected node: metadata, frontmatter chips, and the
+ * concept's memory capsule. Rendered in the lower-right workspace column so
+ * the graph stage and capsule content share the fold.
+ */
+export function renderKnowledgeGraphInspector(surface: KnowledgeGraphSurface): string {
+  const { snapshot, state } = surface;
+  const selected = new Set(state.selectedNodeIds);
   const node = snapshot?.nodes.find((candidate) => selected.has(candidate.id)) ?? null;
   if (!node) {
     return `<section class="os-kg-inspector" data-testid="knowledge-graph-inspector"><h3>Inspector</h3><p>No node selected</p></section>`;
@@ -925,20 +1029,114 @@ function renderSelectedInspector(snapshot: MemoryGraphSnapshot | null, selectedN
   const community = node.metrics?.community_id
     ? snapshot?.communities.find((candidate) => candidate.id === node.metrics.community_id)?.label ?? node.metrics.community_id
     : "None";
+  const deepLink = snapshot ? memoryDeepLinkForGraphNode(snapshot.bundle_id, node) : null;
+  const deepLinkButton = deepLink
+    ? `<button type="button" class="os-kg-copy-deeplink" data-kg-copy-deeplink="${escapeAttr(deepLink)}" data-testid="knowledge-graph-copy-deeplink" title="Copy a deep link to this capsule">Copy deep link</button>`
+    : "";
   return `
     <section class="os-kg-inspector" data-testid="knowledge-graph-inspector">
-      <h3>${escapeHtml(node.label)}</h3>
+      <div class="os-kg-inspector-header">
+        <h3>${escapeHtml(node.label)}</h3>
+        ${deepLinkButton}
+      </div>
       <dl>
         <dt>Kind</dt><dd>${escapeHtml(node.kind)}</dd>
         <dt>Visibility</dt><dd>${escapeHtml(node.visibility ?? "unknown")}</dd>
         <dt>Community</dt><dd>${escapeHtml(community)}</dd>
         <dt>Tags</dt><dd>${escapeHtml(node.tags.join(", ") || "None")}</dd>
       </dl>
+      ${renderCapsule(node, surface)}
     </section>
   `;
 }
 
-function renderFallbackList(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
+/**
+ * Capsule pane inside the inspector: the concept's memory capsule fetched
+ * from the concept-detail endpoint. Non-concept nodes have no capsule; for
+ * concepts the pane moves through loading → detail (or error with retry).
+ */
+function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): string {
+  if (node.kind !== "concept" || !node.concept_id) return "";
+  if (surface.conceptDetailError) {
+    return `
+      <div class="os-kg-capsule" data-testid="knowledge-graph-capsule">
+        <p class="os-kg-capsule-error" data-testid="knowledge-graph-capsule-error">Capsule unavailable: ${escapeHtml(surface.conceptDetailError)}</p>
+        <button type="button" data-kg-capsule-retry data-testid="knowledge-graph-capsule-retry">Retry</button>
+      </div>
+    `;
+  }
+  const detail = surface.conceptDetail ?? null;
+  if (!detail || detail.concept_id !== node.concept_id) {
+    return `<div class="os-kg-capsule" data-testid="knowledge-graph-capsule"><p data-testid="knowledge-graph-capsule-loading">Loading capsule&hellip;</p></div>`;
+  }
+  const frontmatter = { ...detail.frontmatter_view.primary, ...detail.frontmatter_view.opensymphony };
+  const chips = Object.entries(frontmatter)
+    .filter(([key, value]) => key !== "title" && isChipValue(value))
+    .slice(0, 8)
+    .map(([key, value]) => `<span class="os-kg-chip">${escapeHtml(key)}: ${escapeHtml(chipText(value))}</span>`)
+    .join("");
+  const links = detail.links.length > 0
+    ? `
+      <h4>Linked concepts</h4>
+      <ul class="os-kg-capsule-links">
+        ${detail.links.map((link) => `
+          <li><button type="button" class="os-kg-capsule-link" data-kg-link-target="${escapeAttr(link.target)}">${escapeHtml(link.label ?? link.target)}</button></li>
+        `).join("")}
+      </ul>
+    `
+    : "";
+  const citations = detail.citations.length > 0
+    ? `
+      <h4>Citations</h4>
+      <ul class="os-kg-capsule-links" data-testid="knowledge-graph-capsule-citations">
+        ${detail.citations.map((citation) => `
+          <li>${/^https?:\/\//.test(citation.target)
+            // Real OKF citations often carry a URL target with a short
+            // label; those are external evidence, not graph nodes.
+            ? `<a href="${escapeAttr(citation.target)}" target="_blank" rel="noreferrer">${escapeHtml(citation.label ?? citation.id)}</a>`
+            : `<button type="button" class="os-kg-capsule-link" data-kg-link-target="${escapeAttr(citation.target)}">${escapeHtml(citation.label ?? citation.target)}</button>`}</li>
+        `).join("")}
+      </ul>
+    `
+    : "";
+  const sources = detail.source_refs.length > 0
+    ? `
+      <h4>Sources</h4>
+      <ul class="os-kg-capsule-sources">
+        ${detail.source_refs.map((ref) => `
+          <li>${ref.url && /^https?:\/\//.test(ref.url)
+            ? `<a href="${escapeAttr(ref.url)}" target="_blank" rel="noreferrer">${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}</a>`
+            : `${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}`}</li>
+        `).join("")}
+      </ul>
+    `
+    : "";
+  return `
+    <div class="os-kg-capsule" data-testid="knowledge-graph-capsule">
+      ${chips ? `<div class="os-kg-capsule-chips">${chips}</div>` : ""}
+      <div class="os-kg-capsule-body" data-testid="knowledge-graph-capsule-body">${renderMemoryMarkdown(detail.body_markdown)}</div>
+      ${links}
+      ${citations}
+      ${sources}
+    </div>
+  `;
+}
+
+function isChipValue(value: unknown): boolean {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    || (Array.isArray(value) && value.every((entry) => typeof entry === "string"));
+}
+
+function chipText(value: unknown): string {
+  return Array.isArray(value) ? value.join(", ") : String(value);
+}
+
+/**
+ * Clickable entity list for the visible snapshot (also the keyboard/screen-
+ * reader path into the graph). Rendered in the narrow lower-left workspace
+ * column; bind with bindKnowledgeGraphListNavigation.
+ */
+export function renderKnowledgeGraphNodeList(snapshot: MemoryGraphSnapshot | null, selectedNodeIds: readonly string[]): string {
   if (!snapshot || snapshot.nodes.length === 0) {
     return `<div class="os-empty">No graph data available.</div>`;
   }

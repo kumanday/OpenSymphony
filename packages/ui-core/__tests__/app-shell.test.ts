@@ -10,17 +10,26 @@ import {
   computeGraphLayout,
   createFixtureGraphAdapter,
   createScaleGraphSnapshot,
+  fixtureConceptDetail,
   fixtureGraphSnapshot,
+  graphVizFixtureBundleList,
+  graphVizFixtureCommunityList,
+  graphVizFixtureConceptDetail,
+  graphVizFixtureSnapshot,
   initialGraphState,
   type GraphDataAdapter,
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
+  bindKnowledgeGraphListNavigation,
   createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   mountKnowledgeGraphRenderer,
+  renderKnowledgeGraphInspector,
+  renderKnowledgeGraphNodeList,
   renderKnowledgeGraphSurface,
 } from "../src/knowledge-graph-renderer.js";
+import { hitTestHull, hitTestScene, type GraphScene } from "../src/knowledge-graph-scene.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -855,9 +864,12 @@ describe("OpenSymphonyApp mount", () => {
       fallbackButtons[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
       expect(nextFocus).toHaveBeenCalled();
       nextFocus.mockRestore();
-      expect(root.querySelector(".os-graph-hero-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
-      expect(root.querySelector("[data-testid='knowledge-lower-list']")).not.toBeNull();
-      expect(root.querySelector("[data-testid='knowledge-lower-detail']")).not.toBeNull();
+      // Entity list and inspector live in the lower workspace columns, not
+      // inside the graph hero, so the stage keeps the full hero height.
+      expect(root.querySelector(".os-graph-hero-panel .os-kg-list")).toBeNull();
+      expect(root.querySelector(".os-graph-hero-panel [data-testid='knowledge-graph-inspector']")).toBeNull();
+      expect(root.querySelector(".os-knowledge-lower-panel [data-kg-node-id='concept:coe-465']")).not.toBeNull();
+      expect(root.querySelector(".os-knowledge-lower-panel [data-testid='knowledge-graph-inspector']")).not.toBeNull();
       expect(root.textContent).not.toContain("unknown_frontmatter");
       expect(root.textContent).not.toContain("frontmatter_summary");
       // TODO(COE-471): migrate the COE-468 search/filter/inspector/raw-frontmatter controls
@@ -927,11 +939,12 @@ describe("OpenSymphonyApp mount", () => {
 
       (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector("[data-kg-node-id='concept:coe-465']") !== null);
-      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("50%");
+      // Knowledge defaults to a narrow entity list beside the inspector.
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("34%");
       (root.querySelector("[data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
       resizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
-      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("32%");
 
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
@@ -944,7 +957,7 @@ describe("OpenSymphonyApp mount", () => {
 
       (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
       await flushUntil(() => root.querySelector(".os-kg-list li.is-selected [data-kg-node-id='concept:coe-465']") !== null);
-      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("48%");
+      expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("32%");
     } finally {
       getContext.mockRestore();
       await handle.destroy();
@@ -1032,6 +1045,287 @@ describe("OpenSymphonyApp mount", () => {
       await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") !== null);
       root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") === null);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("renders the selected concept's memory capsule and follows capsule links", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+
+      const capsule = root.querySelector("[data-testid='knowledge-graph-capsule']");
+      expect(capsule?.textContent).toContain("Shared graph frontend package and reducers");
+      expect(capsule?.textContent).toContain("issue: COE-465");
+      expect(fixtureConceptDetail.links[0]?.target).toBe("tag:graph-view");
+
+      // The capsule carries a copyable deep link to itself.
+      const copy = root.querySelector<HTMLButtonElement>("[data-testid='knowledge-graph-copy-deeplink']");
+      expect(copy?.dataset.kgCopyDeeplink).toBe("opensymphony://memory/local-default/concepts/issues/COE-465");
+
+      // Breadcrumb reflects the drill trail back to the atlas.
+      expect(root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent).toContain("COE-465");
+
+      // Following a capsule link selects the linked node and drills into
+      // its area, even when starting from the atlas.
+      (root.querySelector("[data-kg-link-target='tag:graph-view']") as HTMLButtonElement).click();
+      await flushUntil(() =>
+        root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent === "graph-view",
+      );
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("tag");
+      expect(root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent).toContain("Graph View");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("surfaces capsule fetch failures with a retry that recovers", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    let failures = 1;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getConceptDetail(bundleId, conceptId) {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("capsule endpoint offline");
+        }
+        return { ...fixtureConceptDetail, bundle_id: bundleId, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter,
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-error']") !== null);
+      expect(root.querySelector("[data-testid='knowledge-graph-capsule-error']")?.textContent).toContain("capsule endpoint offline");
+
+      (root.querySelector("[data-testid='knowledge-graph-capsule-retry']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("resolves deep links whose bundle is queued behind an in-flight graph load", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const bundleB = {
+      ...fixtureGraphSnapshot,
+      bundle_id: "bundle-b",
+      cursor: { sequence: 1, partition: "memory-graph:bundle-b" },
+      nodes: fixtureGraphSnapshot.nodes.map((node) => ({ ...node, bundle_id: "bundle-b" })),
+    };
+    let releaseFirstSnapshot: (() => void) | null = null;
+    const firstSnapshotGate = new Promise<void>((resolve) => {
+      releaseFirstSnapshot = resolve;
+    });
+    let snapshotCalls = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async listBundles() {
+        return {
+          schema_version: schemaVersionV1(),
+          bundles: [
+            { id: "local-default", title: "Default", okf_version: "0.1", visibility: "private" as const, concept_count: 1 },
+            { id: "bundle-b", title: "Bundle B", okf_version: "0.1", visibility: "private" as const, concept_count: 1 },
+          ],
+        };
+      },
+      async getGraphSnapshot(bundleId) {
+        snapshotCalls += 1;
+        if (snapshotCalls === 1) await firstSnapshotGate;
+        return bundleId === "bundle-b" ? bundleB : fixtureGraphSnapshot;
+      },
+      async getConceptDetail(bundleId, conceptId) {
+        return { ...fixtureConceptDetail, bundle_id: bundleId, concept_id: conceptId };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport: buildTransport(), graphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+      // Opening the pane starts a default-bundle load; the deep link lands
+      // while that load is still in flight, so its bundle gets queued.
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      const openPromise = handle.openMemoryDeepLink("opensymphony://memory/bundle-b/concepts/issues/COE-465");
+      await flushAsync();
+      releaseFirstSnapshot?.();
+
+      expect(await openPromise).toBe(true);
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent)
+        .toContain("COE-465");
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("discards in-flight capsule responses superseded by an accepted graph refresh", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    let releaseFirstDetail: (() => void) | null = null;
+    const firstDetailGate = new Promise<void>((resolve) => {
+      releaseFirstDetail = resolve;
+    });
+    let snapshotReads = 0;
+    let detailCalls = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getGraphSnapshot() {
+        snapshotReads += 1;
+        return snapshotReads > 1
+          ? {
+              ...fixtureGraphSnapshot,
+              cursor: { ...fixtureGraphSnapshot.cursor, sequence: 2 },
+              metrics: { orphan_count: 0, broken_link_count: 0, stale_concept_count: 0, warning_count: 1 },
+            }
+          : fixtureGraphSnapshot;
+      },
+      async getConceptDetail(bundleId, conceptId) {
+        detailCalls += 1;
+        if (detailCalls === 1) await firstDetailGate;
+        return {
+          ...fixtureConceptDetail,
+          bundle_id: bundleId,
+          concept_id: conceptId,
+          body_markdown: `# capsule fetch ${detailCalls}`,
+        };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, graphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+
+      // Start the capsule fetch, then let an accepted refresh land while it
+      // is still in flight.
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => detailCalls === 1);
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 30, partition: "events" },
+        entity_ref: { kind: "unknown", id: "memory-graph:local-default" },
+        event_kind: "memory_graph_updated",
+        emitted_at: "2026-06-28T00:02:00Z",
+        payload: {
+          schema_version: schemaVersionV1(),
+          bundle_id: "local-default",
+          cursor: { sequence: 2, partition: "memory-graph:local-default" },
+          updated_at: "2026-06-28T00:02:00Z",
+        },
+      });
+      await flushUntil(() => snapshotReads === 2);
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph warnings") ?? false);
+
+      // The pre-refresh response must be discarded and refetched, not
+      // written back over the invalidated cache.
+      releaseFirstDetail?.();
+      await flushUntil(() =>
+        root.querySelector("[data-testid='knowledge-graph-capsule-body']")?.textContent?.includes("capsule fetch 2") ?? false,
+      );
+      expect(detailCalls).toBe(2);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("navigates memory deep links into a drilled capsule and steps back out with Escape", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter({
+        bundles: graphVizFixtureBundleList,
+        snapshot: graphVizFixtureSnapshot,
+        communities: graphVizFixtureCommunityList,
+        conceptDetail: (_bundleId, conceptId) => graphVizFixtureConceptDetail(conceptId),
+      }),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+
+      expect(await handle.openMemoryDeepLink("not-a-deep-link")).toBe(false);
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/concepts/missing")).toBe(false);
+
+      const opened = await handle.openMemoryDeepLink(
+        "opensymphony://memory/viz-workbench/concepts/concepts/code-intelligence-01",
+      );
+      expect(opened).toBe(true);
+
+      // The deep link lands on the Knowledge Graph pane, drilled into the
+      // concept's area with the capsule open.
+      expect(root.querySelector("[data-testid='graph-hero']")?.getAttribute("data-active-graph-surface")).toBe("knowledge");
+      const breadcrumb = () => root.querySelector("[data-testid='knowledge-graph-breadcrumb']")?.textContent ?? "";
+      expect(breadcrumb()).toContain("Code Intelligence");
+      expect(breadcrumb()).toContain("Tree-sitter Provider Skeleton");
+      expect(root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent)
+        .toBe("Tree-sitter Provider Skeleton");
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule-body']") !== null);
+      expect(root.querySelector("[data-testid='knowledge-graph-capsule-body']")?.textContent).toContain("Summary");
+
+      // The drilled view is filtered to the area's full membership,
+      // including multi-area concepts whose primary community differs.
+      const areaMemberCount = graphVizFixtureSnapshot.communities
+        .find((community) => community.id === "area:code-intelligence")!.node_ids.length;
+      expect(root.querySelectorAll("[data-testid='knowledge-graph-node-list'] li").length).toBe(areaMemberCount);
+
+      // Escape pops one level at a time: capsule → area → atlas.
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushUntil(() => !breadcrumb().includes("Tree-sitter Provider Skeleton"));
+      expect(breadcrumb()).toContain("Code Intelligence");
+
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-breadcrumb']") === null);
+      expect(root.querySelectorAll("[data-testid='knowledge-graph-node-list'] li").length)
+        .toBe(graphVizFixtureSnapshot.nodes.length);
+
+      // Community deep links drill straight into the area.
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
+      await flushUntil(() => breadcrumb().includes("Gateway"));
+
+      // A community deep link into the already-drilled area lands on the
+      // area view: the stale capsule selection is cleared, not kept.
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/concepts/concepts/gateway-01")).toBe(true);
+      await flushUntil(() => breadcrumb().includes("Gateway DTO Boundary Checklist"));
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
+      await flushUntil(() => !breadcrumb().includes("Gateway DTO Boundary Checklist"));
+      expect(breadcrumb()).toContain("Gateway");
     } finally {
       await handle.destroy();
     }
@@ -1168,20 +1462,211 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("drills into an area when a stationary click lands on its cloud", () => {
+    const root = document.createElement("div");
+    const layout = computeGraphLayout(graphVizFixtureSnapshot, { kind: "force", width: 1280, height: 900 });
+    root.innerHTML = renderKnowledgeGraphSurface({
+      snapshot: graphVizFixtureSnapshot,
+      layout,
+      state: { ...initialGraphState, layoutStatus: "ready" },
+    });
+    document.body.appendChild(root);
+    const onSelectArea = jest.fn();
+    try {
+      mountKnowledgeGraphRenderer(root, {
+        snapshot: graphVizFixtureSnapshot,
+        layout,
+        selectedNodeIds: [],
+        view: createKnowledgeGraphViewState(),
+        onSelect: jest.fn(),
+        onFocus: jest.fn(),
+        onSelectArea,
+      });
+      const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']")!;
+      const scene = (canvas as HTMLCanvasElement & { __kgDebug?: { scene: GraphScene } }).__kgDebug!.scene;
+      expect(scene.hulls.length).toBeGreaterThan(0);
+
+      // Find a point that lies on an area cloud but not on any node, so the
+      // click resolves as a drill instead of a node selection.
+      let target: { x: number; y: number; areaId: string } | null = null;
+      for (let y = 4; y < 360 && !target; y += 8) {
+        for (let x = 4; x < 640 && !target; x += 8) {
+          const hull = hitTestHull(scene, x, y);
+          if (hull && hull.labelAlpha > 0.05 && hitTestScene(scene, x, y) === null) {
+            target = { x, y, areaId: hull.areaId };
+          }
+        }
+      }
+      expect(target).not.toBeNull();
+
+      // jsdom does not route dispatched pointer events through on* handler
+      // properties, so invoke the renderer's handlers directly.
+      const pointer = (type: string, x: number, y: number) =>
+        new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }) as PointerEvent;
+      canvas.onpointerdown!(pointer("pointerdown", target!.x, target!.y));
+      canvas.onpointerup!(pointer("pointerup", target!.x, target!.y));
+      expect(onSelectArea).toHaveBeenCalledWith(target!.areaId);
+
+      // The same gesture with movement stays a pan and never drills.
+      onSelectArea.mockClear();
+      canvas.onpointerdown!(pointer("pointerdown", target!.x, target!.y));
+      canvas.onpointermove!(pointer("pointermove", target!.x + 24, target!.y + 18));
+      canvas.onpointerup!(pointer("pointerup", target!.x + 24, target!.y + 18));
+      expect(onSelectArea).not.toHaveBeenCalled();
+
+      // Option-drag orbits grab the scene: dragging right swings the scene
+      // right (yaw decreases, inverted from the raw delta) while dragging
+      // down tilts it down (pitch follows the raw delta) — tuned by feel,
+      // see the orbit handler comment.
+      const view = (canvas as HTMLCanvasElement & { __kgDebug?: { camera: { yaw: number; pitch: number } } }).__kgDebug!;
+      const before = { ...view.camera };
+      const orbitPointer = (type: string, x: number, y: number) =>
+        new MouseEvent(type, { clientX: x, clientY: y, button: 0, altKey: true, bubbles: true }) as PointerEvent;
+      canvas.onpointerdown!(orbitPointer("pointerdown", target!.x, target!.y));
+      canvas.onpointermove!(orbitPointer("pointermove", target!.x + 40, target!.y + 30));
+      canvas.onpointerup!(orbitPointer("pointerup", target!.x + 40, target!.y + 30));
+      const after = (canvas as HTMLCanvasElement & { __kgDebug?: { camera: { yaw: number; pitch: number } } }).__kgDebug!.camera;
+      expect(after.yaw).toBeLessThan(before.yaw);
+      expect(after.pitch).toBeGreaterThan(before.pitch);
+    } finally {
+      disposeKnowledgeGraphRenderer(root);
+      root.remove();
+    }
+  });
+
+  it("resolves relative markdown capsule link targets against snapshot nodes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    // OKF capsules can store link targets verbatim as relative markdown
+    // paths ("../concepts/x.md"); the graph snapshot only knows the
+    // resolved concept id ("concepts/x").
+    const graphAdapter = createFixtureGraphAdapter({
+      bundles: graphVizFixtureBundleList,
+      snapshot: graphVizFixtureSnapshot,
+      communities: graphVizFixtureCommunityList,
+      conceptDetail: (_bundleId, conceptId) => {
+        const detail = graphVizFixtureConceptDetail(conceptId);
+        if (!detail) return null;
+        return {
+          ...detail,
+          links: detail.links.map((link) => ({ ...link, target: `../${link.target}.md` })),
+        };
+      },
+    });
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport: buildTransport(), graphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      expect(await handle.openMemoryDeepLink(
+        "opensymphony://memory/viz-workbench/concepts/concepts/code-intelligence-01",
+      )).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-capsule'] [data-kg-link-target^='../']") !== null);
+
+      const link = root.querySelector<HTMLElement>("[data-testid='knowledge-graph-capsule'] [data-kg-link-target^='../']")!;
+      const target = link.dataset.kgLinkTarget!;
+      const resolvedConceptId = target.replace(/^(\.\.\/)+/, "").replace(/\.md$/, "");
+      const expectedLabel = graphVizFixtureSnapshot.nodes.find((node) => node.concept_id === resolvedConceptId)!.label;
+
+      link.click();
+      await flushUntil(() =>
+        root.querySelector("[data-testid='knowledge-graph-inspector'] h3")?.textContent === expectedLabel,
+      );
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("renders URL citation targets as external links, not graph buttons", () => {
+    const concept = fixtureGraphSnapshot.nodes.find((node) => node.kind === "concept")!;
+    const html = renderKnowledgeGraphInspector({
+      snapshot: fixtureGraphSnapshot,
+      layout: null,
+      state: { ...initialGraphState, selectedNodeIds: [concept.id] },
+      conceptDetail: {
+        ...fixtureConceptDetail,
+        citations: [
+          { id: "1", target: "https://linear.app/x/issue/COE-200", label: "COE-200" },
+          { id: "2", target: "issues/COE-465", label: "in-graph citation" },
+        ],
+      },
+    });
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const citations = root.querySelector("[data-testid='knowledge-graph-capsule-citations']")!;
+    const anchor = citations.querySelector("a")!;
+    expect(anchor.getAttribute("href")).toBe("https://linear.app/x/issue/COE-200");
+    expect(anchor.textContent).toBe("COE-200");
+    const buttons = Array.from(citations.querySelectorAll<HTMLElement>("[data-kg-link-target]"));
+    expect(buttons.map((button) => button.dataset.kgLinkTarget)).toEqual(["issues/COE-465"]);
+  });
+
+  it("renders capsule citations as navigable graph links", () => {
+    const concept = graphVizFixtureSnapshot.nodes.find(
+      (node) => node.kind === "concept" && (graphVizFixtureConceptDetail(node.concept_id!)?.citations.length ?? 0) > 0,
+    );
+    expect(concept).toBeDefined();
+    const detail = graphVizFixtureConceptDetail(concept!.concept_id!)!;
+    const html = renderKnowledgeGraphInspector({
+      snapshot: graphVizFixtureSnapshot,
+      layout: null,
+      state: { ...initialGraphState, selectedNodeIds: [concept!.id] },
+      conceptDetail: detail,
+    });
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const citationButtons = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-testid='knowledge-graph-capsule-citations'] [data-kg-link-target]"),
+    );
+    expect(citationButtons.length).toBe(detail.citations.length);
+    expect(citationButtons.map((button) => button.dataset.kgLinkTarget)).toEqual(
+      detail.citations.map((citation) => citation.target),
+    );
+  });
+
+  it("flags only truncated entity-list names for the instant hover tooltip", () => {
+    const root = document.createElement("div");
+    root.innerHTML = renderKnowledgeGraphNodeList(fixtureGraphSnapshot, []);
+    document.body.appendChild(root);
+    try {
+      const buttons = Array.from(root.querySelectorAll<HTMLElement>(".os-kg-list [data-kg-node-id]"));
+      expect(buttons.length).toBeGreaterThan(1);
+      const [truncated, fitting] = buttons;
+      // jsdom has no layout; emulate one ellipsized and one fitting row.
+      Object.defineProperty(truncated, "scrollWidth", { value: 300, configurable: true });
+      Object.defineProperty(truncated, "clientWidth", { value: 180, configurable: true });
+      Object.defineProperty(fitting, "scrollWidth", { value: 120, configurable: true });
+      Object.defineProperty(fitting, "clientWidth", { value: 180, configurable: true });
+
+      bindKnowledgeGraphListNavigation(root, { onSelect: jest.fn(), onFocus: jest.fn() });
+      expect(truncated.dataset.kgOverflow).toBe(truncated.textContent);
+      expect(truncated.getAttribute("title")).toBe(truncated.textContent);
+      expect(fitting.dataset.kgOverflow).toBeUndefined();
+      expect(fitting.getAttribute("title")).toBeNull();
+
+      // A relayout that makes the name fit clears the tooltip again.
+      Object.defineProperty(truncated, "scrollWidth", { value: 100, configurable: true });
+      bindKnowledgeGraphListNavigation(root, { onSelect: jest.fn(), onFocus: jest.fn() });
+      expect(truncated.dataset.kgOverflow).toBeUndefined();
+      expect(truncated.getAttribute("title")).toBeNull();
+    } finally {
+      root.remove();
+    }
+  });
+
   it("keeps scale rendering accessible with LOD labels and reduced motion", () => {
     const snapshot = createScaleGraphSnapshot(5_000);
     const layout = computeGraphLayout(snapshot, { kind: "force", width: 1280, height: 720 });
     const selectedNodeId = "concept:scale-1";
     const root = document.createElement("div");
-    root.innerHTML = renderKnowledgeGraphSurface({
-      snapshot,
-      layout,
-      state: {
-        ...initialGraphState,
-        selectedNodeIds: [selectedNodeId],
-        layoutStatus: "ready",
-      },
-    });
+    // The list and inspector render in the lower workspace columns; compose
+    // them alongside the surface the way the app shell does.
+    const composeView = (selectedIds: string[]) => {
+      const state = { ...initialGraphState, selectedNodeIds: selectedIds, layoutStatus: "ready" as const };
+      return renderKnowledgeGraphSurface({ snapshot, layout, state })
+        + renderKnowledgeGraphInspector({ snapshot, layout, state })
+        + renderKnowledgeGraphNodeList(snapshot, selectedIds);
+    };
+    root.innerHTML = composeView([selectedNodeId]);
     document.body.appendChild(root);
     // Labels are created imperatively by the renderer with zoom-based LOD;
     // the server-rendered surface starts with an empty overlay layer, and
@@ -1203,15 +1688,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl")?.textContent).toContain("concept");
     expect(root.querySelector("[data-testid='knowledge-graph-inspector'] dl div")).toBeNull();
     expect(root.querySelector(".os-kg-list [data-kg-node-id='concept:scale-1']")?.getAttribute("aria-current")).toBe("true");
-    root.innerHTML = renderKnowledgeGraphSurface({
-      snapshot,
-      layout,
-      state: {
-        ...initialGraphState,
-        selectedNodeIds: [],
-        layoutStatus: "ready",
-      },
-    });
+    root.innerHTML = composeView([]);
     expect(root.querySelector("[data-testid='knowledge-graph-inspector']")?.textContent).toContain("No node selected");
 
     const originalMatchMedia = globalThis.matchMedia;
