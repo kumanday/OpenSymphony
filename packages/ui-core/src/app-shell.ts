@@ -386,7 +386,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       planningEdit: { ...emptyPlanningEditState },
     };
     this.loadPlanningWorkspace("opensymphony-local");
+    // Document-level so Escape works even when focus sits on the body (the
+    // graph canvas itself is not focusable). Removed in destroy().
+    this.options.root.ownerDocument.addEventListener("keydown", this.onDocumentKeydown);
   }
+
+  private onDocumentKeydown = (event: KeyboardEvent): void => {
+    if (this.destroyed || event.key !== "Escape" || this.state.graphPaneView !== "knowledge") {
+      return;
+    }
+    const graph = this.state.knowledgeGraph;
+    if (graph.mode !== "atlas" || graph.focusedNodeId || graph.selectedNodeIds.length > 0) {
+      this.resetKnowledgeGraphView();
+    }
+  };
 
   /**
    * Fetch all evidence for a run concurrently, without touching state. The
@@ -491,6 +504,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   async destroy(): Promise<void> {
     this.destroyed = true;
+    this.options.root.ownerDocument.removeEventListener("keydown", this.onDocumentKeydown);
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
     this.graphLayoutAdapter.dispose();
@@ -2550,6 +2564,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     element.addEventListener(type, handler);
   }
 
+  /**
+   * Return the Knowledge Graph to its home view: atlas mode, no focus, no
+   * selection, camera reframed to the full layout. Bound to the
+   * "Show full graph" toolbar button and Escape.
+   */
+  private resetKnowledgeGraphView(): void {
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "NODE_FOCUSED", nodeId: null });
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "MODE_SET", mode: "atlas" });
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    this.state.knowledgeGraphLayout = null;
+    this.knowledgeGraphLayoutSize = null;
+    this.knowledgeGraphView.camera = null;
+    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+    this.render();
+  }
+
   private setTaskGraphLinkEmphasis(nodeButton: HTMLElement, active: boolean): void {
     const nodeId = nodeButton.dataset.nodeId;
     const svg = nodeButton.closest(".os-task-graph-stage")?.querySelector<SVGElement>(".os-task-graph-links");
@@ -2709,6 +2739,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           this.selectGraphPaneView(view);
         }
       });
+    });
+    this.listen(this.options.root.querySelector("[data-kg-reset]"), "kg-reset", "click", () => {
+      this.resetKnowledgeGraphView();
     });
     this.bindKnowledgeGraph();
     this.options.root.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach((handle) => {
@@ -4682,6 +4715,7 @@ function appShellStyles(): string {
     .os-knowledge-toolbar div { display: grid; gap: 2px; min-width: 0; }
     .os-knowledge-toolbar strong { font-size: 13px; }
     .os-knowledge-toolbar span { color: #667788; font-size: 12px; }
+    .os-kg-reset { flex: 0 0 auto; border-color: #39708f; color: #23566f; background: #e7f1f5; font-weight: 600; }
     .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
     .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
     .os-knowledge-stage { position: relative; height: clamp(320px, 52vh, 680px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #eef1f4; }

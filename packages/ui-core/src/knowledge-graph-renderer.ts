@@ -53,6 +53,15 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
   const summary = snapshot
     ? `${snapshot.nodes.length} nodes / ${snapshot.edges.length} edges / ${metrics?.stale_concept_count ?? 0} stale / ${metrics?.warning_count ?? 0} warnings`
     : "No graph snapshot";
+  // Home affordance: once the operator narrows the view (neighborhood focus,
+  // a selection, or a non-atlas mode) there must always be a one-click path
+  // back to the full graph.
+  const narrowed = state.mode !== "atlas"
+    || state.focusedNodeId !== null
+    || state.selectedNodeIds.length > 0;
+  const resetButton = narrowed
+    ? `<button type="button" class="os-icon-button os-kg-reset" data-kg-reset data-testid="knowledge-graph-reset" title="Show the full graph (Esc)">Show full graph</button>`
+    : "";
   return `
     <div class="os-knowledge-graph" data-testid="knowledge-graph-renderer" data-layout-status="${escapeAttr(status)}">
       <div class="os-knowledge-toolbar">
@@ -60,6 +69,7 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
           <strong>Knowledge Graph</strong>
           <span data-testid="knowledge-graph-metrics">${escapeHtml(summary)}</span>
         </div>
+        ${resetButton}
         ${renderStatus(surface.state)}
       </div>
       <div class="os-knowledge-stage" data-kg-stage>
@@ -394,7 +404,10 @@ function bindNodeButton(root: HTMLElement, button: HTMLElement, options: Knowled
   };
   button.onfocus = () => {
     const nodeId = button.dataset.kgNodeId;
-    if (nodeId) options.onFocus(nodeId);
+    // Focus-driven neighborhood preview is a keyboard affordance; a mouse
+    // click also focuses the button, and jumping into neighborhood mode on
+    // every click stranded users away from the full graph.
+    if (nodeId && matchesFocusVisible(button)) options.onFocus(nodeId);
   };
 }
 
@@ -966,6 +979,16 @@ function now(): number {
 
 function shortLabel(label: string): string {
   return label.length > 34 ? `${label.slice(0, 31)}...` : label;
+}
+
+function matchesFocusVisible(element: Element): boolean {
+  try {
+    return element.matches(":focus-visible");
+  } catch {
+    // Environments without :focus-visible (older jsdom) keep the previous
+    // behavior of treating any focus as intentional.
+    return true;
+  }
 }
 
 function cssEscape(value: string): string {

@@ -36,20 +36,32 @@ interface DemoIssue {
 
 // Row order matters: the renderer lays nodes out top-to-bottom in array
 // order, so the blockedBy spans below encode the arrow shapes under test.
+//
+// The dependency web is deliberately deep and overlapping, following the
+// "A blocks B, C, D; B blocks C, D; C blocks E, F, G" pattern so arrow
+// routing is exercised across several simultaneous levels:
+//
+//   VIZ-100 (Done)   — completed blocker: its arrows must NOT render
+//   VIZ-101 (L0) → VIZ-102, VIZ-103, VIZ-104        (A fans three)
+//   VIZ-102 (L1) → VIZ-103, VIZ-104                 (B re-blocks C and D: diamond)
+//   VIZ-103 (L2) → VIZ-105, VIZ-106, VIZ-107        (C fans E, F, G)
+//   VIZ-104 (L2) → VIZ-108, VIZ-113                 (long skip to the tail)
+//   VIZ-105..108 (L3) → VIZ-109..112 (L4) → VIZ-113 (L5)
 const demoIssues: DemoIssue[] = [
-  { id: "VIZ-101", title: "Scene model and shared projector", state: "Done" },
+  { id: "VIZ-100", title: "Scene model spike", state: "Done" },
+  { id: "VIZ-101", title: "Shared projector foundation", state: "In Progress", blockedBy: ["VIZ-100"], running: true },
   { id: "VIZ-102", title: "Area hull computation", state: "In Progress", blockedBy: ["VIZ-101"], running: true },
-  { id: "VIZ-103", title: "Hover highlight and tooltip", state: "In Progress", blockedBy: ["VIZ-101"], running: true },
-  { id: "VIZ-104", title: "Node dragging interactions", state: "Todo", blockedBy: ["VIZ-103"] },
-  { id: "VIZ-105", title: "Zoom-dependent label fades", state: "Todo", blockedBy: ["VIZ-101", "VIZ-102"] },
-  { id: "VIZ-106", title: "Camera framing animations", state: "Todo", blockedBy: ["VIZ-102"] },
-  { id: "VIZ-107", title: "Task graph lane routing", state: "Human Review", blockedBy: ["VIZ-101"] },
-  { id: "VIZ-108", title: "Arrow palette and markers", state: "Todo", blockedBy: ["VIZ-107"] },
-  { id: "VIZ-109", title: "Dependency hover emphasis", state: "Todo", blockedBy: ["VIZ-103", "VIZ-107"] },
-  { id: "VIZ-110", title: "Fixture workbench docs", state: "Todo", blockedBy: ["VIZ-102"] },
-  { id: "VIZ-111", title: "Playwright visual sweep", state: "Todo", blockedBy: ["VIZ-105", "VIZ-108"] },
-  { id: "VIZ-112", title: "Reduced motion audit", state: "Todo", blockedBy: ["VIZ-103"] },
-  { id: "VIZ-113", title: "Release notes and demo capture", state: "Todo", blockedBy: ["VIZ-111", "VIZ-112", "VIZ-101"] },
+  { id: "VIZ-103", title: "Hover highlight and tooltip", state: "Human Review", blockedBy: ["VIZ-101", "VIZ-102"] },
+  { id: "VIZ-104", title: "Node dragging interactions", state: "Todo", blockedBy: ["VIZ-101", "VIZ-102"] },
+  { id: "VIZ-105", title: "Zoom-dependent label fades", state: "Todo", blockedBy: ["VIZ-103"] },
+  { id: "VIZ-106", title: "Camera framing animations", state: "Todo", blockedBy: ["VIZ-103"] },
+  { id: "VIZ-107", title: "Task graph lane routing", state: "Todo", blockedBy: ["VIZ-103"] },
+  { id: "VIZ-108", title: "Arrow palette and markers", state: "Todo", blockedBy: ["VIZ-104"] },
+  { id: "VIZ-109", title: "Dependency hover emphasis", state: "Todo", blockedBy: ["VIZ-105", "VIZ-106"] },
+  { id: "VIZ-110", title: "Fixture workbench docs", state: "Todo", blockedBy: ["VIZ-106"] },
+  { id: "VIZ-111", title: "Playwright visual sweep", state: "Todo", blockedBy: ["VIZ-107", "VIZ-108"] },
+  { id: "VIZ-112", title: "Reduced motion audit", state: "Todo", blockedBy: ["VIZ-108"] },
+  { id: "VIZ-113", title: "Release notes and demo capture", state: "Todo", blockedBy: ["VIZ-104", "VIZ-109", "VIZ-111"] },
 ];
 
 function demoNode(issue: DemoIssue): TaskGraphNode {

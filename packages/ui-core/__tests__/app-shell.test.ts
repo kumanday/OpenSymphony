@@ -944,6 +944,40 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("offers a home path back to the full Knowledge Graph after narrowing", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+      expect(root.querySelector("[data-testid='knowledge-graph-reset']")).toBeNull();
+
+      // Keyboard focus narrows to the neighborhood; the home button appears.
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).focus();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") !== null);
+
+      (root.querySelector("[data-testid='knowledge-graph-reset']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") === null);
+      expect(root.querySelector(".os-kg-list li.is-selected")).toBeNull();
+
+      // Escape offers the same escape hatch.
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") !== null);
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-reset']") === null);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("refreshes the Knowledge Graph on memory_graph_updated events", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
