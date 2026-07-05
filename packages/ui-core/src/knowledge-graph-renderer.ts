@@ -503,6 +503,9 @@ function syncOverlay(
   const seen = new Set<Element>();
 
   // Area titles surface when zoomed out, replacing the node-label noise.
+  // A light declutter pass nudges titles apart when neighboring clusters
+  // overlap so two areas never render on top of each other.
+  const placedAreaLabels: Array<{ x: number; y: number; halfWidth: number }> = [];
   for (const hull of scene.hulls) {
     if (hull.labelAlpha <= 0.02) continue;
     let label = container.querySelector<HTMLElement>(`[data-kg-area-label="${cssEscape(hull.areaId)}"]`);
@@ -513,8 +516,19 @@ function syncOverlay(
       container.appendChild(label);
     }
     if (label.textContent !== hull.label) label.textContent = hull.label;
+    const halfWidth = hull.label.length * 5.4;
+    let labelY = hull.labelY;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const collision = placedAreaLabels.find((placed) =>
+        Math.abs(placed.y - labelY) < 24
+        && Math.abs(placed.x - hull.labelX) < placed.halfWidth + halfWidth,
+      );
+      if (!collision) break;
+      labelY += 26;
+    }
+    placedAreaLabels.push({ x: hull.labelX, y: labelY, halfWidth });
     label.style.left = `${hull.labelX.toFixed(1)}px`;
-    label.style.top = `${hull.labelY.toFixed(1)}px`;
+    label.style.top = `${labelY.toFixed(1)}px`;
     label.style.opacity = hull.labelAlpha.toFixed(2);
     label.style.color = hull.color;
     seen.add(label);
