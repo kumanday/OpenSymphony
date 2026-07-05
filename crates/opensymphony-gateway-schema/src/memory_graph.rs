@@ -205,6 +205,69 @@ pub struct MemoryGraphNodeMetrics {
     pub community_id: Option<String>,
 }
 
+/// One page of completed tasks projected from the memory catalog (primary
+/// source: DuckDB issue capsules) merged with orchestrator-known completed
+/// issues that have not been captured yet. Serves the task graph's
+/// "Completed" pane without touching the Linear API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCompletedTaskPage {
+    pub schema_version: SchemaVersion,
+    pub bundle_id: String,
+    pub tasks: Vec<MemoryCompletedTask>,
+    /// Total row count after filtering, before pagination.
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub sort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCompletedTask {
+    pub issue_key: String,
+    /// OKF concept id (e.g. `issues/COE-123`) when the task has a captured
+    /// memory capsule; empty when the row comes from the orchestrator only.
+    #[serde(default)]
+    pub concept_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub prs: Vec<MemoryTaskPullRequest>,
+    pub source: MemoryCompletedTaskSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryTaskPullRequest {
+    pub number: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub merged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCompletedTaskSource {
+    /// Row backed by a captured memory capsule (has concept_id / PR evidence).
+    Memory,
+    /// Row known only to the orchestrator control plane (not yet captured).
+    Orchestrator,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryGraphUpdatedEvent {
     pub schema_version: SchemaVersion,

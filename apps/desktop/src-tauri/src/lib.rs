@@ -67,6 +67,7 @@ pub fn run() {
             commands::memory_concept_detail,
             commands::memory_communities,
             commands::memory_search,
+            commands::memory_completed_tasks,
             commands::task_graph,
             commands::run_detail,
             commands::run_files,

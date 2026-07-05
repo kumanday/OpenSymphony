@@ -12,11 +12,13 @@ import {
   createTauriNativeGraphAdapter,
   graphVizFixtureBundleList,
   graphVizFixtureCommunityList,
+  graphVizFixtureCompletedTasks,
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
   memoryDeepLinkPrefix,
   type MemoryBundleList,
   type MemoryCommunityList,
+  type MemoryCompletedTaskPage,
   type MemoryConceptDetail,
   type MemoryGraphSnapshot,
   type MemorySearchResponse,
@@ -114,6 +116,14 @@ function createDesktopNativeGraphApi(invoke: TauriInvoke): NativeGraphApi {
         query,
         limit: options?.limit ?? null,
         bundleId: options?.bundleId ?? null,
+        visibility: options?.visibility ?? null,
+      }),
+    getCompletedTasks: (options) =>
+      invoke<MemoryCompletedTaskPage>("memory_completed_tasks", {
+        query: options?.query ?? null,
+        sort: options?.sort ?? null,
+        limit: options?.limit ?? null,
+        offset: options?.offset ?? null,
         visibility: options?.visibility ?? null,
       }),
   };
@@ -665,6 +675,7 @@ if (root && fixtureWorkbenchRequested()) {
       snapshot: graphVizFixtureSnapshot,
       communities: graphVizFixtureCommunityList,
       conceptDetail: (_bundleId, conceptId) => graphVizFixtureConceptDetail(conceptId),
+      completedTasks: graphVizFixtureCompletedTasks,
     }),
     modelProfileController: createDesktopModelProfileController(),
   });

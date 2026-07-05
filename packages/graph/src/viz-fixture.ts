@@ -1,10 +1,12 @@
 import type {
   MemoryBundleList,
   MemoryCommunityList,
+  MemoryCompletedTask,
   MemoryConceptDetail,
   MemoryGraphEdge,
   MemoryGraphNode,
   MemoryGraphSnapshot,
+  MemoryTaskPullRequest,
 } from "@opensymphony/gateway-schema";
 
 /**
@@ -410,6 +412,88 @@ export const graphVizFixtureCommunityList: MemoryCommunityList = {
   communities: graphVizFixtureSnapshot.communities,
   generated_at,
 };
+
+/** Named completed tasks matching the three-pane design mocks (newest first). */
+const completedTaskTitles: ReadonlyArray<readonly [string, string]> = [
+  ["VIZ-100", "Scene model spike"],
+  ["VIZ-099", "Data pipeline setup"],
+  ["VIZ-098", "Graph schema v1"],
+  ["VIZ-097", "Tokenization service"],
+  ["VIZ-096", "Auth integration"],
+  ["VIZ-095", "Build system config"],
+  ["VIZ-094", "Logging baseline"],
+  ["VIZ-093", "Local runner"],
+  ["VIZ-092", "CLI scaffolding"],
+  ["VIZ-091", "Config loader"],
+  ["VIZ-090", "Health checks"],
+  ["VIZ-089", "Metrics exporter"],
+  ["VIZ-088", "Cache layer"],
+  ["VIZ-087", "Test harness"],
+  ["VIZ-086", "Palette tokens pass"],
+  ["VIZ-085", "Renderer profiling hooks"],
+  ["VIZ-084", "Snapshot cursor plumbing"],
+  ["VIZ-083", "Diff pager batching"],
+  ["VIZ-082", "Fixture transport shims"],
+  ["VIZ-081", "Event journal replay"],
+  ["VIZ-080", "Keyboard focus audit"],
+  ["VIZ-079", "Session token refresh"],
+  ["VIZ-078", "Approval banner polish"],
+  ["VIZ-077", "Workspace scan cache"],
+  ["VIZ-076", "Terminal frame budget"],
+  ["VIZ-075", "Retry queue telemetry"],
+  ["VIZ-074", "Capability probe matrix"],
+  ["VIZ-073", "Run detail parity sweep"],
+  ["VIZ-072", "Dark theme contrast pass"],
+  ["VIZ-071", "Icon set consolidation"],
+  ["VIZ-070", "Bootstrap CLI docs"],
+];
+
+function buildCompletedTasks(): MemoryCompletedTask[] {
+  const concepts = buildVizConcepts();
+  return completedTaskTitles.map(([issueKey, title], index) => {
+    const issueNumber = Number.parseInt(issueKey.slice(4), 10);
+    // One completion per weekday-ish cadence walking back from May 1.
+    const completedAt = new Date(Date.UTC(2026, 4, 1, 17, 0, 0) - index * 86_400_000).toISOString();
+    const prNumber = issueNumber + 1;
+    const prs: MemoryTaskPullRequest[] = [
+      {
+        number: prNumber,
+        title: `${issueKey} ${title.toLowerCase()}`,
+        url: `https://github.com/example/opensymphony/pull/${prNumber}`,
+        merged: true,
+        merged_at: completedAt,
+      },
+    ];
+    // Every fifth task carries an earlier abandoned PR (never merged) so the
+    // multi-PR presentation — newest bold, unmerged struck through — is
+    // exercised by the fixture.
+    if (index % 5 === 4) {
+      prs.unshift({
+        number: prNumber - 40,
+        title: `${issueKey} first attempt (superseded)`,
+        url: `https://github.com/example/opensymphony/pull/${prNumber - 40}`,
+        merged: false,
+      });
+    }
+    const concept = concepts[(index * 7) % concepts.length];
+    return {
+      issue_key: issueKey,
+      // Reuse real fixture concepts so capsule deep links resolve inside the
+      // workbench's knowledge graph.
+      concept_id: concept.id.replace("concept:", "concepts/"),
+      bundle_id: bundleId,
+      title,
+      state: "Done",
+      milestone: "M13",
+      url: `https://linear.app/example/issue/${issueKey}`,
+      completed_at: completedAt,
+      prs,
+      source: "memory",
+    };
+  });
+}
+
+export const graphVizFixtureCompletedTasks: MemoryCompletedTask[] = buildCompletedTasks();
 
 /**
  * Capsule detail for a fixture concept, derived from the snapshot's own

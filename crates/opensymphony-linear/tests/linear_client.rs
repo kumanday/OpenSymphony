@@ -322,6 +322,61 @@ async fn project_issues_by_identifiers_fetches_project_issue_details_in_one_quer
 }
 
 #[tokio::test]
+async fn project_task_graph_issues_return_requested_and_backlog_from_one_scan() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        project_issues_response_with_states(&[
+            (
+                "issue-260",
+                "COE-260",
+                "Domain model and orchestrator state machine",
+                "In Progress",
+                "started",
+            ),
+            (
+                "issue-300",
+                "COE-300",
+                "Deferred backlog polish",
+                "Backlog",
+                "backlog",
+            ),
+            (
+                "issue-310",
+                "COE-310",
+                "Unrequested todo issue",
+                "Todo",
+                "unstarted",
+            ),
+        ]),
+    )])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    let issues = client
+        .project_task_graph_issues(&["COE-260"])
+        .await
+        .expect("task graph lookup should succeed");
+
+    // Requested identifiers first, then backlog issues; issues that are
+    // neither requested nor backlog-state stay out of the task graph set.
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<Vec<_>>(),
+        vec!["COE-260", "COE-300"],
+    );
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 1, "one project scan serves both buckets");
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query ProjectIssues")
+    );
+}
+
+#[tokio::test]
 async fn candidate_issues_fetch_all_label_pages() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!(
@@ -1118,9 +1173,18 @@ fn test_config(base_url: &str) -> LinearConfig {
 }
 
 fn project_issues_response(issues: &[(&str, &str, &str)]) -> String {
+    project_issues_response_with_states(
+        &issues
+            .iter()
+            .map(|(issue_id, identifier, title)| (*issue_id, *identifier, *title, "Done", "completed"))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn project_issues_response_with_states(issues: &[(&str, &str, &str, &str, &str)]) -> String {
     let nodes = issues
         .iter()
-        .map(|(issue_id, identifier, title)| {
+        .map(|(issue_id, identifier, title, state_name, state_type)| {
             format!(
                 r#"{{
       "id": "{issue_id}",
@@ -1132,9 +1196,9 @@ fn project_issues_response(issues: &[(&str, &str, &str)]) -> String {
       "createdAt": "2026-03-20T10:00:00Z",
       "updatedAt": "2026-03-21T12:00:00Z",
       "state": {{
-        "id": "state-done",
-        "name": "Done",
-        "type": "completed"
+        "id": "state-{identifier}",
+        "name": "{state_name}",
+        "type": "{state_type}"
       }},
       "parent": null,
       "children": {{

@@ -27,6 +27,7 @@ import {
   cachedConceptDetail,
   createGraphLayoutAdapter,
   createInitialGraphState,
+  formatMemoryDeepLink,
   graphLayoutKindForMode,
   graphReducer,
   currentGraphSnapshot,
@@ -37,8 +38,11 @@ import {
   type GraphLayoutAdapter,
   type GraphLayoutResult,
   type GraphState,
+  type MemoryCompletedTask,
+  type MemoryCompletedTaskPage,
   type MemoryConceptDetail,
   type MemoryGraphNode,
+  type MemoryTaskPullRequest,
 } from "@opensymphony/graph";
 import {
   authStateFromError,
@@ -242,6 +246,11 @@ interface AppState {
   activeView: "dashboard" | "planning";
   // Task graph editor state
   taskGraphFilter: TaskGraphFilter;
+  // Three-pane task graph (desktop): Completed | Current | Backlog
+  taskPaneCollapsed: { done: boolean; backlog: boolean };
+  completedTasks: MemoryCompletedTaskPage | null;
+  completedTasksError: string | null;
+  completedTasksParams: { query: string; sort: string; page: number };
   collapsedProjectGroups: Set<string>;
   inlineEdit: InlineEditState;
   createDialog: EditorDialogState;
@@ -293,6 +302,8 @@ const liveRefreshFailureThreshold = 2;
 const liveRefreshPollIntervalMs = 5_000;
 const defaultWorkspacePaneSizes: WorkspacePaneSizes = { left: 50, right: 50 };
 const minWorkspacePaneSizes: WorkspacePaneSizes = { left: 30, right: 30 };
+const completedTasksPageSize = 25;
+const defaultCompletedTasksParams = { query: "", sort: "completed_desc", page: 1 } as const;
 
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
@@ -327,6 +338,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
   /** Concept-detail request currently in flight, keyed `${bundleId}:${conceptId}`. */
   private knowledgeCapsuleRequest: string | null = null;
+  /** Guards in-flight completed-tasks pages (superseded by newer queries). */
+  private completedTasksSeq = 0;
+  /** Debounce for the Completed pane's search input. */
+  private completedTasksSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Cross-pane edge repositioning is rAF-coalesced per burst of scroll/resize. */
+  private crossLinksFrame: number | null = null;
   /** Last failed concept-detail request; keyed so a new selection is unaffected. */
   private knowledgeCapsuleError: { key: string; message: string } | null = null;
   /**
@@ -394,6 +411,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
+      taskPaneCollapsed: { done: false, backlog: false },
+      completedTasks: null,
+      completedTasksError: null,
+      completedTasksParams: { ...defaultCompletedTasksParams },
       collapsedProjectGroups: new Set(),
       inlineEdit: { ...emptyInlineEdit },
       createDialog: { ...emptyEditorDialog },
@@ -410,7 +431,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     // Document-level so Escape works even when focus sits on the body (the
     // graph canvas itself is not focusable). Removed in destroy().
     this.options.root.ownerDocument.addEventListener("keydown", this.onDocumentKeydown);
+    // Cross-pane task edges are measured from live card positions, so any
+    // viewport resize must recompute them. Removed in destroy().
+    this.options.root.ownerDocument.defaultView?.addEventListener("resize", this.onWindowResize);
   }
+
+  private onWindowResize = (): void => {
+    this.scheduleCrossLinksReposition();
+  };
 
   private onDocumentKeydown = (event: KeyboardEvent): void => {
     if (this.destroyed || event.key !== "Escape" || this.state.graphPaneView !== "knowledge") {
@@ -533,6 +561,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   async destroy(): Promise<void> {
     this.destroyed = true;
     this.options.root.ownerDocument.removeEventListener("keydown", this.onDocumentKeydown);
+    this.options.root.ownerDocument.defaultView?.removeEventListener("resize", this.onWindowResize);
+    if (this.completedTasksSearchTimer !== null) {
+      clearTimeout(this.completedTasksSearchTimer);
+      this.completedTasksSearchTimer = null;
+    }
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
     this.graphLayoutAdapter.dispose();
@@ -760,6 +793,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
+    if (this.options.mode === "desktop") {
+      // Completed pane data loads independently: a memory-server hiccup must
+      // not delay the Current/Backlog graph.
+      void this.loadCompletedTasks();
+    }
     await Promise.all([
       this.fetchRunOverlays(taskGraph).then((overlays) => {
         // A concurrently opened run may already have stored a fresher detail.
@@ -772,6 +810,39 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }),
       initialNode ? this.openRun(initialNode) : Promise.resolve(),
     ]);
+  }
+
+  /**
+   * Fetch the Completed pane's current page from the memory-backed
+   * completed-tasks endpoint. Newer requests supersede in-flight ones; a
+   * failure keeps the last good page and surfaces the error inline.
+   */
+  private async loadCompletedTasks(): Promise<void> {
+    const adapter = this.graphAdapter;
+    if (!adapter?.getCompletedTasks) {
+      return;
+    }
+    const seq = ++this.completedTasksSeq;
+    const { query, sort, page } = this.state.completedTasksParams;
+    try {
+      const result = await adapter.getCompletedTasks({
+        query: query || undefined,
+        sort,
+        limit: completedTasksPageSize,
+        offset: (page - 1) * completedTasksPageSize,
+      });
+      if (this.destroyed || seq !== this.completedTasksSeq) {
+        return;
+      }
+      this.state.completedTasks = result;
+      this.state.completedTasksError = null;
+    } catch (error) {
+      if (this.destroyed || seq !== this.completedTasksSeq) {
+        return;
+      }
+      this.state.completedTasksError = errorMessage(error);
+    }
+    this.render();
   }
 
   private async loadKnowledgeGraph(bundleId?: string): Promise<void> {
@@ -2341,19 +2412,162 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (this.options.mode === "web") {
       return this.renderEditableTaskGraph(taskGraph, filtered, getOverlay);
     }
-    const dependencySignals = buildDependencySignals(taskGraph.nodes, filtered);
-    const graph = renderTaskGraphVisualization(
-      filtered,
-      this.state.selectedNodeId,
-      getOverlay,
-      dependencySignals,
-      this.state.collapsedProjectGroups,
-      this.options.mode === "desktop",
-    );
-
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
+    return `${filters}${this.renderTaskGraphPanes(taskGraph, filtered, getOverlay)}`;
+  }
 
-    return `${filters}${graph}`;
+  /**
+   * Desktop task surface: three panes — Completed (memory-backed table),
+   * Current (dispatchable dependency graph), Backlog (same grammar, faded
+   * edges). Cross-pane dependency edges render in an absolutely positioned
+   * overlay whose paths are measured after mount (positionTaskGraphCrossLinks).
+   */
+  private renderTaskGraphPanes(
+    taskGraph: TaskGraphSnapshot,
+    filtered: TaskGraphNode[],
+    getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
+  ): string {
+    const currentNodes = filtered.filter(isCurrentPaneTaskNode);
+    const backlogNodes = filtered.filter((node) => node.state_category === "backlog");
+    // Dependency suffixes treat both graph panes as visible: a backlog task
+    // blocked by a Current task reads "blocked by VIZ-103", not "1 hidden".
+    // In-pane edge building still only links nodes present in that pane;
+    // cross-pane pairs render through the measured overlay instead.
+    const visibleAcrossPanes = [...currentNodes, ...backlogNodes];
+    const currentSignals = buildDependencySignals(taskGraph.nodes, visibleAcrossPanes);
+    const backlogSignals = currentSignals;
+    const collapsed = this.state.taskPaneCollapsed;
+
+    const currentGraph = currentNodes.length > 0
+      ? renderTaskGraphVisualization(
+        currentNodes,
+        this.state.selectedNodeId,
+        getOverlay,
+        currentSignals,
+        this.state.collapsedProjectGroups,
+        true,
+      )
+      : `<div class="os-empty">No dispatchable tasks match the current filters</div>`;
+    const backlogGraph = backlogNodes.length > 0
+      ? renderTaskGraphVisualization(
+        backlogNodes,
+        this.state.selectedNodeId,
+        getOverlay,
+        backlogSignals,
+        new Set(),
+        false,
+        "backlog",
+      )
+      : `<div class="os-empty">No backlog tasks</div>`;
+
+    const donePane = collapsed.done
+      ? renderCollapsedTaskPane("done", "Completed", this.state.completedTasks?.total ?? null)
+      : `
+        <section class="os-tg-pane os-tg-pane-done" data-tg-pane="done" data-testid="task-pane-done">
+          ${renderTaskPaneHeader("done", "Completed", this.state.completedTasks?.total ?? null)}
+          <div class="os-tg-pane-body" data-tg-pane-body="done">
+            ${this.renderCompletedTasksBody()}
+          </div>
+        </section>
+      `;
+    const backlogPane = collapsed.backlog
+      ? renderCollapsedTaskPane("backlog", "Backlog", backlogNodes.length)
+      : `
+        <section class="os-tg-pane os-tg-pane-backlog" data-tg-pane="backlog" data-testid="task-pane-backlog">
+          ${renderTaskPaneHeader("backlog", "Backlog", backlogNodes.length)}
+          <div class="os-tg-pane-body" data-tg-pane-body="backlog">
+            ${backlogGraph}
+          </div>
+        </section>
+      `;
+
+    const crossLinks = renderTaskGraphCrossLinks(taskGraph.nodes, currentNodes, backlogNodes);
+
+    return `
+      <div class="os-tg-panes" data-tg-panes>
+        ${donePane}
+        <section class="os-tg-pane os-tg-pane-current" data-tg-pane="current" data-testid="task-pane-current">
+          <header class="os-tg-pane-head">
+            <span class="os-tg-dot os-tg-dot-current" aria-hidden="true"></span>
+            <strong>Current</strong>
+            <span class="os-tg-count os-tg-count-current">${currentNodes.filter((node) => node.kind !== "milestone").length} current</span>
+          </header>
+          <div class="os-tg-pane-body" data-tg-pane-body="current">
+            ${currentGraph}
+          </div>
+        </section>
+        ${backlogPane}
+        ${crossLinks}
+      </div>
+    `;
+  }
+
+  /** Search box, sortable table, and pagination for the Completed pane. */
+  private renderCompletedTasksBody(): string {
+    if (!this.graphAdapter?.getCompletedTasks) {
+      return `<div class="os-empty" data-testid="completed-tasks-unavailable">Completed tasks need a memory-server connection</div>`;
+    }
+    const page = this.state.completedTasks;
+    const error = this.state.completedTasksError
+      ? `<p class="os-tg-done-error" data-testid="completed-tasks-error" role="alert">Completed tasks unavailable: ${escapeHtml(this.state.completedTasksError)}</p>`
+      : "";
+    const params = this.state.completedTasksParams;
+    const search = `
+      <input
+        type="search"
+        class="os-tg-done-search"
+        data-tg-done-search
+        placeholder="Search completed tasks"
+        aria-label="Search completed tasks"
+        value="${escapeAttr(params.query)}"
+      />
+    `;
+    if (!page) {
+      return `${search}${error || `<div class="os-empty" data-testid="completed-tasks-loading">Loading completed tasks…</div>`}`;
+    }
+    const rows = page.tasks.map((task) => this.renderCompletedTaskRow(task)).join("");
+    const table = page.tasks.length > 0
+      ? `
+        <table class="os-tg-done-table" data-testid="completed-tasks-table">
+          <thead>
+            <tr>
+              ${renderCompletedSortHeader("id", "ID", params.sort)}
+              ${renderCompletedSortHeader("title", "Title", params.sort)}
+              ${renderCompletedSortHeader("pr", "PR", params.sort)}
+              ${renderCompletedSortHeader("completed", "Done", params.sort)}
+              <th scope="col">Capsule</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `
+      : `<div class="os-empty">No completed tasks${params.query ? " match the search" : ""}</div>`;
+    return `${search}${error}${table}${renderCompletedTasksPagination(page)}`;
+  }
+
+  private renderCompletedTaskRow(task: MemoryCompletedTask): string {
+    const completed = task.completed_at ? formatCompletedDate(task.completed_at) : "—";
+    const capsule = task.concept_id
+      ? `<button
+          type="button"
+          class="os-tg-capsule-button"
+          data-tg-capsule="${escapeAttr(formatMemoryDeepLink({ bundleId: task.bundle_id ?? "local-default", conceptId: task.concept_id }))}"
+          title="Open memory capsule ${escapeAttr(task.concept_id)}"
+          aria-label="Open memory capsule for ${escapeAttr(task.issue_key)}"
+        >◈</button>`
+      : `<span class="os-tg-capsule-missing" title="No memory capsule captured yet (${escapeAttr(task.source)})">—</span>`;
+    const title = task.url
+      ? `<a href="${escapeAttr(task.url)}" target="_blank" rel="noreferrer noopener" title="${escapeAttr(task.title)}">${escapeHtml(task.title)}</a>`
+      : `<span title="${escapeAttr(task.title)}">${escapeHtml(task.title)}</span>`;
+    return `
+      <tr data-testid="completed-task-row" data-task-key="${escapeAttr(task.issue_key)}">
+        <td class="os-tg-done-id">${escapeHtml(task.issue_key)}</td>
+        <td class="os-tg-done-title">${title}</td>
+        <td class="os-tg-done-prs">${renderCompletedTaskPrs(task.prs)}</td>
+        <td class="os-tg-done-date">${escapeHtml(completed)}</td>
+        <td class="os-tg-done-capsule">${capsule}</td>
+      </tr>
+    `;
   }
 
   private renderEditableTaskGraph(
@@ -2894,22 +3108,125 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     return true;
   }
 
-  private setTaskGraphLinkEmphasis(nodeButton: HTMLElement, active: boolean): void {
-    const nodeId = nodeButton.dataset.nodeId;
-    const svg = nodeButton.closest(".os-task-graph-stage")?.querySelector<SVGElement>(".os-task-graph-links");
-    if (!nodeId || !svg) {
+  /**
+   * Emphasize dependency edges for a hovered or selected task, across all
+   * three panes. Pure class toggling on the already-rendered DOM — hover
+   * must never trigger a re-render.
+   *
+   * - Current-pane focus: its incoming and outgoing edges (including
+   *   cross-pane edges into the Backlog) bolden; everything else recedes.
+   * - Backlog focus: the full ancestry critical path boldens — every
+   *   unfinished upstream edge chain that must complete to unblock it —
+   *   and unrelated backlog cards dim.
+   */
+  private applyTaskGraphEmphasis(focusId: string | null): void {
+    const container = this.options.root.querySelector<HTMLElement>("[data-tg-panes]");
+    if (!container) {
       return;
     }
-    svg.classList.toggle("os-links-hover", active);
-    svg.querySelectorAll(".os-task-graph-link.is-active").forEach((path) => {
-      path.classList.remove("is-active");
-    });
-    if (active) {
-      const escaped = cssEscape(nodeId);
-      svg.querySelectorAll(`[data-link-from="${escaped}"], [data-link-to="${escaped}"]`).forEach((path) => {
-        path.classList.add("is-active");
-      });
+    const paths = container.querySelectorAll<SVGPathElement>(".os-task-graph-link, .os-tg-cross-link");
+    const cards = container.querySelectorAll<HTMLElement>("[data-node-id]");
+    paths.forEach((path) => path.classList.remove("is-active", "is-ancestry"));
+    cards.forEach((card) => card.classList.remove("os-tg-dim", "os-tg-ancestry"));
+    const graph = this.state.taskGraph;
+    const node = focusId ? graph?.nodes.find((candidate) => candidate.node_id === focusId) : undefined;
+    container.classList.toggle("os-tg-focused", Boolean(node));
+    if (!graph || !node) {
+      return;
     }
+    if (node.state_category === "backlog") {
+      const ancestry = collectAncestryEdges(graph.nodes, node);
+      paths.forEach((path) => {
+        const key = `${path.dataset.linkFrom}->${path.dataset.linkTo}`;
+        if (ancestry.edges.has(key)) {
+          path.classList.add("is-ancestry");
+        }
+      });
+      cards.forEach((card) => {
+        const id = card.dataset.nodeId ?? "";
+        if (ancestry.members.has(id)) {
+          card.classList.add("os-tg-ancestry");
+        } else if (card.closest("[data-tg-pane='backlog']")) {
+          card.classList.add("os-tg-dim");
+        }
+      });
+      return;
+    }
+    paths.forEach((path) => {
+      if (path.dataset.linkFrom === focusId || path.dataset.linkTo === focusId) {
+        path.classList.add("is-active");
+      }
+    });
+  }
+
+  /** Coalesce cross-link repositioning to one measurement per frame. */
+  private scheduleCrossLinksReposition(): void {
+    if (this.destroyed || this.crossLinksFrame !== null) {
+      return;
+    }
+    const raf = this.options.root.ownerDocument.defaultView?.requestAnimationFrame?.bind(
+      this.options.root.ownerDocument.defaultView,
+    );
+    if (!raf) {
+      this.positionTaskGraphCrossLinks();
+      return;
+    }
+    this.crossLinksFrame = raf(() => {
+      this.crossLinksFrame = null;
+      this.positionTaskGraphCrossLinks();
+    });
+  }
+
+  /**
+   * Give every cross-pane edge its geometry: from the right edge of the
+   * blocking card in the Current pane to the left edge of the blocked card
+   * in the Backlog pane, measured against the live layout. Edges whose
+   * endpoint scrolled out of its pane (or whose pane is collapsed) hide
+   * instead of drawing across headers.
+   */
+  private positionTaskGraphCrossLinks(): void {
+    const container = this.options.root.querySelector<HTMLElement>("[data-tg-panes]");
+    const svg = container?.querySelector<SVGSVGElement>("[data-tg-cross-links]");
+    if (!container || !svg) {
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    if (containerRect.width <= 0 || containerRect.height <= 0) {
+      return;
+    }
+    svg.setAttribute("viewBox", `0 0 ${containerRect.width} ${containerRect.height}`);
+    const paneBodyRect = (pane: string): DOMRect | null =>
+      container.querySelector(`[data-tg-pane-body="${pane}"]`)?.getBoundingClientRect() ?? null;
+    const currentBody = paneBodyRect("current");
+    const backlogBody = paneBodyRect("backlog");
+    svg.querySelectorAll<SVGPathElement>(".os-tg-cross-link").forEach((path) => {
+      const fromId = path.dataset.linkFrom;
+      const toId = path.dataset.linkTo;
+      const from = fromId ? container.querySelector(`[data-node-id="${cssEscape(fromId)}"]`) : null;
+      const to = toId ? container.querySelector(`[data-node-id="${cssEscape(toId)}"]`) : null;
+      if (!from || !to || !currentBody || !backlogBody) {
+        path.style.display = "none";
+        return;
+      }
+      const fromRect = from.getBoundingClientRect();
+      const toRect = to.getBoundingClientRect();
+      const y1 = fromRect.top + fromRect.height / 2;
+      const y2 = toRect.top + toRect.height / 2;
+      const fromVisible = y1 >= currentBody.top - 4 && y1 <= currentBody.bottom + 4;
+      const toVisible = y2 >= backlogBody.top - 4 && y2 <= backlogBody.bottom + 4;
+      if (!fromVisible || !toVisible) {
+        path.style.display = "none";
+        return;
+      }
+      const x1 = Math.min(fromRect.right, currentBody.right) - containerRect.left;
+      const x2 = toRect.left - containerRect.left;
+      const bend = Math.max(28, (x2 - x1) * 0.45);
+      path.setAttribute(
+        "d",
+        `M ${x1} ${y1 - containerRect.top} C ${x1 + bend} ${y1 - containerRect.top}, ${x2 - bend} ${y2 - containerRect.top}, ${x2} ${y2 - containerRect.top}`,
+      );
+      path.style.display = "";
+    });
   }
 
   private bindEvents(): void {
@@ -2991,21 +3308,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           (candidate) => candidate.node_id === button.dataset.nodeId,
         );
         if (node) {
-          if (this.options.mode === "desktop") {
+          if (this.options.mode === "desktop" && node.state_category !== "backlog") {
             void this.openRun(node);
           } else {
+            // Backlog tasks have no run to open; selecting one pins its
+            // ancestry critical path instead.
             this.state.selectedNodeId = node.node_id;
             this.render();
           }
         }
       });
-      // Hovering a task spotlights its dependency arrows: pure class
-      // toggling on the already-rendered SVG, no re-render involved.
+      // Hovering a task spotlights its dependency edges (and for backlog
+      // tasks the full ancestry path): pure class toggling on the
+      // already-rendered SVG, no re-render involved.
       this.listen(button, "node-id-hover", "pointerenter", () => {
-        this.setTaskGraphLinkEmphasis(button, true);
+        this.applyTaskGraphEmphasis(button.dataset.nodeId ?? null);
       });
       this.listen(button, "node-id-hover", "pointerleave", () => {
-        this.setTaskGraphLinkEmphasis(button, false);
+        this.applyTaskGraphEmphasis(this.state.selectedNodeId);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-group-toggle]").forEach((button) => {
@@ -3101,6 +3421,80 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     });
 
+
+    // Three-pane task graph: collapse toggles, completed-tasks controls,
+    // capsule deep links, and cross-pane edge geometry.
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-pane-toggle]").forEach((button) => {
+      this.listen(button, "tg-pane-toggle", "click", () => {
+        const pane = button.dataset.tgPaneToggle;
+        if (pane !== "done" && pane !== "backlog") return;
+        this.state.taskPaneCollapsed = {
+          ...this.state.taskPaneCollapsed,
+          [pane]: !this.state.taskPaneCollapsed[pane],
+        };
+        this.render();
+      });
+    });
+    this.listen(this.options.root.querySelector("[data-tg-done-search]"), "tg-done-search", "input", (event) => {
+      const value = (event.target as HTMLInputElement).value;
+      if (this.completedTasksSearchTimer !== null) {
+        clearTimeout(this.completedTasksSearchTimer);
+      }
+      // Debounced so every keystroke does not hit the memory server; the
+      // seq guard in loadCompletedTasks handles any remaining races.
+      this.completedTasksSearchTimer = setTimeout(() => {
+        this.completedTasksSearchTimer = null;
+        if (this.destroyed || this.state.completedTasksParams.query === value) return;
+        this.state.completedTasksParams = { ...this.state.completedTasksParams, query: value, page: 1 };
+        void this.loadCompletedTasks();
+      }, 180);
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-done-sort]").forEach((button) => {
+      this.listen(button, "tg-done-sort", "click", () => {
+        const column = button.dataset.tgDoneSort;
+        const sorts = column ? completedSortColumns[column] : undefined;
+        if (!sorts) return;
+        const active = this.state.completedTasksParams.sort;
+        const next = active === sorts.first
+          ? (sorts.first === sorts.asc ? sorts.desc : sorts.asc)
+          : sorts.first;
+        this.state.completedTasksParams = { ...this.state.completedTasksParams, sort: next, page: 1 };
+        void this.loadCompletedTasks();
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-done-page]").forEach((button) => {
+      this.listen(button, "tg-done-page", "click", () => {
+        const value = button.dataset.tgDonePage;
+        const params = this.state.completedTasksParams;
+        const total = this.state.completedTasks?.total ?? 0;
+        const pageCount = Math.max(1, Math.ceil(total / completedTasksPageSize));
+        const nextPage = value === "prev"
+          ? params.page - 1
+          : value === "next"
+            ? params.page + 1
+            : Number.parseInt(value ?? "", 10);
+        if (!Number.isFinite(nextPage) || nextPage < 1 || nextPage > pageCount || nextPage === params.page) return;
+        this.state.completedTasksParams = { ...params, page: nextPage };
+        void this.loadCompletedTasks();
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-capsule]").forEach((button) => {
+      this.listen(button, "tg-capsule", "click", () => {
+        const link = button.dataset.tgCapsule;
+        if (link) {
+          void this.openMemoryDeepLink(link);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-pane-body], .os-task-graph-stage").forEach((element) => {
+      this.listen(element, "tg-cross-scroll", "scroll", () => this.scheduleCrossLinksReposition());
+    });
+    if (this.options.mode === "desktop" && this.state.graphPaneView === "task") {
+      // Selection emphasis and cross-pane geometry re-apply after every
+      // morph; hover emphasis stays purely event-driven.
+      this.applyTaskGraphEmphasis(this.state.selectedNodeId);
+      this.scheduleCrossLinksReposition();
+    }
 
     // Task graph filters
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-filter]").forEach((control) => {
@@ -3843,6 +4237,9 @@ const shellScrollSelectors = [
   ".os-knowledge-lower-panel",
   ".os-code-graph-lower-panel",
   ".os-task-graph-stage",
+  '[data-tg-pane-body="done"]',
+  '[data-tg-pane-body="current"]',
+  '[data-tg-pane-body="backlog"]',
   ".os-run-activity",
 ] as const;
 
@@ -4539,6 +4936,7 @@ function renderTaskGraphVisualization(
   signals: Map<string, DependencySignal>,
   collapsedProjectGroups = new Set<string>(),
   groupByProject = false,
+  variant: "current" | "backlog" = "current",
 ): string {
   if (nodes.length === 0) {
     return `<div class="os-empty">No tasks match the current filters</div>`;
@@ -4549,7 +4947,7 @@ function renderTaskGraphVisualization(
       const collapsed = collapsedProjectGroups.has(group.key);
       const body = collapsed
         ? ""
-        : renderTaskGraphVisualization(group.nodes, selectedNodeId, getOverlay, signals, collapsedProjectGroups, false);
+        : renderTaskGraphVisualization(group.nodes, selectedNodeId, getOverlay, signals, collapsedProjectGroups, false, variant);
       const title = projectGroupTitle(group);
       return `
         <section class="os-project-group" id="${escapeAttr(projectGroupDomId(group.key))}" role="region" aria-label="${escapeAttr(title)}" data-project-group="${escapeAttr(group.key)}">
@@ -4571,9 +4969,11 @@ function renderTaskGraphVisualization(
     selectedNodeId,
     getOverlay(model.node),
   )).join("");
+  const stageClass = variant === "backlog" ? "os-task-graph-stage os-tg-stage-backlog" : "os-task-graph-stage";
+  const stageTestId = variant === "backlog" ? "task-graph-backlog" : "task-graph-visualization";
 
   return `
-    <div class="os-task-graph-stage" data-testid="task-graph-visualization" style="--os-graph-height: ${graphHeight}px; --os-graph-width: ${graphWidth}px; --os-tg-gutter: ${gutterWidth}px;">
+    <div class="${stageClass}" data-testid="${stageTestId}" style="--os-graph-height: ${graphHeight}px; --os-graph-width: ${graphWidth}px; --os-tg-gutter: ${gutterWidth}px;">
       <svg class="os-task-graph-links" data-testid="task-graph-links" viewBox="0 0 ${graphWidth} ${graphHeight}" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker id="os-task-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
@@ -4589,6 +4989,202 @@ function renderTaskGraphVisualization(
       <div class="os-node-list os-node-graph-list" style="min-height: ${graphHeight}px;">${renderedNodes}</div>
     </div>
   `;
+}
+
+/** Header shared by the collapsible Completed and Backlog panes. */
+function renderTaskPaneHeader(pane: "done" | "backlog", label: string, count: number | null): string {
+  const countChip = count !== null
+    ? `<span class="os-tg-count os-tg-count-${pane}">${count} ${pane === "done" ? "done" : "backlog"}</span>`
+    : "";
+  return `
+    <header class="os-tg-pane-head">
+      <span class="os-tg-dot os-tg-dot-${pane}" aria-hidden="true"></span>
+      <strong>${escapeHtml(label)}</strong>
+      ${countChip}
+      <button
+        type="button"
+        class="os-tg-pane-toggle"
+        data-tg-pane-toggle="${pane}"
+        aria-expanded="true"
+        aria-label="Collapse ${escapeAttr(label)} pane"
+        title="Collapse ${escapeAttr(label)} pane"
+      >${pane === "done" ? "‹" : "›"}</button>
+    </header>
+  `;
+}
+
+/** Narrow vertical strip shown while a side pane is collapsed. */
+function renderCollapsedTaskPane(pane: "done" | "backlog", label: string, count: number | null): string {
+  return `
+    <section class="os-tg-pane os-tg-pane-collapsed" data-tg-pane="${pane}" data-collapsed data-testid="task-pane-${pane}">
+      <button
+        type="button"
+        class="os-tg-pane-toggle"
+        data-tg-pane-toggle="${pane}"
+        aria-expanded="false"
+        aria-label="Expand ${escapeAttr(label)} pane"
+        title="Expand ${escapeAttr(label)} pane"
+      >${pane === "done" ? "›" : "‹"}</button>
+      <span class="os-tg-dot os-tg-dot-${pane}" aria-hidden="true"></span>
+      <span class="os-tg-pane-vertical-label">${escapeHtml(label)}</span>
+      ${count !== null ? `<span class="os-tg-count os-tg-count-${pane}">${count}</span>` : ""}
+    </section>
+  `;
+}
+
+const completedSortColumns: Record<string, { asc: string; desc: string; first: string }> = {
+  id: { asc: "id_asc", desc: "id_desc", first: "id_asc" },
+  title: { asc: "title_asc", desc: "title_desc", first: "title_asc" },
+  pr: { asc: "pr_asc", desc: "pr_desc", first: "pr_desc" },
+  completed: { asc: "completed_asc", desc: "completed_desc", first: "completed_desc" },
+};
+
+function renderCompletedSortHeader(column: string, label: string, activeSort: string): string {
+  const sorts = completedSortColumns[column];
+  const direction = activeSort === sorts.asc ? "ascending" : activeSort === sorts.desc ? "descending" : null;
+  const arrow = direction === "ascending" ? " ↑" : direction === "descending" ? " ↓" : " ↕";
+  return `
+    <th scope="col" ${direction ? `aria-sort="${direction}"` : ""}>
+      <button type="button" class="os-tg-done-sort ${direction ? "is-active" : ""}" data-tg-done-sort="${escapeAttr(column)}">${escapeHtml(label)}<span aria-hidden="true">${arrow}</span></button>
+    </th>
+  `;
+}
+
+function renderCompletedTaskPrs(prs: MemoryTaskPullRequest[]): string {
+  if (prs.length === 0) {
+    return `<span class="os-tg-capsule-missing">—</span>`;
+  }
+  // Newest first; the newest PR is emphasized, unmerged ones struck through.
+  const ordered = [...prs].sort((a, b) =>
+    (b.merged_at ?? "").localeCompare(a.merged_at ?? "") || b.number - a.number);
+  const latest = ordered[0];
+  return ordered.map((pr) => {
+    const classes = [
+      "os-tg-pr",
+      pr === latest ? "os-tg-pr-latest" : "",
+      pr.merged ? "" : "os-tg-pr-unmerged",
+    ].filter(Boolean).join(" ");
+    const title = `${pr.title || `PR #${pr.number}`}${pr.merged ? "" : " (not merged)"}`;
+    return pr.url
+      ? `<a class="${classes}" href="${escapeAttr(pr.url)}" target="_blank" rel="noreferrer noopener" title="${escapeAttr(title)}">#${pr.number}</a>`
+      : `<span class="${classes}" title="${escapeAttr(title)}">#${pr.number}</span>`;
+  }).join(" ");
+}
+
+function renderCompletedTasksPagination(page: MemoryCompletedTaskPage): string {
+  const pageCount = Math.max(1, Math.ceil(page.total / Math.max(1, page.limit)));
+  const currentPage = Math.floor(page.offset / Math.max(1, page.limit)) + 1;
+  if (pageCount <= 1) {
+    return `<div class="os-tg-done-pagination" data-testid="completed-tasks-pagination"><span class="os-tg-done-page-size">${page.total} task${page.total === 1 ? "" : "s"}</span></div>`;
+  }
+  // Window of at most 7 numbered buttons centered on the current page.
+  const windowStart = Math.max(1, Math.min(currentPage - 3, pageCount - 6));
+  const windowEnd = Math.min(pageCount, windowStart + 6);
+  const numbers: string[] = [];
+  for (let pageNumber = windowStart; pageNumber <= windowEnd; pageNumber += 1) {
+    numbers.push(`
+      <button
+        type="button"
+        class="os-tg-done-page ${pageNumber === currentPage ? "is-active" : ""}"
+        data-tg-done-page="${pageNumber}"
+        ${pageNumber === currentPage ? `aria-current="page"` : ""}
+      >${pageNumber}</button>
+    `);
+  }
+  return `
+    <div class="os-tg-done-pagination" data-testid="completed-tasks-pagination">
+      <button type="button" class="os-tg-done-page" data-tg-done-page="prev" ${currentPage <= 1 ? "disabled" : ""} aria-label="Previous page">‹</button>
+      ${numbers.join("")}
+      <button type="button" class="os-tg-done-page" data-tg-done-page="next" ${currentPage >= pageCount ? "disabled" : ""} aria-label="Next page">›</button>
+      <span class="os-tg-done-page-size">${page.limit} / page</span>
+    </div>
+  `;
+}
+
+function formatCompletedDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return date.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+}
+
+/**
+ * Cross-pane dependency edges (Current → Backlog). Paths carry the same
+ * data-link-from/to contract as in-pane edges but start with empty geometry:
+ * positionTaskGraphCrossLinks measures the live card positions after mount
+ * and on every scroll/resize/collapse.
+ */
+function renderTaskGraphCrossLinks(
+  allNodes: TaskGraphNode[],
+  currentNodes: TaskGraphNode[],
+  backlogNodes: TaskGraphNode[],
+): string {
+  const currentIds = new Set(currentNodes.map((node) => node.node_id));
+  const pairs: Array<{ from: string; to: string }> = [];
+  for (const backlogNode of backlogNodes) {
+    for (const blockerRef of backlogNode.blocked_by) {
+      const blocker = findNodeByRef(allNodes, blockerRef);
+      if (blocker && currentIds.has(blocker.node_id)) {
+        pairs.push({ from: blocker.node_id, to: backlogNode.node_id });
+      }
+    }
+  }
+  if (pairs.length === 0) {
+    return "";
+  }
+  const hueBySource = new Map<string, number>();
+  for (const pair of pairs) {
+    if (!hueBySource.has(pair.from)) {
+      hueBySource.set(pair.from, hueBySource.size % taskGraphLinkHues.length);
+    }
+  }
+  const paths = pairs.map((pair) => {
+    const hue = hueBySource.get(pair.from) ?? 0;
+    return `<path class="os-tg-cross-link os-tg-hue-${hue}" data-testid="task-graph-cross-link" data-link-from="${escapeAttr(pair.from)}" data-link-to="${escapeAttr(pair.to)}" d="" marker-end="url(#os-tg-cross-arrow-${hue})"></path>`;
+  }).join("");
+  return `
+    <svg class="os-tg-cross-links" data-tg-cross-links aria-hidden="true">
+      <defs>
+        ${taskGraphLinkHues.map((hue, index) => `
+        <marker id="os-tg-cross-arrow-${index}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M 0 0 L 8 4 L 0 8 z" fill="${escapeAttr(hue)}"></path>
+        </marker>`).join("")}
+      </defs>
+      ${paths}
+    </svg>
+  `;
+}
+
+/**
+ * Edges on the "ancestry critical path" of a backlog task: every
+ * non-terminal blocked_by edge reachable walking upstream from the task.
+ * These are the tasks that must complete to unblock it.
+ */
+function collectAncestryEdges(
+  nodes: TaskGraphNode[],
+  target: TaskGraphNode,
+): { edges: Set<string>; members: Set<string> } {
+  const edges = new Set<string>();
+  const members = new Set<string>([target.node_id]);
+  const queue = [target];
+  const visited = new Set<string>([target.node_id]);
+  while (queue.length > 0) {
+    const node = queue.shift()!;
+    for (const blockerRef of node.blocked_by) {
+      const blocker = findNodeByRef(nodes, blockerRef);
+      if (!blocker || isTerminalTaskNode(blocker)) {
+        continue;
+      }
+      edges.add(`${blocker.node_id}->${node.node_id}`);
+      members.add(blocker.node_id);
+      if (!visited.has(blocker.node_id)) {
+        visited.add(blocker.node_id);
+        queue.push(blocker);
+      }
+    }
+  }
+  return { edges, members };
 }
 
 interface ProjectGroup {
@@ -4901,11 +5497,21 @@ function initialSelectedTaskNode(nodes: TaskGraphNode[], rootIds: string[]): Tas
     ...rootIds.map((id) => findNodeByRef(nodes, id)).filter((node): node is TaskGraphNode => Boolean(node)),
     ...nodes,
   ];
-  return ordered.find((node) => node.kind !== "milestone" && node.state_category === "in_progress")
-    ?? ordered.find((node) => node.kind !== "milestone" && node.run_id)
-    ?? ordered.find((node) => node.kind !== "milestone")
-    ?? ordered[0]
+  // Backlog and terminal nodes live in the side panes and have no run to
+  // open, so the initial selection sticks to the Current pane.
+  const current = ordered.filter(isCurrentPaneTaskNode);
+  return current.find((node) => node.kind !== "milestone" && node.state_category === "in_progress")
+    ?? current.find((node) => node.kind !== "milestone" && node.run_id)
+    ?? current.find((node) => node.kind !== "milestone")
+    ?? current[0]
     ?? null;
+}
+
+/** Nodes rendered in the Current pane: dispatchable states, not backlog/terminal. */
+function isCurrentPaneTaskNode(node: TaskGraphNode): boolean {
+  return node.state_category !== "backlog"
+    && node.state_category !== "done"
+    && node.state_category !== "canceled";
 }
 
 function stateToneForTaskNode(node: TaskGraphNode): string {
@@ -5039,6 +5645,72 @@ function appShellStyles(): string {
     .os-task-graph-links marker path:not([fill]) { fill: #39708f; }
     /* Reserve the skip-arrow routing gutter (taskGraphRouteGutterWidth). */
     .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; padding-left: var(--os-tg-gutter, 62px); }
+    /* Three-pane task graph: Completed | Current | Backlog. */
+    .os-tg-panes { position: relative; display: flex; align-items: stretch; gap: 10px; min-width: 0; }
+    .os-tg-pane { display: flex; flex-direction: column; min-width: 0; border: 1px solid #d8dee4; border-radius: 10px; background: #fbfcfe; }
+    .os-tg-pane-done { flex: 0 0 clamp(300px, 30%, 460px); }
+    .os-tg-pane-current { flex: 1 1 auto; }
+    .os-tg-pane-backlog { flex: 0 0 clamp(260px, 26%, 420px); }
+    .os-tg-pane-collapsed { flex: 0 0 44px; align-items: center; gap: 8px; padding: 8px 0; }
+    .os-tg-pane-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #e3e8ee; }
+    .os-tg-pane-head strong { font-size: 13px; }
+    .os-tg-dot { width: 9px; height: 9px; border-radius: 999px; flex: 0 0 auto; }
+    .os-tg-dot-done { background: #16a34a; }
+    .os-tg-dot-current { background: #2563eb; }
+    .os-tg-dot-backlog { background: #7c3aed; }
+    .os-tg-count { border-radius: 999px; font-size: 11px; padding: 1px 8px; }
+    .os-tg-count-done { background: #dcfce7; color: #166534; }
+    .os-tg-count-current { background: #dbeafe; color: #1e40af; }
+    .os-tg-count-backlog { background: #ede9fe; color: #5b21b6; }
+    .os-tg-pane-toggle { margin-left: auto; min-height: 24px; min-width: 26px; padding: 0 6px; border-radius: 6px; font-size: 13px; line-height: 1; }
+    .os-tg-pane-collapsed .os-tg-pane-toggle { margin-left: 0; }
+    .os-tg-pane-vertical-label { writing-mode: vertical-rl; font-size: 12px; font-weight: 600; color: #405568; letter-spacing: 0.04em; }
+    .os-tg-pane-body { min-height: 0; max-height: clamp(360px, 56vh, 720px); overflow: auto; padding: 10px; }
+    /* Cross-pane dependency edges: measured overlay, never intercepts input. */
+    .os-tg-cross-links { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 4; pointer-events: none; overflow: visible; }
+    .os-tg-cross-link { fill: none; stroke-width: 1.9; stroke-linecap: round; opacity: 0.34; transition: opacity 0.14s ease, stroke-width 0.14s ease; }
+    .os-tg-cross-link.os-tg-hue-0 { stroke: #39708f; }
+    .os-tg-cross-link.os-tg-hue-1 { stroke: #7c3aed; }
+    .os-tg-cross-link.os-tg-hue-2 { stroke: #0f766e; }
+    .os-tg-cross-link.os-tg-hue-3 { stroke: #b0762f; }
+    .os-tg-cross-link.os-tg-hue-4 { stroke: #a05577; }
+    /* Backlog edges read as "not yet actionable" until emphasized. */
+    .os-tg-stage-backlog .os-task-graph-link { opacity: 0.26; }
+    [data-tg-panes].os-tg-focused .os-task-graph-link:not(.is-active):not(.is-ancestry) { opacity: 0.1; }
+    [data-tg-panes].os-tg-focused .os-tg-cross-link:not(.is-active):not(.is-ancestry) { opacity: 0.08; }
+    [data-tg-panes] .os-task-graph-link.is-active,
+    [data-tg-panes] .os-task-graph-link.is-ancestry,
+    [data-tg-panes] .os-tg-cross-link.is-active,
+    [data-tg-panes] .os-tg-cross-link.is-ancestry { opacity: 1; stroke-width: 2.8; }
+    [data-tg-panes] .os-node.os-tg-dim { opacity: 0.42; }
+    [data-tg-panes] .os-node.os-tg-ancestry { border-color: #7c3aed; box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.25); }
+    /* Completed pane: search + sortable table + pagination. */
+    .os-tg-done-search { width: 100%; box-sizing: border-box; min-height: 32px; margin-bottom: 8px; border: 1px solid #cbd5df; border-radius: 6px; padding: 5px 9px; background: #ffffff; color: #17202a; font: inherit; font-size: 12px; }
+    .os-tg-done-error { color: #b3372a; font-size: 12px; margin: 0 0 8px; }
+    .os-tg-done-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .os-tg-done-table th { text-align: left; padding: 4px 6px; border-bottom: 1px solid #d8dee4; color: #536170; font-size: 11px; white-space: nowrap; }
+    .os-tg-done-table td { padding: 6px; border-bottom: 1px solid #eef1f4; vertical-align: top; }
+    .os-tg-done-sort { border: none; background: transparent; min-height: 22px; padding: 0; color: inherit; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
+    .os-tg-done-sort span { color: #98a6b3; }
+    .os-tg-done-sort.is-active, .os-tg-done-sort.is-active span { color: #23566f; }
+    .os-tg-done-id { font-weight: 600; white-space: nowrap; color: #17202a; }
+    .os-tg-done-title { max-width: 0; width: 55%; }
+    .os-tg-done-title a, .os-tg-done-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; }
+    .os-tg-done-title a:hover { text-decoration: underline; }
+    .os-tg-done-prs { white-space: nowrap; }
+    .os-tg-pr { color: #23566f; text-decoration: none; }
+    .os-tg-pr:hover { text-decoration: underline; }
+    .os-tg-pr-latest { font-weight: 700; }
+    .os-tg-pr-unmerged { text-decoration: line-through; color: #98a6b3; }
+    .os-tg-pr-unmerged:hover { text-decoration: line-through underline; }
+    .os-tg-done-date { white-space: nowrap; color: #536170; }
+    .os-tg-capsule-button { min-height: 22px; min-width: 26px; padding: 0 4px; border: 1px solid #cdd6de; border-radius: 5px; background: #f4f7f9; color: #5b21b6; font-size: 13px; line-height: 1; cursor: pointer; }
+    .os-tg-capsule-button:hover { border-color: #7c3aed; background: #ede9fe; }
+    .os-tg-capsule-missing { color: #98a6b3; }
+    .os-tg-done-pagination { display: flex; align-items: center; gap: 4px; margin-top: 10px; flex-wrap: wrap; }
+    .os-tg-done-page { min-height: 26px; min-width: 28px; padding: 0 7px; font-size: 12px; border-radius: 6px; }
+    .os-tg-done-page.is-active { border-color: #39708f; background: #e7f1f5; font-weight: 700; }
+    .os-tg-done-page-size { margin-left: auto; color: #667788; font-size: 11px; }
     .os-knowledge-graph { display: grid; gap: 10px; min-width: 0; }
     .os-knowledge-toolbar { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
     .os-knowledge-toolbar div { display: grid; gap: 2px; min-width: 0; }
@@ -5405,6 +6077,24 @@ function appShellStyles(): string {
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .os-changed-file:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-task-graph-link { stroke: #5ca0b8; opacity: 0.82; }
       .os-task-graph-links marker path { fill: #5ca0b8; }
+      .os-tg-pane { background: #131920; border-color: #2a3440; }
+      .os-tg-pane-head { border-color: #2a3440; }
+      .os-tg-count-done { background: #14351f; color: #86efac; }
+      .os-tg-count-current { background: #16283f; color: #93c5fd; }
+      .os-tg-count-backlog { background: #271c3f; color: #c4b5fd; }
+      .os-tg-pane-vertical-label { color: #b8c4cf; }
+      .os-tg-stage-backlog .os-task-graph-link { opacity: 0.3; }
+      [data-tg-panes] .os-node.os-tg-ancestry { border-color: #a78bfa; box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.35); }
+      .os-tg-done-search { background: #101720; border-color: #2a3440; color: #e6edf3; }
+      .os-tg-done-table th { border-color: #2a3440; color: #94a3b3; }
+      .os-tg-done-table td { border-color: #1e2731; }
+      .os-tg-done-id { color: #e6edf3; }
+      .os-tg-done-sort.is-active, .os-tg-done-sort.is-active span { color: #8bd0e6; }
+      .os-tg-pr { color: #8bd0e6; }
+      .os-tg-pr-unmerged { color: #64748b; }
+      .os-tg-capsule-button { background: #1a2230; border-color: #2f3b4c; color: #c4b5fd; }
+      .os-tg-capsule-button:hover { border-color: #a78bfa; background: #271c3f; }
+      .os-tg-done-page.is-active { background: #18303a; border-color: #5ca0b8; }
       .os-node-gutter { background: #10232c; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.3); }
       .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.22); }
       .os-node-has-upstream .os-node-gutter { background: #3a2414; color: #fbbf24; box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.34); }

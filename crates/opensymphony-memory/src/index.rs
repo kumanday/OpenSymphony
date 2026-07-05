@@ -859,6 +859,59 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
     Ok(issues)
 }
 
+/// Pull-request evidence grouped by issue key, ordered by PR number. Only
+/// the columns persisted in the `pull_requests` table are populated; the
+/// nested commit/file/check/review evidence stays empty.
+fn load_pull_requests_by_issue(
+    config: &MemoryConfig,
+) -> Result<BTreeMap<String, Vec<PullRequestEvidence>>, MemoryError> {
+    if !config.index_path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let connection = open_index_read_only(config)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests ORDER BY issue_key, number",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            let merged_at: Option<String> = row.get(6)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                PullRequestEvidence {
+                    number: row.get::<_, i64>(1)?.max(0) as u64,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    branch: row.get(4)?,
+                    merge_sha: row.get(5)?,
+                    merged_at: merged_at
+                        .as_deref()
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc)),
+                    ..PullRequestEvidence::default()
+                },
+            ))
+        })
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+
+    let mut by_issue = BTreeMap::<String, Vec<PullRequestEvidence>>::new();
+    for row in rows {
+        let (issue_key, pr) = row.map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+        by_issue.entry(issue_key).or_default().push(pr);
+    }
+    Ok(by_issue)
+}
+
 fn load_issue_areas(
     connection: &Connection,
     issue_key: &str,

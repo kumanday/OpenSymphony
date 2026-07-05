@@ -42,10 +42,10 @@ use crate::opensymphony_gateway_schema::{
     },
 };
 use crate::opensymphony_memory::{
-    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
-    MemoryGraphProjectionError, memory_concept_detail, memory_graph_bundles,
-    memory_graph_communities_with_options, memory_graph_search as search_memory_graph,
-    memory_graph_snapshot_with_options,
+    DEFAULT_MEMORY_GRAPH_BUNDLE_ID, MemoryConfig, MemoryError, MemoryGraphAccess,
+    MemoryGraphCommunityOptions, MemoryGraphProjectionError, memory_completed_task_rows,
+    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
+    memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
 pub mod action_handler;
@@ -84,8 +84,9 @@ pub use crate::opensymphony_gateway_schema::{
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
     memory_graph::{
-        MemoryBundleList, MemoryCommunityList, MemoryConceptDetail, MemoryGraphSnapshot,
-        MemoryGraphUpdatedEvent, MemorySearchResponse,
+        MemoryBundleList, MemoryCommunityList, MemoryCompletedTask, MemoryCompletedTaskPage,
+        MemoryCompletedTaskSource, MemoryConceptDetail, MemoryGraphSnapshot,
+        MemoryGraphUpdatedEvent, MemorySearchResponse, MemoryTaskPullRequest,
     },
     model_settings::{
         CodexCliProbe, CodexLocalReadiness, CredentialStatusResponse, ModelSettingsResponse,
@@ -126,6 +127,16 @@ pub trait LinearTaskGraphClient: Send + Sync + 'static {
         &self,
         identifiers: &[String],
     ) -> Result<Vec<TrackerIssue>, String>;
+
+    /// The requested identifiers plus every backlog-state issue in the
+    /// project, from one scan. Defaults to the plain identifier lookup so
+    /// fakes without backlog data keep working unchanged.
+    async fn task_graph_issues(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        self.issues_by_identifiers(identifiers).await
+    }
 }
 
 #[async_trait]
@@ -135,6 +146,15 @@ impl LinearTaskGraphClient for crate::opensymphony_linear::LinearClient {
         identifiers: &[String],
     ) -> Result<Vec<TrackerIssue>, String> {
         self.project_issues_by_identifiers(identifiers)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn task_graph_issues(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        self.project_task_graph_issues(identifiers)
             .await
             .map_err(|error| error.to_string())
     }
@@ -699,6 +719,10 @@ impl GatewayServer {
                 get(get_memory_communities),
             )
             .route("/api/v1/memory/search", get(search_memory))
+            .route(
+                "/api/v1/memory/completed-tasks",
+                get(get_memory_completed_tasks),
+            )
             .route("/api/v1/projects", get(list_projects))
             .route("/api/v1/projects/{project_id}", get(get_project))
             .route(
@@ -1261,6 +1285,228 @@ async fn search_memory(
     search_memory_graph(config, &query, params.limit.unwrap_or(10), access)
         .map(Json)
         .map_err(memory_graph_error)
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct MemoryCompletedTasksQuery {
+    q: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort: Option<String>,
+    visibility: Option<String>,
+}
+
+const MEMORY_COMPLETED_TASKS_DEFAULT_LIMIT: usize = 25;
+const MEMORY_COMPLETED_TASKS_MAX_LIMIT: usize = 100;
+
+/// Completed tasks for the task graph's "Completed" pane. Rows come from
+/// the memory catalog first (capsules carry PR evidence and survive Linear
+/// archival) merged with orchestrator-known completed issues that have not
+/// been captured yet — the Linear API is never touched on this path.
+async fn get_memory_completed_tasks(
+    State(state): State<GatewayState>,
+    Query(params): Query<MemoryCompletedTasksQuery>,
+) -> Result<Json<MemoryCompletedTaskPage>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_memory(&state)?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
+    let mut rows = memory_completed_task_rows(config, access).map_err(memory_graph_error)?;
+
+    let envelope = state.store.current().await;
+    let captured = rows
+        .iter()
+        .map(|row| row.issue_key.to_ascii_uppercase())
+        .collect::<HashSet<_>>();
+    for issue in &envelope.snapshot.issues {
+        if !matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Completed)
+            || captured.contains(&issue.identifier.to_ascii_uppercase())
+        {
+            continue;
+        }
+        rows.push(MemoryCompletedTask {
+            issue_key: issue.identifier.clone(),
+            concept_id: String::new(),
+            bundle_id: None,
+            title: issue.title.clone(),
+            state: Some(issue.tracker_state.clone()),
+            milestone: None,
+            url: None,
+            completed_at: issue.finished_at.or(Some(issue.last_event_at)),
+            prs: issue
+                .pr_url
+                .as_deref()
+                .map(pull_request_from_url)
+                .into_iter()
+                .collect(),
+            source: MemoryCompletedTaskSource::Orchestrator,
+        });
+    }
+
+    let query = params
+        .query
+        .or(params.q)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(query) = &query {
+        let needle = query.to_ascii_lowercase();
+        rows.retain(|row| completed_task_matches(row, &needle));
+    }
+
+    let sort = parse_completed_tasks_sort(params.sort.as_deref());
+    sort_completed_tasks(&mut rows, sort);
+
+    let total = rows.len();
+    let limit = params
+        .limit
+        .unwrap_or(MEMORY_COMPLETED_TASKS_DEFAULT_LIMIT)
+        .clamp(1, MEMORY_COMPLETED_TASKS_MAX_LIMIT);
+    let offset = params.offset.unwrap_or(0).min(total);
+    let tasks = rows.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(MemoryCompletedTaskPage {
+        schema_version: SchemaVersion::v1(),
+        bundle_id: DEFAULT_MEMORY_GRAPH_BUNDLE_ID.to_string(),
+        tasks,
+        total,
+        offset,
+        limit,
+        sort: sort.as_str().to_string(),
+        query,
+        generated_at: Utc::now(),
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletedTasksSort {
+    CompletedDesc,
+    CompletedAsc,
+    IdAsc,
+    IdDesc,
+    TitleAsc,
+    TitleDesc,
+    PrDesc,
+    PrAsc,
+}
+
+impl CompletedTasksSort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CompletedDesc => "completed_desc",
+            Self::CompletedAsc => "completed_asc",
+            Self::IdAsc => "id_asc",
+            Self::IdDesc => "id_desc",
+            Self::TitleAsc => "title_asc",
+            Self::TitleDesc => "title_desc",
+            Self::PrDesc => "pr_desc",
+            Self::PrAsc => "pr_asc",
+        }
+    }
+}
+
+fn parse_completed_tasks_sort(value: Option<&str>) -> CompletedTasksSort {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("completed_asc") => CompletedTasksSort::CompletedAsc,
+        Some("id_asc") => CompletedTasksSort::IdAsc,
+        Some("id_desc") => CompletedTasksSort::IdDesc,
+        Some("title_asc") => CompletedTasksSort::TitleAsc,
+        Some("title_desc") => CompletedTasksSort::TitleDesc,
+        Some("pr_desc") => CompletedTasksSort::PrDesc,
+        Some("pr_asc") => CompletedTasksSort::PrAsc,
+        _ => CompletedTasksSort::CompletedDesc,
+    }
+}
+
+fn sort_completed_tasks(rows: &mut [MemoryCompletedTask], sort: CompletedTasksSort) {
+    match sort {
+        // Rows without a completion date sort last in either direction (the
+        // leading `is_none()` key), instead of `Option`'s None-first order.
+        CompletedTasksSort::CompletedDesc => rows.sort_by_key(|row| {
+            (
+                row.completed_at.is_none(),
+                std::cmp::Reverse(row.completed_at),
+                std::cmp::Reverse(issue_key_sort_key(&row.issue_key)),
+            )
+        }),
+        CompletedTasksSort::CompletedAsc => rows.sort_by_key(|row| {
+            (
+                row.completed_at.is_none(),
+                row.completed_at,
+                issue_key_sort_key(&row.issue_key),
+            )
+        }),
+        CompletedTasksSort::IdAsc => {
+            rows.sort_by_key(|row| issue_key_sort_key(&row.issue_key));
+        }
+        CompletedTasksSort::IdDesc => {
+            rows.sort_by_key(|row| std::cmp::Reverse(issue_key_sort_key(&row.issue_key)));
+        }
+        CompletedTasksSort::TitleAsc => rows.sort_by(|left, right| {
+            left.title
+                .to_ascii_lowercase()
+                .cmp(&right.title.to_ascii_lowercase())
+        }),
+        CompletedTasksSort::TitleDesc => rows.sort_by(|left, right| {
+            right
+                .title
+                .to_ascii_lowercase()
+                .cmp(&left.title.to_ascii_lowercase())
+        }),
+        CompletedTasksSort::PrDesc => {
+            rows.sort_by_key(|row| std::cmp::Reverse(latest_pr_number(row)));
+        }
+        CompletedTasksSort::PrAsc => {
+            rows.sort_by_key(latest_pr_number);
+        }
+    }
+}
+
+/// Natural sort key so `COE-99` orders before `COE-100`.
+fn issue_key_sort_key(issue_key: &str) -> (String, u64) {
+    let (prefix, number) = issue_key
+        .rfind(['-', '_'])
+        .map(|at| (&issue_key[..at], &issue_key[at + 1..]))
+        .unwrap_or((issue_key, ""));
+    (
+        prefix.to_ascii_uppercase(),
+        number.parse::<u64>().unwrap_or(0),
+    )
+}
+
+fn latest_pr_number(row: &MemoryCompletedTask) -> u64 {
+    row.prs.iter().map(|pr| pr.number).max().unwrap_or(0)
+}
+
+fn completed_task_matches(row: &MemoryCompletedTask, needle: &str) -> bool {
+    row.issue_key.to_ascii_lowercase().contains(needle)
+        || row.title.to_ascii_lowercase().contains(needle)
+        || row
+            .state
+            .as_deref()
+            .is_some_and(|state| state.to_ascii_lowercase().contains(needle))
+        || row
+            .milestone
+            .as_deref()
+            .is_some_and(|milestone| milestone.to_ascii_lowercase().contains(needle))
+        || row.prs.iter().any(|pr| {
+            pr.title.to_ascii_lowercase().contains(needle)
+                || format!("#{}", pr.number).contains(needle)
+        })
+}
+
+fn pull_request_from_url(url: &str) -> MemoryTaskPullRequest {
+    let number = url
+        .rsplit('/')
+        .find_map(|segment| segment.parse::<u64>().ok())
+        .unwrap_or(0);
+    MemoryTaskPullRequest {
+        number,
+        title: String::new(),
+        url: Some(url.to_string()),
+        // No merge evidence on this path; the memory-backed row replaces
+        // this one after capture and carries the real merge state.
+        merged: true,
+        merged_at: None,
+    }
 }
 
 fn configured_memory(
@@ -2783,20 +3029,6 @@ async fn get_task_graph(
         .map(|issue| issue.identifier.clone())
         .collect::<Vec<_>>();
 
-    if identifiers.is_empty() {
-        return (
-            StatusCode::OK,
-            Json(TaskGraphSnapshot {
-                schema_version: SchemaVersion::v1(),
-                project_id,
-                generated_at,
-                nodes: Vec::new(),
-                root_ids: Vec::new(),
-            }),
-        )
-            .into_response();
-    }
-
     let Some(linear_task_graph) = state.linear_task_graph.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2811,7 +3043,10 @@ async fn get_task_graph(
             .into_response();
     };
 
-    let linear_issues = match linear_task_graph.issues_by_identifiers(&identifiers).await {
+    // No early return on empty identifiers: even with nothing tracked by the
+    // control plane, the project can still have backlog-state issues that the
+    // task graph renders in its Backlog pane.
+    let linear_issues = match linear_task_graph.task_graph_issues(&identifiers).await {
         Ok(issues) => issues,
         Err(error) => {
             tracing::warn!(error = %error, "failed to load task graph dependencies from Linear");
@@ -4003,6 +4238,50 @@ mod tests {
     use crate::opensymphony_gateway_schema::event_journal::{
         EventActor, EventKind, StreamErrorType,
     };
+
+    #[test]
+    fn completed_tasks_sort_puts_undated_rows_last_in_both_directions() {
+        fn row(issue_key: &str, completed_at: Option<&str>) -> MemoryCompletedTask {
+            MemoryCompletedTask {
+                issue_key: issue_key.to_string(),
+                concept_id: String::new(),
+                bundle_id: None,
+                title: issue_key.to_string(),
+                state: None,
+                milestone: None,
+                url: None,
+                completed_at: completed_at.map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .expect("test timestamp")
+                        .with_timezone(&Utc)
+                }),
+                prs: Vec::new(),
+                source: MemoryCompletedTaskSource::Memory,
+            }
+        }
+
+        let mut rows = vec![
+            row("COE-2", None),
+            row("COE-100", Some("2026-06-01T00:00:00Z")),
+            row("COE-99", Some("2026-06-03T00:00:00Z")),
+        ];
+        sort_completed_tasks(&mut rows, CompletedTasksSort::CompletedDesc);
+        assert_eq!(
+            rows.iter().map(|row| row.issue_key.as_str()).collect::<Vec<_>>(),
+            vec!["COE-99", "COE-100", "COE-2"],
+        );
+        sort_completed_tasks(&mut rows, CompletedTasksSort::CompletedAsc);
+        assert_eq!(
+            rows.iter().map(|row| row.issue_key.as_str()).collect::<Vec<_>>(),
+            vec!["COE-100", "COE-99", "COE-2"],
+        );
+        // Natural key order: COE-99 before COE-100 despite lexicographic order.
+        sort_completed_tasks(&mut rows, CompletedTasksSort::IdAsc);
+        assert_eq!(
+            rows.iter().map(|row| row.issue_key.as_str()).collect::<Vec<_>>(),
+            vec!["COE-2", "COE-99", "COE-100"],
+        );
+    }
 
     #[test]
     fn journal_error_mapping_preserves_invalid_cursor_sequence() {

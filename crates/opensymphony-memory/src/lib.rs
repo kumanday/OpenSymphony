@@ -1188,6 +1188,67 @@ mod tests {
     }
 
     #[test]
+    fn memory_completed_task_rows_join_pull_request_evidence() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let source: SourceFile = serde_yaml::from_str(
+            r#"
+issues:
+  - identifier: COE-123
+    title: WebSocket reconnect recovery
+    url: https://linear.app/example/issue/COE-123
+    state: Done
+    completed_at: 2026-06-13T17:00:00Z
+    labels: [runtime]
+    linked_prs: [456, 490]
+prs:
+  - number: 456
+    title: COE-123 first attempt
+    url: https://github.com/example/repo/pull/456
+    branch: coe-123-attempt-1
+  - number: 490
+    title: COE-123 recover websocket reconnects
+    url: https://github.com/example/repo/pull/490
+    branch: coe-123-reconnect
+    merge_sha: abcdef1234567890
+    merged_at: 2026-06-13T16:00:00Z
+"#,
+        )
+        .expect("source yaml should parse");
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan =
+            plan_capture(&config, &source, &selection, true, false).expect("capture should plan");
+        write_capture_plan(&config, &plan, false).expect("capture should write");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.issue_key, "COE-123");
+        assert_eq!(row.concept_id, "issues/COE-123");
+        assert_eq!(row.state.as_deref(), Some("Done"));
+        assert!(row.completed_at.is_some());
+        // Freshly captured rows have empty source_refs in the index (they
+        // are rebuilt from capsule frontmatter on OKF reindex), so no
+        // Linear URL yet — the row is still fully usable.
+        assert_eq!(row.url, None);
+        assert_eq!(row.prs.len(), 2);
+        // The abandoned PR carries no merge evidence; the merged one keeps
+        // its merged_at so the UI can bold the most recent PR and strike
+        // through unmerged ones.
+        assert_eq!(row.prs[0].number, 456);
+        assert!(!row.prs[0].merged);
+        assert_eq!(row.prs[1].number, 490);
+        assert!(row.prs[1].merged);
+        assert!(row.prs[1].merged_at.is_some());
+    }
+
+    #[test]
     fn okf_parses_legacy_issue_capsule_without_losing_metadata() {
         let repo = TempDir::new().expect("temp repo");
         let capsule = r#"---

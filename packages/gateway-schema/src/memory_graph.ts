@@ -85,6 +85,49 @@ export interface MemorySearchResult {
   areas: string[];
 }
 
+/**
+ * One page of completed tasks for the task graph's Completed pane.
+ * Primary source is the memory catalog (DuckDB issue capsules with PR
+ * evidence); orchestrator-known completed issues not yet captured are
+ * merged in with `source: "orchestrator"`.
+ */
+export interface MemoryCompletedTaskPage {
+  schema_version: SchemaVersion;
+  bundle_id: string;
+  tasks: MemoryCompletedTask[];
+  /** Total row count after filtering, before pagination. */
+  total: number;
+  offset: number;
+  limit: number;
+  sort: string;
+  query?: string;
+  generated_at: string;
+}
+
+export interface MemoryCompletedTask {
+  issue_key: string;
+  /** OKF concept id (e.g. `issues/COE-123`); empty for orchestrator rows. */
+  concept_id: string;
+  bundle_id?: string;
+  title: string;
+  state?: string;
+  milestone?: string;
+  url?: string;
+  completed_at?: string;
+  prs: MemoryTaskPullRequest[];
+  source: MemoryCompletedTaskSource;
+}
+
+export interface MemoryTaskPullRequest {
+  number: number;
+  title: string;
+  url?: string;
+  merged: boolean;
+  merged_at?: string;
+}
+
+export type MemoryCompletedTaskSource = "memory" | "orchestrator";
+
 export interface MemoryGraphNode {
   id: string;
   kind: MemoryGraphNodeKind;

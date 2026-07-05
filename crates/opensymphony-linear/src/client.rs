@@ -397,6 +397,56 @@ impl LinearClient {
         }
     }
 
+    /// Task-graph issue set from a single project scan: every requested
+    /// identifier plus all backlog-state issues. Backlog issues never enter
+    /// the control plane (they are not in `active_states`), so the task
+    /// graph endpoint asks for them here without a second Linear pass.
+    pub async fn project_task_graph_issues<S>(
+        &self,
+        identifiers: &[S],
+    ) -> Result<Vec<TrackerIssue>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        let identifiers = normalize_strings(identifiers);
+        let requested_keys = identifiers
+            .iter()
+            .map(|identifier| identifier.to_ascii_uppercase())
+            .collect::<HashSet<_>>();
+
+        let mut issues_by_identifier = HashMap::new();
+        let mut backlog = Vec::new();
+        for issue in self.project_issues(false).await? {
+            let key = issue.identifier.to_ascii_uppercase();
+            if requested_keys.contains(&key) {
+                issues_by_identifier.insert(key, issue);
+            } else if matches!(
+                issue.state_kind,
+                crate::opensymphony_domain::TrackerIssueStateKind::Backlog
+            ) {
+                backlog.push(issue);
+            }
+        }
+
+        let mut issues = Vec::new();
+        let mut missing_issue_ids = Vec::new();
+        for identifier in &identifiers {
+            match issues_by_identifier.remove(&identifier.to_ascii_uppercase()) {
+                Some(issue) => issues.push(issue),
+                None => missing_issue_ids.push(identifier.clone()),
+            }
+        }
+        if !missing_issue_ids.is_empty() {
+            return Err(LinearError::MissingIssueIds {
+                issue_ids: missing_issue_ids,
+            });
+        }
+
+        backlog.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        issues.extend(backlog);
+        Ok(issues)
+    }
+
     async fn project_issues(
         &self,
         include_archived: bool,

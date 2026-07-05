@@ -1965,7 +1965,9 @@ describe("OpenSymphonyApp mount", () => {
       expect.stringContaining("alpha-project | Alpha Project"),
       expect.stringContaining("beta-project | Beta Project"),
     ]);
-    expect(headings[0]?.textContent).toContain("issues=4 running=1 todo=2");
+    // Done nodes (completed-prereq) render in the Completed pane, not the
+    // Current pane's project groups.
+    expect(headings[0]?.textContent).toContain("issues=3 running=1 todo=2");
     expect(headings[0]?.textContent).toContain("blocked=1");
     expect(headings[1]?.textContent).toContain("issues=2 running=0 todo=2");
     expect(headings[1]?.textContent).toContain("blocked=2");
@@ -1982,7 +1984,13 @@ describe("OpenSymphonyApp mount", () => {
       ...projectSetTaskGraph.nodes.find((node) => node.node_id === "desktop-alpha")!,
       project_name: undefined,
     };
-    const alphaNamed = projectSetTaskGraph.nodes.find((node) => node.node_id === "completed-prereq")!;
+    // Not Done here: a terminal state would drop the node from the Current
+    // pane and this test is about mixed project metadata, not state buckets.
+    const alphaNamed = {
+      ...projectSetTaskGraph.nodes.find((node) => node.node_id === "completed-prereq")!,
+      state: "Todo",
+      state_category: "todo" as const,
+    };
     const beta = projectSetTaskGraph.nodes.find((node) => node.node_id === "hosted-auth")!;
     const unassigned = {
       ...taskGraph.nodes.find((node) => node.node_id === "follow-up")!,
@@ -2100,7 +2108,7 @@ describe("OpenSymphonyApp mount", () => {
     const restoredAlphaNodes = Array.from(
       root.querySelectorAll("[data-project-group='alpha-project'] [data-node-id]"),
     ).map((node) => node.getAttribute("data-node-id"));
-    expect(restoredAlphaNodes).toEqual(["m7-milestone", "app-shell", "desktop-alpha", "follow-up", "completed-prereq"]);
+    expect(restoredAlphaNodes).toEqual(["m7-milestone", "app-shell", "desktop-alpha", "follow-up"]);
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
 
     await handle.destroy();
@@ -2132,7 +2140,7 @@ describe("OpenSymphonyApp mount", () => {
       expect.stringContaining("unassigned"),
     ]);
     expect(headings[0]).toContain("issues=2 running=1 todo=1 blocked=1");
-    expect(headings[1]).toContain("issues=3 running=0 todo=2 blocked=1");
+    expect(headings[1]).toContain("issues=2 running=0 todo=2 blocked=1");
     expect(headings[2]).toContain("issues=1 running=0 todo=1 blocked=0");
     expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='COE-705']")).not.toBeNull();
     expect(root.querySelector("[data-node-id='COE-700'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-701");
@@ -2257,7 +2265,9 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.textContent).not.toContain("src/config.ts");
       expect(root.textContent).not.toContain("Live data stale");
       expect(root.querySelector(".os-pill")?.textContent).toBe("released");
-      expect(root.querySelector("[data-node-id='desktop-alpha']")?.textContent).toContain("Done");
+      // Once the task reaches Done it leaves the Current pane (three-pane
+      // task graph): the card must no longer render among current tasks.
+      expect(root.querySelector("[data-node-id='desktop-alpha']")).toBeNull();
       expect(root.querySelector("[data-testid='changed-file-item']")?.getAttribute("data-path")).toBe("src/live-update.ts");
     } finally {
       warnSpy.mockRestore();
@@ -3343,6 +3353,258 @@ describe("OpenSymphonyApp mount", () => {
     expect(select).not.toBeNull();
     // Without a profile controller the shell uses the default UI profile.
     expect(select.options.length).toBeGreaterThan(0);
+    await handle.destroy();
+  });
+});
+
+describe("three-pane task graph", () => {
+  const backlogNodes = [
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "backlog-a",
+      kind: "issue" as const,
+      identifier: "COE-460",
+      title: "Backlog changelog & publish",
+      state: "Backlog",
+      state_category: "backlog" as const,
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["COE-449"],
+      labels: ["backlog"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "backlog-b",
+      kind: "issue" as const,
+      identifier: "COE-461",
+      title: "Backlog release evidence",
+      state: "Backlog",
+      state_category: "backlog" as const,
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["COE-460"],
+      labels: ["backlog"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "backlog-c",
+      kind: "issue" as const,
+      identifier: "COE-462",
+      title: "Backlog unrelated polish",
+      state: "Backlog",
+      state_category: "backlog" as const,
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: [],
+      labels: ["backlog"],
+    },
+  ];
+  const threePaneTaskGraph: TaskGraphSnapshot = {
+    ...taskGraph,
+    nodes: [...taskGraph.nodes, ...backlogNodes],
+  };
+  const completedRows = [
+    {
+      issue_key: "COE-448",
+      concept_id: "issues/COE-465",
+      bundle_id: "local-default",
+      title: "Completed prerequisite",
+      state: "Done",
+      milestone: "M7",
+      url: "https://linear.app/example/issue/COE-448",
+      completed_at: "2026-06-10T00:00:00Z",
+      prs: [
+        {
+          number: 700,
+          title: "COE-448 first attempt",
+          url: "https://github.com/example/repo/pull/700",
+          merged: false,
+        },
+        {
+          number: 720,
+          title: "COE-448 landed",
+          url: "https://github.com/example/repo/pull/720",
+          merged: true,
+          merged_at: "2026-06-10T00:00:00Z",
+        },
+      ],
+      source: "memory" as const,
+    },
+    ...Array.from({ length: 30 }, (_, index) => ({
+      issue_key: `COE-${400 + index}`,
+      concept_id: `issues/COE-${400 + index}`,
+      bundle_id: "local-default",
+      title: `Historical task ${400 + index}`,
+      state: "Done",
+      completed_at: new Date(Date.UTC(2026, 4, 1) - index * 86_400_000).toISOString(),
+      prs: [
+        {
+          number: 500 + index,
+          title: `COE-${400 + index} landed`,
+          url: `https://github.com/example/repo/pull/${500 + index}`,
+          merged: true,
+          merged_at: new Date(Date.UTC(2026, 4, 1) - index * 86_400_000).toISOString(),
+        },
+      ],
+      source: "memory" as const,
+    })),
+  ];
+
+  async function mountThreePane() {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: threePaneTaskGraph }),
+      graphAdapter: createFixtureGraphAdapter({ completedTasks: completedRows }),
+    });
+    await flushUntil(() =>
+      root.querySelectorAll("[data-testid='completed-task-row']").length > 0
+      && root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-a']") !== null,
+    );
+    return { root, handle };
+  }
+
+  it("renders Completed, Current, and Backlog panes with cross-pane edges", async () => {
+    const { root, handle } = await mountThreePane();
+
+    expect(root.querySelector("[data-testid='task-pane-done']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='task-pane-current']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='task-pane-backlog']")).not.toBeNull();
+
+    // Done nodes leave the Current pane; backlog nodes render in their own.
+    expect(root.querySelector("[data-tg-pane='current'] [data-node-id='completed-prereq']")).toBeNull();
+    expect(root.querySelector("[data-tg-pane='current'] [data-node-id='backlog-a']")).toBeNull();
+    expect(root.querySelectorAll("[data-tg-pane='backlog'] [data-node-id]").length).toBe(3);
+
+    // Backlog dependency suffix names the Current blocker instead of
+    // calling it hidden: both graph panes count as visible.
+    expect(
+      root.querySelector("[data-node-id='backlog-a'] [data-testid='dependency-suffix']")?.textContent,
+    ).toContain("blocked by COE-449");
+
+    // The cross-pane edge from the Current blocker into the Backlog exists
+    // with the shared link data contract (geometry is measured in-browser).
+    const cross = root.querySelector("[data-testid='task-graph-cross-link']");
+    expect(cross?.getAttribute("data-link-from")).toBe("desktop-alpha");
+    expect(cross?.getAttribute("data-link-to")).toBe("backlog-a");
+
+    // First page: newest completion first, 25 rows per page.
+    const rows = Array.from(root.querySelectorAll("[data-testid='completed-task-row']"));
+    expect(rows).toHaveLength(25);
+    expect(rows[0]?.getAttribute("data-task-key")).toBe("COE-448");
+
+    // Multi-PR presentation: newest PR emphasized, unmerged struck through.
+    const firstRowPrs = Array.from(rows[0]?.querySelectorAll(".os-tg-pr") ?? []);
+    expect(firstRowPrs.map((pr) => pr.textContent)).toEqual(["#720", "#700"]);
+    expect(firstRowPrs[0]?.classList.contains("os-tg-pr-latest")).toBe(true);
+    expect(firstRowPrs[1]?.classList.contains("os-tg-pr-unmerged")).toBe(true);
+
+    // Capsule deep link carries the wired opensymphony://memory URL.
+    expect(rows[0]?.querySelector("[data-tg-capsule]")?.getAttribute("data-tg-capsule"))
+      .toBe("opensymphony://memory/local-default/concepts/issues/COE-465");
+
+    await handle.destroy();
+  });
+
+  it("searches, sorts, and paginates the Completed pane", async () => {
+    const { root, handle } = await mountThreePane();
+
+    (root.querySelector("[data-tg-done-page='next']") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelectorAll("[data-testid='completed-task-row']").length === completedRows.length - 25,
+    );
+
+    (root.querySelector("[data-tg-done-sort='id']") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelector("[data-testid='completed-task-row']")?.getAttribute("data-task-key") === "COE-400",
+    );
+    expect(
+      root.querySelector("[data-tg-done-sort='id']")?.closest("th")?.getAttribute("aria-sort"),
+    ).toBe("ascending");
+
+    const search = root.querySelector("[data-tg-done-search]") as HTMLInputElement;
+    search.value = "prerequisite";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    // The search input debounces (~180ms) before hitting the adapter, so
+    // this wait needs more head-room than the default flush window.
+    await flushUntil(
+      () => root.querySelectorAll("[data-testid='completed-task-row']").length === 1,
+      600,
+    );
+    expect(
+      root.querySelector("[data-testid='completed-task-row']")?.getAttribute("data-task-key"),
+    ).toBe("COE-448");
+
+    await handle.destroy();
+  });
+
+  it("boldens the ancestry critical path when a backlog task is selected", async () => {
+    const { root, handle } = await mountThreePane();
+
+    (root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-b']") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelector("[data-node-id='backlog-b']")?.classList.contains("is-selected") ?? false,
+    );
+
+    const ancestry = Array.from(root.querySelectorAll(".is-ancestry"))
+      .map((path) => `${path.getAttribute("data-link-from")}->${path.getAttribute("data-link-to")}`)
+      .sort();
+    expect(ancestry).toEqual(["backlog-a->backlog-b", "desktop-alpha->backlog-a"]);
+    expect(root.querySelector("[data-node-id='backlog-c']")?.classList.contains("os-tg-dim")).toBe(true);
+    expect(root.querySelector("[data-node-id='desktop-alpha']")?.classList.contains("os-tg-ancestry")).toBe(true);
+    // Selecting a backlog task never opens a run: the Current selection's
+    // run detail panel is untouched.
+    expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
+
+    // Hovering a Current task spotlights only its own edges, then restores
+    // the pinned ancestry emphasis on leave.
+    const currentCard = root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']") as HTMLElement;
+    currentCard.dispatchEvent(new Event("pointerenter"));
+    const active = Array.from(root.querySelectorAll(".os-task-graph-link.is-active, .os-tg-cross-link.is-active"))
+      .map((path) => `${path.getAttribute("data-link-from")}->${path.getAttribute("data-link-to")}`);
+    expect(active).toContain("desktop-alpha->backlog-a");
+    currentCard.dispatchEvent(new Event("pointerleave"));
+    expect(root.querySelectorAll(".os-task-graph-link.is-active, .os-tg-cross-link.is-active").length).toBe(0);
+    expect(root.querySelectorAll(".is-ancestry").length).toBe(2);
+
+    await handle.destroy();
+  });
+
+  it("collapses and expands the Completed and Backlog panes", async () => {
+    const { root, handle } = await mountThreePane();
+
+    (root.querySelector("[data-tg-pane-toggle='done']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-tg-pane='done'][data-collapsed]") !== null);
+    expect(root.querySelector("[data-testid='completed-task-row']")).toBeNull();
+    expect(root.querySelector("[data-tg-pane='done'] .os-tg-pane-vertical-label")?.textContent).toBe("Completed");
+
+    (root.querySelector("[data-tg-pane-toggle='backlog']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-tg-pane='backlog'][data-collapsed]") !== null);
+    expect(root.querySelector("[data-tg-pane='backlog'] [data-node-id]")).toBeNull();
+    // The Current pane has no collapse affordance.
+    expect(root.querySelector("[data-tg-pane-toggle='current']")).toBeNull();
+
+    (root.querySelector("[data-tg-pane-toggle='done']") as HTMLButtonElement).click();
+    (root.querySelector("[data-tg-pane-toggle='backlog']") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelectorAll("[data-testid='completed-task-row']").length === 25
+      && root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-a']") !== null,
+    );
+
+    await handle.destroy();
+  });
+
+  it("opens the memory capsule from a completed row via the deep link", async () => {
+    const { root, handle } = await mountThreePane();
+
+    (root.querySelector("[data-tg-capsule]") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelector("[data-testid='knowledge-graph-capsule']") !== null
+      || (root.querySelector(".os-kg-breadcrumb")?.textContent?.includes("COE-465") ?? false),
+    );
+
     await handle.destroy();
   });
 });

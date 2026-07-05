@@ -23,8 +23,8 @@ use opensymphony::opensymphony_gateway_schema::action::{
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
 use opensymphony::opensymphony_gateway_schema::memory_graph::{
-    MemoryBundleList, MemoryCommunityList, MemoryConceptDetail, MemoryGraphEdgeKind,
-    MemoryGraphSnapshot, MemorySearchResponse,
+    MemoryBundleList, MemoryCommunityList, MemoryCompletedTaskPage, MemoryConceptDetail,
+    MemoryGraphEdgeKind, MemoryGraphSnapshot, MemorySearchResponse,
 };
 use opensymphony::opensymphony_gateway_schema::model_settings::{
     CodexCliProbe, CodexLocalReadiness, CredentialStatusKind, CredentialStatusResponse,
@@ -61,6 +61,41 @@ impl LinearTaskGraphClient for FakeLinearTaskGraphClient {
                     .cloned()
             })
             .collect())
+    }
+}
+
+/// Fake that mirrors the real client's task-graph contract: requested
+/// identifiers plus every backlog-state issue from the project scan.
+#[derive(Clone)]
+struct BacklogLinearTaskGraphClient {
+    issues: Vec<TrackerIssue>,
+    backlog: Vec<TrackerIssue>,
+}
+
+#[async_trait]
+impl LinearTaskGraphClient for BacklogLinearTaskGraphClient {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        Ok(identifiers
+            .iter()
+            .filter_map(|identifier| {
+                self.issues
+                    .iter()
+                    .find(|issue| issue.identifier == *identifier)
+                    .cloned()
+            })
+            .collect())
+    }
+
+    async fn task_graph_issues(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        let mut issues = self.issues_by_identifiers(identifiers).await?;
+        issues.extend(self.backlog.iter().cloned());
+        Ok(issues)
     }
 }
 
@@ -2051,6 +2086,262 @@ async fn gateway_task_graph_skips_completed_issues_without_project_metadata() {
     assert_eq!(response.nodes[0].identifier, "COE-255");
 
     server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_task_graph_includes_backlog_issues_with_cross_edges() {
+    let snapshot = fixture_snapshot(0);
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let now = Utc::now();
+    let backlog_issue = TrackerIssue {
+        id: "COE-900".to_owned(),
+        identifier: "COE-900".to_owned(),
+        url: "https://linear.app/kumanday/issue/COE-900".to_owned(),
+        title: "Backlog follow-up".to_owned(),
+        description: None,
+        priority: None,
+        state: "Backlog".to_owned(),
+        state_kind: TrackerIssueStateKind::Backlog,
+        branch_name: None,
+        pr_url: None,
+        labels: Vec::new(),
+        project_id: Some("proj-open".to_owned()),
+        project_slug: Some("opensymphony-bootstrap".to_owned()),
+        project_name: Some("OpenSymphony".to_owned()),
+        parent_id: None,
+        parent: None,
+        project_milestone: None,
+        blocked_by: vec![TrackerIssueBlocker {
+            id: "COE-255".to_owned(),
+            identifier: "COE-255".to_owned(),
+            title: "Observability and FrankenTUI".to_owned(),
+            state: TrackerIssueState {
+                id: "state-COE-255".to_owned(),
+                name: "In Progress".to_owned(),
+                tracker_type: "started".to_owned(),
+                kind: TrackerIssueStateKind::Started,
+            },
+        }],
+        sub_issues: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store).with_linear_task_graph(Some(std::sync::Arc::new(
+        BacklogLinearTaskGraphClient {
+            issues,
+            backlog: vec![backlog_issue],
+        },
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    assert_eq!(response.nodes.len(), 2);
+    let backlog_node = response
+        .nodes
+        .iter()
+        .find(|node| node.identifier == "COE-900")
+        .expect("backlog issue should be present in the task graph");
+    assert_eq!(
+        backlog_node.state_category,
+        opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Backlog,
+    );
+    // The blocked_by edge crosses from the backlog node to the tracked
+    // current node — the UI draws it as a Current → Backlog edge.
+    assert_eq!(backlog_node.blocked_by, vec!["COE-255".to_owned()]);
+    assert!(backlog_node.runtime_overlay.is_none());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_memory_completed_tasks() {
+    let repo = tempfile::tempdir().expect("memory repo");
+    let config = write_completed_tasks_fixture(repo.path());
+    refresh_memory_index_from_okf(&config, &repo.path().join(".opensymphony/memory"))
+        .expect("fixture should reindex");
+
+    // The control plane knows one freshly completed issue that memory has
+    // not captured yet — it must appear as an `orchestrator` row.
+    let mut snapshot = fixture_snapshot(0);
+    let mut completed_issue = snapshot.issues[0].clone();
+    completed_issue.identifier = "COE-370".to_owned();
+    completed_issue.title = "Fresh completion".to_owned();
+    completed_issue.tracker_state = "Done".to_owned();
+    completed_issue.runtime_state = IssueRuntimeState::Completed;
+    completed_issue.finished_at = Some(Utc::now());
+    completed_issue.pr_url =
+        Some("https://github.com/kumanday/OpenSymphony/pull/370".to_owned());
+    snapshot.issues.push(completed_issue);
+
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store).with_memory_config(Some(config));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}/api/v1/memory/completed-tasks");
+
+    let page = client
+        .get(&base)
+        .send()
+        .await
+        .expect("fetch completed tasks")
+        .json::<MemoryCompletedTaskPage>()
+        .await
+        .expect("decode completed tasks");
+    assert_eq!(page.schema_version.major, 1);
+    assert_eq!(page.total, 2);
+    assert_eq!(page.sort, "completed_desc");
+    // Freshest completion first: the orchestrator row finished just now,
+    // the memory capsule's timestamp is in the past.
+    assert_eq!(page.tasks[0].issue_key, "COE-370");
+    assert_eq!(
+        page.tasks[0].source,
+        opensymphony::opensymphony_gateway_schema::memory_graph::MemoryCompletedTaskSource::Orchestrator,
+    );
+    assert_eq!(page.tasks[0].prs.len(), 1);
+    assert_eq!(page.tasks[0].prs[0].number, 370);
+    assert_eq!(page.tasks[1].issue_key, "COE-300");
+    assert_eq!(
+        page.tasks[1].source,
+        opensymphony::opensymphony_gateway_schema::memory_graph::MemoryCompletedTaskSource::Memory,
+    );
+    assert_eq!(page.tasks[1].concept_id, "issues/COE-300");
+    assert_eq!(page.tasks[1].state.as_deref(), Some("Done"));
+    // The In Progress capsule must not leak into the completed list.
+    assert!(page.tasks.iter().all(|task| task.issue_key != "COE-301"));
+
+    // Search narrows on title/key, pagination clamps.
+    let filtered = client
+        .get(format!("{base}?query=fresh&limit=1&sort=id_asc"))
+        .send()
+        .await
+        .expect("fetch filtered completed tasks")
+        .json::<MemoryCompletedTaskPage>()
+        .await
+        .expect("decode filtered completed tasks");
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.tasks[0].issue_key, "COE-370");
+    assert_eq!(filtered.sort, "id_asc");
+    assert_eq!(filtered.query.as_deref(), Some("fresh"));
+
+    let second_page = client
+        .get(format!("{base}?limit=1&offset=1"))
+        .send()
+        .await
+        .expect("fetch second page")
+        .json::<MemoryCompletedTaskPage>()
+        .await
+        .expect("decode second page");
+    assert_eq!(second_page.total, 2);
+    assert_eq!(second_page.tasks.len(), 1);
+    assert_eq!(second_page.tasks[0].issue_key, "COE-300");
+
+    server_task.abort();
+}
+
+fn write_completed_tasks_fixture(repo: &std::path::Path) -> MemoryConfig {
+    let config_path = repo.join("opensymphony-memory.yaml");
+    std::fs::write(
+        &config_path,
+        r#"
+areas:
+  graph-view:
+    title: Graph View
+    docs_target: docs/graph-view.md
+    status: stable
+    confidence: 90
+"#,
+    )
+    .expect("memory config should write");
+    let memory_root = repo.join(".opensymphony/memory");
+    let issues_dir = memory_root.join("issues");
+    std::fs::create_dir_all(&issues_dir).expect("memory issues dir should write");
+    std::fs::write(
+        issues_dir.join("COE-300.md"),
+        r#"---
+type: issue-capsule
+title: "COE-300: Completed capsule"
+description: Completed task fixture.
+state: Done
+timestamp: 2026-06-20T10:00:00Z
+tags: [memory]
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-300
+    - kind: area
+      id: graph-view
+  source_refs:
+    - kind: linear_issue
+      id: COE-300
+      url: https://linear.app/example/issue/COE-300
+---
+
+# COE-300: Completed capsule
+
+Completed body.
+"#,
+    )
+    .expect("completed capsule should write");
+    std::fs::write(
+        issues_dir.join("COE-301.md"),
+        r#"---
+type: issue-capsule
+title: "COE-301: Active capsule"
+description: Not completed yet.
+state: In Progress
+timestamp: 2026-06-21T10:00:00Z
+tags: [memory]
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-301
+    - kind: area
+      id: graph-view
+---
+
+# COE-301: Active capsule
+
+Active body.
+"#,
+    )
+    .expect("active capsule should write");
+    MemoryConfig::load(repo, Some(&config_path)).expect("memory config should load")
 }
 
 #[tokio::test]
