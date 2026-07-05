@@ -119,15 +119,17 @@ export function mountKnowledgeGraphRenderer(
     // The morphing render preserves the canvas node, so without drawable
     // data the previous mount's bitmap and handlers would otherwise stay
     // live and interactive against a stale layout. Always detach the
-    // interaction handlers; drop the bitmap too once the snapshot itself is
-    // gone (bundle switch/reset). During a pure re-layout the snapshot is
-    // still present and keeping the bitmap avoids a blank flash.
+    // interaction handlers and clear the label/tooltip overlays (they are
+    // positioned against the old layout and remain clickable otherwise);
+    // drop the bitmap too once the snapshot itself is gone (bundle
+    // switch/reset). During a pure re-layout the snapshot is still present
+    // and keeping the bitmap avoids a blank flash.
     detachCanvasHandlers(canvas);
+    clearOverlayContainer(root);
     if (!options.snapshot) {
       disposeKnowledgeGraphCanvas(canvas);
       canvas.width = canvas.width || 1;
       canvas.dataset.nonblank = "false";
-      clearOverlayContainer(root);
     }
     return;
   }
@@ -318,10 +320,10 @@ function attachCanvasHandlers(
           worldNode,
         );
         if (dropped) {
-          state.options.view.overrides.set(
-            state.pointer.nodeId,
-            worldToLayout(state.options.layout, dropped),
-          );
+          state.options.view.overrides.set(state.pointer.nodeId, {
+            ...worldToLayout(state.options.layout, dropped),
+            z: dropped.z,
+          });
         }
       }
     }

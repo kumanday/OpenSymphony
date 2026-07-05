@@ -32,8 +32,13 @@ export interface GraphCameraState {
 
 export interface KnowledgeGraphViewState {
   camera: GraphCameraState | null;
-  /** Node drag overrides in layout coordinates, keyed by node id. */
-  overrides: Map<string, { x: number; y: number }>;
+  /**
+   * Node drag overrides keyed by node id: x/y in layout coordinates, plus
+   * the world-space z of the drop point. Dragging happens on a camera-facing
+   * plane, so under an orbited camera the dropped point's z differs from the
+   * node's community depth — persisting it keeps the node under the cursor.
+   */
+  overrides: Map<string, { x: number; y: number; z?: number }>;
 }
 
 export function createKnowledgeGraphViewState(): KnowledgeGraphViewState {
@@ -245,31 +250,45 @@ export function frameWorldPoints(
   previous?: Pick<GraphCameraState, "yaw" | "pitch">,
   paddingFactor = 1.2,
 ): GraphCameraState {
+  const yaw = previous?.yaw ?? 0;
+  const pitch = previous?.pitch ?? 0;
   if (points.length === 0) {
-    return { targetX: 0, targetY: 0, targetZ: 0, distance: 900, yaw: previous?.yaw ?? 0, pitch: previous?.pitch ?? 0 };
+    return { targetX: 0, targetY: 0, targetZ: 0, distance: 900, yaw, pitch };
   }
-  let minX = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  let minZ = Number.POSITIVE_INFINITY;
-  let maxZ = Number.NEGATIVE_INFINITY;
+  // Extents are measured in the *active* camera basis (right/up/forward for
+  // the preserved yaw/pitch), not along world axes: framing after an orbit
+  // must still fit every requested point on screen.
+  const basis = cameraBasis({ targetX: 0, targetY: 0, targetZ: 0, distance: 1, yaw, pitch });
+  let minRight = Number.POSITIVE_INFINITY;
+  let maxRight = Number.NEGATIVE_INFINITY;
+  let minUp = Number.POSITIVE_INFINITY;
+  let maxUp = Number.NEGATIVE_INFINITY;
+  let minForward = Number.POSITIVE_INFINITY;
+  let maxForward = Number.NEGATIVE_INFINITY;
   for (const point of points) {
-    minX = Math.min(minX, point.x);
-    maxX = Math.max(maxX, point.x);
-    minY = Math.min(minY, point.y);
-    maxY = Math.max(maxY, point.y);
-    minZ = Math.min(minZ, point.z);
-    maxZ = Math.max(maxZ, point.z);
+    const alongRight = dot(point, basis.right);
+    const alongUp = dot(point, basis.up);
+    const alongForward = dot(point, basis.forward);
+    minRight = Math.min(minRight, alongRight);
+    maxRight = Math.max(maxRight, alongRight);
+    minUp = Math.min(minUp, alongUp);
+    maxUp = Math.max(maxUp, alongUp);
+    minForward = Math.min(minForward, alongForward);
+    maxForward = Math.max(maxForward, alongForward);
   }
+  const centerRight = (minRight + maxRight) / 2;
+  const centerUp = (minUp + maxUp) / 2;
+  const centerForward = (minForward + maxForward) / 2;
+  // The basis is orthonormal, so the view-space center maps back to world
+  // space as a linear combination of the basis directions.
   const center: WorldPoint = {
-    x: (minX + maxX) / 2,
-    y: (minY + maxY) / 2,
-    z: (minZ + maxZ) / 2,
+    x: basis.right.x * centerRight + basis.up.x * centerUp + basis.forward.x * centerForward,
+    y: basis.right.y * centerRight + basis.up.y * centerUp + basis.forward.y * centerForward,
+    z: basis.right.z * centerRight + basis.up.z * centerUp + basis.forward.z * centerForward,
   };
-  const halfWidth = Math.max(40, (maxX - minX) / 2);
-  const halfHeight = Math.max(40, (maxY - minY) / 2);
-  const halfDepth = (maxZ - minZ) / 2;
+  const halfWidth = Math.max(40, (maxRight - minRight) / 2);
+  const halfHeight = Math.max(40, (maxUp - minUp) / 2);
+  const halfDepth = (maxForward - minForward) / 2;
   // Box fit: distance where both the vertical and horizontal extents fill
   // the frustum, pushed back by the content's depth so nothing near-clips.
   const f = Math.tan((graphCameraFovDegrees * Math.PI) / 360);
@@ -281,8 +300,8 @@ export function frameWorldPoints(
     targetY: center.y,
     targetZ: center.z,
     distance: clamp((Math.max(fitHeight, fitWidth) + halfDepth) * paddingFactor, minCameraDistance, maxCameraDistance),
-    yaw: previous?.yaw ?? 0,
-    pitch: previous?.pitch ?? 0,
+    yaw,
+    pitch,
   };
 }
 
@@ -324,7 +343,7 @@ export interface WorldNode extends WorldPoint {
 /** Map a layout node into centered, y-up world space with community depth. */
 export function worldNodesFor(
   layout: GraphLayoutResult,
-  overrides: ReadonlyMap<string, { x: number; y: number }>,
+  overrides: ReadonlyMap<string, { x: number; y: number; z?: number }>,
 ): WorldNode[] {
   const degrees = new Map<string, number>();
   for (const edge of layout.edges) {
@@ -339,7 +358,7 @@ export function worldNodesFor(
       nodeId: node.nodeId,
       x: layoutX - layout.width / 2,
       y: layout.height / 2 - layoutY,
-      z: communityDepth(node.communityId, node.nodeId),
+      z: override?.z ?? communityDepth(node.communityId, node.nodeId),
       radius: node.radius,
       label: node.label,
       kind: node.kind,
@@ -595,7 +614,7 @@ export interface SceneBuildInput {
   communities: readonly CommunityLike[];
   camera: GraphCameraState;
   viewport: SceneViewport;
-  overrides: ReadonlyMap<string, { x: number; y: number }>;
+  overrides: ReadonlyMap<string, { x: number; y: number; z?: number }>;
   selectedNodeIds: readonly string[];
   hoveredNodeId: string | null;
   maxLabels?: number;

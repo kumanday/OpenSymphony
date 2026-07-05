@@ -28,6 +28,7 @@ import {
   createInitialGraphState,
   graphLayoutKindForMode,
   graphReducer,
+  currentGraphSnapshot,
   visibleGraphSnapshot,
   type GraphDataAdapter,
   type GraphLayoutAdapter,
@@ -775,13 +776,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.render();
       return;
     }
-    // Only surface the loading state before anything is on screen. A
-    // background refresh over an already-rendered graph stays silent: if the
-    // incoming snapshot is identical (the common poll case) nothing resets
-    // the status, and a dangling "loading" would block resize relayouts and
-    // pin the status pill on "Stabilizing" forever.
-    const hasRenderedGraph = Boolean(visibleGraphSnapshot(this.state.knowledgeGraph) && this.state.knowledgeGraphLayout);
-    if (!hasRenderedGraph) {
+    // Only surface the loading state while the very first snapshot is being
+    // fetched. Once a snapshot exists the status belongs to the layout
+    // pipeline: marking background refreshes as "loading" left the status
+    // dangling whenever the poll redelivered an identical snapshot (nothing
+    // resets it), pinning the pill on "Stabilizing" and blocking both resize
+    // relayouts and retries of failed layouts.
+    if (!currentGraphSnapshot(this.state.knowledgeGraph)) {
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
       this.render();
     }
@@ -818,6 +819,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (acceptedSnapshot) {
       this.state.knowledgeGraphLayout = null;
       this.knowledgeGraphLayoutSize = null;
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+    } else if (!this.state.knowledgeGraphLayout && this.state.knowledgeGraph.layoutStatus === "failed") {
+      // Identical poll while nothing is on screen after a failed layout:
+      // return to idle so the next bind pass schedules a retry instead of
+      // staying failed until a newer snapshot happens to arrive.
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
     }
     this.render();

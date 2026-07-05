@@ -122,6 +122,25 @@ describe("camera operations", () => {
     }
   });
 
+  it("frames points so they fit the viewport under an orbited camera", () => {
+    const points = [
+      { x: -420, y: -180, z: -120 },
+      { x: 430, y: 210, z: 140 },
+      { x: 60, y: -240, z: 40 },
+    ];
+    const framed = frameWorldPoints(points, viewport, { yaw: 0.7, pitch: 0.45 }, 1.1);
+    expect(framed.yaw).toBeCloseTo(0.7, 5);
+    expect(framed.pitch).toBeCloseTo(0.45, 5);
+    for (const point of points) {
+      const projected = projectWorldPoint(framed, viewport, point);
+      expect(projected.visible).toBe(true);
+      expect(projected.x).toBeGreaterThanOrEqual(0);
+      expect(projected.x).toBeLessThanOrEqual(viewport.width);
+      expect(projected.y).toBeGreaterThanOrEqual(0);
+      expect(projected.y).toBeLessThanOrEqual(viewport.height);
+    }
+  });
+
   it("unprojects a node's screen position back onto its drag plane", () => {
     const camera = testCamera();
     const world = { x: 150, y: -80, z: 40 };
@@ -286,12 +305,18 @@ describe("scene assembly on the viz fixture", () => {
     expect(hitTestScene(scene, -50, -50)).toBeNull();
   });
 
-  it("applies drag overrides to world positions", () => {
+  it("applies drag overrides to world positions, including dropped z", () => {
     const nodeId = layout.nodes[0].nodeId;
-    const overrides = new Map([[nodeId, { x: 77, y: 88 }]]);
+    const overrides = new Map([[nodeId, { x: 77, y: 88, z: 55 }]]);
     const moved = worldNodesFor(layout, overrides).find((node) => node.nodeId === nodeId)!;
     expect(moved.x).toBeCloseTo(77 - layout.width / 2, 5);
     expect(moved.y).toBeCloseTo(layout.height / 2 - 88, 5);
+    // Drops on an orbited camera-facing plane land off the community depth
+    // band; the stored z wins so the node stays under the cursor.
+    expect(moved.z).toBe(55);
+    const withoutZ = worldNodesFor(layout, new Map([[nodeId, { x: 77, y: 88 }]]))
+      .find((node) => node.nodeId === nodeId)!;
+    expect(withoutZ.z).not.toBe(55);
   });
 });
 
