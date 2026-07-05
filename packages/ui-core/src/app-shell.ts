@@ -4451,7 +4451,10 @@ function renderTaskGraphLink(
       `Q ${routeX} ${y2} ${routeX + turn} ${y2}`,
       `H ${x2}`,
     ].join(" ");
-    return `<path class="os-task-graph-link os-task-graph-link-skip os-tg-hue-${link.hue}" ${linkAttrs} marker-end="url(#os-task-arrow-${link.hue})" d="${escapeAttr(d)}"></path>`;
+    // The hue-specific marker is applied via CSS (see .os-tg-hue-* rules):
+    // a `marker-end` presentation attribute here would lose to the base
+    // `.os-task-graph-link` CSS rule, leaving every skip arrowhead default.
+    return `<path class="os-task-graph-link os-task-graph-link-skip os-tg-hue-${link.hue}" ${linkAttrs} d="${escapeAttr(d)}"></path>`;
   }
   const bend = Math.max(34, Math.abs(y2 - y1) * 0.24);
   const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${Math.max(x2 - bend, x1 + 18)} ${y2}, ${x2} ${y2}`;
@@ -4727,11 +4730,11 @@ function appShellStyles(): string {
     .os-task-graph-links { position: absolute; z-index: 3; inset: 2px auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
     .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); transition: opacity 0.14s ease, stroke-width 0.14s ease; }
     .os-task-graph-link-skip { opacity: 0.72; }
-    .os-task-graph-link.os-tg-hue-0 { stroke: #39708f; }
-    .os-task-graph-link.os-tg-hue-1 { stroke: #7c3aed; }
-    .os-task-graph-link.os-tg-hue-2 { stroke: #0f766e; }
-    .os-task-graph-link.os-tg-hue-3 { stroke: #b0762f; }
-    .os-task-graph-link.os-tg-hue-4 { stroke: #a05577; }
+    .os-task-graph-link.os-tg-hue-0 { stroke: #39708f; marker-end: url(#os-task-arrow-0); }
+    .os-task-graph-link.os-tg-hue-1 { stroke: #7c3aed; marker-end: url(#os-task-arrow-1); }
+    .os-task-graph-link.os-tg-hue-2 { stroke: #0f766e; marker-end: url(#os-task-arrow-2); }
+    .os-task-graph-link.os-tg-hue-3 { stroke: #b0762f; marker-end: url(#os-task-arrow-3); }
+    .os-task-graph-link.os-tg-hue-4 { stroke: #a05577; marker-end: url(#os-task-arrow-4); }
     .os-task-graph-links.os-links-hover .os-task-graph-link { opacity: 0.1; }
     .os-task-graph-links.os-links-hover .os-task-graph-link.is-active { opacity: 1; stroke-width: 2.5; }
     .os-task-graph-links marker path:not([fill]) { fill: #39708f; }

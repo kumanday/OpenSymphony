@@ -733,6 +733,13 @@ describe("OpenSymphonyApp mount", () => {
     // per-source hue/lane instead of sharp L-shapes.
     expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \S+ Q .+ V .+ Q .+ H /);
     expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("class")).toMatch(/os-tg-hue-\d/);
+    // The hue marker is applied via CSS, not an inline `marker-end` that the
+    // base `.os-task-graph-link` rule would override to the default arrow.
+    expect(root.querySelector(".os-task-graph-link-skip")?.hasAttribute("marker-end")).toBe(false);
+    const shellStyleText = Array.from(root.querySelectorAll("style"))
+      .map((style) => style.textContent ?? "")
+      .join("\n");
+    expect(shellStyleText).toMatch(/\.os-tg-hue-0 \{[^}]*marker-end: url\(#os-task-arrow-0\)/);
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-indent")).toBe("34px");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-height")).toBe("78px");
