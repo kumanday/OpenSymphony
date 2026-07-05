@@ -5497,21 +5497,26 @@ function initialSelectedTaskNode(nodes: TaskGraphNode[], rootIds: string[]): Tas
     ...rootIds.map((id) => findNodeByRef(nodes, id)).filter((node): node is TaskGraphNode => Boolean(node)),
     ...nodes,
   ];
-  // Backlog and terminal nodes live in the side panes and have no run to
-  // open, so the initial selection sticks to the Current pane.
+  // Side-pane nodes (backlog, done) have no run to open, so the initial
+  // selection sticks to the Current pane and prefers non-terminal work —
+  // a canceled node only wins when nothing else renders there.
   const current = ordered.filter(isCurrentPaneTaskNode);
   return current.find((node) => node.kind !== "milestone" && node.state_category === "in_progress")
-    ?? current.find((node) => node.kind !== "milestone" && node.run_id)
+    ?? current.find((node) => node.kind !== "milestone" && node.run_id && !isTerminalTaskNode(node))
+    ?? current.find((node) => node.kind !== "milestone" && !isTerminalTaskNode(node))
     ?? current.find((node) => node.kind !== "milestone")
     ?? current[0]
     ?? null;
 }
 
-/** Nodes rendered in the Current pane: dispatchable states, not backlog/terminal. */
+/**
+ * Nodes rendered in the Current pane. Done nodes move to the Completed
+ * pane and backlog nodes to the Backlog pane; canceled nodes stay here —
+ * they have no other pane (the Completed endpoint serves done work only),
+ * so dropping them would make the "Canceled" state filter show nothing.
+ */
 function isCurrentPaneTaskNode(node: TaskGraphNode): boolean {
-  return node.state_category !== "backlog"
-    && node.state_category !== "done"
-    && node.state_category !== "canceled";
+  return node.state_category !== "backlog" && node.state_category !== "done";
 }
 
 function stateToneForTaskNode(node: TaskGraphNode): string {

@@ -108,10 +108,11 @@ The desktop task surface splits into three panes
   unmerged ones struck through — plus a memory-capsule button that opens
   the task's capsule through `openMemoryDeepLink`.
 - **Current** (center, never collapses) — the dispatchable dependency graph
-  as before (Todo / In Progress / Human Review / Rework). Selecting or
-  hovering a task boldens its incoming and outgoing edges, including
-  outgoing edges that leave the pane's right side toward blocked Backlog
-  tasks.
+  as before (Todo / In Progress / Human Review / Rework). Canceled nodes
+  also stay here (they have no other pane, and the Canceled state filter
+  must still surface them). Selecting or hovering a task boldens its
+  incoming and outgoing edges, including outgoing edges that leave the
+  pane's right side toward blocked Backlog tasks.
 - **Backlog** (collapsible, right) — backlog-state Linear issues, now
   included in the task-graph snapshot (`LinearClient::project_task_graph_issues`
   returns them from the same single project scan that already served the

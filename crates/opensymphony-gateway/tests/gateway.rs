@@ -2218,10 +2218,10 @@ async fn gateway_serves_memory_completed_tasks() {
         .await
         .expect("decode completed tasks");
     assert_eq!(page.schema_version.major, 1);
-    assert_eq!(page.total, 2);
+    assert_eq!(page.total, 3);
     assert_eq!(page.sort, "completed_desc");
     // Freshest completion first: the orchestrator row finished just now,
-    // the memory capsule's timestamp is in the past.
+    // the memory capsules' timestamps are in the past.
     assert_eq!(page.tasks[0].issue_key, "COE-370");
     assert_eq!(
         page.tasks[0].source,
@@ -2236,8 +2236,28 @@ async fn gateway_serves_memory_completed_tasks() {
     );
     assert_eq!(page.tasks[1].concept_id, "issues/COE-300");
     assert_eq!(page.tasks[1].state.as_deref(), Some("Done"));
+    assert_eq!(page.tasks[2].issue_key, "COE-302");
     // The In Progress capsule must not leak into the completed list.
     assert!(page.tasks.iter().all(|task| task.issue_key != "COE-301"));
+
+    // Public views serve only public memory capsules: the private COE-302
+    // stays out, and so do orchestrator rows — the control plane has no
+    // visibility metadata, so merging them would reintroduce
+    // privately-captured tasks past the filter.
+    let public = client
+        .get(format!("{base}?visibility=public"))
+        .send()
+        .await
+        .expect("fetch public completed tasks")
+        .json::<MemoryCompletedTaskPage>()
+        .await
+        .expect("decode public completed tasks");
+    assert_eq!(public.total, 1);
+    assert_eq!(public.tasks[0].issue_key, "COE-300");
+    assert_eq!(
+        public.tasks[0].source,
+        opensymphony::opensymphony_gateway_schema::memory_graph::MemoryCompletedTaskSource::Memory,
+    );
 
     // Search narrows on title/key, pagination clamps.
     let filtered = client
@@ -2261,7 +2281,7 @@ async fn gateway_serves_memory_completed_tasks() {
         .json::<MemoryCompletedTaskPage>()
         .await
         .expect("decode second page");
-    assert_eq!(second_page.total, 2);
+    assert_eq!(second_page.total, 3);
     assert_eq!(second_page.tasks.len(), 1);
     assert_eq!(second_page.tasks[0].issue_key, "COE-300");
 
@@ -2337,6 +2357,30 @@ Active body.
 "#,
     )
     .expect("active capsule should write");
+    std::fs::write(
+        issues_dir.join("COE-302.md"),
+        r#"---
+type: issue-capsule
+title: "COE-302: Private completed capsule"
+description: Completed but private.
+state: Done
+timestamp: 2026-06-19T10:00:00Z
+tags: [memory]
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-302
+    - kind: area
+      id: graph-view
+---
+
+# COE-302: Private completed capsule
+
+Private completed body.
+"#,
+    )
+    .expect("private completed capsule should write");
     MemoryConfig::load(repo, Some(&config_path)).expect("memory config should load")
 }
 

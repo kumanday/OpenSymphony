@@ -1306,16 +1306,24 @@ async fn get_memory_completed_tasks(
     let access = memory_graph_access(params.visibility.as_deref())?;
     let mut rows = memory_completed_task_rows(config, access).map_err(memory_graph_error)?;
 
+    // Control-plane issues carry no visibility metadata, and `captured` is
+    // built from the access-filtered rows — merging them under
+    // `visibility=public` would reintroduce privately-captured tasks (title
+    // and PR URL) as `orchestrator` rows. Public views therefore serve
+    // memory-backed rows only.
+    let merge_orchestrator = access == MemoryGraphAccess::AllAccessible;
     let envelope = state.store.current().await;
     let captured = rows
         .iter()
         .map(|row| row.issue_key.to_ascii_uppercase())
         .collect::<HashSet<_>>();
     for issue in &envelope.snapshot.issues {
-        if !matches!(
-            issue.runtime_state,
-            ControlPlaneIssueRuntimeState::Completed
-        ) || captured.contains(&issue.identifier.to_ascii_uppercase())
+        if !merge_orchestrator
+            || !matches!(
+                issue.runtime_state,
+                ControlPlaneIssueRuntimeState::Completed
+            )
+            || captured.contains(&issue.identifier.to_ascii_uppercase())
         {
             continue;
         }

@@ -3398,6 +3398,19 @@ describe("three-pane task graph", () => {
       blocked_by: [],
       labels: ["backlog"],
     },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "canceled-node",
+      kind: "issue" as const,
+      identifier: "COE-463",
+      title: "Canceled experiment",
+      state: "Canceled",
+      state_category: "canceled" as const,
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: [],
+      labels: [],
+    },
   ];
   const threePaneTaskGraph: TaskGraphSnapshot = {
     ...taskGraph,
@@ -3477,6 +3490,9 @@ describe("three-pane task graph", () => {
     expect(root.querySelector("[data-tg-pane='current'] [data-node-id='completed-prereq']")).toBeNull();
     expect(root.querySelector("[data-tg-pane='current'] [data-node-id='backlog-a']")).toBeNull();
     expect(root.querySelectorAll("[data-tg-pane='backlog'] [data-node-id]").length).toBe(3);
+    // Canceled nodes have no other pane: they stay visible in Current so
+    // the Canceled state filter can still surface them.
+    expect(root.querySelector("[data-tg-pane='current'] [data-node-id='canceled-node']")).not.toBeNull();
 
     // Backlog dependency suffix names the Current blocker instead of
     // calling it hidden: both graph panes count as visible.
