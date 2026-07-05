@@ -8,6 +8,7 @@ authors = ["Leonardo Gonzalez <leonardo.gonzalez@trilogy.com>"]
 readme = "README.md"
 keywords = ["ai", "agents", "orchestration", "linear", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = ["docs/specs/task-graph-phases/*.png"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -72,7 +73,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.93"
-version = "2.8.3"
+version = "2.8.4"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
