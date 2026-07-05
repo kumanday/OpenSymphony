@@ -223,6 +223,18 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+For any release version bump, keep the root crate and desktop app metadata in
+lock-step before tagging or publishing. After updating `Cargo.toml` and lockfiles,
+run the desktop release preflight:
+
+```bash
+npm run package:release --workspace=@opensymphony/desktop -- --dry-run
+```
+
+This verifies that `apps/desktop/package.json`,
+`apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/tauri.conf.json`,
+and the desktop Cargo lockfile all match the root Cargo workspace version.
+
 ## Useful commands
 
 ```bash
