@@ -347,7 +347,11 @@ function attachCanvasHandlers(
       state.camera = panCamera(state.camera, viewport, deltaX, deltaY);
       state.goal = state.camera;
     } else if (state.pointer.mode === "orbit") {
-      state.camera = orbitCamera(state.camera, deltaX * 0.005, deltaY * 0.004);
+      // Grab-the-scene orbit: dragging right swings the scene right (the
+      // camera orbits the opposite way), matching pan and common
+      // orbit-controls conventions. Mapping drag deltas straight onto
+      // yaw/pitch felt reversed on both axes.
+      state.camera = orbitCamera(state.camera, -deltaX * 0.005, -deltaY * 0.004);
       state.goal = state.camera;
     } else if (state.pointer.mode === "drag-node" && state.pointer.nodeId && state.options.layout) {
       const worldNode = worldNodesFor(state.options.layout, state.options.view.overrides)

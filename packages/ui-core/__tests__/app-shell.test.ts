@@ -1370,6 +1370,20 @@ describe("OpenSymphonyApp mount", () => {
       canvas.onpointermove!(pointer("pointermove", target!.x + 24, target!.y + 18));
       canvas.onpointerup!(pointer("pointerup", target!.x + 24, target!.y + 18));
       expect(onSelectArea).not.toHaveBeenCalled();
+
+      // Option-drag orbits grab the scene: dragging right/down swings the
+      // camera the opposite way (yaw and pitch decrease), so the scene
+      // follows the cursor instead of moving against it.
+      const view = (canvas as HTMLCanvasElement & { __kgDebug?: { camera: { yaw: number; pitch: number } } }).__kgDebug!;
+      const before = { ...view.camera };
+      const orbitPointer = (type: string, x: number, y: number) =>
+        new MouseEvent(type, { clientX: x, clientY: y, button: 0, altKey: true, bubbles: true }) as PointerEvent;
+      canvas.onpointerdown!(orbitPointer("pointerdown", target!.x, target!.y));
+      canvas.onpointermove!(orbitPointer("pointermove", target!.x + 40, target!.y + 30));
+      canvas.onpointerup!(orbitPointer("pointerup", target!.x + 40, target!.y + 30));
+      const after = (canvas as HTMLCanvasElement & { __kgDebug?: { camera: { yaw: number; pitch: number } } }).__kgDebug!.camera;
+      expect(after.yaw).toBeLessThan(before.yaw);
+      expect(after.pitch).toBeLessThan(before.pitch);
     } finally {
       disposeKnowledgeGraphRenderer(root);
       root.remove();
