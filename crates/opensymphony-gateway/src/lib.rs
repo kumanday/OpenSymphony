@@ -4247,7 +4247,7 @@ mod tests {
                 milestone: None,
                 url: None,
                 completed_at: completed_at.map(|value| {
-                    chrono::DateTime::parse_from_rfc3339(value)
+                    DateTime::parse_from_rfc3339(value)
                         .expect("test timestamp")
                         .with_timezone(&Utc)
                 }),
