@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-desktop"
-version = "2.8.4"
+version = "2.8.5"
 dependencies = [
  "chrono",
  "directories",
