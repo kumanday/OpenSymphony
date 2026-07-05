@@ -347,11 +347,12 @@ function attachCanvasHandlers(
       state.camera = panCamera(state.camera, viewport, deltaX, deltaY);
       state.goal = state.camera;
     } else if (state.pointer.mode === "orbit") {
-      // Grab-the-scene orbit: dragging right swings the scene right (the
-      // camera orbits the opposite way), matching pan and common
-      // orbit-controls conventions. Mapping drag deltas straight onto
-      // yaw/pitch felt reversed on both axes.
-      state.camera = orbitCamera(state.camera, -deltaX * 0.005, -deltaY * 0.004);
+      // Grab-the-scene orbit, tuned by feel: dragging right swings the
+      // scene right (yaw inverted from the raw delta), and dragging up
+      // tilts the scene away/up (pitch follows the raw delta). Signs are
+      // deliberate — both once mapped straight onto yaw/pitch and read
+      // reversed horizontally; a full inversion read reversed vertically.
+      state.camera = orbitCamera(state.camera, -deltaX * 0.005, deltaY * 0.004);
       state.goal = state.camera;
     } else if (state.pointer.mode === "drag-node" && state.pointer.nodeId && state.options.layout) {
       const worldNode = worldNodesFor(state.options.layout, state.options.view.overrides)

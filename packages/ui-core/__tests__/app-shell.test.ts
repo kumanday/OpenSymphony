@@ -1371,9 +1371,10 @@ describe("OpenSymphonyApp mount", () => {
       canvas.onpointerup!(pointer("pointerup", target!.x + 24, target!.y + 18));
       expect(onSelectArea).not.toHaveBeenCalled();
 
-      // Option-drag orbits grab the scene: dragging right/down swings the
-      // camera the opposite way (yaw and pitch decrease), so the scene
-      // follows the cursor instead of moving against it.
+      // Option-drag orbits grab the scene: dragging right swings the scene
+      // right (yaw decreases, inverted from the raw delta) while dragging
+      // down tilts it down (pitch follows the raw delta) — tuned by feel,
+      // see the orbit handler comment.
       const view = (canvas as HTMLCanvasElement & { __kgDebug?: { camera: { yaw: number; pitch: number } } }).__kgDebug!;
       const before = { ...view.camera };
       const orbitPointer = (type: string, x: number, y: number) =>
@@ -1383,7 +1384,7 @@ describe("OpenSymphonyApp mount", () => {
       canvas.onpointerup!(orbitPointer("pointerup", target!.x + 40, target!.y + 30));
       const after = (canvas as HTMLCanvasElement & { __kgDebug?: { camera: { yaw: number; pitch: number } } }).__kgDebug!.camera;
       expect(after.yaw).toBeLessThan(before.yaw);
-      expect(after.pitch).toBeLessThan(before.pitch);
+      expect(after.pitch).toBeGreaterThan(before.pitch);
     } finally {
       disposeKnowledgeGraphRenderer(root);
       root.remove();
