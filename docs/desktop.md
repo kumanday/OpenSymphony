@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 
 ## Current model
 
-- PR-196 contributed: PR #196: perf(desktop): fix task/diff click latency and live-refresh selection clobbering (merge `428acc9`)
+- PR-197 contributed: PR #197: feat(graph): 3D knowledge-graph command center, differentiated task-graph arrows, shared viz fixtures (merge `8e341b5`)
 
 ## Important invariants
 
@@ -28,11 +28,11 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 
 ## Recent changes
 
-- PR-196: Desktop task and diff latency plus live-refresh UX fixes
+- PR-197: Graph visualization command center and shared fixtures
 
 ## Source refs
 
-- PR-196
+- PR-197
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
 ## Local Build And Run
