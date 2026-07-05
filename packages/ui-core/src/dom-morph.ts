@@ -133,6 +133,13 @@ function morphNode(current: Node, next: Node): void {
     return;
   }
 
+  if (currentElement.hasAttribute("data-morph-ignore-children")) {
+    // Imperative islands (e.g. the knowledge-graph overlay layer) own their
+    // children outside the render cycle; only their attributes sync.
+    syncAttributes(currentElement, nextElement, focused);
+    return;
+  }
+
   // Capture the target form state before morphing children: reconciliation
   // can move option nodes out of `next`, which would change its `value`.
   const formState = captureFormState(nextElement);

@@ -42,6 +42,10 @@ export {
 export type { TauriChannel, TauriRuntime } from "./transports.js";
 export { MockGatewayTransport } from "./mock.js";
 export {
+  createGraphVizDemoTransport,
+  graphVizDemoTaskGraph,
+} from "./graph-viz-demo.js";
+export {
   StreamReplayBuffer,
   orderedEvents,
   StreamCorrelator,

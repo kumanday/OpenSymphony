@@ -73,6 +73,13 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 - The daemon must remain correct without any UI attached.
 - The UI consumes the control-plane snapshot and event stream only.
 - UI code must not reach into orchestrator internals directly.
+- Graph-visualization work (knowledge graph, task graph arrows) iterates
+  against the shared fixtures and desktop `?fixtures` workbench described in
+  `docs/graph-view.md` ("Graph visualization workbench"). Do not recreate
+  ad-hoc demo data; extend `packages/graph/src/viz-fixture.ts` and
+  `packages/api-client/src/graph-viz-demo.ts` instead, and keep the scene
+  math covered by `packages/ui-core/__tests__/knowledge-graph-scene.test.ts`
+  (including the THREE.js projection-parity test).
 
 ### CLI surface
 
