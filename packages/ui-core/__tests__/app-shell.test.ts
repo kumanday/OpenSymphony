@@ -1130,6 +1130,84 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("discards in-flight capsule responses superseded by an accepted graph refresh", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    let releaseFirstDetail: (() => void) | null = null;
+    const firstDetailGate = new Promise<void>((resolve) => {
+      releaseFirstDetail = resolve;
+    });
+    let snapshotReads = 0;
+    let detailCalls = 0;
+    const graphAdapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      async getGraphSnapshot() {
+        snapshotReads += 1;
+        return snapshotReads > 1
+          ? {
+              ...fixtureGraphSnapshot,
+              cursor: { ...fixtureGraphSnapshot.cursor, sequence: 2 },
+              metrics: { orphan_count: 0, broken_link_count: 0, stale_concept_count: 0, warning_count: 1 },
+            }
+          : fixtureGraphSnapshot;
+      },
+      async getConceptDetail(bundleId, conceptId) {
+        detailCalls += 1;
+        if (detailCalls === 1) await firstDetailGate;
+        return {
+          ...fixtureConceptDetail,
+          bundle_id: bundleId,
+          concept_id: conceptId,
+          body_markdown: `# capsule fetch ${detailCalls}`,
+        };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, graphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-graph-view='knowledge']") !== null);
+      (root.querySelector("[data-graph-view='knowledge']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") !== null);
+
+      // Start the capsule fetch, then let an accepted refresh land while it
+      // is still in flight.
+      (root.querySelector(".os-kg-list [data-kg-node-id='concept:coe-465']") as HTMLButtonElement).click();
+      await flushUntil(() => detailCalls === 1);
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 30, partition: "events" },
+        entity_ref: { kind: "unknown", id: "memory-graph:local-default" },
+        event_kind: "memory_graph_updated",
+        emitted_at: "2026-06-28T00:02:00Z",
+        payload: {
+          schema_version: schemaVersionV1(),
+          bundle_id: "local-default",
+          cursor: { sequence: 2, partition: "memory-graph:local-default" },
+          updated_at: "2026-06-28T00:02:00Z",
+        },
+      });
+      await flushUntil(() => snapshotReads === 2);
+      await flushUntil(() => root.querySelector("[data-testid='knowledge-graph-status']")?.textContent?.includes("Graph warnings") ?? false);
+
+      // The pre-refresh response must be discarded and refetched, not
+      // written back over the invalidated cache.
+      releaseFirstDetail?.();
+      await flushUntil(() =>
+        root.querySelector("[data-testid='knowledge-graph-capsule-body']")?.textContent?.includes("capsule fetch 2") ?? false,
+      );
+      expect(detailCalls).toBe(2);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("navigates memory deep links into a drilled capsule and steps back out with Escape", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1186,6 +1264,14 @@ describe("OpenSymphonyApp mount", () => {
       // Community deep links drill straight into the area.
       expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
       await flushUntil(() => breadcrumb().includes("Gateway"));
+
+      // A community deep link into the already-drilled area lands on the
+      // area view: the stale capsule selection is cleared, not kept.
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/concepts/concepts/gateway-01")).toBe(true);
+      await flushUntil(() => breadcrumb().includes("Gateway DTO Boundary Checklist"));
+      expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
+      await flushUntil(() => !breadcrumb().includes("Gateway DTO Boundary Checklist"));
+      expect(breadcrumb()).toContain("Gateway");
     } finally {
       await handle.destroy();
     }

@@ -2664,13 +2664,21 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   /** Drill into an area cloud: community mode filtered to that area's members. */
   private drillIntoKnowledgeArea(areaId: string): void {
     const graph = this.state.knowledgeGraph;
-    if (graph.mode === "community" && graph.filters.communities.length === 1 && graph.filters.communities[0] === areaId) {
+    const alreadyDrilled = graph.mode === "community"
+      && graph.filters.communities.length === 1
+      && graph.filters.communities[0] === areaId;
+    if (alreadyDrilled && graph.selectedNodeIds.length === 0 && graph.focusedNodeId === null) {
       return;
     }
+    // Re-drilling into the current area still clears selection/focus (the
+    // requested destination is the area view, not the open capsule) — it
+    // just skips the redundant filter change and relayout.
     this.state.knowledgeGraph = graphReducer(graph, { type: "NODE_FOCUSED", nodeId: null });
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "SELECTION_SET", nodeIds: [] });
-    this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: areaId });
-    this.invalidateKnowledgeGraphLayout();
+    if (!alreadyDrilled) {
+      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "COMMUNITY_SELECTED", communityId: areaId });
+      this.invalidateKnowledgeGraphLayout();
+    }
     this.render();
   }
 
@@ -2771,13 +2779,26 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const key = `${bundleId}:${conceptId}`;
     if (this.knowledgeCapsuleRequest === key || this.knowledgeCapsuleError?.key === key) return;
     this.knowledgeCapsuleRequest = key;
+    // Snapshot generation guard: an accepted refresh while this request is
+    // in flight invalidates the bundle's capsule cache, and this response
+    // may predate the refresh — writing it back would pin stale markdown
+    // against the current graph. Discard it instead; the follow-up render
+    // refetches against the new snapshot.
+    const cursorBefore = graph.snapshots[bundleId]?.cursor;
     try {
       const detail = await this.graphAdapter.getConceptDetail(bundleId, conceptId);
       if (this.destroyed) return;
-      // Cache under the id we asked for: a server echoing an alias id would
-      // otherwise miss the cache and refetch on every render.
-      const normalized = detail.concept_id === conceptId ? detail : { ...detail, concept_id: conceptId };
-      this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "CONCEPT_DETAIL_LOADED", detail: normalized });
+      const cursorAfter = this.state.knowledgeGraph.snapshots[bundleId]?.cursor;
+      const superseded = cursorBefore === undefined
+        || cursorAfter === undefined
+        || cursorAfter.partition !== cursorBefore.partition
+        || cursorAfter.sequence !== cursorBefore.sequence;
+      if (!superseded) {
+        // Cache under the id we asked for: a server echoing an alias id
+        // would otherwise miss the cache and refetch on every render.
+        const normalized = detail.concept_id === conceptId ? detail : { ...detail, concept_id: conceptId };
+        this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "CONCEPT_DETAIL_LOADED", detail: normalized });
+      }
     } catch (error) {
       if (this.destroyed) return;
       this.knowledgeCapsuleError = { key, message: errorMessage(error) };
