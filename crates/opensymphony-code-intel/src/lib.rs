@@ -1588,30 +1588,39 @@ fn rust_impl_container(
     else {
         return Ok((None, Vec::new()));
     };
-    let name = owner
+    let owner_parts = owner
         .utf8_text(source)
-        .map(rust_container_part)?
+        .map(rust_container_parts)?
         .unwrap_or_default();
-    if name.is_empty() {
+    let Some(owner_name) = owner_parts.last() else {
         return Ok((None, Vec::new()));
-    }
+    };
     let trait_name = impl_item
         .child_by_field_name("trait")
         .and_then(|node| node.utf8_text(source).ok())
         .and_then(rust_container_part);
     if let Some(trait_name) = trait_name {
-        Ok((
-            Some(trait_name.to_string()),
-            vec![name.to_string(), trait_name.to_string()],
-        ))
+        let mut chain = owner_parts;
+        chain.push(trait_name.to_string());
+        Ok((Some(trait_name.to_string()), chain))
     } else {
-        Ok((Some(name.to_string()), vec![name.to_string()]))
+        Ok((Some(owner_name.to_string()), owner_parts))
     }
 }
 
 fn rust_container_part(text: &str) -> Option<&str> {
     let trimmed = text.split('<').next().unwrap_or(text).trim();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn rust_container_parts(text: &str) -> Option<Vec<String>> {
+    let parts = rust_container_part(text)?
+        .split("::")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then_some(parts)
 }
 
 fn span_strictly_contains(outer: &SourceSpan, inner: &SourceSpan) -> bool {
@@ -2420,6 +2429,23 @@ mod tests {
             .expect("nested impl method");
         assert_eq!(method.container_name.as_deref(), Some("Widget"));
         assert_eq!(method.container_chain, vec!["outer", "Widget"]);
+    }
+
+    #[test]
+    fn rust_qualified_impl_owners_split_into_container_chain_parts() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/qualified_impl.rs")),
+            "mod m {\n    struct Widget;\n}\nimpl m::Widget {\n    fn run(&self) {}\n}\n",
+        )
+        .expect("rust parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
+            .expect("qualified impl method");
+        assert_eq!(method.container_name.as_deref(), Some("Widget"));
+        assert_eq!(method.container_chain, vec!["m", "Widget"]);
     }
 
     #[test]
