@@ -1,0 +1,529 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Task Graph Phase Final Candidate V2</title>
+<style>
+  :root {
+    --bg: #f5f7fb;
+    --panel: #fff;
+    --line: #d8e0ea;
+    --soft: #eef4fa;
+    --text: #17212f;
+    --muted: #6b7b91;
+    --blue: #2f7fd3;
+    --green: #1f9d59;
+    --violet: #7f52d9;
+    --orange: #d37724;
+    --red: #c84b3d;
+    --teal: #129187;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-width: 1600px;
+    min-height: 980px;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .source-nav {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 20;
+  }
+  .source-nav a {
+    display: inline-grid;
+    place-items: center;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fbfdff;
+    color: var(--text);
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .app { width: 1600px; min-height: 980px; padding: 12px 16px; }
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 48px;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { font-size: 18px; font-weight: 750; margin-right: auto; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .pill, button, select, input {
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fbfdff;
+    color: var(--text);
+  }
+  .pill { padding: 8px 12px; }
+  .hero {
+    margin-top: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 14px;
+  }
+  .hero-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+  h1 { margin: 0; font-size: 17px; }
+  .tabs { margin-left: auto; display: flex; gap: 6px; }
+  .tab { padding: 6px 12px; border-radius: 7px; border: 1px solid transparent; }
+  .tab.active { border-color: #8bb7dc; background: #edf7ff; font-weight: 700; }
+  .filters {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1.45fr auto;
+    gap: 10px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 10px;
+    margin-bottom: 10px;
+  }
+  label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  select, input, button { height: 32px; padding: 0 10px; font: inherit; }
+  .visibility {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    height: 40px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 0 12px;
+    margin-bottom: 10px;
+    color: #40516a;
+  }
+  .check { width: 14px; height: 14px; border-radius: 3px; display: inline-grid; place-items: center; color: white; font-size: 10px; margin-right: 5px; }
+  .blue { background: var(--blue); }
+  .green { background: var(--green); }
+  .violet { background: var(--violet); }
+  .legend { margin-left: auto; display: flex; gap: 16px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  .graph {
+    position: relative;
+    display: grid;
+    gap: 10px;
+    min-height: 535px;
+  }
+  .layout-expanded { grid-template-columns: 520px 1fr 440px; }
+  .layout-done-collapsed { grid-template-columns: 60px 1.25fr 0.9fr; }
+  .layout-backlog-collapsed { grid-template-columns: 60px 1fr 58px; }
+  .layout-ancestry { grid-template-columns: 60px 1fr 1.05fr; }
+  .pane {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+  }
+  .pane-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 42px;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 750;
+  }
+  .count { border-radius: 999px; padding: 2px 8px; font-size: 12px; background: #e9f7ee; color: #167246; font-weight: 700; }
+  .count.blue-count { background: #e8f2ff; color: #2466a8; }
+  .count.violet-count { background: #f1ecff; color: #6542c4; }
+  .icon {
+    width: 28px;
+    height: 28px;
+    display: inline-grid;
+    place-items: center;
+    padding: 0;
+    margin-left: auto;
+    font-weight: 900;
+  }
+  .icon + .icon { margin-left: 4px; }
+  .done-table { padding: 10px; }
+  .done-search { width: 100%; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 7px 6px; border-bottom: 1px solid #e9eef5; text-align: left; white-space: nowrap; }
+  th { color: #596a82; font-size: 11px; font-weight: 800; }
+  td a { color: #126dcc; text-decoration: none; font-weight: 700; }
+  .pager {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding-top: 12px;
+  }
+  .page { min-width: 30px; height: 30px; display: inline-grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: #fbfdff; }
+  .page.active { border-color: var(--blue); background: #edf7ff; color: #0b579c; font-weight: 800; }
+  .collapsed {
+    display: grid;
+    grid-template-rows: 42px 1fr;
+    background: linear-gradient(90deg, rgba(31,157,89,0.06), #fff);
+  }
+  .collapsed .pane-head {
+    justify-content: center;
+    padding: 0;
+    gap: 0;
+  }
+  .collapsed-label {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    justify-self: center;
+    align-self: start;
+    margin-top: 18px;
+    display: grid;
+    gap: 10px;
+    justify-items: center;
+    font-weight: 800;
+  }
+  .collapsed-label .count { writing-mode: horizontal-tb; transform: rotate(180deg); }
+  .tasks {
+    position: relative;
+    height: 492px;
+    padding-top: 10px;
+  }
+  .task {
+    position: absolute;
+    height: 58px;
+    border: 1px solid #c7d4e3;
+    border-radius: 7px;
+    background: #fff;
+    padding: 8px 10px 8px 42px;
+  }
+  .task.small { height: 52px; }
+  .task.selected { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(47,127,211,0.14); background: #f4f9ff; }
+  .task.bold { border-width: 2px; font-weight: 760; background: #fbfdff; }
+  .task.muted { opacity: 0.42; }
+  .task.target { border-color: var(--red); border-width: 2px; background: #fff8f6; }
+  .play {
+    position: absolute;
+    left: 12px;
+    top: 17px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid #b7cadd;
+    display: grid;
+    place-items: center;
+    color: var(--blue);
+    background: #f3f9ff;
+    font-size: 11px;
+  }
+  .task b { font-size: 12px; }
+  .task span { color: #6b7890; margin-left: 6px; }
+  .dep { color: #b63d1f; font-size: 12px; margin-top: 2px; }
+  .chips { display: flex; gap: 6px; margin-top: 3px; color: #617187; font-size: 11px; }
+  .chip { border-radius: 999px; background: #edf3f8; padding: 1px 7px; }
+  .chip.greenish { background: #e8f7ee; color: #167246; }
+  .graph-svg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .edge { fill: none; stroke-width: 2.2; opacity: 0.78; marker-end: url(#arrow); }
+  .edge.faded { opacity: 0.22; stroke-width: 1.7; }
+  .edge.bold-edge { opacity: 1; stroke-width: 3.1; marker-end: url(#arrow-bold); }
+  .edge.critical { opacity: 1; stroke-width: 3.3; stroke: var(--violet); marker-end: url(#arrow-critical); }
+  .phase-link { stroke-dasharray: 0; }
+  .lower {
+    display: grid;
+    grid-template-columns: 1fr 0.8fr 1.2fr;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .lower .box {
+    height: 178px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px;
+  }
+  .box h3 { margin: 0 0 8px; font-size: 14px; }
+  .run-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 10px; }
+  .metric { border: 1px solid #e0e7ef; border-radius: 6px; padding: 7px; }
+  .metric span { display: block; color: var(--muted); font-size: 11px; }
+  .diff {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #f6f9fc;
+    border: 1px solid #e0e7ef;
+    border-radius: 6px;
+    padding: 8px;
+    color: #496079;
+  }
+  .addition { background: #dcf8df; color: #098444; display: block; }
+</style>
+<nav class="source-nav"><a href="index.html">Image catalog</a></nav>
+<div class="app">
+  <div class="top">
+    <div>
+      <div class="brand">OpenSymphony Desktop (fixtures)</div>
+      <div class="sub">Connected to http://graph-viz.fixtures.local</div>
+    </div>
+    <div class="pill"><b>Dashboard</b></div>
+    <div class="pill">Planning <b style="color:#b48100">WIP</b></div>
+    <div class="pill"><span style="color:var(--green)">●</span> Connected</div>
+    <div class="pill">2 running&nbsp; 0 retry&nbsp; <b>216K</b> tokens</div>
+    <div class="pill">Local Daemon 🔗</div>
+    <div class="pill">07:00:00 PM VIZ</div>
+    <div class="pill">Log</div>
+    <div class="pill">g. Model profile... ⚙</div>
+  </div>
+  <div class="hero">
+    <div class="hero-head">
+      <div>
+        <h1>Graph Surface</h1>
+        <div class="sub">Task scheduling and run context</div>
+      </div>
+      <div class="tabs">
+        <div class="tab active">Task Graph</div>
+        <div class="tab">Knowledge Graph</div>
+        <div class="tab">Code Graph</div>
+      </div>
+    </div>
+    <div class="filters">
+      <label>Kind<select><option>All kinds</option></select></label>
+      <label>Runtime<select><option>All runtime</option></select></label>
+      <label>State<select><option>All states</option></select></label>
+      <label>Search<input placeholder="Filter tasks..."></label>
+      <label>&nbsp;<button>Reset</button></label>
+    </div>
+    <div class="visibility">
+      <span>Visibility</span>
+      <span><span class="check blue">✓</span>Dispatchable (current)</span>
+      <span><span class="check green">✓</span>Show Done</span>
+      <span><span class="check violet">✓</span>Show Backlog</span>
+      <span>Grouping <select><option>By dependency (default)</option></select></span>
+      <span class="legend">
+        <span><i class="dot" style="background:#92cfaa"></i>Done</span>
+        <span><i class="dot" style="background:#5895df"></i>Dispatchable</span>
+        <span><i class="dot" style="background:#956ce1"></i>Backlog</span>
+      </span>
+    </div>
+    <div id="graph"></div>
+    <div class="lower">
+      <div class="box">
+        <h3>Run Detail <span class="sub">VIZ-101</span></h3>
+        <div class="sub">deps: ready | completed blockers VIZ-100 | blocks VIZ-102, VIZ-103, VIZ-104</div>
+        <div class="run-grid">
+          <div class="metric"><span>Phase</span><b>active</b></div>
+          <div class="metric"><span>Stream</span><b>healthy</b></div>
+          <div class="metric"><span>Turns</span><b>2</b></div>
+          <div class="metric"><span>Runtime</span><b>210s</b></div>
+          <div class="metric"><span>Input</span><b>12K</b></div>
+        </div>
+      </div>
+      <div class="box">
+        <h3>Changed Files</h3>
+        <div class="metric"><b>MODIFIED</b> packages/ui-core/src/knowledge-graph-renderer.ts <b style="color:#1f9d59">+320</b> <b style="color:#c84b3d">-180</b></div>
+        <div class="metric" style="margin-top:8px"><b>CREATED</b> packages/ui-core/src/knowledge-graph-scene.ts <b style="color:#1f9d59">+400</b></div>
+      </div>
+      <div class="box">
+        <h3>Inspector</h3>
+        <div class="diff">
+          @@ -1,2 +1,4 @@<br>
+          // graph viz workbench<br>
+          <span class="addition">+export const hulls = buildAreaHulls(layout);</span>
+          <span class="addition">+export const tooltip = buildTooltipModel(hover);</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const state = new URLSearchParams(location.search).get("state") || "expanded";
+const current = [
+  ["A", "VIZ-101", "Shared projector foundation", "blocks VIZ-102, VIZ-103, VIZ-104"],
+  ["B", "VIZ-102", "Area hull computation", "blocked by VIZ-101 | blocks VIZ-103"],
+  ["C", "VIZ-103", "Hover highlight and tooltip", "blocked by VIZ-102 | blocks VIZ-104, VIZ-105, VIZ-106, VIZ-107, VIZ-114, VIZ-115"],
+  ["D", "VIZ-104", "Node dragging interactions", "blocked by VIZ-101, VIZ-103 | blocks VIZ-108, VIZ-117"],
+  ["X", "VIZ-105", "Zoom-dependent label fades", "blocked by VIZ-103 | blocks VIZ-109"],
+  ["Y", "VIZ-106", "Camera framing animations", "blocked by VIZ-103 | blocks VIZ-109, VIZ-110"],
+  ["Z", "VIZ-107", "Task graph lane routing", "blocked by VIZ-103 | blocks VIZ-111"],
+  ["W", "VIZ-108", "Arrow palette and markers", "blocked by VIZ-104 | blocks VIZ-111, VIZ-112"],
+];
+const backlog = [
+  ["E", "VIZ-114", "Changelog & publish", "blocked by VIZ-103"],
+  ["F", "VIZ-115", "Frame budget analysis", "blocked by VIZ-103"],
+  ["G", "VIZ-116", "Memory & leak audit", "blocked by VIZ-114, VIZ-115"],
+  ["H", "VIZ-117", "Release evidence pack", "blocked by VIZ-104, VIZ-116"],
+  ["I", "VIZ-118", "Packaging fallback polish", "blocked by VIZ-116"],
+  ["J", "VIZ-119", "Docs site update", "blocked by VIZ-108"],
+  ["K", "VIZ-120", "Post-release validation", "blocked by VIZ-117, VIZ-119"],
+];
+const doneRows = [
+  ["VIZ-100", "Scene model spike", "#101", "May 01"],
+  ["VIZ-099", "Data pipeline setup", "#100", "Apr 30"],
+  ["VIZ-098", "Graph schema v1", "#98", "Apr 30"],
+  ["VIZ-097", "Tokenization service", "#97", "Apr 29"],
+  ["VIZ-096", "Auth integration", "#96", "Apr 29"],
+  ["VIZ-095", "Build system config", "#95", "Apr 28"],
+  ["VIZ-094", "Logging baseline", "#94", "Apr 28"],
+  ["VIZ-093", "Local runner", "#93", "Apr 27"],
+  ["VIZ-092", "CLI scaffolding", "#92", "Apr 27"],
+  ["VIZ-091", "Config loader", "#91", "Apr 26"],
+  ["VIZ-090", "Health checks", "#90", "Apr 26"],
+  ["VIZ-089", "Metrics exporter", "#89", "Apr 25"],
+  ["VIZ-088", "Cache layer", "#88", "Apr 25"],
+  ["VIZ-087", "Test harness", "#87", "Apr 24"],
+];
+const currentEdges = [["A","B"],["B","C"],["A","D"],["C","D"],["C","X"],["C","Y"],["C","Z"],["D","W"]];
+const backlogEdges = [["E","G"],["F","G"],["G","H"],["G","I"],["H","K"],["J","K"]];
+const crossEdges = [["C","E"],["C","F"],["D","H"],["X","J"],["Y","I"],["Z","K"],["W","J"]];
+const lanes = {
+  current: { A: 0, B: 1, C: 2, D: 3, X: 3, Y: 3, Z: 3, W: 4 },
+  backlog: { E: 0, F: 0, G: 1, H: 2, I: 2, J: 0, K: 3 },
+};
+const colors = ["#2f7fd3","#8c55e8","#14927e","#d37724","#ba5e79","#567fa7","#a46a2a"];
+const boldCurrent = state === "current-selected" ? new Set(["B","C","D","X","Y","Z","E","F"]) : new Set();
+const ancestry = state === "backlog-ancestry" ? new Set(["A","D","F","G","H"]) : new Set();
+
+function paneHeader(kind, title, count, collapsed = false) {
+  const cls = kind === "current" ? "blue-count" : kind === "backlog" ? "violet-count" : "";
+  const controls = collapsed ? `<button class="icon" aria-label="expand ${title}">›</button>` : `<button class="icon" aria-label="collapse ${title}">‹</button>`;
+  return `<div class="pane-head"><span style="color:var(--${kind === "backlog" ? "violet" : kind === "done" ? "green" : "blue"})">●</span>${title}<span class="count ${cls}">${count}</span>${controls}</div>`;
+}
+function donePane(collapsed) {
+  if (collapsed) {
+    return `<section class="pane collapsed">${paneHeader("done", "", "", true)}<div class="collapsed-label"><span>Done</span><span class="count">50</span></div></section>`;
+  }
+  return `<section class="pane">
+    ${paneHeader("done", "Done", "50 done")}
+    <div class="done-table">
+      <input class="done-search" placeholder="Search done...">
+      <table><thead><tr><th>ID ↑</th><th>Title ↕</th><th>PR ↕</th><th>Done ↓</th><th>Capsule</th><th>Source</th></tr></thead>
+      <tbody>${doneRows.map(row => `<tr><td><b>${row[0]}</b></td><td>${row[1]}</td><td><a>${row[2]}</a></td><td>${row[3]}</td><td>◇</td><td>▣</td></tr>`).join("")}</tbody></table>
+      <div class="pager"><span class="page">‹</span><span class="page active">1</span><span class="page">2</span><span class="page">3</span><span class="page">4</span><span class="page">5</span><span class="page">›</span><span style="margin-left:auto">25 / page ▾</span></div>
+    </div>
+  </section>`;
+}
+function taskMarkup(kind, task, top, selected, bold, muted, target) {
+  const lane = lanes[kind][task[0]] ?? 0;
+  const left = 86 + lane * 42;
+  const right = 12 + Math.max(0, 3 - lane) * 6;
+  return `<div class="task ${selected ? "selected" : ""} ${bold ? "bold" : ""} ${muted ? "muted" : ""} ${target ? "target" : ""}" data-key="${task[0]}" data-depth="${lane}" style="top:${top}px;left:${left}px;right:${right}px">
+    <span class="play">▶</span><b>${task[1]}</b><span>${task[2]}</span><div class="dep">${task[3]}</div>
+    <div class="chips"><span>ISSUE</span><span class="chip greenish">${task[1] === "VIZ-101" || task[1] === "VIZ-102" ? "In Progress" : "Todo"}</span></div>
+  </div>`;
+}
+function graphPane(kind, tasks, collapsed = false) {
+  if (collapsed) {
+    return `<section class="pane collapsed" style="background:linear-gradient(90deg, rgba(127,82,217,0.06), #fff)">${paneHeader("backlog", "", "", true)}<div class="collapsed-label"><span>Backlog</span><span class="count violet-count">50</span></div></section>`;
+  }
+  const title = kind === "current" ? "Current" : "Backlog";
+  const count = kind === "current" ? "5 current" : "50 backlog";
+  const selectedKey = state === "current-selected" && kind === "current" ? "C" : state === "backlog-ancestry" && kind === "backlog" ? "H" : "";
+  const rows = tasks.map((task, index) => {
+    const top = 10 + index * 61;
+    const bold = boldCurrent.has(task[0]) || ancestry.has(task[0]);
+    const muted = state === "backlog-ancestry" && kind === "backlog" && !ancestry.has(task[0]) && task[0] !== "H";
+    return taskMarkup(kind, task, top, task[0] === selectedKey, bold, muted, state === "backlog-ancestry" && task[0] === "H");
+  }).join("");
+  return `<section class="pane graph-pane ${kind}" data-kind="${kind}">
+    ${paneHeader(kind, title, count)}
+    <div class="tasks">${rows}<svg class="graph-svg"></svg></div>
+  </section>`;
+}
+function render() {
+  const doneCollapsed = state !== "expanded";
+  const backlogCollapsed = state === "backlog-collapsed";
+  const layout = state === "expanded" ? "layout-expanded" : state === "backlog-collapsed" ? "layout-backlog-collapsed" : state === "backlog-ancestry" ? "layout-ancestry" : "layout-done-collapsed";
+  document.querySelector("#graph").outerHTML = `<div id="graph" class="graph ${layout}">${donePane(doneCollapsed)}${graphPane("current", current)}${graphPane("backlog", backlog, backlogCollapsed)}</div>`;
+  requestAnimationFrame(drawEdges);
+}
+function center(root, key) {
+  const el = root.querySelector(`[data-key="${key}"]`);
+  if (!el) return null;
+  const box = el.getBoundingClientRect();
+  const pane = root.getBoundingClientRect();
+  return { x: box.left - pane.left + 18, y: box.top - pane.top + box.height / 2, right: box.right - pane.left };
+}
+function pathInternal(from, to, lane, width) {
+  const startX = from.x;
+  const endX = to.x;
+  const routeX = Math.max(12, Math.min(startX - 22, endX - 18) - lane * 9);
+  const turn = 10;
+  return `M ${startX} ${from.y} H ${routeX + turn} Q ${routeX} ${from.y} ${routeX} ${from.y + turn} V ${to.y - turn} Q ${routeX} ${to.y} ${routeX + turn} ${to.y} H ${endX}`;
+}
+function pathCross(from, to, rootRect, leftRoot, rightRoot) {
+  const sx = from.right + 4;
+  const sy = from.y;
+  const tx = to.x;
+  const ty = to.y;
+  const dx = Math.max(52, (tx - sx) * 0.42);
+  return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`;
+}
+function edgeClass(a, b) {
+  if (state === "current-selected") {
+    return a === "C" || b === "C" ? "edge bold-edge" : "edge faded";
+  }
+  if (state === "backlog-ancestry") {
+    const critical = (a === "A" && b === "D") || (a === "D" && b === "H") || (a === "F" && b === "G") || (a === "G" && b === "H");
+    return critical ? "edge critical" : "edge faded";
+  }
+  return "edge";
+}
+function drawPaneEdges(pane, edges) {
+  if (!pane) return;
+  const svg = pane.querySelector("svg");
+  svg.innerHTML = markerDefs();
+  edges.forEach(([a, b], index) => {
+    const from = center(pane, a);
+    const to = center(pane, b);
+    if (!from || !to) return;
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathInternal(from, to, Math.min(index, 8), pane.clientWidth));
+    path.setAttribute("class", edgeClass(a, b));
+    path.setAttribute("stroke", colors[index % colors.length]);
+    svg.appendChild(path);
+  });
+}
+function drawCrossEdges() {
+  const currentPane = document.querySelector(".current .tasks");
+  const backlogPane = document.querySelector(".backlog .tasks");
+  if (!currentPane || !backlogPane) return;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("graph-svg");
+  svg.style.inset = "0";
+  svg.style.position = "absolute";
+  svg.style.zIndex = 3;
+  svg.innerHTML = markerDefs();
+  document.querySelector("#graph").appendChild(svg);
+  const graphRect = document.querySelector("#graph").getBoundingClientRect();
+  const currentRect = currentPane.getBoundingClientRect();
+  const backlogRect = backlogPane.getBoundingClientRect();
+  crossEdges.forEach(([a, b], index) => {
+    const ca = currentPane.querySelector(`[data-key="${a}"]`);
+    const bb = backlogPane.querySelector(`[data-key="${b}"]`);
+    if (!ca || !bb) return;
+    const fromBox = ca.getBoundingClientRect();
+    const toBox = bb.getBoundingClientRect();
+    const from = { right: fromBox.right - graphRect.left, y: fromBox.top - graphRect.top + fromBox.height / 2 };
+    const to = { x: toBox.left - graphRect.left + 18, y: toBox.top - graphRect.top + toBox.height / 2 };
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", `M ${from.right + 4} ${from.y} C ${from.right + 62} ${from.y}, ${to.x - 70} ${to.y}, ${to.x} ${to.y}`);
+    const klass = state === "current-selected"
+      ? (a === "C" ? "edge bold-edge phase-link" : "edge faded phase-link")
+      : edgeClass(a, b) + " phase-link";
+    path.setAttribute("class", klass);
+    path.setAttribute("stroke", colors[(index + 2) % colors.length]);
+    svg.appendChild(path);
+  });
+}
+function markerDefs() {
+  return `<defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"></path></marker>
+    <marker id="arrow-bold" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"></path></marker>
+    <marker id="arrow-critical" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"></path></marker>
+  </defs>`;
+}
+function drawEdges() {
+  drawPaneEdges(document.querySelector(".current .tasks"), currentEdges);
+  drawPaneEdges(document.querySelector(".backlog .tasks"), backlogEdges);
+  if (state !== "backlog-collapsed") drawCrossEdges();
+}
+render();
+</script>
