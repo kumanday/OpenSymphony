@@ -32,6 +32,7 @@ import {
   graphLayoutKindForMode,
   graphReducer,
   currentGraphSnapshot,
+  sameGraphTopology,
   parseMemoryDeepLink,
   resolveMemoryDeepLinkNode,
   visibleGraphSnapshot,
@@ -964,12 +965,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!this.graphAdapter) return;
     const snapshot = await this.graphAdapter.getGraphSnapshot(bundleId);
     const previousGraph = this.state.knowledgeGraph;
+    const previousSnapshot = currentGraphSnapshot(previousGraph);
     this.state.knowledgeGraph = graphReducer(previousGraph, { type: "SNAPSHOT_LOADED", snapshot });
     const acceptedSnapshot = this.state.knowledgeGraph !== previousGraph;
-    // Only invalidate the layout when the reducer actually accepted a newer
-    // snapshot. Re-layouting on every identical poll churned the whole
-    // graph surface every five seconds (and reset in-progress hover/zoom).
-    if (acceptedSnapshot) {
+    // Only recompute the layout when the graph's topology (its node/edge set)
+    // actually changed — not merely because the reducer accepted a newer
+    // snapshot. The live memory snapshot's cursor advances on every poll even
+    // when the content is identical; relaying out on each such tick recomputed
+    // node positions and, because the renderer reframes on a new layout,
+    // yanked the operator's zoom back out to the area overview every five
+    // seconds. Capsule staleness still keys on acceptance (see SNAPSHOT_LOADED),
+    // so an edited capsule still refetches without a needless relayout.
+    const topologyChanged = acceptedSnapshot && !sameGraphTopology(previousSnapshot, snapshot);
+    if (topologyChanged) {
       this.state.knowledgeGraphLayout = null;
       this.knowledgeGraphLayoutSize = null;
       this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });

@@ -14,11 +14,29 @@ import {
   graphStateToHistory,
   initialGraphFilters,
   initialGraphState,
+  sameGraphTopology,
   searchGraphSnapshot,
   visibleGraphSnapshot,
 } from "@opensymphony/graph";
 
 describe("@opensymphony/graph", () => {
+  it("treats snapshots as same-topology when only the cursor/timestamp advances", () => {
+    const advanced = {
+      ...fixtureGraphSnapshot,
+      generated_at: "2099-01-01T00:00:00Z",
+      cursor: { ...fixtureGraphSnapshot.cursor, sequence: fixtureGraphSnapshot.cursor.sequence + 5 },
+    };
+    // Same nodes/edges, newer cursor → no relayout warranted.
+    expect(sameGraphTopology(fixtureGraphSnapshot, advanced)).toBe(true);
+    // A changed node set is a genuine topology change.
+    const trimmed = { ...fixtureGraphSnapshot, nodes: fixtureGraphSnapshot.nodes.slice(1) };
+    expect(sameGraphTopology(fixtureGraphSnapshot, trimmed)).toBe(false);
+    // A changed edge set is a genuine topology change.
+    const fewerEdges = { ...fixtureGraphSnapshot, edges: fixtureGraphSnapshot.edges.slice(1) };
+    expect(sameGraphTopology(fixtureGraphSnapshot, fewerEdges)).toBe(false);
+    expect(sameGraphTopology(null, fixtureGraphSnapshot)).toBe(false);
+  });
+
   it("loads DTOs and switches through all graph modes", () => {
     let state = graphReducer(initialGraphState, {
       type: "SNAPSHOT_LOADED",

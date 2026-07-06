@@ -428,6 +428,28 @@ export function currentGraphSnapshot(state: GraphState): MemoryGraphSnapshot | n
   return bundleId ? state.snapshots[bundleId] ?? null : null;
 }
 
+/**
+ * True when two snapshots have the same graph topology — identical node and
+ * edge id sets for the same bundle. Node positions depend only on topology, so
+ * this is the granularity that decides whether a re-layout is warranted;
+ * cursor/timestamp churn and body/label edits (which the capsule fetch handles
+ * separately) do not move nodes and must not trigger one.
+ */
+export function sameGraphTopology(
+  a: MemoryGraphSnapshot | null,
+  b: MemoryGraphSnapshot | null,
+): boolean {
+  if (!a || !b) return false;
+  if (a.bundle_id !== b.bundle_id) return false;
+  if (a.nodes.length !== b.nodes.length || a.edges.length !== b.edges.length) return false;
+  const sameIds = (left: readonly { id: string }[], right: readonly { id: string }[]): boolean => {
+    const leftIds = left.map((item) => item.id).sort();
+    const rightIds = right.map((item) => item.id).sort();
+    return leftIds.every((id, index) => id === rightIds[index]);
+  };
+  return sameIds(a.nodes, b.nodes) && sameIds(a.edges, b.edges);
+}
+
 /** Cached capsule detail for a concept, or null until CONCEPT_DETAIL_LOADED lands. */
 export function cachedConceptDetail(
   state: GraphState,
