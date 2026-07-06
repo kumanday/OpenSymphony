@@ -138,6 +138,11 @@ both the task graph's done nodes and the dashboard snapshot's control-plane
 completed count, so completions surface even when the finished issue is
 absent from the task graph (e.g. no project metadata). `memory_graph_updated`
 events reload it too, for capsule/PR evidence captured after completion.
+Only real completions count: a workspace recovered at daemon startup whose
+issue sits in a non-active tracker state is *parked* (runtime `idle`, and
+the tracker state decides its pane), never reported as `completed`, and the
+scheduler's 60-second dispatch discovery reopens a parked issue as soon as
+its tracker state turns active again — no orchestrator restart required.
 
 ### Drill-down navigation
 

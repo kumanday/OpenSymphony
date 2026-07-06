@@ -2224,6 +2224,176 @@ async fn gateway_task_graph_keeps_failed_issues_visible_as_todo() {
 }
 
 #[tokio::test]
+async fn gateway_task_graph_categorizes_idle_issues_by_tracker_state() {
+    // An Idle control-plane entry carries no run information — e.g. a
+    // recovered workspace parked while its issue sits in Backlog. The
+    // tracker state must decide the category, or the issue would surface
+    // as Todo in the Current pane instead of staying in Backlog.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Backlog".to_owned();
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store).with_linear_task_graph(Some(std::sync::Arc::new(
+        FakeLinearTaskGraphClient { issues },
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    assert_eq!(response.nodes.len(), 1);
+    assert_eq!(response.nodes[0].identifier, "COE-255");
+    assert_eq!(
+        response.nodes[0].state_category,
+        opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Backlog,
+    );
+    // A parked issue is not schedulable until its tracker state turns
+    // active, so its overlay must not advertise it as queued or eligible.
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("tracked issue should carry a runtime overlay");
+    assert!(!overlay.eligible);
+    assert!(!overlay.queued);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_task_graph_suppresses_overlay_for_parked_non_active_state() {
+    // A parked recovered issue whose tracker state maps to the coarse `todo`
+    // graph category but is NOT a configured active state (e.g. Triage, or a
+    // custom state) must not be advertised as queued/eligible: the scheduler
+    // released it as tracker-inactive and will not dispatch it until it
+    // enters a configured active state.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Triage".to_owned();
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store)
+        .with_linear_task_graph(Some(std::sync::Arc::new(FakeLinearTaskGraphClient {
+            issues,
+        })))
+        .with_active_states(["Todo".to_owned(), "In Progress".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    // Triage still lands in the coarse `todo` category ...
+    assert_eq!(
+        response.nodes[0].state_category,
+        opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Todo,
+    );
+    // ... but it is not a configured active state, so the overlay is clean.
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("tracked issue should carry a runtime overlay");
+    assert!(!overlay.eligible);
+    assert!(!overlay.queued);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_task_graph_marks_configured_active_state_eligible() {
+    // A custom active state that maps to the coarse `todo` category (e.g.
+    // "Rework") is genuinely dispatchable when listed in active_states, so
+    // its overlay must be queued/eligible even though the category alone is
+    // ambiguous. This is why dispatchability keys on active_states, not the
+    // category or the semantic tracker-state kind.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Rework".to_owned();
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store)
+        .with_linear_task_graph(Some(std::sync::Arc::new(FakeLinearTaskGraphClient {
+            issues,
+        })))
+        .with_active_states(["Todo".to_owned(), "Rework".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("tracked issue should carry a runtime overlay");
+    assert!(overlay.eligible);
+    assert!(overlay.queued);
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_memory_completed_tasks() {
     let repo = tempfile::tempdir().expect("memory repo");
     let config = write_completed_tasks_fixture(repo.path());
@@ -2590,6 +2760,89 @@ async fn gateway_serves_run_detail() {
         response.status,
         opensymphony::opensymphony_gateway_schema::run::RunStatus::Running
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_parked_non_active_issue_is_not_eligible_or_retryable() {
+    use opensymphony::opensymphony_gateway_schema::run::{RunAction, RunLifecycleState, RunStatus};
+
+    // A recovered issue parked in Backlog maps to Idle in the control plane
+    // but is not dispatchable until its tracker state becomes active. Run
+    // detail must not advertise it as an eligible, retryable run.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Backlog".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server =
+        GatewayServer::new(store).with_active_states(["Todo".to_owned(), "In Progress".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.status, RunStatus::Unclaimed);
+    assert_eq!(response.lifecycle_state, RunLifecycleState::Backlog);
+    assert!(
+        !response.allowed_actions.contains(&RunAction::Retry),
+        "a parked non-active issue must not offer a retry action"
+    );
+    assert!(!response.safe_actions.retry);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_dispatchable_idle_issue_is_eligible_and_retryable() {
+    use opensymphony::opensymphony_gateway_schema::run::{RunAction, RunLifecycleState, RunStatus};
+
+    // An Idle issue whose tracker state IS a configured active state is a
+    // genuine queued run: eligible and retryable.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Todo".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server =
+        GatewayServer::new(store).with_active_states(["Todo".to_owned(), "In Progress".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.status, RunStatus::Unclaimed);
+    assert_eq!(response.lifecycle_state, RunLifecycleState::Eligible);
+    assert!(response.allowed_actions.contains(&RunAction::Retry));
 
     server_task.abort();
 }

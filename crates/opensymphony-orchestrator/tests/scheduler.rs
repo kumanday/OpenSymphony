@@ -1661,6 +1661,74 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
 }
 
 #[tokio::test]
+async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
+    // A leftover workspace for a non-active (Backlog) issue is recovered and
+    // parked at startup. When the issue later moves back into an active
+    // state, the 60s dispatch discovery must reopen the released execution
+    // and dispatch it instead of waiting for the hourly full detail refresh.
+    let recovered_workspace = workspace_record("COE-532", "/tmp/recovered/COE-532");
+    let tracker = FakeTracker {
+        states: HashMap::from([(
+            "lin-532".to_string(),
+            tracker_state_snapshot("lin-532", "COE-532", "Backlog", "backlog", 0),
+        )]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-532", "COE-532", "Backlog"),
+            workspace: recovered_workspace.clone(),
+            had_in_flight_run: false,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-532".to_string(), recovered_workspace.clone())]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("recovery tick should succeed");
+
+    let issue_id = IssueId::new("lin-532").expect("issue id should be valid");
+    let parked = scheduler
+        .execution(&issue_id)
+        .expect("recovered issue should be parked");
+    assert_eq!(parked.status(), SchedulerStatus::Released);
+    match parked.state() {
+        crate::opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+            assert_eq!(*reason, ReleaseReason::TrackerInactive);
+        }
+        other => panic!("expected released state, got {other:?}"),
+    }
+    assert!(scheduler.worker().launches.is_empty());
+
+    scheduler.tracker_mut().active = vec![tracker_issue("lin-532", "COE-532", "In Progress", 0)];
+
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect("dispatch discovery should reopen and dispatch the issue");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0].issue.identifier.as_str(),
+        "COE-532"
+    );
+    assert_eq!(
+        scheduler.worker().launches[0].workspace.path,
+        recovered_workspace.path
+    );
+    let running = scheduler
+        .execution(&issue_id)
+        .expect("dispatched issue should have an execution");
+    assert_eq!(running.status(), SchedulerStatus::Running);
+}
+
+#[tokio::test]
 async fn tracker_inactive_release_frees_the_per_state_slot() {
     let tracker = FakeTracker {
         active: vec![

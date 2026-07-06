@@ -282,6 +282,13 @@ pub struct GatewayState {
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     pub memory_config: Option<MemoryConfig>,
+    /// Normalized (trimmed, lowercased) workflow active-state names. The task
+    /// graph consults these to decide whether an Idle issue is actually
+    /// dispatchable — the authoritative signal the scheduler itself uses —
+    /// rather than inferring it from the coarse graph category. Empty when no
+    /// workflow config is wired in (bare test servers), in which case the
+    /// category is used as a fallback.
+    pub active_states: Arc<HashSet<String>>,
     pub codex_readiness_cache: Arc<CodexReadinessCache>,
     pub workspace_scans: WorkspaceScans,
     pub pr_urls: PrUrls,
@@ -299,6 +306,7 @@ impl Clone for GatewayState {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            active_states: self.active_states.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
             workspace_scans: self.workspace_scans.clone(),
             pr_urls: self.pr_urls.clone(),
@@ -500,6 +508,7 @@ pub struct GatewayServer {
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     memory_config: Option<MemoryConfig>,
+    active_states: Arc<HashSet<String>>,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -513,6 +522,7 @@ impl Clone for GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            active_states: self.active_states.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -537,6 +547,7 @@ impl std::fmt::Debug for GatewayServer {
                 &self.linear_task_graph.as_ref().map(|_| "..."),
             )
             .field("memory_config", &self.memory_config.as_ref().map(|_| "..."))
+            .field("active_states", &self.active_states.len())
             .field("terminal_ingest_handle", &"<handle>")
             .finish()
     }
@@ -567,6 +578,7 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            active_states: Arc::new(HashSet::new()),
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -585,6 +597,7 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            active_states: Arc::new(HashSet::new()),
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -624,6 +637,20 @@ impl GatewayServer {
         self
     }
 
+    /// Install the workflow's active-state names so the task graph can decide
+    /// whether an Idle issue is genuinely dispatchable (matching the
+    /// scheduler's own active-state test) instead of inferring it from the
+    /// coarse graph category. Names are normalized (trimmed, lowercased).
+    pub fn with_active_states(mut self, states: impl IntoIterator<Item = String>) -> Self {
+        self.active_states = Arc::new(
+            states
+                .into_iter()
+                .map(|state| state.trim().to_ascii_lowercase())
+                .collect(),
+        );
+        self
+    }
+
     /// Extract clones of the journal and broker so the caller can keep them for testing.
     pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal.clone(), self.broker.clone())
@@ -641,6 +668,7 @@ impl GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            active_states: self.active_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
             workspace_scans: WorkspaceScans::default(),
             pr_urls: PrUrls::default(),
@@ -3099,10 +3127,36 @@ async fn get_task_graph(
             let snapshot_issue = snapshot_by_identifier
                 .get(issue.identifier.as_str())
                 .copied();
-            let state_category = snapshot_issue
-                .map(|issue| map_runtime_state_to_graph_category(&issue.runtime_state))
-                .unwrap_or_else(|| map_tracker_state_kind_to_graph_category(&issue.state_kind));
-            let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
+            // Idle carries no run information (queued work, or a parked
+            // issue whose recovered workspace waits for reactivation), so
+            // the tracker state decides the category — otherwise an Idle
+            // Backlog issue would surface as Todo in the Current pane.
+            let state_category = match snapshot_issue.map(|issue| &issue.runtime_state) {
+                None | Some(ControlPlaneIssueRuntimeState::Idle) => {
+                    map_tracker_state_kind_to_graph_category(&issue.state_kind)
+                }
+                Some(runtime_state) => map_runtime_state_to_graph_category(runtime_state),
+            };
+            // Dispatchability drives the queued/eligible overlay. Use the
+            // workflow's active-state names — the same authority the scheduler
+            // uses — so a parked Idle issue in a non-active state (Backlog,
+            // Triage, or a custom state absent from `active_states`) is never
+            // shown as queued/eligible, and a genuinely active state that maps
+            // to the coarse `todo` category (e.g. "Rework") still is. Fall back
+            // to the graph category only when no active states are configured
+            // (bare test servers).
+            let dispatchable = if state.active_states.is_empty() {
+                matches!(
+                    state_category,
+                    TaskGraphStateCategory::Todo | TaskGraphStateCategory::InProgress
+                )
+            } else {
+                state
+                    .active_states
+                    .contains(&issue.state.trim().to_ascii_lowercase())
+            };
+            let runtime_overlay = snapshot_issue
+                .map(|snapshot_issue| build_runtime_overlay(snapshot_issue, dispatchable));
             let parent_id = issue
                 .parent
                 .as_ref()
@@ -3208,7 +3262,10 @@ fn map_tracker_state_kind_to_graph_category(
     }
 }
 
-fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeOverlay {
+fn build_runtime_overlay(
+    issue: &ControlPlaneIssueSnapshot,
+    dispatchable: bool,
+) -> TaskGraphRuntimeOverlay {
     let diff_summary = if issue.modified_files.is_empty() {
         None
     } else {
@@ -3249,15 +3306,21 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
     };
 
     let is_running = matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Running);
-    // An issue is eligible only when it is idle (not yet started) and not
-    // blocked.  Completed and failed issues must not appear eligible.
-    let is_eligible =
-        !issue.blocked && matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle);
+    // An issue is eligible only when it is idle (not yet started), not
+    // blocked, and in a dispatchable graph category. Completed and failed
+    // issues must not appear eligible, and neither must a parked Idle issue
+    // whose tracker state is non-active (e.g. a recovered Backlog
+    // workspace) — the scheduler will not dispatch it until the tracker
+    // state turns active.
+    let is_eligible = dispatchable
+        && !issue.blocked
+        && matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle);
     // Queued means the issue is actively waiting to be picked up by a worker.
     // Blocked issues must never appear queued, regardless of state:
     // a blocked Idle issue is not schedulable, and a blocked RetryQueued
     // issue is waiting on its blocker to clear before retry.
-    let is_queued = !issue.blocked
+    let is_queued = dispatchable
+        && !issue.blocked
         && (matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle)
             || matches!(
                 issue.runtime_state,
@@ -3291,10 +3354,11 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
 // ── Run endpoints ─────────────────────────────────────────────────────────────
 
 async fn get_run_detail(
-    State(store): State<SnapshotStore>,
-    State(pr_urls): State<PrUrls>,
+    State(state): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
+    let store = &state.store;
+    let pr_urls = &state.pr_urls;
     let envelope = store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue,
@@ -3344,7 +3408,20 @@ async fn get_run_detail(
         }
     };
 
+    // A parked recovered issue maps to Idle (it never ran) but is only
+    // dispatchable once its tracker state is a configured active state. Use
+    // the workflow's active states — the scheduler's own authority — so run
+    // detail does not advertise a parked Backlog/Triage issue as an eligible,
+    // retryable run. Fall back to treating Idle as eligible only when no
+    // active states are configured (bare test servers).
+    let dispatchable = state.active_states.is_empty()
+        || state
+            .active_states
+            .contains(&issue.tracker_state.trim().to_ascii_lowercase());
     let (status, lifecycle_state) = match issue.runtime_state {
+        ControlPlaneIssueRuntimeState::Idle if !dispatchable => {
+            (RunStatus::Unclaimed, RunLifecycleState::Backlog)
+        }
         ControlPlaneIssueRuntimeState::Idle => (RunStatus::Unclaimed, RunLifecycleState::Eligible),
         ControlPlaneIssueRuntimeState::Running => (RunStatus::Running, RunLifecycleState::Running),
         ControlPlaneIssueRuntimeState::Paused => (RunStatus::Paused, RunLifecycleState::Paused),
@@ -3421,7 +3498,7 @@ async fn get_run_detail(
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
             error: None,
-            allowed_actions: allowed_actions_for_issue(issue),
+            allowed_actions: allowed_actions_for_issue(issue, dispatchable),
             liveness: Some(build_liveness(issue)),
             diagnostics: Some(RunDiagnostics {
                 harness_scheduler_disagreement: None,
@@ -4007,7 +4084,10 @@ fn default_terminal_limit() -> usize {
     1000
 }
 
-fn allowed_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> Vec<RunAction> {
+fn allowed_actions_for_issue(
+    issue: &ControlPlaneIssueSnapshot,
+    dispatchable: bool,
+) -> Vec<RunAction> {
     let mut allowed = Vec::new();
     use ControlPlaneIssueRuntimeState as State;
     match issue.runtime_state {
@@ -4023,7 +4103,10 @@ fn allowed_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> Vec<RunAction
             allowed.push(RunAction::Retry);
             allowed.push(RunAction::Rehydrate);
         }
-        State::Idle => {
+        // Retry re-queues the issue for dispatch, which only makes sense when
+        // the scheduler will actually pick it up. A parked issue (Idle but in
+        // a non-active tracker state) is not dispatchable, so it gets no retry.
+        State::Idle if dispatchable => {
             allowed.push(RunAction::Retry);
         }
         _ => {}
@@ -4643,7 +4726,7 @@ exit 2
                 detached: false,
             },
         );
-        let actions = allowed_actions_for_issue(&issue);
+        let actions = allowed_actions_for_issue(&issue, true);
         assert!(actions.contains(&RunAction::Cancel));
         assert!(actions.contains(&RunAction::Pause));
         assert!(actions.contains(&RunAction::Comment));
@@ -4665,7 +4748,7 @@ exit 2
                 detached: false,
             },
         );
-        let actions = allowed_actions_for_issue(&issue);
+        let actions = allowed_actions_for_issue(&issue, true);
         assert!(actions.contains(&RunAction::Comment));
         assert!(actions.contains(&RunAction::CreateFollowup));
         assert!(!actions.contains(&RunAction::OpenWorkspace));
@@ -4682,7 +4765,7 @@ exit 2
                 detached: false,
             },
         );
-        let actions = allowed_actions_for_issue(&issue);
+        let actions = allowed_actions_for_issue(&issue, true);
         assert!(actions.contains(&RunAction::Retry));
         assert!(actions.contains(&RunAction::Rehydrate));
         assert!(actions.contains(&RunAction::OpenWorkspace));
@@ -4704,7 +4787,7 @@ exit 2
                 detached: false,
             },
         );
-        assert!(allowed_actions_for_issue(&stalled).contains(&RunAction::Detach));
+        assert!(allowed_actions_for_issue(&stalled, true).contains(&RunAction::Detach));
 
         let healthy = test_issue(
             ControlPlaneIssueRuntimeState::Running,
@@ -4714,7 +4797,7 @@ exit 2
                 detached: false,
             },
         );
-        assert!(!allowed_actions_for_issue(&healthy).contains(&RunAction::Detach));
+        assert!(!allowed_actions_for_issue(&healthy, true).contains(&RunAction::Detach));
 
         let already_detached = test_issue(
             ControlPlaneIssueRuntimeState::Running,
@@ -4724,7 +4807,7 @@ exit 2
                 detached: true,
             },
         );
-        assert!(!allowed_actions_for_issue(&already_detached).contains(&RunAction::Detach));
+        assert!(!allowed_actions_for_issue(&already_detached, true).contains(&RunAction::Detach));
     }
 
     #[test]

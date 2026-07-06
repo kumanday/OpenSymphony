@@ -289,7 +289,16 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
             .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
-            .with_memory_config(server_memory_config);
+            .with_memory_config(server_memory_config)
+            .with_active_states(
+                runtime
+                    .workflow
+                    .config
+                    .tracker
+                    .active_states
+                    .iter()
+                    .cloned(),
+            );
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
     let mut gateway_action_cursor = 0;
 

@@ -1390,6 +1390,27 @@ where
                 );
                 continue;
             }
+            // A released execution blocks dispatch until the hourly full
+            // refresh reconciles it. When the tracker reactivates such an
+            // issue (e.g. Backlog back to Todo after its workspace was
+            // recovered and parked), reopen it here so the 60s discovery
+            // cadence picks it up instead.
+            let needs_reopen = self
+                .executions
+                .get(&normalized.id)
+                .is_some_and(|execution| {
+                    execution.status() == SchedulerStatus::Released
+                        && !terminal_worker_outcome_prevents_reopen(execution)
+                });
+            if needs_reopen {
+                if self
+                    .interrupt_human_review_polling_for_merging(&normalized, observed_at)
+                    .await?
+                {
+                    continue;
+                }
+                self.upsert_active_execution(normalized, observed_at, None)?;
+            }
             detailed.push(detailed_issue);
         }
 
