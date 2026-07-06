@@ -2269,6 +2269,14 @@ async fn gateway_task_graph_categorizes_idle_issues_by_tracker_state() {
         response.nodes[0].state_category,
         opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Backlog,
     );
+    // A parked issue is not schedulable until its tracker state turns
+    // active, so its overlay must not advertise it as queued or eligible.
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("tracked issue should carry a runtime overlay");
+    assert!(!overlay.eligible);
+    assert!(!overlay.queued);
 
     server_task.abort();
 }

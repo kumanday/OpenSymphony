@@ -3109,7 +3109,15 @@ async fn get_task_graph(
                 }
                 Some(runtime_state) => map_runtime_state_to_graph_category(runtime_state),
             };
-            let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
+            let runtime_overlay = snapshot_issue.map(|snapshot_issue| {
+                build_runtime_overlay(
+                    snapshot_issue,
+                    matches!(
+                        state_category,
+                        TaskGraphStateCategory::Todo | TaskGraphStateCategory::InProgress
+                    ),
+                )
+            });
             let parent_id = issue
                 .parent
                 .as_ref()
@@ -3215,7 +3223,10 @@ fn map_tracker_state_kind_to_graph_category(
     }
 }
 
-fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeOverlay {
+fn build_runtime_overlay(
+    issue: &ControlPlaneIssueSnapshot,
+    dispatchable: bool,
+) -> TaskGraphRuntimeOverlay {
     let diff_summary = if issue.modified_files.is_empty() {
         None
     } else {
@@ -3256,15 +3267,21 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
     };
 
     let is_running = matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Running);
-    // An issue is eligible only when it is idle (not yet started) and not
-    // blocked.  Completed and failed issues must not appear eligible.
-    let is_eligible =
-        !issue.blocked && matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle);
+    // An issue is eligible only when it is idle (not yet started), not
+    // blocked, and in a dispatchable graph category. Completed and failed
+    // issues must not appear eligible, and neither must a parked Idle issue
+    // whose tracker state is non-active (e.g. a recovered Backlog
+    // workspace) — the scheduler will not dispatch it until the tracker
+    // state turns active.
+    let is_eligible = dispatchable
+        && !issue.blocked
+        && matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle);
     // Queued means the issue is actively waiting to be picked up by a worker.
     // Blocked issues must never appear queued, regardless of state:
     // a blocked Idle issue is not schedulable, and a blocked RetryQueued
     // issue is waiting on its blocker to clear before retry.
-    let is_queued = !issue.blocked
+    let is_queued = dispatchable
+        && !issue.blocked
         && (matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle)
             || matches!(
                 issue.runtime_state,
