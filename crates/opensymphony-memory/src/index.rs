@@ -537,6 +537,8 @@ pub fn persist_code_intel_documents(
         skipped_files: Vec::new(),
         diagnostics: Vec::new(),
     };
+    let stored_commit_sha =
+        code_revision_key(batch.commit_sha.as_deref(), batch.worktree_dirty);
 
     for document in batch.documents {
         let path = document.path.to_string_lossy().to_string();
@@ -558,10 +560,10 @@ pub fn persist_code_intel_documents(
         transaction
             .execute(
                 "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    batch.repo_id,
-                    batch.commit_sha,
-                    batch.worktree_dirty,
+                    params![
+                        batch.repo_id,
+                    stored_commit_sha.clone(),
+                        batch.worktree_dirty,
                     path,
                     document.language,
                     document.content_sha256,
@@ -582,7 +584,7 @@ pub fn persist_code_intel_documents(
 
         let prepared_symbols = prepare_code_symbols(
             &batch.repo_id,
-            batch.commit_sha.as_deref(),
+            stored_commit_sha.as_deref(),
             batch.worktree_dirty,
             &path,
             &document,
@@ -597,7 +599,7 @@ pub fn persist_code_intel_documents(
                         prepared.symbol_id,
                         prepared.symbol_key,
                         batch.repo_id,
-                        batch.commit_sha,
+                        stored_commit_sha.clone(),
                         batch.worktree_dirty,
                         path,
                         document.language,
@@ -652,7 +654,7 @@ pub fn persist_code_intel_documents(
                     params![
                         edge_id,
                         batch.repo_id,
-                        batch.commit_sha,
+                        stored_commit_sha.clone(),
                         batch.worktree_dirty,
                         path,
                         document.language,
@@ -705,7 +707,7 @@ pub fn persist_code_intel_documents(
                     params![
                         diagnostic_id,
                         batch.repo_id,
-                        batch.commit_sha,
+                        stored_commit_sha.clone(),
                         batch.worktree_dirty,
                         path,
                         document.language,
@@ -872,12 +874,14 @@ fn symbol_contains_span(symbol: &CodeIntelSymbolInput, start_byte: usize, end_by
 }
 
 fn edge_target_name(target_hint: &str) -> Option<&str> {
-    let before_call = target_hint.split_once('(').map_or(target_hint, |(name, _)| name);
-    before_call
-        .split([':', '.'])
-        .rfind(|part| !part.is_empty())
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
+    let before_call = target_hint
+        .split_once('(')
+        .map_or(target_hint, |(name, _)| name)
+        .trim();
+    if before_call.contains("::") || before_call.contains('.') {
+        return None;
+    }
+    (!before_call.is_empty()).then_some(before_call)
 }
 
 fn single_symbol_named<'a>(
@@ -999,7 +1003,7 @@ pub fn code_symbols_containing_span(
     })?;
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key",
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1016,8 +1020,10 @@ pub fn code_symbols_containing_span(
             path: config.index_path.clone(),
             source,
         })?;
+    let mut seen_keys = BTreeSet::new();
     rows.into_iter()
         .filter(|symbol| symbol_contains_point(symbol, line, column))
+        .filter(|symbol| seen_keys.insert(symbol.symbol_key.clone()))
         .take(limit)
         .map(|mut symbol| {
             fill_container_chain(&connection, &mut symbol)?;
@@ -1071,6 +1077,10 @@ pub fn code_symbol_neighborhood(
                         }
                     }
                 }
+                if !edge_endpoints_present(&edge, &symbols) {
+                    truncated = true;
+                    continue;
+                }
                 edges.insert(edge.edge_id.clone(), edge);
             }
             if truncated {
@@ -1091,6 +1101,13 @@ pub fn code_symbol_neighborhood(
         max_records,
         truncated,
     }))
+}
+
+fn edge_endpoints_present(edge: &CodeEdgeRecord, symbols: &BTreeMap<String, CodeSymbolRecord>) -> bool {
+    [edge.source_symbol_key.as_deref(), edge.target_symbol_key.as_deref()]
+        .into_iter()
+        .flatten()
+        .all(|key| symbols.contains_key(key))
 }
 
 pub fn compare_code_symbols(
@@ -1197,7 +1214,7 @@ fn query_symbols_for_revision(
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND commit_sha = ? ORDER BY symbol_key, indexed_at DESC, symbol_id",
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
@@ -1384,6 +1401,16 @@ fn stale_code_rows(
 
 fn code_row_id(parts: &[&str]) -> String {
     sha256_hex(&parts.join("\u{1f}"))
+}
+
+fn code_revision_key(commit_sha: Option<&str>, worktree_dirty: bool) -> Option<String> {
+    commit_sha.map(|sha| {
+        if worktree_dirty {
+            format!("{sha}+dirty")
+        } else {
+            sha.to_string()
+        }
+    })
 }
 
 fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, MemoryError> {

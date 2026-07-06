@@ -5507,17 +5507,30 @@ mod tests {
                 snippet_sha256: "removed".to_string(),
             },
         ];
-        base.edges = vec![CodeIntelEdgeInput {
-            edge_kind: "reference.call".to_string(),
-            target_hint: Some("helper()".to_string()),
-            confidence: "query_pack:calls".to_string(),
-            start_line: 4,
-            start_col: 9,
-            end_line: 4,
-            end_col: 17,
-            start_byte: 40,
-            end_byte: 48,
-        }];
+        base.edges = vec![
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("helper()".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 4,
+                start_col: 9,
+                end_line: 4,
+                end_col: 17,
+                start_byte: 40,
+                end_byte: 48,
+            },
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("Widget::helper()".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 4,
+                start_col: 20,
+                end_line: 4,
+                end_col: 28,
+                start_byte: 50,
+                end_byte: 58,
+            },
+        ];
         persist_code_intel_documents(
             &config,
             CodeIntelPersistBatch {
@@ -5570,10 +5583,33 @@ mod tests {
                     && !edge.unresolved
                     && edge.target_symbol_key.is_some())
         );
+        assert!(
+            neighborhood
+                .edges
+                .iter()
+                .any(
+                    |edge| edge.target_hint.as_deref() == Some("Widget::helper()")
+                        && edge.unresolved
+                        && edge.target_symbol_key.is_none()
+                )
+        );
         let truncated = code_symbol_neighborhood(&config, &run_key, 1, 1)
             .expect("bounded neighborhood")
             .expect("center exists");
         assert!(truncated.truncated);
+        assert!(
+            truncated.edges.iter().all(|edge| [
+                edge.source_symbol_key.as_deref(),
+                edge.target_symbol_key.as_deref()
+            ]
+            .into_iter()
+            .flatten()
+            .all(|key| truncated
+                .symbols
+                .iter()
+                .any(|symbol| symbol.symbol_key == key))),
+            "bounded neighborhoods must not expose dangling edges"
+        );
 
         let mut head = base;
         head.content_sha256 = "hash-b".to_string();
@@ -5674,6 +5710,33 @@ mod tests {
         assert!(
             comparison.diffs.is_empty(),
             "unchanged symbols must not become added or removed"
+        );
+
+        let containing = code_symbols_containing_span(&config, "repo", "src/lib.rs", 1, 2, 10)
+            .expect("span containment");
+        assert_eq!(
+            containing.len(),
+            1,
+            "current span lookups should collapse unchanged revision duplicates"
+        );
+
+        let mut dirty = document.clone();
+        dirty.symbols[0].snippet_sha256 = "dirty-snippet".to_string();
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("head".to_string()),
+                worktree_dirty: true,
+                documents: vec![dirty],
+            },
+        )
+        .expect("dirty revision persist");
+        let comparison =
+            compare_code_symbols(&config, "repo", "base", "head", 10).expect("compare revisions");
+        assert!(
+            comparison.diffs.is_empty(),
+            "dirty worktree rows must not be compared as committed revisions"
         );
     }
 

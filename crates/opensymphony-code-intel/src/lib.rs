@@ -1495,13 +1495,15 @@ fn run_query_pack(
                     && let Some(name) =
                         symbol_name_for_capture(&capture_name, capture.node, source)?
                 {
+                    let (container_name, container_chain) =
+                        rust_impl_container(language, &kind, capture.node, source)?;
                     symbols.push(SymbolRecord {
                         kind,
                         name,
                         span: span.clone(),
                         rendered_span: rendered_span.clone(),
-                        container_name: None,
-                        container_chain: Vec::new(),
+                        container_name,
+                        container_chain,
                         parser_version: TREE_SITTER_VERSION.to_string(),
                         query_pack_version: query_pack.version.clone(),
                     });
@@ -1525,6 +1527,9 @@ fn run_query_pack(
 
 fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
     for index in 0..symbols.len() {
+        if !symbols[index].container_chain.is_empty() {
+            continue;
+        }
         let parent_index = symbols
             .iter()
             .enumerate()
@@ -1550,6 +1555,37 @@ fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
             symbols[index].container_name = Some(parent.name);
             symbols[index].container_chain = chain;
         }
+    }
+}
+
+fn rust_impl_container(
+    language: SourceLanguage,
+    kind: &SymbolKind,
+    node: Node<'_>,
+    source: &[u8],
+) -> Result<(Option<String>, Vec<String>), CodeIntelError> {
+    if language != SourceLanguage::Rust || kind != &SymbolKind::Method {
+        return Ok((None, Vec::new()));
+    }
+    let Some(impl_item) = ancestor_node(node, "impl_item") else {
+        return Ok((None, Vec::new()));
+    };
+    let Some(owner) = impl_item
+        .child_by_field_name("type")
+        .or_else(|| first_named_child_kind(impl_item, &["type_identifier", "generic_type"]))
+    else {
+        return Ok((None, Vec::new()));
+    };
+    let name = owner
+        .utf8_text(source)?
+        .split('<')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        Ok((None, Vec::new()))
+    } else {
+        Ok((Some(name.to_string()), vec![name.to_string()]))
     }
 }
 
@@ -1716,14 +1752,24 @@ fn is_test_function(language: SourceLanguage, node: Node<'_>, source: &[u8]) -> 
     }
 }
 
-fn has_ancestor(mut node: Node<'_>, kind: &str) -> bool {
+fn has_ancestor(node: Node<'_>, kind: &str) -> bool {
+    ancestor_node(node, kind).is_some()
+}
+
+fn ancestor_node<'tree>(mut node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     while let Some(parent) = node.parent() {
         if parent.kind() == kind {
-            return true;
+            return Some(parent);
         }
         node = parent;
     }
-    false
+    None
+}
+
+fn first_named_child_kind<'tree>(node: Node<'tree>, kinds: &[&str]) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|child| kinds.contains(&child.kind()))
 }
 
 fn has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
@@ -2303,6 +2349,18 @@ mod tests {
 
         assert_eq!(trait_method.container_name.as_deref(), Some("Runnable"));
         assert_eq!(trait_method.container_chain, vec!["Runnable"]);
+
+        let impl_method = summary
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind == SymbolKind::Method
+                    && symbol.name == "run"
+                    && symbol.rendered_span == "23:5-25:6"
+            })
+            .expect("impl method symbol");
+        assert_eq!(impl_method.container_name.as_deref(), Some("Widget"));
+        assert_eq!(impl_method.container_chain, vec!["Widget"]);
     }
 
     #[test]
