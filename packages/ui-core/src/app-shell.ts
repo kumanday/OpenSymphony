@@ -229,6 +229,9 @@ interface AppState {
   expandedActivityEvents: Set<string>;
   collapsedActivityEvents: Set<string>;
   workspacePaneSizes: WorkspacePaneSizesBySurface;
+  // Widths (px) of the collapsible task-graph side panes; the Current pane
+  // between them flexes to absorb the remainder.
+  taskPaneSizes: { done: number; backlog: number };
   eventLogModalOpen: boolean;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
@@ -302,6 +305,14 @@ const liveRefreshFailureThreshold = 2;
 const liveRefreshPollIntervalMs = 5_000;
 const defaultWorkspacePaneSizes: WorkspacePaneSizes = { left: 50, right: 50 };
 const minWorkspacePaneSizes: WorkspacePaneSizes = { left: 30, right: 30 };
+type TaskSidePane = "done" | "backlog";
+const defaultTaskPaneSizes: { done: number; backlog: number } = { done: 360, backlog: 340 };
+// Side panes stay usable without starving the flexible Current pane.
+const taskPaneSizeBounds: Record<TaskSidePane, { min: number; max: number }> = {
+  done: { min: 260, max: 640 },
+  backlog: { min: 240, max: 620 },
+};
+const taskPaneResizeStep = 24;
 const completedTasksPageSize = 25;
 const defaultCompletedTasksParams = { query: "", sort: "completed_desc", page: 1 } as const;
 
@@ -395,6 +406,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       expandedActivityEvents: new Set(),
       collapsedActivityEvents: new Set(),
       workspacePaneSizes: createDefaultWorkspacePaneSizes(),
+      taskPaneSizes: { ...defaultTaskPaneSizes },
       eventLogModalOpen: false,
       runValidation: null,
       runApprovals: null,
@@ -1522,6 +1534,56 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
   }
 
+  /** Drag a task-graph side pane (Completed or Backlog) to a new px width. */
+  private startTaskPaneResize(pane: string | undefined, event: PointerEvent): void {
+    if (!isTaskSidePane(pane)) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = this.state.taskPaneSizes[pane];
+    const bounds = taskPaneSizeBounds[pane];
+    const paneEl = this.options.root.querySelector<HTMLElement>(`[data-tg-pane="${pane}"]`);
+    const move = (moveEvent: PointerEvent) => {
+      // Completed sits left of its handle (drag right grows it); Backlog sits
+      // right of its handle (drag right shrinks it).
+      const rawDelta = moveEvent.clientX - startX;
+      const delta = pane === "done" ? rawDelta : -rawDelta;
+      const next = clamp(startWidth + delta, bounds.min, bounds.max);
+      this.state.taskPaneSizes = { ...this.state.taskPaneSizes, [pane]: next };
+      if (paneEl) {
+        paneEl.style.flex = `0 0 ${next}px`;
+      }
+      this.scheduleCrossLinksReposition();
+    };
+    const done = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", done);
+      this.render();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", done, { once: true });
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
+
+  private onTaskPaneResizeKey(pane: string | undefined, event: KeyboardEvent): void {
+    if (!isTaskSidePane(pane)) {
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const bounds = taskPaneSizeBounds[pane];
+    // Arrow keys mirror the divider's physical motion: Right widens the pane
+    // left of the handle (Completed) and narrows the one right of it (Backlog).
+    const rightward = event.key === "ArrowRight" ? taskPaneResizeStep : -taskPaneResizeStep;
+    const delta = pane === "done" ? rightward : -rightward;
+    const next = clamp(this.state.taskPaneSizes[pane] + delta, bounds.min, bounds.max);
+    this.state.taskPaneSizes = { ...this.state.taskPaneSizes, [pane]: next };
+    this.render();
+  }
+
   private async dispatchRunAction(action: RunAction): Promise<void> {
     const runId = this.state.runDetail?.run_id;
     if (!runId) return;
@@ -2524,10 +2586,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       )
       : `<div class="os-empty">No backlog tasks</div>`;
 
+    const sizes = this.state.taskPaneSizes;
     const donePane = collapsed.done
       ? renderCollapsedTaskPane("done", "Completed", this.state.completedTasks?.total ?? null)
       : `
-        <section class="os-tg-pane os-tg-pane-done" data-tg-pane="done" data-testid="task-pane-done">
+        <section class="os-tg-pane os-tg-pane-done" data-tg-pane="done" data-testid="task-pane-done" style="flex: 0 0 ${sizes.done}px;">
           ${renderTaskPaneHeader("done", "Completed", this.state.completedTasks?.total ?? null)}
           <div class="os-tg-pane-body" data-tg-pane-body="done">
             ${this.renderCompletedTasksBody()}
@@ -2537,7 +2600,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const backlogPane = collapsed.backlog
       ? renderCollapsedTaskPane("backlog", "Backlog", backlogNodes.length)
       : `
-        <section class="os-tg-pane os-tg-pane-backlog" data-tg-pane="backlog" data-testid="task-pane-backlog">
+        <section class="os-tg-pane os-tg-pane-backlog" data-tg-pane="backlog" data-testid="task-pane-backlog" style="flex: 0 0 ${sizes.backlog}px;">
           ${renderTaskPaneHeader("backlog", "Backlog", backlogNodes.length)}
           <div class="os-tg-pane-body" data-tg-pane-body="backlog">
             ${backlogGraph}
@@ -2550,6 +2613,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     return `
       <div class="os-tg-panes" data-tg-panes>
         ${donePane}
+        ${collapsed.done ? "" : renderTaskPaneResizer("done", "Resize Completed pane", sizes.done)}
         <section class="os-tg-pane os-tg-pane-current" data-tg-pane="current" data-testid="task-pane-current">
           <header class="os-tg-pane-head">
             <span class="os-tg-dot os-tg-dot-current" aria-hidden="true"></span>
@@ -2560,6 +2624,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             ${currentGraph}
           </div>
         </section>
+        ${collapsed.backlog ? "" : renderTaskPaneResizer("backlog", "Resize Backlog pane", sizes.backlog)}
         ${backlogPane}
         ${crossLinks}
       </div>
@@ -3464,6 +3529,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.onPaneResizeKey(handle.dataset.paneResizer, event as KeyboardEvent);
       });
     });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-resizer]").forEach((handle) => {
+      this.listen(handle, "tg-resizer", "pointerdown", (event) => {
+        this.startTaskPaneResize(handle.dataset.tgResizer, event as PointerEvent);
+      });
+      this.listen(handle, "tg-resizer", "keydown", (event) => {
+        this.onTaskPaneResizeKey(handle.dataset.tgResizer, event as KeyboardEvent);
+      });
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-activity-toggle]").forEach((button) => {
       this.listen(button, "activity-toggle", "click", () => {
         const eventKey = button.dataset.activityToggle;
@@ -4353,6 +4426,19 @@ function renderPaneResizer(handle: WorkspacePaneResizeHandle, label: string, val
   `;
 }
 
+function renderTaskPaneResizer(pane: TaskSidePane, label: string, value: number): string {
+  const bounds = taskPaneSizeBounds[pane];
+  return `
+    <div class="os-pane-resizer os-tg-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="${escapeAttr(label)}" aria-valuemin="${bounds.min}" aria-valuemax="${bounds.max}" aria-valuenow="${Math.round(value)}" data-tg-resizer="${pane}">
+      <span aria-hidden="true"></span>
+    </div>
+  `;
+}
+
+function isTaskSidePane(value: string | undefined): value is TaskSidePane {
+  return value === "done" || value === "backlog";
+}
+
 function panePercent(value: number): string {
   return `${Math.round(value * 100) / 100}%`;
 }
@@ -4901,6 +4987,10 @@ const taskGraphRowGap = 8;
  */
 const taskGraphMinRouteGutterWidth = 62;
 const taskGraphSkipLaneGap = 11;
+/** Arrow rail x-origin inside the routing gutter (see renderTaskGraphLink). */
+const taskGraphRailBaseOffset = 21;
+/** Slack past the deepest lane for the curve bend and arrowhead. */
+const taskGraphArrowPad = 48;
 const taskGraphLinkHues = ["#39708f", "#7c3aed", "#0f766e", "#b0762f", "#a05577"] as const;
 
 function taskGraphRouteGutterWidth(links: readonly TaskGraphLink[]): number {
@@ -5040,7 +5130,15 @@ function renderTaskGraphVisualization(
   const graphHeight = models.length * taskGraphRowHeight + Math.max(0, models.length - 1) * taskGraphRowGap;
   const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
   const gutterWidth = taskGraphRouteGutterWidth(links);
-  const graphWidth = Math.max(620, 360 + maxLane * taskGraphLaneWidth) + gutterWidth;
+  // Only the arrow coordinate space needs a fixed width: every in-pane edge
+  // is anchored to the left routing gutter and lane rails (see
+  // renderTaskGraphLink), so the deepest lane plus a small pad for the bend
+  // and arrowhead is all the SVG must span. Node bodies are fluid — they grow
+  // to fill wider panes and shrink to fit narrow ones (the node list caps at
+  // 100% of the pane), so this width no longer reserves body space and the
+  // narrow side panes stop showing a horizontal scrollbar when nothing
+  // actually overflows.
+  const graphWidth = taskGraphRailBaseOffset + gutterWidth + maxLane * taskGraphLaneWidth + taskGraphArrowPad;
   const svgLinks = links.map((link) => renderTaskGraphLink(link, gutterWidth)).join("");
   const renderedNodes = models.map((model) => renderReadOnlyTaskGraphNode(
     model,
@@ -5771,14 +5869,17 @@ function appShellStyles(): string {
     .os-task-graph-links.os-links-hover .os-task-graph-link.is-active { opacity: 1; stroke-width: 2.5; }
     .os-task-graph-links marker path:not([fill]) { fill: #39708f; }
     /* Reserve the skip-arrow routing gutter (taskGraphRouteGutterWidth). */
-    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; padding-left: var(--os-tg-gutter, 62px); }
+    .os-node-graph-list { position: relative; z-index: 1; min-width: min(100%, var(--os-graph-width)); gap: 8px; padding-left: var(--os-tg-gutter, 62px); }
     /* Three-pane task graph: Completed | Current | Backlog. */
-    .os-tg-panes { position: relative; display: flex; align-items: stretch; gap: 10px; min-width: 0; }
+    /* gap: 0 — the resizers between expanded panes provide the separation
+       (matching .os-lower-columns); collapsed strips carry their own margin. */
+    .os-tg-panes { position: relative; display: flex; align-items: stretch; gap: 0; min-width: 0; }
+    .os-tg-resizer { align-self: stretch; }
     .os-tg-pane { display: flex; flex-direction: column; min-width: 0; border: 1px solid #d8dee4; border-radius: 10px; background: #fbfcfe; }
     .os-tg-pane-done { flex: 0 0 clamp(300px, 30%, 460px); }
     .os-tg-pane-current { flex: 1 1 auto; }
     .os-tg-pane-backlog { flex: 0 0 clamp(260px, 26%, 420px); }
-    .os-tg-pane-collapsed { flex: 0 0 44px; align-items: center; gap: 8px; padding: 8px 0; }
+    .os-tg-pane-collapsed { flex: 0 0 44px; align-items: center; gap: 8px; padding: 8px 0; margin-inline: 5px; }
     .os-tg-pane-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #e3e8ee; }
     .os-tg-pane-head strong { font-size: 13px; }
     .os-tg-dot { width: 9px; height: 9px; border-radius: 999px; flex: 0 0 auto; }
