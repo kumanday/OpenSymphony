@@ -1299,29 +1299,36 @@ fn memory_graph_communities_from_issues(
 ) -> Vec<MemoryGraphCommunity> {
     let mut communities = BTreeMap::<String, (String, Vec<String>)>::new();
     for issue in issues {
-        let (id, label) = community_key(issue);
-        let (_, node_ids) = communities
-            .entry(id)
-            .or_insert_with(|| (label, Vec::new()));
-        node_ids.push(concept_node_id(issue));
-        if options.include_tags {
-            node_ids.extend(issue.tags.iter().map(|tag| format!("tag:{tag}")));
-        }
-        if options.include_citations {
-            node_ids.extend(
-                issue
-                    .citations
-                    .iter()
-                    .map(|citation| format!("citation:{}", citation.id)),
-            );
-        }
-        if options.include_source_refs {
-            node_ids.extend(
-                issue
-                    .source_refs
-                    .iter()
-                    .map(|source_ref| format!("source_ref:{}:{}", source_ref.kind, source_ref.id)),
-            );
+        // Communities are membership lists, not primary assignments: a
+        // concept that belongs to several areas joins every one of them, so
+        // drilling into an area keeps its multi-area members (and the edges
+        // between them). Assigning each concept to a single community left
+        // the drilled view with almost no surviving edges, because most
+        // relationships crossed the primary-community boundary.
+        for (id, label) in community_keys(issue) {
+            let (_, node_ids) = communities
+                .entry(id)
+                .or_insert_with(|| (label, Vec::new()));
+            node_ids.push(concept_node_id(issue));
+            if options.include_tags {
+                node_ids.extend(issue.tags.iter().map(|tag| format!("tag:{tag}")));
+            }
+            if options.include_citations {
+                node_ids.extend(
+                    issue
+                        .citations
+                        .iter()
+                        .map(|citation| format!("citation:{}", citation.id)),
+                );
+            }
+            if options.include_source_refs {
+                node_ids.extend(
+                    issue
+                        .source_refs
+                        .iter()
+                        .map(|source_ref| format!("source_ref:{}:{}", source_ref.kind, source_ref.id)),
+                );
+            }
         }
     }
     communities
@@ -1343,22 +1350,28 @@ fn memory_graph_communities_from_issues(
         .collect()
 }
 
-fn community_key(issue: &IndexedIssue) -> (String, String) {
-    // Assign exactly one stable community per concept. Multiple areas are
-    // ordered before selecting the first; tags keep frontmatter order.
-    if let Some(area) = issue.areas().into_iter().next() {
-        return (format!("area:{area}"), area);
+fn community_keys(issue: &IndexedIssue) -> Vec<(String, String)> {
+    // Every area a concept belongs to is a community it is a member of, so a
+    // multi-area concept appears in each area's node list. Falls back to the
+    // first tag, then the concept's directory, then its type when it carries
+    // no areas — every concept lands in exactly one community in that case.
+    let areas = issue.areas();
+    if !areas.is_empty() {
+        return areas
+            .into_iter()
+            .map(|area| (format!("area:{area}"), area))
+            .collect();
     }
     if let Some(tag) = issue.tags.first() {
-        return (format!("tag:{tag}"), tag.clone());
+        return vec![(format!("tag:{tag}"), tag.clone())];
     }
     if let Some((directory, _)) = issue.concept_id.rsplit_once('/') {
-        return (format!("directory:{directory}"), directory.to_string());
+        return vec![(format!("directory:{directory}"), directory.to_string())];
     }
-    (
+    vec![(
         format!("type:{}", issue.concept_type),
         issue.concept_type.clone(),
-    )
+    )]
 }
 
 fn apply_node_metrics(
@@ -1446,5 +1459,65 @@ fn graph_snapshot_metrics(
             .filter(|node| node.kind == MemoryGraphNodeKind::Concept)
             .map(|node| node.warning_count)
             .sum(),
+    }
+}
+
+#[cfg(test)]
+mod community_tests {
+    use super::*;
+
+    fn issue_with_areas(key: &str, areas: &[&str]) -> IndexedIssue {
+        IndexedIssue {
+            issue_key: key.to_string(),
+            concept_id: format!("issues/{key}"),
+            concept_type: "issue-capsule".to_string(),
+            title: format!("{key} concept"),
+            description: None,
+            state: None,
+            milestone: None,
+            labels: Vec::new(),
+            tags: Vec::new(),
+            areas: areas.iter().map(|area| area.to_string()).collect(),
+            capsule_path: PathBuf::from(format!(".opensymphony/memory/issues/{key}.md")),
+            visibility: MemoryVisibility::Public,
+            source_hash: String::new(),
+            warning_count: 0,
+            docs_sync_status: "pending".to_string(),
+            completion_time: None,
+            captured_at: "2026-07-06T00:00:00Z".to_string(),
+            changed_files: Vec::new(),
+            scope_refs: Vec::new(),
+            source_refs: Vec::new(),
+            links: Vec::new(),
+            citations: Vec::new(),
+            freshness: MemoryFreshness::Unknown,
+            warnings: Vec::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn multi_area_concept_joins_every_area_community() {
+        let issues = vec![
+            issue_with_areas("COE-1", &["architecture", "build"]),
+            issue_with_areas("COE-2", &["architecture"]),
+        ];
+        let communities = memory_graph_communities_from_issues(
+            &issues,
+            MemoryGraphCommunityOptions::default(),
+        );
+        let members = |id: &str| {
+            communities
+                .iter()
+                .find(|community| community.id == id)
+                .map(|community| community.node_ids.clone())
+                .unwrap_or_default()
+        };
+        // The multi-area concept appears in both of its areas; the
+        // single-area concept only in its own.
+        assert!(members("area:architecture").contains(&"concept:issues/COE-1".to_string()));
+        assert!(members("area:build").contains(&"concept:issues/COE-1".to_string()));
+        assert!(members("area:architecture").contains(&"concept:issues/COE-2".to_string()));
+        assert!(!members("area:build").contains(&"concept:issues/COE-2".to_string()));
     }
 }
