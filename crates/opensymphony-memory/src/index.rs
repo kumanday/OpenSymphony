@@ -391,6 +391,7 @@ CREATE TABLE IF NOT EXISTS code_documents (
 );
 CREATE TABLE IF NOT EXISTS code_symbols (
   symbol_id TEXT PRIMARY KEY,
+  symbol_key TEXT NOT NULL,
   repo_id TEXT NOT NULL,
   commit_sha TEXT,
   worktree_dirty BOOLEAN NOT NULL,
@@ -424,7 +425,9 @@ CREATE TABLE IF NOT EXISTS code_edges (
   language TEXT NOT NULL,
   edge_kind TEXT NOT NULL,
   source_symbol_id TEXT,
+  source_symbol_key TEXT,
   target_symbol_id TEXT,
+  target_symbol_key TEXT,
   target_hint TEXT,
   confidence TEXT NOT NULL,
   start_line BIGINT NOT NULL,
@@ -463,10 +466,13 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
 );
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
 UPDATE code_symbols SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS symbol_key TEXT DEFAULT '';
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_symbols SET parser_version = '' WHERE parser_version IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
 UPDATE code_edges SET worktree_dirty = false WHERE worktree_dirty IS NULL;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS source_symbol_key TEXT;
+ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS target_symbol_key TEXT;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
 UPDATE code_edges SET start_col = 0 WHERE start_col IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS end_col BIGINT DEFAULT 0;
@@ -490,10 +496,13 @@ UPDATE code_diagnostics SET end_byte = 0 WHERE end_byte IS NULL;
 ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_diagnostics SET parser_version = '' WHERE parser_version IS NULL;
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
+CREATE INDEX IF NOT EXISTS idx_code_symbols_key ON code_symbols(symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_path ON code_symbols(path);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_kind ON code_symbols(kind);
 CREATE INDEX IF NOT EXISTS idx_code_edges_source ON code_edges(source_symbol_id);
 CREATE INDEX IF NOT EXISTS idx_code_edges_target ON code_edges(target_symbol_id);
+CREATE INDEX IF NOT EXISTS idx_code_edges_source_key ON code_edges(source_symbol_key);
+CREATE INDEX IF NOT EXISTS idx_code_edges_target_key ON code_edges(target_symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 "#,
     ))
@@ -568,25 +577,16 @@ pub fn persist_code_intel_documents(
             })?;
         report.persisted_documents += 1;
 
-        for symbol in &document.symbols {
-            let symbol_id = code_row_id(&[
-                &batch.repo_id,
-                &path,
-                &document.content_sha256,
-                &document.parser_version,
-                &document.query_pack_version,
-                &symbol.kind,
-                &symbol.name,
-                &symbol.start_line.to_string(),
-                &symbol.start_col.to_string(),
-                &symbol.end_line.to_string(),
-                &symbol.end_col.to_string(),
-            ]);
+        let prepared_symbols = prepare_code_symbols(&batch.repo_id, &path, &document);
+
+        for prepared in &prepared_symbols {
+            let symbol = prepared.symbol;
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_symbols (symbol_id, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
-                        symbol_id,
+                        prepared.symbol_id,
+                        prepared.symbol_key,
                         batch.repo_id,
                         batch.commit_sha,
                         batch.worktree_dirty,
@@ -594,7 +594,7 @@ pub fn persist_code_intel_documents(
                         document.language,
                         symbol.kind,
                         symbol.name,
-                        Option::<String>::None,
+                        prepared.container_symbol_id,
                         symbol.signature,
                         symbol.start_line as i64,
                         symbol.start_col as i64,
@@ -620,6 +620,7 @@ pub fn persist_code_intel_documents(
         }
 
         for edge in &document.edges {
+            let resolved = resolve_code_edge(edge, &prepared_symbols);
             let edge_id = code_row_id(&[
                 &batch.repo_id,
                 &path,
@@ -637,7 +638,7 @@ pub fn persist_code_intel_documents(
             ]);
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, target_symbol_id, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         edge_id,
                         batch.repo_id,
@@ -646,10 +647,12 @@ pub fn persist_code_intel_documents(
                         path,
                         document.language,
                         edge.edge_kind,
-                        Option::<String>::None,
-                        Option::<String>::None,
+                        resolved.source_symbol_id,
+                        resolved.source_symbol_key,
+                        resolved.target_symbol_id,
+                        resolved.target_symbol_key,
                         edge.target_hint,
-                        edge.confidence,
+                        normalize_edge_confidence(&edge.confidence, resolved.target_resolved),
                         edge.start_line as i64,
                         edge.start_col as i64,
                         edge.end_line as i64,
@@ -727,6 +730,596 @@ pub fn persist_code_intel_documents(
             source,
         })?;
     Ok(report)
+}
+
+struct PreparedCodeSymbol<'a> {
+    symbol: &'a CodeIntelSymbolInput,
+    symbol_id: String,
+    symbol_key: String,
+    container_symbol_id: Option<String>,
+}
+
+struct ResolvedCodeEdge {
+    source_symbol_id: Option<String>,
+    source_symbol_key: Option<String>,
+    target_symbol_id: Option<String>,
+    target_symbol_key: Option<String>,
+    target_resolved: bool,
+}
+
+fn prepare_code_symbols<'a>(
+    repo_id: &str,
+    path: &str,
+    document: &'a CodeIntelDocumentInput,
+) -> Vec<PreparedCodeSymbol<'a>> {
+    let mut base_key_counts = BTreeMap::<String, usize>::new();
+    let mut prepared = document
+        .symbols
+        .iter()
+        .map(|symbol| {
+            let symbol_id = code_row_id(&[
+                repo_id,
+                path,
+                &document.content_sha256,
+                &document.parser_version,
+                &document.query_pack_version,
+                &symbol.kind,
+                &symbol.name,
+                &symbol.start_line.to_string(),
+                &symbol.start_col.to_string(),
+                &symbol.end_line.to_string(),
+                &symbol.end_col.to_string(),
+            ]);
+            let base_key = code_row_id(&[
+                repo_id,
+                path,
+                &document.language,
+                &symbol.kind,
+                &symbol.container_chain.join("\u{1f}"),
+                &symbol.name,
+            ]);
+            let ordinal = base_key_counts.entry(base_key.clone()).or_default();
+            *ordinal += 1;
+            let symbol_key = if *ordinal == 1 {
+                base_key
+            } else {
+                format!("{base_key}#{ordinal}")
+            };
+            PreparedCodeSymbol {
+                symbol,
+                symbol_id,
+                symbol_key,
+                container_symbol_id: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for index in 0..prepared.len() {
+        if let Some(parent_index) = container_symbol_index(&prepared, index) {
+            prepared[index].container_symbol_id = Some(prepared[parent_index].symbol_id.clone());
+        }
+    }
+
+    prepared
+}
+
+fn container_symbol_index(symbols: &[PreparedCodeSymbol<'_>], child_index: usize) -> Option<usize> {
+    let child = symbols[child_index].symbol;
+    let parent_name = child.container_chain.last()?;
+    let parent_chain = &child.container_chain[..child.container_chain.len().saturating_sub(1)];
+    symbols
+        .iter()
+        .enumerate()
+        .filter(|(candidate_index, candidate)| {
+            *candidate_index != child_index
+                && candidate.symbol.name == *parent_name
+                && candidate.symbol.container_chain == parent_chain
+                && symbol_contains_span(candidate.symbol, child.start_byte, child.end_byte)
+        })
+        .min_by_key(|(_, candidate)| {
+            (
+                candidate.symbol.end_byte.saturating_sub(candidate.symbol.start_byte),
+                std::cmp::Reverse(candidate.symbol.start_byte),
+            )
+        })
+        .map(|(candidate_index, _)| candidate_index)
+}
+
+fn resolve_code_edge(
+    edge: &CodeIntelEdgeInput,
+    symbols: &[PreparedCodeSymbol<'_>],
+) -> ResolvedCodeEdge {
+    let source = symbols
+        .iter()
+        .filter(|symbol| symbol_contains_span(symbol.symbol, edge.start_byte, edge.end_byte))
+        .min_by_key(|symbol| {
+            (
+                symbol.symbol.end_byte.saturating_sub(symbol.symbol.start_byte),
+                std::cmp::Reverse(symbol.symbol.start_byte),
+            )
+        });
+    let target = edge
+        .target_hint
+        .as_deref()
+        .and_then(edge_target_name)
+        .and_then(|name| single_symbol_named(symbols, name));
+
+    ResolvedCodeEdge {
+        source_symbol_id: source.map(|symbol| symbol.symbol_id.clone()),
+        source_symbol_key: source.map(|symbol| symbol.symbol_key.clone()),
+        target_symbol_id: target.map(|symbol| symbol.symbol_id.clone()),
+        target_symbol_key: target.map(|symbol| symbol.symbol_key.clone()),
+        target_resolved: target.is_some(),
+    }
+}
+
+fn symbol_contains_span(symbol: &CodeIntelSymbolInput, start_byte: usize, end_byte: usize) -> bool {
+    symbol.start_byte <= start_byte && symbol.end_byte >= end_byte
+}
+
+fn edge_target_name(target_hint: &str) -> Option<&str> {
+    let before_call = target_hint.split_once('(').map_or(target_hint, |(name, _)| name);
+    before_call
+        .split([':', '.'])
+        .filter(|part| !part.is_empty())
+        .next_back()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+}
+
+fn single_symbol_named<'a>(
+    symbols: &'a [PreparedCodeSymbol<'_>],
+    name: &str,
+) -> Option<&'a PreparedCodeSymbol<'a>> {
+    let mut matches = symbols.iter().filter(|symbol| symbol.symbol.name == name);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn normalize_edge_confidence(input: &str, target_resolved: bool) -> &'static str {
+    if target_resolved {
+        return "exact";
+    }
+    let normalized = input.trim().to_ascii_lowercase();
+    if normalized.contains("heuristic") {
+        "heuristic"
+    } else {
+        "syntactic"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSymbolRecord {
+    pub symbol_id: String,
+    pub symbol_key: String,
+    pub repo_id: String,
+    pub commit_sha: Option<String>,
+    pub path: String,
+    pub language: String,
+    pub kind: String,
+    pub name: String,
+    pub container_symbol_id: Option<String>,
+    pub container_chain: Vec<String>,
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub snippet_sha256: String,
+    pub freshness: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeEdgeRecord {
+    pub edge_id: String,
+    pub edge_kind: String,
+    pub source_symbol_key: Option<String>,
+    pub target_symbol_key: Option<String>,
+    pub target_hint: Option<String>,
+    pub confidence: String,
+    pub unresolved: bool,
+    pub path: String,
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeNeighborhood {
+    pub center: CodeSymbolRecord,
+    pub symbols: Vec<CodeSymbolRecord>,
+    pub edges: Vec<CodeEdgeRecord>,
+    pub max_depth: usize,
+    pub max_records: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeSymbolDiffStatus {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSymbolDiff {
+    pub symbol_key: String,
+    pub status: CodeSymbolDiffStatus,
+    pub base: Option<CodeSymbolRecord>,
+    pub head: Option<CodeSymbolRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSymbolComparison {
+    pub base_revision: String,
+    pub head_revision: String,
+    pub diffs: Vec<CodeSymbolDiff>,
+    pub max_records: usize,
+    pub truncated: bool,
+}
+
+pub fn code_symbol_detail(
+    config: &MemoryConfig,
+    symbol_key: &str,
+) -> Result<Option<CodeSymbolRecord>, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    query_code_symbol_by_key(&connection, symbol_key, true)
+}
+
+pub fn code_symbols_containing_span(
+    config: &MemoryConfig,
+    repo_id: &str,
+    path: &str,
+    line: usize,
+    column: usize,
+    limit: usize,
+) -> Result<Vec<CodeSymbolRecord>, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let mut statement = connection
+        .prepare(
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = statement
+        .query_map(params![repo_id, path], |row| code_symbol_from_row(row))
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    rows.into_iter()
+        .filter(|symbol| symbol_contains_point(symbol, line, column))
+        .take(limit)
+        .map(|mut symbol| {
+            symbol.container_chain = load_container_chain(&connection, symbol.container_symbol_id.as_deref())?;
+            Ok(symbol)
+        })
+        .collect()
+}
+
+pub fn code_symbol_neighborhood(
+    config: &MemoryConfig,
+    symbol_key: &str,
+    max_depth: usize,
+    max_records: usize,
+) -> Result<Option<CodeNeighborhood>, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let Some(center) = query_code_symbol_by_key(&connection, symbol_key, true)? else {
+        return Ok(None);
+    };
+    let mut symbols = BTreeMap::from([(center.symbol_key.clone(), center.clone())]);
+    let mut edges = BTreeMap::<String, CodeEdgeRecord>::new();
+    let mut frontier = BTreeSet::from([center.symbol_key.clone()]);
+    let mut truncated = false;
+
+    for _ in 0..max_depth {
+        let mut next_frontier = BTreeSet::new();
+        for key in &frontier {
+            for edge in query_edges_for_symbol_key(&connection, key)? {
+                if edges.len() >= max_records {
+                    truncated = true;
+                    break;
+                }
+                for adjacent in [
+                    edge.source_symbol_key.as_deref(),
+                    edge.target_symbol_key.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !symbols.contains_key(adjacent) {
+                        if symbols.len() >= max_records {
+                            truncated = true;
+                            continue;
+                        }
+                        if let Some(symbol) = query_code_symbol_by_key(&connection, adjacent, true)? {
+                            next_frontier.insert(adjacent.to_string());
+                            symbols.insert(adjacent.to_string(), symbol);
+                        }
+                    }
+                }
+                edges.insert(edge.edge_id.clone(), edge);
+            }
+            if truncated {
+                break;
+            }
+        }
+        if truncated || next_frontier.is_empty() {
+            break;
+        }
+        frontier = next_frontier;
+    }
+
+    Ok(Some(CodeNeighborhood {
+        center,
+        symbols: symbols.into_values().collect(),
+        edges: edges.into_values().collect(),
+        max_depth,
+        max_records,
+        truncated,
+    }))
+}
+
+pub fn compare_code_symbols(
+    config: &MemoryConfig,
+    repo_id: &str,
+    base_revision: &str,
+    head_revision: &str,
+    max_records: usize,
+) -> Result<CodeSymbolComparison, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
+    let head = query_symbols_for_revision(&connection, repo_id, head_revision)?;
+    let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();
+    keys.extend(head.keys().cloned());
+    let mut diffs = Vec::new();
+    let mut truncated = false;
+
+    for key in keys {
+        if diffs.len() >= max_records {
+            truncated = true;
+            break;
+        }
+        match (base.get(&key), head.get(&key)) {
+            (None, Some(head_symbol)) => diffs.push(CodeSymbolDiff {
+                symbol_key: key,
+                status: CodeSymbolDiffStatus::Added,
+                base: None,
+                head: Some(head_symbol.clone()),
+            }),
+            (Some(base_symbol), None) => diffs.push(CodeSymbolDiff {
+                symbol_key: key,
+                status: CodeSymbolDiffStatus::Removed,
+                base: Some(base_symbol.clone()),
+                head: None,
+            }),
+            (Some(base_symbol), Some(head_symbol))
+                if base_symbol.snippet_sha256 != head_symbol.snippet_sha256 =>
+            {
+                diffs.push(CodeSymbolDiff {
+                    symbol_key: key,
+                    status: CodeSymbolDiffStatus::Modified,
+                    base: Some(base_symbol.clone()),
+                    head: Some(head_symbol.clone()),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(CodeSymbolComparison {
+        base_revision: base_revision.to_string(),
+        head_revision: head_revision.to_string(),
+        diffs,
+        max_records,
+        truncated,
+    })
+}
+
+fn query_code_symbol_by_key(
+    connection: &Connection,
+    symbol_key: &str,
+    current_only: bool,
+) -> Result<Option<CodeSymbolRecord>, MemoryError> {
+    let sql = if current_only {
+        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+    } else {
+        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![symbol_key])
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    let Some(row) = rows.next().map_err(|source| MemoryError::DuckDb {
+        path: PathBuf::from("<memory-index>"),
+        source,
+    })?
+    else {
+        return Ok(None);
+    };
+    let mut symbol = code_symbol_from_row(row).map_err(|source| MemoryError::DuckDb {
+        path: PathBuf::from("<memory-index>"),
+        source,
+    })?;
+    symbol.container_chain = load_container_chain(connection, symbol.container_symbol_id.as_deref())?;
+    Ok(Some(symbol))
+}
+
+fn query_symbols_for_revision(
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND commit_sha = ? ORDER BY symbol_key, indexed_at DESC, symbol_id",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    let rows = statement
+        .query_map(params![repo_id, revision], |row| code_symbol_from_row(row))
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    let mut symbols = BTreeMap::new();
+    for mut symbol in rows {
+        if !symbols.contains_key(&symbol.symbol_key) {
+            symbol.container_chain = load_container_chain(connection, symbol.container_symbol_id.as_deref())?;
+            symbols.insert(symbol.symbol_key.clone(), symbol);
+        }
+    }
+    Ok(symbols)
+}
+
+fn query_edges_for_symbol_key(
+    connection: &Connection,
+    symbol_key: &str,
+) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, start_line, start_col, end_line, end_col FROM code_edges WHERE freshness = 'current' AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    statement
+        .query_map(params![symbol_key, symbol_key], |row| code_edge_from_row(row))
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })
+}
+
+fn load_container_chain(
+    connection: &Connection,
+    container_symbol_id: Option<&str>,
+) -> Result<Vec<String>, MemoryError> {
+    let mut chain = Vec::new();
+    let mut next = container_symbol_id.map(str::to_string);
+    while let Some(symbol_id) = next {
+        let mut statement = connection
+            .prepare("SELECT name, container_symbol_id FROM code_symbols WHERE symbol_id = ? LIMIT 1")
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+        let mut rows = statement
+            .query(params![symbol_id])
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+        let Some(row) = rows.next().map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?
+        else {
+            break;
+        };
+        chain.push(row.get::<_, String>(0).map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?);
+        next = row.get::<_, Option<String>>(1).map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+fn code_symbol_from_row(row: &duckdb::Row<'_>) -> Result<CodeSymbolRecord, duckdb::Error> {
+    Ok(CodeSymbolRecord {
+        symbol_id: row.get(0)?,
+        symbol_key: row.get(1)?,
+        repo_id: row.get(2)?,
+        commit_sha: row.get(3)?,
+        path: row.get(4)?,
+        language: row.get(5)?,
+        kind: row.get(6)?,
+        name: row.get(7)?,
+        container_symbol_id: row.get(8)?,
+        container_chain: Vec::new(),
+        start_line: row.get::<_, i64>(9)? as usize,
+        start_col: row.get::<_, i64>(10)? as usize,
+        end_line: row.get::<_, i64>(11)? as usize,
+        end_col: row.get::<_, i64>(12)? as usize,
+        start_byte: row.get::<_, i64>(13)? as usize,
+        end_byte: row.get::<_, i64>(14)? as usize,
+        snippet_sha256: row.get(15)?,
+        freshness: row.get(16)?,
+    })
+}
+
+fn code_edge_from_row(row: &duckdb::Row<'_>) -> Result<CodeEdgeRecord, duckdb::Error> {
+    let target_symbol_key = row.get::<_, Option<String>>(3)?;
+    Ok(CodeEdgeRecord {
+        edge_id: row.get(0)?,
+        edge_kind: row.get(1)?,
+        source_symbol_key: row.get(2)?,
+        unresolved: target_symbol_key.is_none(),
+        target_symbol_key,
+        target_hint: row.get(4)?,
+        confidence: row.get(5)?,
+        path: row.get(6)?,
+        start_line: row.get::<_, i64>(7)? as usize,
+        start_col: row.get::<_, i64>(8)? as usize,
+        end_line: row.get::<_, i64>(9)? as usize,
+        end_col: row.get::<_, i64>(10)? as usize,
+    })
+}
+
+fn symbol_contains_point(symbol: &CodeSymbolRecord, line: usize, column: usize) -> bool {
+    (symbol.start_line < line || (symbol.start_line == line && symbol.start_col <= column))
+        && (symbol.end_line > line || (symbol.end_line == line && symbol.end_col >= column))
 }
 
 struct CodeFreshnessKey<'a> {

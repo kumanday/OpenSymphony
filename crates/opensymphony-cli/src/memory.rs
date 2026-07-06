@@ -2978,6 +2978,7 @@ fn code_intel_document_input(
                 CodeIntelSymbolInput {
                     kind: symbol_kind_id(&symbol.kind).to_string(),
                     name: symbol.name.clone(),
+                    container_chain: symbol.container_chain.clone(),
                     signature: None,
                     start_line: symbol.span.start_line,
                     start_col: symbol.span.start_column,
@@ -4694,8 +4695,9 @@ mod tests {
     };
     use crate::opensymphony_memory::{
         CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
-        CodeIntelPersistBatch, CodeIntelSymbolInput, MemoryConfig, MemoryError,
-        persist_code_intel_documents,
+        CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus, MemoryConfig,
+        MemoryError, code_symbol_detail, code_symbol_neighborhood, code_symbols_containing_span,
+        compare_code_symbols, persist_code_intel_documents,
     };
     use axum::http::{HeaderMap, HeaderValue, header};
     use duckdb::{Connection, params};
@@ -5302,6 +5304,280 @@ mod tests {
         assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 2);
     }
 
+    #[test]
+    fn code_intel_symbol_key_is_stable_beside_revision_bound_symbol_id() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let base = sample_code_intel_document("hash-a", "pack-a");
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("base".to_string()),
+                worktree_dirty: false,
+                documents: vec![base],
+            },
+        )
+        .expect("base persist");
+
+        let mut shifted = sample_code_intel_document("hash-b", "pack-a");
+        shifted.symbols[0].start_line = 5;
+        shifted.symbols[0].end_line = 5;
+        shifted.symbols[0].start_byte = 40;
+        shifted.symbols[0].end_byte = 52;
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("head".to_string()),
+                worktree_dirty: false,
+                documents: vec![shifted],
+            },
+        )
+        .expect("head persist");
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        let rows = connection
+            .prepare("SELECT symbol_id, symbol_key FROM code_symbols ORDER BY commit_sha")
+            .expect("prepare symbols")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query symbols")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("symbol rows");
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].0, rows[1].0);
+        assert_eq!(rows[0].1, rows[1].1);
+    }
+
+    #[test]
+    fn code_intel_duplicate_symbol_keys_get_deterministic_ordinals() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.symbols.push(CodeIntelSymbolInput {
+            kind: "function".to_string(),
+            name: "answer".to_string(),
+            container_chain: Vec::new(),
+            signature: None,
+            start_line: 2,
+            start_col: 1,
+            end_line: 2,
+            end_col: 12,
+            start_byte: 20,
+            end_byte: 32,
+            selection_start_line: 2,
+            selection_end_line: 2,
+            snippet_sha256: "snippet-2".to_string(),
+        });
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("same".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist duplicate symbols");
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        let keys = connection
+            .prepare("SELECT symbol_key FROM code_symbols ORDER BY start_byte")
+            .expect("prepare keys")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query keys")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("keys");
+        assert_eq!(keys.len(), 2);
+        assert!(!keys[0].ends_with("#2"));
+        assert_eq!(keys[1], format!("{}#2", keys[0]));
+    }
+
+    #[test]
+    fn code_intel_read_model_resolves_containers_edges_bounds_and_diff() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut base = sample_code_intel_document("hash-a", "pack-a");
+        base.symbols = vec![
+            CodeIntelSymbolInput {
+                kind: "struct".to_string(),
+                name: "Widget".to_string(),
+                container_chain: Vec::new(),
+                signature: None,
+                start_line: 1,
+                start_col: 1,
+                end_line: 8,
+                end_col: 1,
+                start_byte: 0,
+                end_byte: 120,
+                selection_start_line: 1,
+                selection_end_line: 8,
+                snippet_sha256: "widget".to_string(),
+            },
+            CodeIntelSymbolInput {
+                kind: "method".to_string(),
+                name: "run".to_string(),
+                container_chain: vec!["Widget".to_string()],
+                signature: None,
+                start_line: 3,
+                start_col: 5,
+                end_line: 5,
+                end_col: 6,
+                start_byte: 20,
+                end_byte: 80,
+                selection_start_line: 3,
+                selection_end_line: 5,
+                snippet_sha256: "run-v1".to_string(),
+            },
+            CodeIntelSymbolInput {
+                kind: "function".to_string(),
+                name: "helper".to_string(),
+                container_chain: Vec::new(),
+                signature: None,
+                start_line: 10,
+                start_col: 1,
+                end_line: 10,
+                end_col: 20,
+                start_byte: 140,
+                end_byte: 160,
+                selection_start_line: 10,
+                selection_end_line: 10,
+                snippet_sha256: "helper".to_string(),
+            },
+            CodeIntelSymbolInput {
+                kind: "function".to_string(),
+                name: "removed".to_string(),
+                container_chain: Vec::new(),
+                signature: None,
+                start_line: 12,
+                start_col: 1,
+                end_line: 12,
+                end_col: 20,
+                start_byte: 170,
+                end_byte: 190,
+                selection_start_line: 12,
+                selection_end_line: 12,
+                snippet_sha256: "removed".to_string(),
+            },
+        ];
+        base.edges = vec![CodeIntelEdgeInput {
+            edge_kind: "reference.call".to_string(),
+            target_hint: Some("helper()".to_string()),
+            confidence: "query_pack:calls".to_string(),
+            start_line: 4,
+            start_col: 9,
+            end_line: 4,
+            end_col: 17,
+            start_byte: 40,
+            end_byte: 48,
+        }];
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("base".to_string()),
+                worktree_dirty: false,
+                documents: vec![base.clone()],
+            },
+        )
+        .expect("base persist");
+
+        let containing = code_symbols_containing_span(&config, "repo", "src/lib.rs", 4, 10, 10)
+            .expect("span containment");
+        assert_eq!(
+            containing
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Widget", "run"]
+        );
+        let run_key = containing
+            .iter()
+            .find(|symbol| symbol.name == "run")
+            .expect("run symbol")
+            .symbol_key
+            .clone();
+        let detail = code_symbol_detail(&config, &run_key)
+            .expect("detail query")
+            .expect("run detail");
+        assert_eq!(detail.container_chain, vec!["Widget"]);
+
+        let neighborhood = code_symbol_neighborhood(&config, &run_key, 1, 10)
+            .expect("neighborhood")
+            .expect("center exists");
+        assert!(!neighborhood.truncated);
+        assert!(
+            neighborhood
+                .edges
+                .iter()
+                .any(|edge| edge.confidence == "exact"
+                    && !edge.unresolved
+                    && edge.target_symbol_key.is_some())
+        );
+        let truncated = code_symbol_neighborhood(&config, &run_key, 1, 1)
+            .expect("bounded neighborhood")
+            .expect("center exists");
+        assert!(truncated.truncated);
+
+        let mut head = base;
+        head.content_sha256 = "hash-b".to_string();
+        head.symbols[1].snippet_sha256 = "run-v2".to_string();
+        head.symbols.retain(|symbol| symbol.name != "removed");
+        head.symbols.push(CodeIntelSymbolInput {
+            kind: "function".to_string(),
+            name: "added".to_string(),
+            container_chain: Vec::new(),
+            signature: None,
+            start_line: 12,
+            start_col: 1,
+            end_line: 12,
+            end_col: 20,
+            start_byte: 170,
+            end_byte: 190,
+            selection_start_line: 12,
+            selection_end_line: 12,
+            snippet_sha256: "added".to_string(),
+        });
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("head".to_string()),
+                worktree_dirty: false,
+                documents: vec![head],
+            },
+        )
+        .expect("head persist");
+
+        let comparison =
+            compare_code_symbols(&config, "repo", "base", "head", 10).expect("compare revisions");
+        assert!(
+            comparison
+                .diffs
+                .iter()
+                .any(|diff| matches!(diff.status, CodeSymbolDiffStatus::Added))
+        );
+        assert!(
+            comparison
+                .diffs
+                .iter()
+                .any(|diff| matches!(diff.status, CodeSymbolDiffStatus::Removed))
+        );
+        assert!(
+            comparison
+                .diffs
+                .iter()
+                .any(|diff| matches!(diff.status, CodeSymbolDiffStatus::Modified))
+        );
+        let capped =
+            compare_code_symbols(&config, "repo", "base", "head", 1).expect("capped compare");
+        assert!(capped.truncated);
+    }
+
     fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
         CodeIntelDocumentInput {
             path: "src/lib.rs".into(),
@@ -5315,6 +5591,7 @@ mod tests {
             symbols: vec![CodeIntelSymbolInput {
                 kind: "function".to_string(),
                 name: "answer".to_string(),
+                container_chain: Vec::new(),
                 signature: None,
                 start_line: 1,
                 start_col: 1,

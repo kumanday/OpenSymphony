@@ -388,6 +388,10 @@ pub struct SymbolRecord {
     pub name: String,
     pub span: SourceSpan,
     pub rendered_span: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub container_chain: Vec<String>,
     pub parser_version: String,
     pub query_pack_version: String,
 }
@@ -1496,6 +1500,8 @@ fn run_query_pack(
                         name,
                         span: span.clone(),
                         rendered_span: rendered_span.clone(),
+                        container_name: None,
+                        container_chain: Vec::new(),
                         parser_version: TREE_SITTER_VERSION.to_string(),
                         query_pack_version: query_pack.version.clone(),
                     });
@@ -1512,7 +1518,45 @@ fn run_query_pack(
         }
     }
 
+    assign_symbol_containers(&mut symbols);
+
     Ok((symbols, captures))
+}
+
+fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
+    for index in 0..symbols.len() {
+        let parent_index = symbols
+            .iter()
+            .enumerate()
+            .filter(|(candidate_index, candidate)| {
+                *candidate_index != index
+                    && span_strictly_contains(&candidate.span, &symbols[index].span)
+            })
+            .min_by_key(|(_, candidate)| {
+                (
+                    candidate
+                        .span
+                        .end_byte
+                        .saturating_sub(candidate.span.start_byte),
+                    std::cmp::Reverse(candidate.span.start_byte),
+                )
+            })
+            .map(|(candidate_index, _)| candidate_index);
+
+        if let Some(parent_index) = parent_index {
+            let parent = symbols[parent_index].clone();
+            let mut chain = parent.container_chain;
+            chain.push(parent.name.clone());
+            symbols[index].container_name = Some(parent.name);
+            symbols[index].container_chain = chain;
+        }
+    }
+}
+
+fn span_strictly_contains(outer: &SourceSpan, inner: &SourceSpan) -> bool {
+    outer.start_byte <= inner.start_byte
+        && outer.end_byte >= inner.end_byte
+        && (outer.start_byte < inner.start_byte || outer.end_byte > inner.end_byte)
 }
 
 fn symbol_kind_for_capture(
@@ -1778,6 +1822,8 @@ fn parse_lightweight_source(
                 .to_string(),
             rendered_span: span.render(),
             span,
+            container_name: None,
+            container_chain: Vec::new(),
             parser_version: LIGHTWEIGHT_PARSER_VERSION.to_string(),
             query_pack_version: query_pack,
         }],
@@ -2235,6 +2281,28 @@ mod tests {
             symbols.contains(&(SymbolKind::Test, "exercises_widget", "30:1-33:2")),
             "{symbols:?}"
         );
+    }
+
+    #[test]
+    fn rust_fixture_extracts_container_chains() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/complete.rs")),
+            RUST_COMPLETE,
+        )
+        .expect("fixture parses");
+
+        let trait_method = summary
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind == SymbolKind::Method
+                    && symbol.name == "run"
+                    && symbol.rendered_span == "15:5-15:19"
+            })
+            .expect("trait method symbol");
+
+        assert_eq!(trait_method.container_name.as_deref(), Some("Runnable"));
+        assert_eq!(trait_method.container_chain, vec!["Runnable"]);
     }
 
     #[test]
