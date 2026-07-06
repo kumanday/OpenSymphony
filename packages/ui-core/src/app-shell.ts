@@ -1172,10 +1172,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     // A task finishing (or reopening) moves it between the Current pane and
     // the Completed table, whose data loads separately — refresh that page
-    // whenever the set of done nodes changes so it never goes stale until a
-    // manual reload.
+    // whenever the completed set could have changed so it never goes stale
+    // until a manual reload. The signature watches both the task graph's
+    // done nodes (so a done node appearing/leaving triggers it) and the
+    // control-plane completed count (so a completion whose issue is absent
+    // from the task graph — e.g. no project metadata — still triggers it).
     const completedSetChanged = this.options.mode === "desktop"
-      && doneTaskGraphKey(this.state.taskGraph) !== doneTaskGraphKey(taskGraph);
+      && completedTasksSignature(this.state.snapshot, this.state.taskGraph)
+        !== completedTasksSignature(snapshot, taskGraph);
 
     // Apply everything atomically: the previous data stays on screen until
     // the replacement is fully loaded, so panels never flash empty.
@@ -5602,6 +5606,25 @@ function isCurrentPaneTaskNode(node: TaskGraphNode): boolean {
  * not just IDs, so a completed issue whose PR or dates change while
  * staying done still triggers a reload.
  */
+/**
+ * Change signal for the separately-loaded Completed pane. Combines the
+ * task graph's done nodes (a done node appearing or leaving) with the
+ * control-plane completed count from the dashboard snapshot (a completion
+ * whose issue never surfaces in the task graph — e.g. no project metadata —
+ * still bumps this count). When it differs across a live refresh, the
+ * Completed page is reloaded.
+ */
+function completedTasksSignature(
+  snapshot: DashboardSnapshot | null,
+  taskGraph: TaskGraphSnapshot | null,
+): string {
+  const completedCount = (snapshot?.projects ?? []).reduce(
+    (sum, project) => sum + project.completed_count,
+    0,
+  );
+  return `${completedCount}\n${doneTaskGraphKey(taskGraph)}`;
+}
+
 function doneTaskGraphKey(taskGraph: TaskGraphSnapshot | null): string {
   return (taskGraph?.nodes ?? [])
     .filter((node) => node.state_category === "done")

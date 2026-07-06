@@ -127,6 +127,18 @@ Cross-pane edges live in a measured SVG overlay
 repositioned on scroll, resize, and collapse; endpoints scrolled out of
 their pane hide instead of drawing across headers.
 
+**Live status reflection.** The Current and Backlog panes are pure
+functions of the latest task-graph snapshot — `renderTaskGraphPanes`
+re-partitions the fresh nodes on every render — so a status change moves a
+task between panes on the next live refresh with no restart: Backlog→Todo
+lands it in Current, Todo→Backlog returns it, and a completion drops it from
+Current. The Completed pane loads separately, so `refreshLiveGatewayData`
+reloads it whenever `completedTasksSignature` changes — a signature over
+both the task graph's done nodes and the dashboard snapshot's control-plane
+completed count, so completions surface even when the finished issue is
+absent from the task graph (e.g. no project metadata). `memory_graph_updated`
+events reload it too, for capsule/PR evidence captured after completion.
+
 ### Drill-down navigation
 
 The knowledge graph navigates through three levels, mirroring the Obsidian

@@ -463,6 +463,7 @@ class LiveEventTransport extends MockGatewayTransport {
   private queuedEvents: Array<GatewayEnvelope | null> = [];
   private resolveNext: ((event: GatewayEnvelope | null) => void) | null = null;
   private liveTaskGraph: TaskGraphSnapshot | null = null;
+  private liveSnapshot: DashboardSnapshot | null = null;
   private nextSnapshotError: Error | null = null;
 
   emit(event: GatewayEnvelope): void {
@@ -477,6 +478,10 @@ class LiveEventTransport extends MockGatewayTransport {
     this.push(null);
   }
 
+  setSnapshot(snapshot: DashboardSnapshot): void {
+    this.liveSnapshot = snapshot;
+  }
+
   override async snapshot(): Promise<DashboardSnapshot> {
     this.snapshotReads += 1;
     if (this.nextSnapshotError) {
@@ -484,7 +489,7 @@ class LiveEventTransport extends MockGatewayTransport {
       this.nextSnapshotError = null;
       throw error;
     }
-    return super.snapshot();
+    return this.liveSnapshot ?? super.snapshot();
   }
 
   setTaskGraph(snapshot: TaskGraphSnapshot): void {
@@ -3717,6 +3722,107 @@ describe("three-pane task graph", () => {
       root.querySelector("[data-testid='knowledge-graph-capsule']") !== null
       || (root.querySelector(".os-kg-breadcrumb")?.textContent?.includes("COE-465") ?? false),
     );
+
+    await handle.destroy();
+  });
+
+  it("moves a task between Backlog and Current as its status changes, both ways", async () => {
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph: threePaneTaskGraph,
+      runDetails: [runDetail],
+    });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter: createFixtureGraphAdapter({ completedTasks: [] }),
+    });
+    await flushUntil(() => root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-a']") !== null);
+    // Starts in Backlog, absent from Current.
+    expect(root.querySelector("[data-tg-pane='current'] [data-node-id='backlog-a']")).toBeNull();
+
+    // Backlog -> Todo: the refreshed snapshot recategorizes the node.
+    const promoted = (category: "todo" | "backlog") => ({
+      ...threePaneTaskGraph,
+      nodes: threePaneTaskGraph.nodes.map((node) =>
+        node.node_id === "backlog-a"
+          ? { ...node, state: category === "todo" ? "Todo" : "Backlog", state_category: category }
+          : node,
+      ),
+    });
+    transport.setTaskGraph(promoted("todo"));
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 1, partition: "events" },
+      entity_ref: { kind: "issue", id: "backlog-a", identifier: "COE-460" },
+      event_kind: "issue.updated",
+      emitted_at: "2026-07-01T00:00:01Z",
+      payload: {},
+    });
+    await flushUntil(() => root.querySelector("[data-tg-pane='current'] [data-node-id='backlog-a']") !== null);
+    expect(root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-a']")).toBeNull();
+
+    // Todo -> Backlog: it must return to the Backlog pane and leave Current.
+    transport.setTaskGraph(promoted("backlog"));
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 2, partition: "events" },
+      entity_ref: { kind: "issue", id: "backlog-a", identifier: "COE-460" },
+      event_kind: "issue.updated",
+      emitted_at: "2026-07-01T00:00:02Z",
+      payload: {},
+    });
+    await flushUntil(() => root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-a']") !== null);
+    expect(root.querySelector("[data-tg-pane='current'] [data-node-id='backlog-a']")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("reloads Completed when the control-plane completed count rises even if the issue leaves the graph", async () => {
+    let completedCalls = 0;
+    const adapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      getCompletedTasks: async (options) => {
+        completedCalls += 1;
+        return pageCompletedTasks([], options);
+      },
+    };
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph: threePaneTaskGraph,
+      runDetails: [runDetail],
+    });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, graphAdapter: adapter });
+    await flushUntil(() => root.querySelector("[data-tg-pane='current']") !== null && completedCalls >= 1);
+    const callsBefore = completedCalls;
+
+    // Simulate a completion whose issue is not present in the task graph
+    // (e.g. no project metadata): the task graph is unchanged, but the
+    // control-plane completed_count rises. The Completed pane must reload.
+    transport.setSnapshot({
+      ...dashboard,
+      projects: dashboard.projects.map((project, index) =>
+        index === 0 ? { ...project, completed_count: project.completed_count + 1 } : project,
+      ),
+    });
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 1, partition: "events" },
+      entity_ref: { kind: "project", id: dashboard.projects[0].project_id },
+      event_kind: "snapshot_published",
+      emitted_at: "2026-07-01T00:00:01Z",
+      payload: {},
+    });
+    await flushUntil(() => completedCalls > callsBefore, 200);
 
     await handle.destroy();
   });
