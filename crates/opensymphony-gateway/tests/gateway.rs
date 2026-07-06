@@ -2760,6 +2760,12 @@ async fn gateway_serves_run_detail() {
         response.status,
         opensymphony::opensymphony_gateway_schema::run::RunStatus::Running
     );
+    // The desktop "Workspace" / "Debug" actions need the on-disk path: the
+    // workspace root joined with the run's suffix.
+    assert_eq!(
+        response.workspace_path.as_deref(),
+        Some("/tmp/opensymphony/COE-255")
+    );
 
     server_task.abort();
 }
