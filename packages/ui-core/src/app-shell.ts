@@ -5484,14 +5484,31 @@ function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
       }
     }
   }
-  // Every skip-level source gets its own gutter lane and hue (in row order),
-  // shared by all of that blocker's arrows: same-source fans stay visually
-  // grouped while different blockers never share a rail.
-  const skipSources = [...new Set(
-    links.filter((link) => link.span > 1)
-      .sort((a, b) => a.from.index - b.from.index)
-      .map((link) => link.from.node.node_id),
-  )];
+  // Every skip-level source gets its own gutter lane and hue, shared by all
+  // of that blocker's arrows: same-source fans stay visually grouped while
+  // different blockers never share a rail.
+  //
+  // Rails are ordered by span, not row position: the shortest hops take the
+  // inner rails (hugging the node cards) and only genuinely long-range arcs
+  // sweep out to the wide rails. Ordering by row instead pushed every deeper
+  // blocker to an outer rail regardless of how close its dependency was, so a
+  // locally-blocked but deeply-nested task's arrow drifted further left the
+  // deeper it sat — the opposite of what the indentation implies.
+  const maxSpanBySource = new Map<string, number>();
+  const firstRowBySource = new Map<string, number>();
+  for (const link of links) {
+    if (link.span <= 1) {
+      continue;
+    }
+    const sourceId = link.from.node.node_id;
+    maxSpanBySource.set(sourceId, Math.max(maxSpanBySource.get(sourceId) ?? 0, link.span));
+    firstRowBySource.set(sourceId, Math.min(firstRowBySource.get(sourceId) ?? Infinity, link.from.index));
+  }
+  const skipSources = [...maxSpanBySource.keys()].sort((a, b) => {
+    const spanDelta = (maxSpanBySource.get(a) ?? 0) - (maxSpanBySource.get(b) ?? 0);
+    // Shorter span → inner rail; ties fall back to row order for determinism.
+    return spanDelta !== 0 ? spanDelta : (firstRowBySource.get(a) ?? 0) - (firstRowBySource.get(b) ?? 0);
+  });
   // Lanes are never reused: every distinct blocker gets its own rail and
   // the gutter widens to fit (taskGraphRouteGutterWidth). Hues cycle.
   const laneBySource = new Map(skipSources.map((sourceId, index) => [sourceId, index]));
