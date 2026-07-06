@@ -1185,6 +1185,25 @@ pub fn refresh_memory_index_from_okf(
                     source,
                 })?;
         }
+        for pr in &row.prs {
+            transaction
+                .execute(
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        row.issue_key,
+                        pr.number as i64,
+                        pr.title.clone(),
+                        pr.url.clone(),
+                        pr.branch.clone(),
+                        pr.merge_sha.clone(),
+                        pr.merged_at.map(|value| value.to_rfc3339()),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
     }
     transaction
         .commit()
@@ -1232,6 +1251,7 @@ struct OkfIndexRow {
     freshness: MemoryFreshness,
     warnings_json: String,
     areas: Vec<String>,
+    prs: Vec<PullRequestEvidence>,
 }
 
 impl OkfIndexRow {
@@ -1295,8 +1315,21 @@ impl OkfIndexRow {
             freshness: okf_index_freshness(&concept),
             warnings_json,
             areas: okf_index_areas(&scope_refs),
+            prs: okf_index_prs(&concept.frontmatter),
         })
     }
+}
+
+/// Pull-request evidence carried in an issue capsule's `prs` frontmatter
+/// (number/url/merge_sha, per `render_issue_capsule`). OKF reindex rewrites
+/// the `pull_requests` table from these so completed rows keep their PR
+/// links after `refresh_memory_index_from_okf`, not just after a live
+/// capture. Malformed entries are skipped rather than failing the reindex.
+fn okf_index_prs(frontmatter: &OkfFrontmatter) -> Vec<PullRequestEvidence> {
+    let Some(value) = frontmatter.extra.get("prs") else {
+        return Vec::new();
+    };
+    serde_yaml::from_value::<Vec<PullRequestEvidence>>(value.clone()).unwrap_or_default()
 }
 
 fn okf_issue_key(

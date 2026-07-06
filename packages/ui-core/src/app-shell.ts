@@ -707,6 +707,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    * tasks — titles, PR URLs — never linger beside a new task graph.
    */
   private resetCompletedTasks(): void {
+    // Bump the sequence so any in-flight completed-tasks request is
+    // abandoned rather than repopulating the cleared page after a context
+    // change (its seq check will now fail).
+    this.completedTasksSeq += 1;
     this.state.completedTasks = null;
     this.state.completedTasksError = null;
     this.state.completedTasksParams = { ...defaultCompletedTasksParams };
@@ -845,16 +849,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private async loadCompletedTasks(contextChanged = false): Promise<void> {
     const adapter = this.graphAdapter;
     if (contextChanged) {
-      this.state.completedTasks = null;
-      this.state.completedTasksError = null;
-      this.state.completedTasksParams = { ...defaultCompletedTasksParams };
+      // resetCompletedTasks bumps completedTasksSeq, so an in-flight request
+      // from the previous context can no longer repopulate the page.
+      this.resetCompletedTasks();
     }
     if (!adapter?.getCompletedTasks) {
       // A gateway without a memory endpoint has no completed tasks: never
-      // leave the prior context's rows on screen.
-      if (contextChanged || this.state.completedTasks) {
-        this.state.completedTasks = null;
-        this.state.completedTasksError = null;
+      // leave the prior context's rows on screen, and invalidate any
+      // still-in-flight request so it cannot land after this return.
+      if (contextChanged || this.state.completedTasks || this.state.completedTasksError) {
+        this.resetCompletedTasks();
       }
       return;
     }

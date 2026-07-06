@@ -377,6 +377,75 @@ async fn project_task_graph_issues_return_requested_and_backlog_from_one_scan() 
 }
 
 #[tokio::test]
+async fn project_task_graph_issues_resolve_out_of_project_ids_by_identifier() {
+    // Project scan returns only COE-260. COE-999 is tracked but sits outside
+    // the project (moved / no project metadata); it resolves via the
+    // per-identifier fallback rather than failing the whole task graph.
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(project_issues_response_with_states(&[(
+            "issue-260",
+            "COE-260",
+            "In-project issue",
+            "In Progress",
+            "started",
+        )])),
+        QueuedResponse::json(issue_by_identifier_response(
+            "issue-999",
+            "COE-999",
+            "Out-of-project issue",
+            "In Progress",
+            "started",
+        )),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    let issues = client
+        .project_task_graph_issues(&["COE-260", "COE-999"])
+        .await
+        .expect("task graph lookup should resolve the out-of-project id");
+
+    let identifiers = issues
+        .iter()
+        .map(|issue| issue.identifier.as_str())
+        .collect::<Vec<_>>();
+    assert!(identifiers.contains(&"COE-260"));
+    assert!(identifiers.contains(&"COE-999"));
+}
+
+#[tokio::test]
+async fn project_task_graph_issues_omit_unresolvable_ids_instead_of_failing() {
+    // COE-404 is neither in the project scan nor resolvable by identifier
+    // (deleted/inaccessible); it is omitted so the rest of the task graph
+    // still renders instead of the endpoint 502-ing.
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(project_issues_response_with_states(&[(
+            "issue-260",
+            "COE-260",
+            "In-project issue",
+            "In Progress",
+            "started",
+        )])),
+        QueuedResponse::json(issue_not_found_response()),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    let issues = client
+        .project_task_graph_issues(&["COE-260", "COE-404"])
+        .await
+        .expect("task graph lookup should not fail on an unresolvable id");
+
+    let identifiers = issues
+        .iter()
+        .map(|issue| issue.identifier.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(identifiers, vec!["COE-260"]);
+}
+
+#[tokio::test]
 async fn candidate_issues_fetch_all_label_pages() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!(
@@ -1241,6 +1310,40 @@ fn project_issues_response_with_states(issues: &[(&str, &str, &str, &str, &str)]
   }}
 }}"#
     )
+}
+
+fn issue_by_identifier_response(
+    issue_id: &str,
+    identifier: &str,
+    title: &str,
+    state_name: &str,
+    state_type: &str,
+) -> String {
+    format!(
+        r#"{{
+  "data": {{
+    "issue": {{
+      "id": "{issue_id}",
+      "identifier": "{identifier}",
+      "url": "https://linear.app/example/issue/{identifier}",
+      "title": "{title}",
+      "description": "Issue resolved by identifier fallback.",
+      "priority": 0.0,
+      "createdAt": "2026-03-20T10:00:00Z",
+      "updatedAt": "2026-03-21T12:00:00Z",
+      "state": {{ "id": "state-{identifier}", "name": "{state_name}", "type": "{state_type}" }},
+      "parent": null,
+      "children": {{ "nodes": [] }},
+      "labels": {{ "nodes": [], "pageInfo": {{ "hasNextPage": false, "endCursor": null }} }},
+      "inverseRelations": {{ "nodes": [], "pageInfo": {{ "hasNextPage": false, "endCursor": null }} }}
+    }}
+  }}
+}}"#
+    )
+}
+
+fn issue_not_found_response() -> String {
+    r#"{"data":{"issue":null}}"#.to_string()
 }
 
 #[derive(Debug, Clone)]

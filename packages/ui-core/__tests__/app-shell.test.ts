@@ -3721,6 +3721,59 @@ describe("three-pane task graph", () => {
     await handle.destroy();
   });
 
+  it("abandons an in-flight completed-tasks request across a context reset", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    let releaseFirst: (() => void) | null = null;
+    let calls = 0;
+    const adapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      getCompletedTasks: async (options) => {
+        calls += 1;
+        if (calls === 1) {
+          // Hold the first (prior-context) request open until after the
+          // reset so it resolves late.
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+          return pageCompletedTasks(
+            [{
+              issue_key: "STALE-1",
+              concept_id: "",
+              title: "Stale prior-context row",
+              state: "Done",
+              completed_at: "2026-06-01T00:00:00Z",
+              prs: [],
+              source: "orchestrator",
+            }],
+            options,
+          );
+        }
+        return pageCompletedTasks([], options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: threePaneTaskGraph }),
+      graphAdapter: adapter,
+    });
+    await flushUntil(() => calls >= 1);
+
+    // A context reset (gateway switch / disconnect) clears and invalidates.
+    const internal = handle as unknown as { resetCompletedTasks?: () => void };
+    expect(typeof internal.resetCompletedTasks).toBe("function");
+    internal.resetCompletedTasks!();
+    // Now let the prior-context request resolve; its stale seq must prevent
+    // it from repopulating the cleared page.
+    releaseFirst?.();
+    await flushMicrotasks();
+    expect(root.querySelector("[data-task-key='STALE-1']")).toBeNull();
+    expect(root.textContent).not.toContain("Stale prior-context row");
+
+    await handle.destroy();
+  });
+
   it("clears Completed rows when a context change hits a gateway without the endpoint", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

@@ -2337,6 +2337,55 @@ async fn gateway_serves_memory_completed_tasks() {
     server_task.abort();
 }
 
+#[tokio::test]
+async fn gateway_completed_tasks_serve_orchestrator_rows_without_memory_catalog() {
+    // No memory catalog configured: a local run's completed issues must
+    // still surface as `orchestrator` rows (the desktop Completed pane is
+    // the only place `done` nodes appear), not 503.
+    let mut snapshot = fixture_snapshot(0);
+    let mut completed_issue = snapshot.issues[0].clone();
+    completed_issue.identifier = "COE-370".to_owned();
+    completed_issue.title = "Local completion".to_owned();
+    completed_issue.tracker_state = "Done".to_owned();
+    completed_issue.runtime_state = IssueRuntimeState::Completed;
+    completed_issue.finished_at = Some(Utc::now());
+    completed_issue.pr_url = Some("https://github.com/kumanday/OpenSymphony/pull/370".to_owned());
+    snapshot.issues.push(completed_issue);
+
+    // GatewayServer::new leaves memory_config unset.
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/memory/completed-tasks"))
+        .send()
+        .await
+        .expect("fetch completed tasks");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let page = response
+        .json::<MemoryCompletedTaskPage>()
+        .await
+        .expect("decode completed tasks");
+    assert_eq!(page.total, 1);
+    assert_eq!(page.tasks[0].issue_key, "COE-370");
+    assert_eq!(
+        page.tasks[0].source,
+        opensymphony::opensymphony_gateway_schema::memory_graph::MemoryCompletedTaskSource::Orchestrator,
+    );
+
+    server_task.abort();
+}
+
 fn write_completed_tasks_fixture(repo: &std::path::Path) -> MemoryConfig {
     let config_path = repo.join("opensymphony-memory.yaml");
     std::fs::write(

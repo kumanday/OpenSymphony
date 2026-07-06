@@ -1249,6 +1249,61 @@ prs:
     }
 
     #[test]
+    fn memory_completed_task_rows_keep_prs_after_okf_reindex() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let source: SourceFile = serde_yaml::from_str(
+            r#"
+issues:
+  - identifier: COE-123
+    title: WebSocket reconnect recovery
+    url: https://linear.app/example/issue/COE-123
+    state: Done
+    completed_at: 2026-06-13T17:00:00Z
+    linked_prs: [456, 490]
+prs:
+  - number: 456
+    title: COE-123 first attempt
+    url: https://github.com/example/repo/pull/456
+  - number: 490
+    title: COE-123 recover websocket reconnects
+    url: https://github.com/example/repo/pull/490
+    merge_sha: abcdef1234567890
+    merged_at: 2026-06-13T16:00:00Z
+"#,
+        )
+        .expect("source yaml should parse");
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan =
+            plan_capture(&config, &source, &selection, true, false).expect("capture should plan");
+        write_capture_plan(&config, &plan, false).expect("capture should write");
+
+        // Reindex from the OKF bundle: this clears the pull_requests table and
+        // rebuilds it from the capsule frontmatter. PR links must survive so
+        // the Completed pane is not blanked after `memory import-okf`.
+        refresh_memory_index_from_okf(&config, &config.memory_root)
+            .expect("reindex should succeed");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+        let row = rows
+            .iter()
+            .find(|row| row.issue_key == "COE-123")
+            .expect("completed capsule should project after reindex");
+        assert_eq!(row.prs.len(), 2, "PR evidence must survive OKF reindex");
+        assert_eq!(row.prs[0].number, 456);
+        assert!(!row.prs[0].merged);
+        assert_eq!(row.prs[1].number, 490);
+        // Frontmatter carries merge_sha (not merged_at), so the merged flag is
+        // derived from the SHA.
+        assert!(row.prs[1].merged);
+    }
+
+    #[test]
     fn memory_completed_task_rows_omit_completed_at_without_a_completion_timestamp() {
         let repo = TempDir::new().expect("temp repo");
         ensure_memory_initialized(repo.path(), None).expect("memory init");

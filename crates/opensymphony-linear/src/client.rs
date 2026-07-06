@@ -436,10 +436,27 @@ impl LinearClient {
                 None => missing_issue_ids.push(identifier.clone()),
             }
         }
-        if !missing_issue_ids.is_empty() {
-            return Err(LinearError::MissingIssueIds {
-                issue_ids: missing_issue_ids,
-            });
+
+        // A tracked issue can sit outside the configured project scan — moved
+        // to another project, or lacking project metadata — while the control
+        // plane still tracks it (e.g. a failed run). Resolve those by
+        // identifier so a single miss does not fail the whole task graph;
+        // anything still unresolvable is omitted (its node and edges simply
+        // drop out) rather than 502-ing the graph.
+        for identifier in missing_issue_ids {
+            match self
+                .issues_by_identifiers(std::slice::from_ref(&identifier))
+                .await
+            {
+                Ok(mut resolved) => issues.append(&mut resolved),
+                Err(LinearError::MissingIssueIds { .. }) => {
+                    debug!(
+                        identifier = %identifier,
+                        "task graph identifier not found in project scan or by lookup; omitting"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         backlog.sort_by(|left, right| left.identifier.cmp(&right.identifier));

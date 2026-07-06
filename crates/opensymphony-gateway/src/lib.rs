@@ -1302,9 +1302,15 @@ async fn get_memory_completed_tasks(
     State(state): State<GatewayState>,
     Query(params): Query<MemoryCompletedTasksQuery>,
 ) -> Result<Json<MemoryCompletedTaskPage>, (StatusCode, Json<serde_json::Value>)> {
-    let config = configured_memory(&state)?;
     let access = memory_graph_access(params.visibility.as_deref())?;
-    let mut rows = memory_completed_task_rows(config, access).map_err(memory_graph_error)?;
+    // Memory is optional here: a local run with no catalog still has
+    // orchestrator-known completions to show. Without it we serve an empty
+    // memory row set rather than 503, since the desktop Completed pane is
+    // the only place `done` nodes surface.
+    let mut rows = match state.memory_config.as_ref() {
+        Some(config) => memory_completed_task_rows(config, access).map_err(memory_graph_error)?,
+        None => Vec::new(),
+    };
 
     // Control-plane issues carry no visibility metadata, and `captured` is
     // built from the access-filtered rows — merging them under
