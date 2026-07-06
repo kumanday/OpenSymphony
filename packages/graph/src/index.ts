@@ -118,6 +118,14 @@ export interface GraphState {
   staleBundleIds: string[];
   staleCursors: Record<string, MemoryGraphSnapshot["cursor"]>;
   warningBundleIds: string[];
+  /**
+   * Cached concept-detail keys whose bundle advanced to a newer snapshot.
+   * The details stay in `conceptDetails` so the open capsule keeps rendering,
+   * but callers refetch stale entries in the background and swap the fresh
+   * result in atomically — dropping them outright blanked the inspector (and
+   * reset its scroll) on every snapshot tick while a capsule was open.
+   */
+  staleConceptDetailKeys: string[];
 }
 
 export type GraphAction =
@@ -271,6 +279,7 @@ export function createInitialGraphState(): GraphState {
     staleBundleIds: [],
     staleCursors: {},
     warningBundleIds: [],
+    staleConceptDetailKeys: [],
   };
 }
 
@@ -305,15 +314,19 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         const warningBundleIds = action.snapshot.metrics && action.snapshot.metrics.warning_count > 0
           ? uniqueSorted([...state.warningBundleIds, action.snapshot.bundle_id])
           : state.warningBundleIds.filter((bundleId) => bundleId !== action.snapshot.bundle_id);
-        // An accepted (strictly newer) snapshot may reflect capsule edits:
-        // drop the bundle's cached concept details so open capsules refetch
-        // instead of rendering stale markdown against a current graph.
-        const conceptDetails = Object.fromEntries(
-          Object.entries(state.conceptDetails).filter(([key]) => !key.startsWith(`${action.snapshot.bundle_id}:`)),
-        );
+        // An accepted (strictly newer) snapshot may reflect capsule edits.
+        // Keep the bundle's cached capsules on screen but mark them stale, so
+        // an open capsule refetches in the background and swaps in atomically
+        // rather than blanking the inspector (and resetting its scroll) on
+        // every snapshot tick.
+        const bundlePrefix = `${action.snapshot.bundle_id}:`;
+        const staleConceptDetailKeys = uniqueSorted([
+          ...state.staleConceptDetailKeys,
+          ...Object.keys(state.conceptDetails).filter((key) => key.startsWith(bundlePrefix)),
+        ]);
         return {
           ...state,
-          conceptDetails,
+          staleConceptDetailKeys,
           snapshots: { ...state.snapshots, [action.snapshot.bundle_id]: action.snapshot },
           selectedBundleId: state.selectedBundleId ?? action.snapshot.bundle_id,
           lastUpdatedAt: action.snapshot.generated_at,
@@ -324,13 +337,17 @@ export function graphReducer(state: GraphState, action: GraphAction): GraphState
         };
       }
     case "CONCEPT_DETAIL_LOADED":
-      return {
-        ...state,
-        conceptDetails: {
-          ...state.conceptDetails,
-          [conceptDetailKey(action.detail.bundle_id, action.detail.concept_id)]: action.detail,
-        },
-      };
+      {
+        const key = conceptDetailKey(action.detail.bundle_id, action.detail.concept_id);
+        return {
+          ...state,
+          conceptDetails: {
+            ...state.conceptDetails,
+            [key]: action.detail,
+          },
+          staleConceptDetailKeys: state.staleConceptDetailKeys.filter((staleKey) => staleKey !== key),
+        };
+      }
     case "COMMUNITIES_LOADED":
       return {
         ...state,
@@ -418,6 +435,19 @@ export function cachedConceptDetail(
   conceptId: string,
 ): MemoryConceptDetail | null {
   return state.conceptDetails[conceptDetailKey(bundleId, conceptId)] ?? null;
+}
+
+/**
+ * True when a cached concept detail is still displayable but its bundle has
+ * advanced to a newer snapshot, so callers should refetch it in the
+ * background and swap the fresh result in once it lands.
+ */
+export function isConceptDetailStale(
+  state: GraphState,
+  bundleId: string,
+  conceptId: string,
+): boolean {
+  return state.staleConceptDetailKeys.includes(conceptDetailKey(bundleId, conceptId));
 }
 
 export function visibleGraphSnapshot(state: GraphState): MemoryGraphSnapshot | null {
