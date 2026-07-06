@@ -445,6 +445,7 @@ mod tests {
                 last_outcome: WorkerOutcome::Running,
                 last_event_at: now,
                 conversation_id_suffix: "c0e255".to_owned(),
+                codex_thread_id: None,
                 workspace_path_suffix: "COE-255".to_owned(),
                 branch_name: None,
                 pr_url: None,

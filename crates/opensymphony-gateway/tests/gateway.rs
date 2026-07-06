@@ -361,6 +361,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             last_outcome: WorkerOutcome::Running,
             last_event_at: now,
             conversation_id_suffix: "c0e255".to_owned(),
+            codex_thread_id: None,
             workspace_path_suffix: "COE-255".to_owned(),
             branch_name: Some("feat/coe-255-observability".to_owned()),
             pr_url: Some("https://github.com/kumanday/OpenSymphony/pull/255".to_owned()),
@@ -451,6 +452,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_outcome: WorkerOutcome::Unknown,
                 last_event_at: now,
                 conversation_id_suffix: String::new(),
+                codex_thread_id: None,
                 workspace_path_suffix: String::new(),
                 branch_name: None,
                 pr_url: None,
@@ -494,6 +496,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_outcome: WorkerOutcome::Completed,
                 last_event_at: now,
                 conversation_id_suffix: "c0e301".to_owned(),
+                codex_thread_id: None,
                 workspace_path_suffix: "COE-301".to_owned(),
                 branch_name: None,
                 pr_url: None,
@@ -588,6 +591,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_outcome: WorkerOutcome::Failed,
                 last_event_at: now,
                 conversation_id_suffix: "c0e302".to_owned(),
+                codex_thread_id: None,
                 workspace_path_suffix: "COE-302".to_owned(),
                 branch_name: None,
                 pr_url: None,
@@ -631,6 +635,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_outcome: WorkerOutcome::Failed,
                 last_event_at: now,
                 conversation_id_suffix: "c0e303".to_owned(),
+                codex_thread_id: None,
                 workspace_path_suffix: "COE-303".to_owned(),
                 branch_name: None,
                 pr_url: None,
@@ -674,6 +679,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_outcome: WorkerOutcome::Unknown,
                 last_event_at: now,
                 conversation_id_suffix: String::new(),
+                codex_thread_id: None,
                 workspace_path_suffix: String::new(),
                 branch_name: None,
                 pr_url: None,
@@ -2765,6 +2771,47 @@ async fn gateway_serves_run_detail() {
     assert_eq!(
         response.workspace_path.as_deref(),
         Some("/tmp/opensymphony/COE-255")
+    );
+    // An OpenHands run reports the OpenHands harness and no Codex thread id.
+    assert_eq!(response.harness_type.as_deref(), Some("openhands"));
+    assert_eq!(response.codex_thread_id, None);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_exposes_codex_thread_id_and_harness() {
+    // A Codex run carries a Codex thread id, so run detail reports the
+    // codex_app_server harness and the full thread id — the desktop Debug
+    // button opens codex://threads/<id> from these.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].codex_thread_id = Some("019f3979-3aa3-71f3-86b1-18e92c71fbc9".to_owned());
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.harness_type.as_deref(), Some("codex_app_server"));
+    assert_eq!(
+        response.codex_thread_id.as_deref(),
+        Some("019f3979-3aa3-71f3-86b1-18e92c71fbc9")
     );
 
     server_task.abort();
