@@ -3099,9 +3099,16 @@ async fn get_task_graph(
             let snapshot_issue = snapshot_by_identifier
                 .get(issue.identifier.as_str())
                 .copied();
-            let state_category = snapshot_issue
-                .map(|issue| map_runtime_state_to_graph_category(&issue.runtime_state))
-                .unwrap_or_else(|| map_tracker_state_kind_to_graph_category(&issue.state_kind));
+            // Idle carries no run information (queued work, or a parked
+            // issue whose recovered workspace waits for reactivation), so
+            // the tracker state decides the category — otherwise an Idle
+            // Backlog issue would surface as Todo in the Current pane.
+            let state_category = match snapshot_issue.map(|issue| &issue.runtime_state) {
+                None | Some(ControlPlaneIssueRuntimeState::Idle) => {
+                    map_tracker_state_kind_to_graph_category(&issue.state_kind)
+                }
+                Some(runtime_state) => map_runtime_state_to_graph_category(runtime_state),
+            };
             let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
             let parent_id = issue
                 .parent
