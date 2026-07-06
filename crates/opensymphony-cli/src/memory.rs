@@ -5476,6 +5476,21 @@ mod tests {
                 selection_end_line: 3,
                 snippet_sha256: "run".to_string(),
             },
+            CodeIntelSymbolInput {
+                kind: "method".to_string(),
+                name: "fmt".to_string(),
+                container_chain: vec!["Widget".to_string(), "Display".to_string()],
+                signature: None,
+                start_line: 5,
+                start_col: 5,
+                end_line: 5,
+                end_col: 16,
+                start_byte: 64,
+                end_byte: 75,
+                selection_start_line: 5,
+                selection_end_line: 5,
+                snippet_sha256: "fmt".to_string(),
+            },
         ];
         persist_code_intel_documents(
             &config,
@@ -5495,6 +5510,14 @@ mod tests {
             .expect("method symbol");
         assert!(method.container_symbol_id.is_some());
         assert_eq!(method.container_chain, vec!["Widget"]);
+
+        let trait_method = code_symbols_containing_span(&config, "repo", "src/lib.rs", 5, 8, 10)
+            .expect("trait impl span containment")
+            .into_iter()
+            .find(|symbol| symbol.name == "fmt")
+            .expect("trait impl method symbol");
+        assert!(trait_method.container_symbol_id.is_some());
+        assert_eq!(trait_method.container_chain, vec!["Widget", "Display"]);
     }
 
     #[test]
@@ -5789,6 +5812,24 @@ mod tests {
             },
         )
         .expect("dirty revision persist");
+        for table in [
+            "code_documents",
+            "code_symbols",
+            "code_edges",
+            "code_diagnostics",
+        ] {
+            let dirty_key_rows: i64 = connection
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE commit_sha LIKE '%+dirty'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("dirty revision key count");
+            assert_eq!(
+                dirty_key_rows, 0,
+                "{table} must keep commit_sha as real HEAD"
+            );
+        }
         let comparison =
             compare_code_symbols(&config, "repo", "base", "head", 10).expect("compare revisions");
         assert!(

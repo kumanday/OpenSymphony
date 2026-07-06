@@ -465,15 +465,11 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
 );
-ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
-UPDATE code_symbols SET worktree_dirty = false WHERE worktree_dirty IS NULL;
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS symbol_key TEXT DEFAULT '';
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS container_chain TEXT DEFAULT '';
 UPDATE code_symbols SET container_chain = '' WHERE container_chain IS NULL;
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_symbols SET parser_version = '' WHERE parser_version IS NULL;
-ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
-UPDATE code_edges SET worktree_dirty = false WHERE worktree_dirty IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS source_symbol_key TEXT;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS target_symbol_key TEXT;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
@@ -486,8 +482,6 @@ ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
 UPDATE code_edges SET end_byte = 0 WHERE end_byte IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_edges SET parser_version = '' WHERE parser_version IS NULL;
-ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
-UPDATE code_diagnostics SET worktree_dirty = false WHERE worktree_dirty IS NULL;
 ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS start_col BIGINT DEFAULT 0;
 UPDATE code_diagnostics SET start_col = 0 WHERE start_col IS NULL;
 ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_col BIGINT DEFAULT 0;
@@ -508,7 +502,35 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_source_key ON code_edges(source_symbol
 CREATE INDEX IF NOT EXISTS idx_code_edges_target_key ON code_edges(target_symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 "#,
-    ))
+    ))?;
+    for table in [
+        "code_documents",
+        "code_symbols",
+        "code_edges",
+        "code_diagnostics",
+    ] {
+        ensure_worktree_dirty_column(connection, table)?;
+    }
+    Ok(())
+}
+
+fn ensure_worktree_dirty_column(connection: &Connection, table: &str) -> Result<(), duckdb::Error> {
+    let column_count: i64 = connection.query_row(
+        &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name = 'worktree_dirty'"),
+        [],
+        |row| row.get(0),
+    )?;
+    if column_count == 0 {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN worktree_dirty BOOLEAN DEFAULT false"),
+            [],
+        )?;
+    }
+    connection.execute(
+        &format!("UPDATE {table} SET worktree_dirty = false WHERE worktree_dirty IS NULL"),
+        [],
+    )?;
+    Ok(())
 }
 
 pub fn persist_code_intel_documents(
@@ -537,9 +559,7 @@ pub fn persist_code_intel_documents(
         skipped_files: Vec::new(),
         diagnostics: Vec::new(),
     };
-    let stored_commit_sha =
-        code_revision_key(batch.commit_sha.as_deref(), batch.worktree_dirty);
-
+    let worktree_dirty = if batch.worktree_dirty { 1_i64 } else { 0_i64 };
     for document in batch.documents {
         let path = document.path.to_string_lossy().to_string();
         report.stale_rows += stale_code_rows(
@@ -562,8 +582,8 @@ pub fn persist_code_intel_documents(
                 "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         batch.repo_id,
-                    stored_commit_sha.clone(),
-                        batch.worktree_dirty,
+                    batch.commit_sha.clone(),
+                        worktree_dirty,
                     path,
                     document.language,
                     document.content_sha256,
@@ -584,7 +604,7 @@ pub fn persist_code_intel_documents(
 
         let prepared_symbols = prepare_code_symbols(
             &batch.repo_id,
-            stored_commit_sha.as_deref(),
+            batch.commit_sha.as_deref(),
             batch.worktree_dirty,
             &path,
             &document,
@@ -599,8 +619,8 @@ pub fn persist_code_intel_documents(
                         prepared.symbol_id,
                         prepared.symbol_key,
                         batch.repo_id,
-                        stored_commit_sha.clone(),
-                        batch.worktree_dirty,
+                        batch.commit_sha.clone(),
+                        worktree_dirty,
                         path,
                         document.language,
                         symbol.kind,
@@ -654,8 +674,8 @@ pub fn persist_code_intel_documents(
                     params![
                         edge_id,
                         batch.repo_id,
-                        stored_commit_sha.clone(),
-                        batch.worktree_dirty,
+                        batch.commit_sha.clone(),
+                        worktree_dirty,
                         path,
                         document.language,
                         edge.edge_kind,
@@ -707,8 +727,8 @@ pub fn persist_code_intel_documents(
                     params![
                         diagnostic_id,
                         batch.repo_id,
-                        stored_commit_sha.clone(),
-                        batch.worktree_dirty,
+                        batch.commit_sha.clone(),
+                        worktree_dirty,
                         path,
                         document.language,
                         diagnostic.kind,
@@ -844,6 +864,28 @@ fn container_symbol_index(symbols: &[PreparedCodeSymbol<'_>], child_index: usize
         })
         .map(|(candidate_index, _)| candidate_index)
         .or_else(|| (matches.len() == 1).then(|| matches[0].0))
+        .or_else(|| trait_impl_owner_symbol_index(symbols, child_index))
+}
+
+fn trait_impl_owner_symbol_index(
+    symbols: &[PreparedCodeSymbol<'_>],
+    child_index: usize,
+) -> Option<usize> {
+    let child = symbols[child_index].symbol;
+    if child.container_chain.len() < 2 {
+        return None;
+    }
+    let owner_name = child.container_chain.first()?;
+    let matches = symbols
+        .iter()
+        .enumerate()
+        .filter(|(candidate_index, candidate)| {
+            *candidate_index != child_index
+                && candidate.symbol.name == *owner_name
+                && candidate.symbol.container_chain.is_empty()
+        })
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches[0].0)
 }
 
 fn resolve_code_edge(
@@ -1219,14 +1261,21 @@ fn query_symbols_for_revision(
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id",
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
         })?;
     let rows = statement
-        .query_map(params![repo_id, revision], code_symbol_from_row)
+        .query_map(params![repo_id, revision], |row| {
+            let dirty = row.get::<_, i64>(18)?;
+            if dirty != 0 {
+                Ok(None)
+            } else {
+                code_symbol_from_row(row).map(Some)
+            }
+        })
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
@@ -1237,7 +1286,10 @@ fn query_symbols_for_revision(
             source,
         })?;
     let mut symbols = BTreeMap::new();
-    for mut symbol in rows {
+    for row in rows {
+        let Some(mut symbol) = row else {
+            continue;
+        };
         if !symbols.contains_key(&symbol.symbol_key) {
             fill_container_chain(connection, &mut symbol)?;
             symbols.insert(symbol.symbol_key.clone(), symbol);
@@ -1406,16 +1458,6 @@ fn stale_code_rows(
 
 fn code_row_id(parts: &[&str]) -> String {
     sha256_hex(&parts.join("\u{1f}"))
-}
-
-fn code_revision_key(commit_sha: Option<&str>, worktree_dirty: bool) -> Option<String> {
-    commit_sha.map(|sha| {
-        if worktree_dirty {
-            format!("{sha}+dirty")
-        } else {
-            sha.to_string()
-        }
-    })
 }
 
 fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, MemoryError> {
