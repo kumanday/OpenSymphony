@@ -3721,6 +3721,92 @@ describe("three-pane task graph", () => {
     await handle.destroy();
   });
 
+  it("bolds the newest PR by number even when an older PR is the merged one", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const rows: MemoryCompletedTask[] = [
+      {
+        issue_key: "COE-500",
+        concept_id: "",
+        title: "Merged then abandoned",
+        state: "Done",
+        completed_at: "2026-06-10T00:00:00Z",
+        // Older PR merged; newer PR abandoned (unmerged, no merged_at).
+        prs: [
+          { number: 100, title: "first, merged", url: "https://example.com/pull/100", merged: true, merged_at: "2026-06-10T00:00:00Z" },
+          { number: 200, title: "second, abandoned", url: "https://example.com/pull/200", merged: false },
+        ],
+        source: "memory",
+      },
+    ];
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: threePaneTaskGraph }),
+      graphAdapter: createFixtureGraphAdapter({ completedTasks: rows }),
+    });
+    await flushUntil(() => root.querySelector("[data-task-key='COE-500']") !== null);
+
+    const prLinks = Array.from(
+      root.querySelector("[data-task-key='COE-500']")?.querySelectorAll(".os-tg-pr") ?? [],
+    );
+    // Newest by number first, and it is the bold "latest" chip even though
+    // it is the unmerged one (struck through).
+    expect(prLinks.map((pr) => pr.textContent)).toEqual(["#200", "#100"]);
+    expect(prLinks[0]?.classList.contains("os-tg-pr-latest")).toBe(true);
+    expect(prLinks[0]?.classList.contains("os-tg-pr-unmerged")).toBe(true);
+    expect(prLinks[1]?.classList.contains("os-tg-pr-latest")).toBe(false);
+
+    await handle.destroy();
+  });
+
+  it("does not enter focused edge-dimming when the selection transitions to done", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph: threePaneTaskGraph,
+      runDetails: [runDetail],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+      graphAdapter: createFixtureGraphAdapter({ completedTasks: [] }),
+    });
+    await flushUntil(() => root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']") !== null);
+
+    // Select the Current task, then complete it via a live event.
+    (root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']")?.classList.contains("is-selected") ?? false);
+
+    transport.setTaskGraph({
+      ...threePaneTaskGraph,
+      nodes: threePaneTaskGraph.nodes.map((node) =>
+        node.node_id === "desktop-alpha"
+          ? { ...node, state: "Done", state_category: "done" as const }
+          : node,
+      ),
+    });
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 1, partition: "events" },
+      entity_ref: { kind: "run", id: "COE-449" },
+      event_kind: "run.completed",
+      emitted_at: "2026-07-01T00:00:01Z",
+      payload: { run_id: "COE-449" },
+    });
+    await flushUntil(() => root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']") === null);
+
+    // The selection now points at a hidden (done) node; the panes must not
+    // be stuck in focused mode dimming every edge with nothing highlighted.
+    expect(root.querySelector("[data-tg-panes]")?.classList.contains("os-tg-focused")).toBe(false);
+
+    await handle.destroy();
+  });
+
   it("abandons an in-flight completed-tasks request across a context reset", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

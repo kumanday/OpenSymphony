@@ -1326,10 +1326,16 @@ impl OkfIndexRow {
 /// links after `refresh_memory_index_from_okf`, not just after a live
 /// capture. Malformed entries are skipped rather than failing the reindex.
 fn okf_index_prs(frontmatter: &OkfFrontmatter) -> Vec<PullRequestEvidence> {
-    let Some(value) = frontmatter.extra.get("prs") else {
+    let Some(serde_yaml::Value::Sequence(entries)) = frontmatter.extra.get("prs") else {
         return Vec::new();
     };
-    serde_yaml::from_value::<Vec<PullRequestEvidence>>(value.clone()).unwrap_or_default()
+    // Parse entries individually so one malformed or newer-format entry
+    // (e.g. a renamed `number`) drops only itself, not every valid PR for
+    // the issue — reindex must preserve the good rows.
+    entries
+        .iter()
+        .filter_map(|entry| serde_yaml::from_value::<PullRequestEvidence>(entry.clone()).ok())
+        .collect()
 }
 
 fn okf_issue_key(

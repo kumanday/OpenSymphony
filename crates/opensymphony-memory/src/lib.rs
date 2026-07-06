@@ -1301,6 +1301,69 @@ prs:
         // Frontmatter carries merge_sha (not merged_at), so the merged flag is
         // derived from the SHA.
         assert!(row.prs[1].merged);
+        // The completion timestamp is persisted in the capsule frontmatter,
+        // so the Completed pane's date/sort survive reindex instead of the
+        // row becoming undated.
+        assert_eq!(
+            row.completed_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-13T17:00:00Z")
+                    .expect("test timestamp")
+                    .with_timezone(&Utc)
+            ),
+        );
+    }
+
+    #[test]
+    fn okf_reindex_keeps_valid_prs_when_one_entry_is_malformed() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let issues_dir = config.memory_root.join("issues");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        // One well-formed PR entry and one malformed (no `number`): the good
+        // one must survive rather than the whole list being dropped.
+        fs::write(
+            issues_dir.join("COE-800.md"),
+            r#"---
+type: issue-capsule
+title: "COE-800: Mixed PR frontmatter"
+state: Done
+timestamp: 2026-06-15T10:00:00Z
+prs:
+  - number: 512
+    url: https://github.com/example/repo/pull/512
+    merge_sha: deadbeef
+  - note: "malformed entry with no number"
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-800
+---
+
+# COE-800: Mixed PR frontmatter
+
+Body.
+"#,
+        )
+        .expect("capsule should write");
+        refresh_memory_index_from_okf(&config, &config.memory_root)
+            .expect("reindex should succeed");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+        let row = rows
+            .iter()
+            .find(|row| row.issue_key == "COE-800")
+            .expect("capsule should project");
+        assert_eq!(
+            row.prs.len(),
+            1,
+            "the valid PR must survive a malformed sibling"
+        );
+        assert_eq!(row.prs[0].number, 512);
+        assert!(row.prs[0].merged);
     }
 
     #[test]

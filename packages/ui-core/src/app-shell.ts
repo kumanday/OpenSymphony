@@ -3190,8 +3190,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     cards.forEach((card) => card.classList.remove("os-tg-dim", "os-tg-ancestry"));
     const graph = this.state.taskGraph;
     const node = focusId ? graph?.nodes.find((candidate) => candidate.node_id === focusId) : undefined;
-    container.classList.toggle("os-tg-focused", Boolean(node));
-    if (!graph || !node) {
+    // Only enter focused mode when the focused node actually has a rendered
+    // card. A selection that transitioned to `done` during a live refresh
+    // moved to the Completed table, so its node still exists in the snapshot
+    // but no card is drawn — focusing it would dim every edge with nothing
+    // highlighted until the user picks another visible task.
+    const hasRenderedCard = Boolean(
+      focusId && container.querySelector(`[data-node-id="${cssEscape(focusId)}"]`),
+    );
+    container.classList.toggle("os-tg-focused", Boolean(node) && hasRenderedCard);
+    if (!graph || !node || !hasRenderedCard) {
       return;
     }
     if (node.state_category === "backlog") {
@@ -5120,9 +5128,11 @@ function renderCompletedTaskPrs(prs: MemoryTaskPullRequest[]): string {
   if (prs.length === 0) {
     return `<span class="os-tg-capsule-missing">—</span>`;
   }
-  // Newest first; the newest PR is emphasized, unmerged ones struck through.
-  const ordered = [...prs].sort((a, b) =>
-    (b.merged_at ?? "").localeCompare(a.merged_at ?? "") || b.number - a.number);
+  // Newest first by PR number — matching the gateway/fixture ordering — so
+  // the bold "latest" chip is genuinely the newest PR even when it is a
+  // later abandoned/unmerged attempt after an older merged one. Unmerged
+  // PRs are struck through.
+  const ordered = [...prs].sort((a, b) => b.number - a.number);
   const latest = ordered[0];
   return ordered.map((pr) => {
     const classes = [
