@@ -400,6 +400,7 @@ CREATE TABLE IF NOT EXISTS code_symbols (
   kind TEXT NOT NULL,
   name TEXT NOT NULL,
   container_symbol_id TEXT,
+  container_chain TEXT NOT NULL DEFAULT '',
   signature TEXT,
   start_line BIGINT NOT NULL,
   start_col BIGINT NOT NULL,
@@ -467,6 +468,8 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
 UPDATE code_symbols SET worktree_dirty = false WHERE worktree_dirty IS NULL;
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS symbol_key TEXT DEFAULT '';
+ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS container_chain TEXT DEFAULT '';
+UPDATE code_symbols SET container_chain = '' WHERE container_chain IS NULL;
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_symbols SET parser_version = '' WHERE parser_version IS NULL;
 ALTER TABLE code_edges ADD COLUMN IF NOT EXISTS worktree_dirty BOOLEAN DEFAULT false;
@@ -577,13 +580,19 @@ pub fn persist_code_intel_documents(
             })?;
         report.persisted_documents += 1;
 
-        let prepared_symbols = prepare_code_symbols(&batch.repo_id, &path, &document);
+        let prepared_symbols = prepare_code_symbols(
+            &batch.repo_id,
+            batch.commit_sha.as_deref(),
+            batch.worktree_dirty,
+            &path,
+            &document,
+        );
 
         for prepared in &prepared_symbols {
             let symbol = prepared.symbol;
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         prepared.symbol_id,
                         prepared.symbol_key,
@@ -595,6 +604,7 @@ pub fn persist_code_intel_documents(
                         symbol.kind,
                         symbol.name,
                         prepared.container_symbol_id,
+                        symbol.container_chain.join("\u{1f}"),
                         symbol.signature,
                         symbol.start_line as i64,
                         symbol.start_col as i64,
@@ -749,6 +759,8 @@ struct ResolvedCodeEdge {
 
 fn prepare_code_symbols<'a>(
     repo_id: &str,
+    commit_sha: Option<&str>,
+    worktree_dirty: bool,
     path: &str,
     document: &'a CodeIntelDocumentInput,
 ) -> Vec<PreparedCodeSymbol<'a>> {
@@ -759,6 +771,8 @@ fn prepare_code_symbols<'a>(
         .map(|symbol| {
             let symbol_id = code_row_id(&[
                 repo_id,
+                commit_sha.unwrap_or(""),
+                if worktree_dirty { "dirty" } else { "clean" },
                 path,
                 &document.content_sha256,
                 &document.parser_version,
@@ -876,11 +890,10 @@ fn single_symbol_named<'a>(
 }
 
 fn normalize_edge_confidence(input: &str, target_resolved: bool) -> &'static str {
-    if target_resolved {
-        return "exact";
-    }
     let normalized = input.trim().to_ascii_lowercase();
-    if normalized.contains("heuristic") {
+    if target_resolved && normalized.contains("exact") {
+        "exact"
+    } else if normalized.contains("heuristic") {
         "heuristic"
     } else {
         "syntactic"
@@ -986,7 +999,7 @@ pub fn code_symbols_containing_span(
     })?;
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key",
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1007,7 +1020,7 @@ pub fn code_symbols_containing_span(
         .filter(|symbol| symbol_contains_point(symbol, line, column))
         .take(limit)
         .map(|mut symbol| {
-            symbol.container_chain = load_container_chain(&connection, symbol.container_symbol_id.as_deref())?;
+            fill_container_chain(&connection, &mut symbol)?;
             Ok(symbol)
         })
         .collect()
@@ -1146,9 +1159,9 @@ fn query_code_symbol_by_key(
     current_only: bool,
 ) -> Result<Option<CodeSymbolRecord>, MemoryError> {
     let sql = if current_only {
-        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
     } else {
-        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
     };
     let mut statement = connection
         .prepare(sql)
@@ -1173,7 +1186,7 @@ fn query_code_symbol_by_key(
         path: PathBuf::from("<memory-index>"),
         source,
     })?;
-    symbol.container_chain = load_container_chain(connection, symbol.container_symbol_id.as_deref())?;
+    fill_container_chain(connection, &mut symbol)?;
     Ok(Some(symbol))
 }
 
@@ -1184,7 +1197,7 @@ fn query_symbols_for_revision(
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND commit_sha = ? ORDER BY symbol_key, indexed_at DESC, symbol_id",
+            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND commit_sha = ? ORDER BY symbol_key, indexed_at DESC, symbol_id",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
@@ -1204,7 +1217,7 @@ fn query_symbols_for_revision(
     let mut symbols = BTreeMap::new();
     for mut symbol in rows {
         if !symbols.contains_key(&symbol.symbol_key) {
-            symbol.container_chain = load_container_chain(connection, symbol.container_symbol_id.as_deref())?;
+            fill_container_chain(connection, &mut symbol)?;
             symbols.insert(symbol.symbol_key.clone(), symbol);
         }
     }
@@ -1275,6 +1288,17 @@ fn load_container_chain(
     Ok(chain)
 }
 
+fn fill_container_chain(
+    connection: &Connection,
+    symbol: &mut CodeSymbolRecord,
+) -> Result<(), MemoryError> {
+    if symbol.container_chain.is_empty() {
+        symbol.container_chain =
+            load_container_chain(connection, symbol.container_symbol_id.as_deref())?;
+    }
+    Ok(())
+}
+
 fn code_symbol_from_row(row: &duckdb::Row<'_>) -> Result<CodeSymbolRecord, duckdb::Error> {
     Ok(CodeSymbolRecord {
         symbol_id: row.get(0)?,
@@ -1286,15 +1310,20 @@ fn code_symbol_from_row(row: &duckdb::Row<'_>) -> Result<CodeSymbolRecord, duckd
         kind: row.get(6)?,
         name: row.get(7)?,
         container_symbol_id: row.get(8)?,
-        container_chain: Vec::new(),
-        start_line: row.get::<_, i64>(9)? as usize,
-        start_col: row.get::<_, i64>(10)? as usize,
-        end_line: row.get::<_, i64>(11)? as usize,
-        end_col: row.get::<_, i64>(12)? as usize,
-        start_byte: row.get::<_, i64>(13)? as usize,
-        end_byte: row.get::<_, i64>(14)? as usize,
-        snippet_sha256: row.get(15)?,
-        freshness: row.get(16)?,
+        container_chain: row
+            .get::<_, String>(9)?
+            .split('\u{1f}')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect(),
+        start_line: row.get::<_, i64>(10)? as usize,
+        start_col: row.get::<_, i64>(11)? as usize,
+        end_line: row.get::<_, i64>(12)? as usize,
+        end_col: row.get::<_, i64>(13)? as usize,
+        start_byte: row.get::<_, i64>(14)? as usize,
+        end_byte: row.get::<_, i64>(15)? as usize,
+        snippet_sha256: row.get(16)?,
+        freshness: row.get(17)?,
     })
 }
 
@@ -1318,7 +1347,7 @@ fn code_edge_from_row(row: &duckdb::Row<'_>) -> Result<CodeEdgeRecord, duckdb::E
 
 fn symbol_contains_point(symbol: &CodeSymbolRecord, line: usize, column: usize) -> bool {
     (symbol.start_line < line || (symbol.start_line == line && symbol.start_col <= column))
-        && (symbol.end_line > line || (symbol.end_line == line && symbol.end_col >= column))
+        && (symbol.end_line > line || (symbol.end_line == line && column < symbol.end_col))
 }
 
 struct CodeFreshnessKey<'a> {

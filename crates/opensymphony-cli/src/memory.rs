@@ -5086,7 +5086,7 @@ mod tests {
         let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
             .expect("index opens");
         assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
-        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 2);
         assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
         assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
         assert_eq!(count_rows(&connection, "code_symbols", "stale"), 0);
@@ -5122,7 +5122,7 @@ mod tests {
         let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
             .expect("index opens");
         assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
-        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 2);
         assert_eq!(count_rows(&connection, "code_edges", "current"), 1);
         assert_eq!(count_rows(&connection, "code_diagnostics", "current"), 1);
         assert_eq!(count_rows(&connection, "code_documents", "stale"), 0);
@@ -5398,6 +5398,49 @@ mod tests {
     }
 
     #[test]
+    fn code_intel_container_chain_survives_partial_symbol_indexes() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.symbols = vec![CodeIntelSymbolInput {
+            kind: "method".to_string(),
+            name: "run".to_string(),
+            container_chain: vec!["Widget".to_string()],
+            signature: None,
+            start_line: 3,
+            start_col: 5,
+            end_line: 5,
+            end_col: 6,
+            start_byte: 20,
+            end_byte: 80,
+            selection_start_line: 3,
+            selection_end_line: 5,
+            snippet_sha256: "run-v1".to_string(),
+        }];
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("base".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist partial symbols");
+
+        let containing = code_symbols_containing_span(&config, "repo", "src/lib.rs", 4, 10, 10)
+            .expect("span containment");
+        assert_eq!(containing.len(), 1);
+        assert_eq!(containing[0].container_symbol_id, None);
+        assert_eq!(containing[0].container_chain, vec!["Widget"]);
+
+        let detail = code_symbol_detail(&config, &containing[0].symbol_key)
+            .expect("detail query")
+            .expect("method detail");
+        assert_eq!(detail.container_chain, vec!["Widget"]);
+    }
+
+    #[test]
     fn code_intel_read_model_resolves_containers_edges_bounds_and_diff() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
@@ -5505,6 +5548,15 @@ mod tests {
             .expect("detail query")
             .expect("run detail");
         assert_eq!(detail.container_chain, vec!["Widget"]);
+        let endpoint = code_symbols_containing_span(&config, "repo", "src/lib.rs", 5, 6, 10)
+            .expect("exclusive end containment");
+        assert_eq!(
+            endpoint
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Widget"]
+        );
 
         let neighborhood = code_symbol_neighborhood(&config, &run_key, 1, 10)
             .expect("neighborhood")
@@ -5514,7 +5566,7 @@ mod tests {
             neighborhood
                 .edges
                 .iter()
-                .any(|edge| edge.confidence == "exact"
+                .any(|edge| edge.confidence == "syntactic"
                     && !edge.unresolved
                     && edge.target_symbol_key.is_some())
         );
@@ -5576,6 +5628,53 @@ mod tests {
         let capped =
             compare_code_symbols(&config, "repo", "base", "head", 1).expect("capped compare");
         assert!(capped.truncated);
+    }
+
+    #[test]
+    fn code_intel_revision_comparison_preserves_unchanged_file_rows() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let document = sample_code_intel_document("hash-a", "pack-a");
+        for revision in ["base", "head"] {
+            persist_code_intel_documents(
+                &config,
+                CodeIntelPersistBatch {
+                    repo_id: "repo".to_string(),
+                    commit_sha: Some(revision.to_string()),
+                    worktree_dirty: false,
+                    documents: vec![document.clone()],
+                },
+            )
+            .expect("persist revision");
+        }
+
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        let rows = connection
+            .prepare(
+                "SELECT commit_sha, symbol_id, symbol_key FROM code_symbols ORDER BY commit_sha",
+            )
+            .expect("prepare symbols")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .expect("query symbols")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("symbol rows");
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].1, rows[1].1);
+        assert_eq!(rows[0].2, rows[1].2);
+
+        let comparison =
+            compare_code_symbols(&config, "repo", "base", "head", 10).expect("compare revisions");
+        assert!(
+            comparison.diffs.is_empty(),
+            "unchanged symbols must not become added or removed"
+        );
     }
 
     fn sample_code_intel_document(hash: &str, query_pack: &str) -> CodeIntelDocumentInput {
