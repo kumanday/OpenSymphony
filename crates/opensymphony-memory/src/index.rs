@@ -255,6 +255,50 @@ fn open_existing_index_read_only(config: &MemoryConfig) -> Result<Option<Connect
     open_index_read_only(config).map(Some)
 }
 
+fn table_has_columns(
+    connection: &Connection,
+    path: &Path,
+    table: &str,
+    columns: &[&str],
+) -> Result<bool, MemoryError> {
+    let mut statement = connection
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .map_err(|source| MemoryError::DuckDb {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let existing = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|source| MemoryError::DuckDb {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(columns.iter().all(|column| existing.contains(*column)))
+}
+
+fn code_symbols_read_model_ready(connection: &Connection, path: &Path) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_symbols",
+        &["symbol_key", "container_chain", "worktree_dirty"],
+    )
+}
+
+fn code_edges_read_model_ready(connection: &Connection, path: &Path) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_edges",
+        &["source_symbol_key", "target_symbol_key", "worktree_dirty"],
+    )
+}
+
 fn migrate_index(connection: &Connection) -> Result<(), duckdb::Error> {
     connection.execute_batch(&format!(
         r#"
@@ -1038,6 +1082,9 @@ pub fn code_symbol_detail(
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Ok(None);
     };
+    if !code_symbols_read_model_ready(&connection, &config.index_path)? {
+        return Ok(None);
+    }
     query_code_symbol_by_key(&connection, symbol_key, true)
 }
 
@@ -1052,6 +1099,9 @@ pub fn code_symbols_containing_span(
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Ok(Vec::new());
     };
+    if !code_symbols_read_model_ready(&connection, &config.index_path)? {
+        return Ok(Vec::new());
+    }
     let mut statement = connection
         .prepare(
             "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id",
@@ -1092,6 +1142,11 @@ pub fn code_symbol_neighborhood(
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Ok(None);
     };
+    if !code_symbols_read_model_ready(&connection, &config.index_path)?
+        || !code_edges_read_model_ready(&connection, &config.index_path)?
+    {
+        return Ok(None);
+    }
     let Some(center) = query_code_symbol_by_key(&connection, symbol_key, true)? else {
         return Ok(None);
     };
@@ -1181,6 +1236,15 @@ pub fn compare_code_symbols(
             truncated: false,
         });
     };
+    if !code_symbols_read_model_ready(&connection, &config.index_path)? {
+        return Ok(CodeSymbolComparison {
+            base_revision: base_revision.to_string(),
+            head_revision: head_revision.to_string(),
+            diffs: Vec::new(),
+            max_records,
+            truncated: false,
+        });
+    }
     let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
     let head = query_symbols_for_revision(&connection, repo_id, head_revision)?;
     let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();

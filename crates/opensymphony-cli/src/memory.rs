@@ -5483,6 +5483,71 @@ mod tests {
     }
 
     #[test]
+    fn code_intel_read_helpers_schema_gate_legacy_index() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        std::fs::create_dir_all(config.index_path.parent().expect("index parent"))
+            .expect("index dir");
+        let connection = Connection::open(&config.index_path).expect("legacy index opens");
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE code_symbols (
+  symbol_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  freshness TEXT NOT NULL
+);
+CREATE TABLE code_edges (
+  edge_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  edge_kind TEXT NOT NULL,
+  freshness TEXT NOT NULL
+);
+"#,
+            )
+            .expect("legacy schema");
+        drop(connection);
+
+        assert!(
+            code_symbol_detail(&config, "missing")
+                .expect("legacy detail read")
+                .is_none()
+        );
+        assert!(
+            code_symbols_containing_span(&config, "repo", "src/lib.rs", 1, 1, 10)
+                .expect("legacy span read")
+                .is_empty()
+        );
+        assert!(
+            code_symbol_neighborhood(&config, "missing", 1, 10)
+                .expect("legacy neighborhood read")
+                .is_none()
+        );
+        assert!(
+            compare_code_symbols(&config, "repo", "base", "head", 10)
+                .expect("legacy compare read")
+                .diffs
+                .is_empty()
+        );
+
+        let connection = Connection::open(&config.index_path).expect("legacy index reopens");
+        let symbol_key_columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('code_symbols') WHERE name = 'symbol_key'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("symbol_key column count");
+        assert_eq!(symbol_key_columns, 0);
+    }
+
+    #[test]
     fn code_intel_impl_methods_link_to_owner_symbol_by_chain() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
