@@ -3619,6 +3619,46 @@ describe("three-pane task graph", () => {
     await handle.destroy();
   });
 
+  it("resizes the Completed and Backlog side panes via their handles", async () => {
+    const { root, handle } = await mountThreePane();
+
+    const donePane = () => root.querySelector("[data-tg-pane='done']") as HTMLElement;
+    const backlogPane = () => root.querySelector("[data-tg-pane='backlog']") as HTMLElement;
+    const doneResizer = () => root.querySelector("[data-tg-resizer='done']") as HTMLElement;
+    const backlogResizer = () => root.querySelector("[data-tg-resizer='backlog']") as HTMLElement;
+
+    // A resizer sits between each expanded side pane and the Current pane.
+    expect(doneResizer()).not.toBeNull();
+    expect(backlogResizer()).not.toBeNull();
+    expect(donePane().style.flexBasis).toBe("360px");
+    expect(backlogPane().style.flexBasis).toBe("340px");
+
+    // ArrowRight widens Completed (the pane left of its handle).
+    doneResizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(donePane().style.flexBasis).toBe("384px");
+
+    // ArrowRight moves the Backlog handle right, narrowing Backlog.
+    backlogResizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(backlogPane().style.flexBasis).toBe("316px");
+    backlogResizer().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(backlogPane().style.flexBasis).toBe("340px");
+
+    await handle.destroy();
+  });
+
+  it("hides a side pane's resizer while it is collapsed", async () => {
+    const { root, handle } = await mountThreePane();
+
+    expect(root.querySelector("[data-tg-resizer='done']")).not.toBeNull();
+    (root.querySelector("[data-tg-pane-toggle='done']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-tg-pane='done'][data-collapsed]") !== null);
+    expect(root.querySelector("[data-tg-resizer='done']")).toBeNull();
+    // The Backlog resizer is unaffected.
+    expect(root.querySelector("[data-tg-resizer='backlog']")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
   it("keeps a backlog selection across refresh without probing its run", async () => {
     const { root, handle } = await mountThreePane();
 
