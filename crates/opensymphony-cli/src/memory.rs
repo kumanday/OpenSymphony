@@ -5441,6 +5441,63 @@ mod tests {
     }
 
     #[test]
+    fn code_intel_impl_methods_link_to_owner_symbol_by_chain() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.symbols = vec![
+            CodeIntelSymbolInput {
+                kind: "struct".to_string(),
+                name: "Widget".to_string(),
+                container_chain: Vec::new(),
+                signature: None,
+                start_line: 1,
+                start_col: 1,
+                end_line: 1,
+                end_col: 15,
+                start_byte: 0,
+                end_byte: 14,
+                selection_start_line: 1,
+                selection_end_line: 1,
+                snippet_sha256: "widget".to_string(),
+            },
+            CodeIntelSymbolInput {
+                kind: "method".to_string(),
+                name: "run".to_string(),
+                container_chain: vec!["Widget".to_string()],
+                signature: None,
+                start_line: 3,
+                start_col: 5,
+                end_line: 3,
+                end_col: 16,
+                start_byte: 32,
+                end_byte: 43,
+                selection_start_line: 3,
+                selection_end_line: 3,
+                snippet_sha256: "run".to_string(),
+            },
+        ];
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("base".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist impl symbols");
+
+        let method = code_symbols_containing_span(&config, "repo", "src/lib.rs", 3, 8, 10)
+            .expect("span containment")
+            .into_iter()
+            .find(|symbol| symbol.name == "run")
+            .expect("method symbol");
+        assert!(method.container_symbol_id.is_some());
+        assert_eq!(method.container_chain, vec!["Widget"]);
+    }
+
+    #[test]
     fn code_intel_read_model_resolves_containers_edges_bounds_and_diff() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");

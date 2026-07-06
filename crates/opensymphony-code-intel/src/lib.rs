@@ -1526,7 +1526,16 @@ fn run_query_pack(
 }
 
 fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
-    for index in 0..symbols.len() {
+    let mut indexes = (0..symbols.len()).collect::<Vec<_>>();
+    indexes.sort_by_key(|index| {
+        std::cmp::Reverse(
+            symbols[*index]
+                .span
+                .end_byte
+                .saturating_sub(symbols[*index].span.start_byte),
+        )
+    });
+    for index in indexes {
         if !symbols[index].container_chain.is_empty() {
             continue;
         }
@@ -1577,16 +1586,29 @@ fn rust_impl_container(
         return Ok((None, Vec::new()));
     };
     let name = owner
-        .utf8_text(source)?
-        .split('<')
-        .next()
-        .unwrap_or("")
-        .trim();
+        .utf8_text(source)
+        .map(rust_container_part)?
+        .unwrap_or_default();
     if name.is_empty() {
-        Ok((None, Vec::new()))
+        return Ok((None, Vec::new()));
+    }
+    let trait_name = impl_item
+        .child_by_field_name("trait")
+        .and_then(|node| node.utf8_text(source).ok())
+        .and_then(rust_container_part);
+    if let Some(trait_name) = trait_name {
+        Ok((
+            Some(trait_name.to_string()),
+            vec![name.to_string(), trait_name.to_string()],
+        ))
     } else {
         Ok((Some(name.to_string()), vec![name.to_string()]))
     }
+}
+
+fn rust_container_part(text: &str) -> Option<&str> {
+    let trimmed = text.split('<').next().unwrap_or(text).trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn span_strictly_contains(outer: &SourceSpan, inner: &SourceSpan) -> bool {
@@ -2361,6 +2383,40 @@ mod tests {
             .expect("impl method symbol");
         assert_eq!(impl_method.container_name.as_deref(), Some("Widget"));
         assert_eq!(impl_method.container_chain, vec!["Widget"]);
+    }
+
+    #[test]
+    fn rust_trait_impl_methods_include_trait_in_container_chain() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/trait_impl.rs")),
+            "struct Widget;\nimpl Display for Widget {\n    fn fmt(&self) {}\n}\n",
+        )
+        .expect("rust parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "fmt")
+            .expect("trait impl method");
+        assert_eq!(method.container_name.as_deref(), Some("Display"));
+        assert_eq!(method.container_chain, vec!["Widget", "Display"]);
+    }
+
+    #[test]
+    fn nested_symbols_get_complete_parent_chains() {
+        let summary = parse_path(
+            "fixtures/python/nested.py",
+            "class Outer:\n    class Inner:\n        def run(self):\n            pass\n",
+        )
+        .expect("python parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
+            .expect("nested method");
+        assert_eq!(method.container_name.as_deref(), Some("Inner"));
+        assert_eq!(method.container_chain, vec!["Outer", "Inner"]);
     }
 
     #[test]

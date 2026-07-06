@@ -823,15 +823,19 @@ fn container_symbol_index(symbols: &[PreparedCodeSymbol<'_>], child_index: usize
     let child = symbols[child_index].symbol;
     let parent_name = child.container_chain.last()?;
     let parent_chain = &child.container_chain[..child.container_chain.len().saturating_sub(1)];
-    symbols
+    let matches = symbols
         .iter()
         .enumerate()
         .filter(|(candidate_index, candidate)| {
             *candidate_index != child_index
                 && candidate.symbol.name == *parent_name
                 && candidate.symbol.container_chain == parent_chain
-                && symbol_contains_span(candidate.symbol, child.start_byte, child.end_byte)
         })
+        .collect::<Vec<_>>();
+    matches
+        .iter()
+        .copied()
+        .filter(|(_, candidate)| symbol_contains_span(candidate.symbol, child.start_byte, child.end_byte))
         .min_by_key(|(_, candidate)| {
             (
                 candidate.symbol.end_byte.saturating_sub(candidate.symbol.start_byte),
@@ -839,6 +843,7 @@ fn container_symbol_index(symbols: &[PreparedCodeSymbol<'_>], child_index: usize
             )
         })
         .map(|(candidate_index, _)| candidate_index)
+        .or_else(|| (matches.len() == 1).then(|| matches[0].0))
 }
 
 fn resolve_code_edge(
