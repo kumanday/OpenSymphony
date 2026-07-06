@@ -1089,6 +1089,26 @@ pub async fn memory_search(
     gateway_get_json(state, &path).await
 }
 
+/// List completed tasks (memory-capsule backed) through the active gateway.
+#[command]
+pub async fn memory_completed_tasks(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    query: Option<String>,
+    sort: Option<String>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+    visibility: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "query", query.as_deref());
+    push_query_param(&mut params, "sort", sort.as_deref());
+    push_query_param_value(&mut params, "limit", limit);
+    push_query_param_value(&mut params, "offset", offset);
+    push_query_param(&mut params, "visibility", visibility.as_deref());
+    let path = path_with_query("/api/v1/memory/completed-tasks", &params);
+    gateway_get_json(state, &path).await
+}
+
 /// Get task graph for a project.
 #[command]
 pub async fn task_graph(

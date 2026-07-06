@@ -606,6 +606,11 @@ fn render_issue_capsule(
                 .filter_map(|pr| pr.merge_sha.clone())
                 .collect(),
         },
+        timestamp: plan
+            .issue
+            .completed_at
+            .or(plan.issue.updated_at)
+            .map(|value| value.to_rfc3339()),
         captured_at: Utc::now(),
         docs_sync: DocsSyncFrontmatter {
             status: "pending".to_string(),
@@ -703,6 +708,12 @@ struct IssueCapsuleFrontmatter {
     prs: Vec<CapsulePr>,
     areas: Vec<String>,
     source_refs: SourceRefs,
+    // The OKF canonical completion timestamp. Persisted so a reindex
+    // (`refresh_memory_index_from_okf`) rebuilds `completion_time` — and
+    // thus the Completed pane's date/sort — instead of losing it because
+    // only `captured_at` survived in the frontmatter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
     captured_at: DateTime<Utc>,
     docs_sync: DocsSyncFrontmatter,
 }

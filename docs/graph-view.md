@@ -47,8 +47,14 @@ test sees the same graph:
 - `packages/api-client/src/graph-viz-demo.ts` — matching task-graph demo
   (`graphVizDemoTaskGraph`) whose dependency shapes stress the arrow
   routing: several skip-level dependencies fanning out from one blocker plus
-  overlapping skips from different blockers. `createGraphVizDemoTransport()`
-  wraps it all in a `MockGatewayTransport`.
+  overlapping skips from different blockers, and a backlog tier (VIZ-114…120)
+  with cross-pane blockers and multi-hop chains that exercise ancestry
+  critical-path highlighting. `createGraphVizDemoTransport()` wraps it all in
+  a `MockGatewayTransport`.
+- `graphVizFixtureCompletedTasks` (in `viz-fixture.ts`) — 31 completed tasks
+  with PR evidence (including abandoned unmerged PRs) whose capsule ids
+  resolve to real fixture concepts, feeding the Completed pane's table,
+  search, sorting, and pagination in the workbench.
 
 ### Running the workbench
 
@@ -86,6 +92,52 @@ with one lane and one hue per blocker (rounded corners, colored arrowheads);
 hovering a task spotlights its incident arrows. See
 `renderTaskGraphLink`/`buildTaskGraphLinks` in
 `packages/ui-core/src/app-shell.ts`.
+
+### Three-pane task graph
+
+The desktop task surface splits into three panes
+(`renderTaskGraphPanes` in `packages/ui-core/src/app-shell.ts`):
+
+- **Completed** (collapsible, left) — a searchable, sortable, paginated
+  table served by `GET /api/v1/memory/completed-tasks`. Rows come from the
+  memory server's DuckDB catalog first (issue capsules with their
+  normalized `pull_requests` evidence — completed tasks survive Linear
+  archival and the Linear API is never queried on this path), merged with
+  orchestrator-known completions not yet captured (`source:
+  "orchestrator"`). Each row lists all of its PRs — the newest bold,
+  unmerged ones struck through — plus a memory-capsule button that opens
+  the task's capsule through `openMemoryDeepLink`.
+- **Current** (center, never collapses) — the dispatchable dependency graph
+  as before (Todo / In Progress / Human Review / Rework). Canceled nodes
+  also stay here (they have no other pane, and the Canceled state filter
+  must still surface them). Selecting or hovering a task boldens its
+  incoming and outgoing edges, including outgoing edges that leave the
+  pane's right side toward blocked Backlog tasks.
+- **Backlog** (collapsible, right) — backlog-state Linear issues, now
+  included in the task-graph snapshot (`LinearClient::project_task_graph_issues`
+  returns them from the same single project scan that already served the
+  identifier lookup). Cards use the Current pane's grammar with faded
+  edges; hovering or selecting a backlog task boldens its full **ancestry
+  critical path** — every unfinished upstream chain that must complete to
+  unblock it — across both panes, and dims unrelated backlog cards.
+
+Cross-pane edges live in a measured SVG overlay
+(`positionTaskGraphCrossLinks`): paths carry the same
+`data-link-from`/`data-link-to` contract as in-pane edges and are
+repositioned on scroll, resize, and collapse; endpoints scrolled out of
+their pane hide instead of drawing across headers.
+
+**Live status reflection.** The Current and Backlog panes are pure
+functions of the latest task-graph snapshot — `renderTaskGraphPanes`
+re-partitions the fresh nodes on every render — so a status change moves a
+task between panes on the next live refresh with no restart: Backlog→Todo
+lands it in Current, Todo→Backlog returns it, and a completion drops it from
+Current. The Completed pane loads separately, so `refreshLiveGatewayData`
+reloads it whenever `completedTasksSignature` changes — a signature over
+both the task graph's done nodes and the dashboard snapshot's control-plane
+completed count, so completions surface even when the finished issue is
+absent from the task graph (e.g. no project metadata). `memory_graph_updated`
+events reload it too, for capsule/PR evidence captured after completion.
 
 ### Drill-down navigation
 
@@ -148,6 +200,18 @@ testing, `?memory=<deep-link>` on the desktop dev server (composable with
   resolvability.
 - `packages/ui-core/__tests__/memory-markdown.test.ts` — capsule markdown
   allowlist rendering and escaping.
+- `packages/graph/__tests__/completed-tasks.test.ts` — completed-task
+  paging/sorting/search (`pageCompletedTasks`, the fixture adapter's twin of
+  the gateway endpoint) and fixture-row determinism.
+- The three-pane suite inside `app-shell.test.ts` — pane rendering,
+  Completed search/sort/pagination, PR emphasis, capsule deep links,
+  ancestry critical-path emphasis, and pane collapse.
+- Rust: `crates/opensymphony-gateway/tests/gateway.rs`
+  (`gateway_task_graph_includes_backlog_issues_with_cross_edges`,
+  `gateway_serves_memory_completed_tasks`),
+  `crates/opensymphony-linear/tests/linear_client.rs`
+  (`project_task_graph_issues_return_requested_and_backlog_from_one_scan`),
+  and the memory crate's PR-evidence projection unit test.
 
 When iterating on visuals, extend these fixtures and tests rather than
 creating throwaway data; `AGENTS.md` ("UI separation") points here.

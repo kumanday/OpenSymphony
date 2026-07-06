@@ -29,7 +29,7 @@ const projectId = "viz-workbench";
 interface DemoIssue {
   id: string;
   title: string;
-  state: "Todo" | "In Progress" | "Human Review" | "Done";
+  state: "Todo" | "In Progress" | "Human Review" | "Done" | "Backlog";
   blockedBy?: string[];
   running?: boolean;
 }
@@ -62,14 +62,27 @@ const demoIssues: DemoIssue[] = [
   { id: "VIZ-111", title: "Playwright visual sweep", state: "Todo", blockedBy: ["VIZ-107", "VIZ-108"] },
   { id: "VIZ-112", title: "Reduced motion audit", state: "Todo", blockedBy: ["VIZ-108"] },
   { id: "VIZ-113", title: "Release notes and demo capture", state: "Todo", blockedBy: ["VIZ-104", "VIZ-109", "VIZ-111"] },
+  // Backlog tier (three-pane task graph): cross-pane edges from Current
+  // blockers into the Backlog pane, plus backlog-internal chains so
+  // ancestry critical-path highlighting has real depth to walk
+  // (e.g. VIZ-117 ← VIZ-116 ← VIZ-114/115 ← VIZ-103).
+  { id: "VIZ-114", title: "Changelog & publish", state: "Backlog", blockedBy: ["VIZ-103"] },
+  { id: "VIZ-115", title: "Frame budget analysis", state: "Backlog", blockedBy: ["VIZ-103"] },
+  { id: "VIZ-116", title: "Memory & leak audit", state: "Backlog", blockedBy: ["VIZ-114", "VIZ-115"] },
+  { id: "VIZ-117", title: "Release evidence pack", state: "Backlog", blockedBy: ["VIZ-104", "VIZ-116"] },
+  { id: "VIZ-118", title: "Packaging fallback polish", state: "Backlog", blockedBy: ["VIZ-116"] },
+  { id: "VIZ-119", title: "Docs site update", state: "Backlog", blockedBy: ["VIZ-108"] },
+  { id: "VIZ-120", title: "Post-release validation", state: "Backlog", blockedBy: ["VIZ-117", "VIZ-119"] },
 ];
 
 function demoNode(issue: DemoIssue): TaskGraphNode {
   const stateCategory = issue.state === "Done"
     ? "done"
-    : issue.state === "Todo"
-      ? "todo"
-      : "in_progress";
+    : issue.state === "Backlog"
+      ? "backlog"
+      : issue.state === "Todo"
+        ? "todo"
+        : "in_progress";
   return {
     schema_version,
     node_id: issue.id.toLowerCase(),

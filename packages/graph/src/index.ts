@@ -1,6 +1,8 @@
 import type {
   MemoryBundleList,
   MemoryCommunityList,
+  MemoryCompletedTask,
+  MemoryCompletedTaskPage,
   MemoryConceptDetail,
   MemoryGraphEdge,
   MemoryGraphEdgeKind,
@@ -25,10 +27,13 @@ import {
 export type {
   MemoryBundleList,
   MemoryCommunityList,
+  MemoryCompletedTask,
+  MemoryCompletedTaskPage,
   MemoryConceptDetail,
   MemoryGraphNode,
   MemoryGraphSnapshot,
   MemorySearchResponse,
+  MemoryTaskPullRequest,
 } from "@opensymphony/gateway-schema";
 export {
   fixtureBundleList,
@@ -41,6 +46,7 @@ export {
 export {
   graphVizFixtureBundleList,
   graphVizFixtureCommunityList,
+  graphVizFixtureCompletedTasks,
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
 } from "./viz-fixture.js";
@@ -139,6 +145,12 @@ export interface GraphDataAdapter {
   getConceptDetail(bundleId: string, conceptId: string, options?: GraphRequestOptions): Promise<MemoryConceptDetail>;
   getCommunities(bundleId: string, options?: GraphRequestOptions): Promise<MemoryCommunityList>;
   search(query: string, options?: GraphSearchOptions): Promise<MemorySearchResponse>;
+  /**
+   * Paginated completed tasks (memory capsules with PR evidence, merged
+   * with orchestrator-known completions). Optional so lean adapters keep
+   * working; surfaces without it render an empty Completed pane.
+   */
+  getCompletedTasks?(options?: GraphCompletedTasksOptions): Promise<MemoryCompletedTaskPage>;
 }
 
 export interface GraphRequestOptions {
@@ -148,6 +160,13 @@ export interface GraphRequestOptions {
 export interface GraphSearchOptions extends GraphRequestOptions {
   limit?: number;
   bundleId?: string;
+}
+
+export interface GraphCompletedTasksOptions extends GraphRequestOptions {
+  query?: string;
+  sort?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface GraphAdapterPolicy {
@@ -585,7 +604,127 @@ export function createHttpGraphAdapter(
       if (options?.bundleId) params.set("bundle_id", options.bundleId);
       return read<MemorySearchResponse>("/api/v1/memory/search", params);
     },
+    getCompletedTasks: (options) => {
+      const params = visibilityParams(options, policy);
+      if (options?.query) params.set("query", options.query);
+      if (options?.sort) params.set("sort", options.sort);
+      if (options?.limit !== undefined) params.set("limit", String(options.limit));
+      if (options?.offset !== undefined) params.set("offset", String(options.offset));
+      return read<MemoryCompletedTaskPage>("/api/v1/memory/completed-tasks", params);
+    },
   };
+}
+
+/**
+ * Client-side twin of the gateway's completed-tasks search/sort/pagination,
+ * used by the fixture adapter (and tests) so the workbench behaves like the
+ * real endpoint.
+ */
+export function pageCompletedTasks(
+  rows: readonly MemoryCompletedTask[],
+  options: GraphCompletedTasksOptions = {},
+): MemoryCompletedTaskPage {
+  const query = options.query?.trim() ?? "";
+  const needle = query.toLowerCase();
+  const filtered = needle
+    ? rows.filter((row) =>
+      row.issue_key.toLowerCase().includes(needle)
+      || row.title.toLowerCase().includes(needle)
+      || (row.state?.toLowerCase().includes(needle) ?? false)
+      || (row.milestone?.toLowerCase().includes(needle) ?? false)
+      || row.prs.some((pr) => pr.title.toLowerCase().includes(needle) || `#${pr.number}`.includes(needle)))
+    : [...rows];
+
+  const sort = normalizeCompletedTasksSort(options.sort);
+  filtered.sort(completedTaskComparator(sort));
+
+  const total = filtered.length;
+  const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
+  const offset = Math.min(Math.max(options.offset ?? 0, 0), total);
+  return {
+    schema_version: { major: 1, minor: 0, patch: 0 },
+    bundle_id: "local-default",
+    tasks: filtered.slice(offset, offset + limit),
+    total,
+    offset,
+    limit,
+    sort,
+    query: query || undefined,
+    generated_at: new Date().toISOString(),
+  };
+}
+
+export const completedTaskSorts = [
+  "completed_desc",
+  "completed_asc",
+  "id_asc",
+  "id_desc",
+  "title_asc",
+  "title_desc",
+  "pr_desc",
+  "pr_asc",
+] as const;
+export type CompletedTaskSort = (typeof completedTaskSorts)[number];
+
+function normalizeCompletedTasksSort(sort: string | undefined): CompletedTaskSort {
+  return (completedTaskSorts as readonly string[]).includes(sort ?? "")
+    ? sort as CompletedTaskSort
+    : "completed_desc";
+}
+
+function completedTaskComparator(sort: CompletedTaskSort): (a: MemoryCompletedTask, b: MemoryCompletedTask) => number {
+  switch (sort) {
+    case "completed_asc":
+      return (a, b) => missingDatesLast(a.completed_at, b.completed_at)
+        || compareNullableStrings(a.completed_at, b.completed_at)
+        || compareIssueKeys(a.issue_key, b.issue_key);
+    case "id_asc":
+      return (a, b) => compareIssueKeys(a.issue_key, b.issue_key);
+    case "id_desc":
+      return (a, b) => compareIssueKeys(b.issue_key, a.issue_key);
+    case "title_asc":
+      return (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+    case "title_desc":
+      return (a, b) => b.title.localeCompare(a.title, undefined, { sensitivity: "base" });
+    case "pr_desc":
+      return (a, b) => latestPrNumber(b) - latestPrNumber(a);
+    case "pr_asc":
+      return (a, b) => latestPrNumber(a) - latestPrNumber(b);
+    default:
+      return (a, b) => missingDatesLast(a.completed_at, b.completed_at)
+        || compareNullableStrings(b.completed_at, a.completed_at)
+        || compareIssueKeys(b.issue_key, a.issue_key);
+  }
+}
+
+/** Rows without a completion date sort after dated rows in either direction. */
+function missingDatesLast(a: string | undefined, b: string | undefined): number {
+  if ((a === undefined) === (b === undefined)) return 0;
+  return a === undefined ? 1 : -1;
+}
+
+function latestPrNumber(row: MemoryCompletedTask): number {
+  return row.prs.reduce((max, pr) => Math.max(max, pr.number), 0);
+}
+
+function compareNullableStrings(a: string | undefined, b: string | undefined): number {
+  if (a === b) return 0;
+  if (a === undefined) return 1;
+  if (b === undefined) return -1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Natural compare so `COE-99` orders before `COE-100`. */
+function compareIssueKeys(a: string, b: string): number {
+  const splitKey = (key: string): [string, number] => {
+    const at = Math.max(key.lastIndexOf("-"), key.lastIndexOf("_"));
+    if (at < 0) return [key.toUpperCase(), 0];
+    const numeric = Number.parseInt(key.slice(at + 1), 10);
+    return [key.slice(0, at).toUpperCase(), Number.isNaN(numeric) ? 0 : numeric];
+  };
+  const [prefixA, numberA] = splitKey(a);
+  const [prefixB, numberB] = splitKey(b);
+  return prefixA.localeCompare(prefixB) || numberA - numberB;
 }
 
 export const createGatewayGraphAdapter = createHttpGraphAdapter;
@@ -698,13 +837,17 @@ export function createFixtureGraphAdapter(fixtures: {
   conceptDetail?: MemoryConceptDetail | ((bundleId: string, conceptId: string) => MemoryConceptDetail | null);
   communities?: MemoryCommunityList;
   search?: MemorySearchResponse;
+  /** Full row set; the adapter applies query/sort/pagination like the gateway. */
+  completedTasks?: readonly MemoryCompletedTask[];
 } = {}): GraphDataAdapter {
   const bundles = fixtures.bundles ?? fixtureBundleList;
   const snapshot = fixtures.snapshot ?? fixtureGraphSnapshot;
   const conceptDetail = fixtures.conceptDetail ?? fixtureConceptDetail;
   const communities = fixtures.communities ?? fixtureCommunityList;
   const search = fixtures.search ?? fixtureSearchResponse;
+  const completedTasks = fixtures.completedTasks ?? [];
   return {
+    getCompletedTasks: async (options) => pageCompletedTasks(completedTasks, options),
     listBundles: async () => bundles,
     getGraphSnapshot: async () => snapshot,
     getConceptDetail: async (bundleId, conceptId) => {
