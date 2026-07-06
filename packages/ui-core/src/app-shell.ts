@@ -25,6 +25,7 @@ import type {
 } from "@opensymphony/gateway-schema";
 import {
   cachedConceptDetail,
+  isConceptDetailStale,
   createGraphLayoutAdapter,
   createInitialGraphState,
   formatMemoryDeepLink,
@@ -3124,7 +3125,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const node = this.selectedKnowledgeConcept();
     if (!this.graphAdapter || !bundleId || !node?.concept_id) return;
     const conceptId = node.concept_id;
-    if (cachedConceptDetail(graph, bundleId, conceptId)) return;
+    // A cached-but-stale detail keeps rendering while we refetch it in the
+    // background (a newer snapshot marked it stale); only a truly-cached
+    // fresh detail skips the fetch. The refetch swaps in atomically via
+    // CONCEPT_DETAIL_LOADED, so the open capsule never blanks or scrolls
+    // back to the top on a background snapshot tick.
+    if (cachedConceptDetail(graph, bundleId, conceptId) && !isConceptDetailStale(graph, bundleId, conceptId)) {
+      return;
+    }
     const key = `${bundleId}:${conceptId}`;
     if (this.knowledgeCapsuleRequest === key || this.knowledgeCapsuleError?.key === key) return;
     this.knowledgeCapsuleRequest = key;
@@ -4394,13 +4402,18 @@ const shellScrollSelectors = [
   ".os-run-activity",
 ] as const;
 
+// Capture by (selector, index): some selectors match more than one element
+// (the Knowledge Graph's entity list and capsule inspector both use
+// `.os-knowledge-lower-panel`), so keying on the selector alone would only
+// ever preserve the first — the capsule inspector's scroll would snap to the
+// top on every background render. DOM order is stable across renders, so the
+// positional index maps each element back to itself.
 function captureShellScrollPositions(root: HTMLElement): Map<string, { left: number; top: number }> {
   const positions = new Map<string, { left: number; top: number }>();
   for (const selector of shellScrollSelectors) {
-    const element = root.querySelector<HTMLElement>(selector);
-    if (element) {
-      positions.set(selector, { left: element.scrollLeft, top: element.scrollTop });
-    }
+    root.querySelectorAll<HTMLElement>(selector).forEach((element, index) => {
+      positions.set(`${selector}#${index}`, { left: element.scrollLeft, top: element.scrollTop });
+    });
   }
   return positions;
 }
@@ -4409,8 +4422,17 @@ function restoreShellScrollPositions(
   root: HTMLElement,
   positions: Map<string, { left: number; top: number }>,
 ): void {
-  for (const [selector, position] of positions) {
-    const element = root.querySelector<HTMLElement>(selector);
+  const elementsBySelector = new Map<string, NodeListOf<HTMLElement>>();
+  for (const [key, position] of positions) {
+    const separator = key.lastIndexOf("#");
+    const selector = key.slice(0, separator);
+    const index = Number(key.slice(separator + 1));
+    let elements = elementsBySelector.get(selector);
+    if (!elements) {
+      elements = root.querySelectorAll<HTMLElement>(selector);
+      elementsBySelector.set(selector, elements);
+    }
+    const element = elements[index];
     if (element) {
       element.scrollLeft = position.left;
       element.scrollTop = position.top;

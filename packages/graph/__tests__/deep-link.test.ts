@@ -1,6 +1,7 @@
 import {
   applyGraphFilters,
   cachedConceptDetail,
+  isConceptDetailStale,
   createFixtureGraphAdapter,
   createInitialGraphState,
   formatMemoryDeepLink,
@@ -242,7 +243,7 @@ describe("fixture graph adapter concept resolution", () => {
     expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toEqual(detail);
   });
 
-  it("drops the bundle's cached details when a newer snapshot is accepted", () => {
+  it("keeps the bundle's cached details but marks them stale when a newer snapshot is accepted", () => {
     const concept = graphVizFixtureSnapshot.nodes.find((node) => node.kind === "concept")!;
     const detail = graphVizFixtureConceptDetail(concept.concept_id!)!;
     const otherBundleDetail = { ...detail, bundle_id: "other-bundle" };
@@ -250,17 +251,26 @@ describe("fixture graph adapter concept resolution", () => {
     state = graphReducer(state, { type: "CONCEPT_DETAIL_LOADED", detail });
     state = graphReducer(state, { type: "CONCEPT_DETAIL_LOADED", detail: otherBundleDetail });
 
-    // A redelivered (same-sequence) snapshot keeps the cache.
+    // A redelivered (same-sequence) snapshot keeps the cache fresh.
     state = graphReducer(state, { type: "SNAPSHOT_LOADED", snapshot: graphVizFixtureSnapshot });
     expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toEqual(detail);
+    expect(isConceptDetailStale(state, detail.bundle_id, detail.concept_id)).toBe(false);
 
     // An accepted, strictly newer snapshot may reflect capsule edits: the
-    // bundle's cached details are invalidated, other bundles' survive.
+    // bundle's cached details stay on screen but are marked stale so an open
+    // capsule refetches in the background (instead of blanking). Other
+    // bundles are untouched.
     state = graphReducer(state, {
       type: "SNAPSHOT_LOADED",
       snapshot: { ...graphVizFixtureSnapshot, cursor: { ...graphVizFixtureSnapshot.cursor, sequence: 2 } },
     });
-    expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toBeNull();
+    expect(cachedConceptDetail(state, detail.bundle_id, detail.concept_id)).toEqual(detail);
+    expect(isConceptDetailStale(state, detail.bundle_id, detail.concept_id)).toBe(true);
     expect(cachedConceptDetail(state, "other-bundle", detail.concept_id)).toEqual(otherBundleDetail);
+    expect(isConceptDetailStale(state, "other-bundle", detail.concept_id)).toBe(false);
+
+    // Refetching clears the stale mark and swaps the fresh detail in.
+    state = graphReducer(state, { type: "CONCEPT_DETAIL_LOADED", detail });
+    expect(isConceptDetailStale(state, detail.bundle_id, detail.concept_id)).toBe(false);
   });
 });
