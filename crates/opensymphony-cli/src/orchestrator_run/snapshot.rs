@@ -11,8 +11,8 @@ use crate::opensymphony_control::{
     RecentEventKind, WorkerOutcome,
 };
 use crate::opensymphony_domain::{
-    HarnessInterruptStatus, HealthStatus, IssueIdentifier, OrchestratorSnapshot, ReleaseReason,
-    SchedulerStatus, WorkerOutcomeKind,
+    HarnessInterruptStatus, HealthStatus, IssueIdentifier, IssueStateCategory,
+    OrchestratorSnapshot, SchedulerStatus, WorkerOutcomeKind,
 };
 use crate::opensymphony_openhands::LocalServerSupervisor;
 use crate::opensymphony_workflow::ResolvedWorkflow;
@@ -106,11 +106,15 @@ fn map_issue(
                 | WorkerOutcomeKind::TimedOut
                 | WorkerOutcomeKind::Stalled,
             ) => IssueRuntimeState::Failed,
-            // A tracker-inactive release with no recorded run is a parked
-            // issue (e.g. a recovered workspace whose issue sits in Backlog),
-            // not a completion — reporting it Completed would surface phantom
-            // rows in every completed-work view.
-            None if issue.runtime.release_reason == Some(ReleaseReason::TrackerInactive) => {
+            // A released execution with no recorded run never dispatched a
+            // worker (e.g. a recovered workspace parked while its issue sits
+            // in a non-active tracker state). Key on the *current* tracker
+            // state, not the release reason: `release_issue` refreshes the
+            // issue state but leaves a stale `TrackerInactive` reason when the
+            // execution is already released, so a parked issue later moved
+            // straight to a terminal state (Backlog → Done) must still surface
+            // as a completion rather than a phantom idle row.
+            None if issue.issue.state.category != IssueStateCategory::Terminal => {
                 IssueRuntimeState::Idle
             }
             _ => IssueRuntimeState::Completed,
@@ -745,6 +749,24 @@ tracker:
             "Done",
             IssueStateCategory::Terminal,
             crate::opensymphony_domain::ReleaseReason::TrackerTerminal,
+        ));
+        assert_eq!(
+            state,
+            crate::opensymphony_control::IssueRuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn stale_tracker_inactive_reason_with_terminal_state_still_maps_to_completed() {
+        // A parked issue (released `TrackerInactive`) moved straight to Done
+        // keeps its stale release reason because `release_issue` does not
+        // re-release an already-released execution. The current terminal
+        // tracker state must still win so the completion reaches the
+        // Completed pane and dashboard instead of vanishing as idle.
+        let state = map_single_issue_runtime_state(released_issue_snapshot(
+            "Done",
+            IssueStateCategory::Terminal,
+            crate::opensymphony_domain::ReleaseReason::TrackerInactive,
         ));
         assert_eq!(
             state,

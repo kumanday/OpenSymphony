@@ -2282,6 +2282,118 @@ async fn gateway_task_graph_categorizes_idle_issues_by_tracker_state() {
 }
 
 #[tokio::test]
+async fn gateway_task_graph_suppresses_overlay_for_parked_non_active_state() {
+    // A parked recovered issue whose tracker state maps to the coarse `todo`
+    // graph category but is NOT a configured active state (e.g. Triage, or a
+    // custom state) must not be advertised as queued/eligible: the scheduler
+    // released it as tracker-inactive and will not dispatch it until it
+    // enters a configured active state.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Triage".to_owned();
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store)
+        .with_linear_task_graph(Some(std::sync::Arc::new(FakeLinearTaskGraphClient {
+            issues,
+        })))
+        .with_active_states(["Todo".to_owned(), "In Progress".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    // Triage still lands in the coarse `todo` category ...
+    assert_eq!(
+        response.nodes[0].state_category,
+        opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Todo,
+    );
+    // ... but it is not a configured active state, so the overlay is clean.
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("tracked issue should carry a runtime overlay");
+    assert!(!overlay.eligible);
+    assert!(!overlay.queued);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_task_graph_marks_configured_active_state_eligible() {
+    // A custom active state that maps to the coarse `todo` category (e.g.
+    // "Rework") is genuinely dispatchable when listed in active_states, so
+    // its overlay must be queued/eligible even though the category alone is
+    // ambiguous. This is why dispatchability keys on active_states, not the
+    // category or the semantic tracker-state kind.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Rework".to_owned();
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store)
+        .with_linear_task_graph(Some(std::sync::Arc::new(FakeLinearTaskGraphClient {
+            issues,
+        })))
+        .with_active_states(["Todo".to_owned(), "Rework".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("tracked issue should carry a runtime overlay");
+    assert!(overlay.eligible);
+    assert!(overlay.queued);
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_memory_completed_tasks() {
     let repo = tempfile::tempdir().expect("memory repo");
     let config = write_completed_tasks_fixture(repo.path());

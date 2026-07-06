@@ -282,6 +282,13 @@ pub struct GatewayState {
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     pub memory_config: Option<MemoryConfig>,
+    /// Normalized (trimmed, lowercased) workflow active-state names. The task
+    /// graph consults these to decide whether an Idle issue is actually
+    /// dispatchable — the authoritative signal the scheduler itself uses —
+    /// rather than inferring it from the coarse graph category. Empty when no
+    /// workflow config is wired in (bare test servers), in which case the
+    /// category is used as a fallback.
+    pub active_states: Arc<HashSet<String>>,
     pub codex_readiness_cache: Arc<CodexReadinessCache>,
     pub workspace_scans: WorkspaceScans,
     pub pr_urls: PrUrls,
@@ -299,6 +306,7 @@ impl Clone for GatewayState {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            active_states: self.active_states.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
             workspace_scans: self.workspace_scans.clone(),
             pr_urls: self.pr_urls.clone(),
@@ -500,6 +508,7 @@ pub struct GatewayServer {
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     memory_config: Option<MemoryConfig>,
+    active_states: Arc<HashSet<String>>,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -513,6 +522,7 @@ impl Clone for GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            active_states: self.active_states.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -537,6 +547,7 @@ impl std::fmt::Debug for GatewayServer {
                 &self.linear_task_graph.as_ref().map(|_| "..."),
             )
             .field("memory_config", &self.memory_config.as_ref().map(|_| "..."))
+            .field("active_states", &self.active_states.len())
             .field("terminal_ingest_handle", &"<handle>")
             .finish()
     }
@@ -567,6 +578,7 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            active_states: Arc::new(HashSet::new()),
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -585,6 +597,7 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            active_states: Arc::new(HashSet::new()),
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -624,6 +637,20 @@ impl GatewayServer {
         self
     }
 
+    /// Install the workflow's active-state names so the task graph can decide
+    /// whether an Idle issue is genuinely dispatchable (matching the
+    /// scheduler's own active-state test) instead of inferring it from the
+    /// coarse graph category. Names are normalized (trimmed, lowercased).
+    pub fn with_active_states(mut self, states: impl IntoIterator<Item = String>) -> Self {
+        self.active_states = Arc::new(
+            states
+                .into_iter()
+                .map(|state| state.trim().to_ascii_lowercase())
+                .collect(),
+        );
+        self
+    }
+
     /// Extract clones of the journal and broker so the caller can keep them for testing.
     pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal.clone(), self.broker.clone())
@@ -641,6 +668,7 @@ impl GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            active_states: self.active_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
             workspace_scans: WorkspaceScans::default(),
             pr_urls: PrUrls::default(),
@@ -3109,15 +3137,26 @@ async fn get_task_graph(
                 }
                 Some(runtime_state) => map_runtime_state_to_graph_category(runtime_state),
             };
-            let runtime_overlay = snapshot_issue.map(|snapshot_issue| {
-                build_runtime_overlay(
-                    snapshot_issue,
-                    matches!(
-                        state_category,
-                        TaskGraphStateCategory::Todo | TaskGraphStateCategory::InProgress
-                    ),
+            // Dispatchability drives the queued/eligible overlay. Use the
+            // workflow's active-state names — the same authority the scheduler
+            // uses — so a parked Idle issue in a non-active state (Backlog,
+            // Triage, or a custom state absent from `active_states`) is never
+            // shown as queued/eligible, and a genuinely active state that maps
+            // to the coarse `todo` category (e.g. "Rework") still is. Fall back
+            // to the graph category only when no active states are configured
+            // (bare test servers).
+            let dispatchable = if state.active_states.is_empty() {
+                matches!(
+                    state_category,
+                    TaskGraphStateCategory::Todo | TaskGraphStateCategory::InProgress
                 )
-            });
+            } else {
+                state
+                    .active_states
+                    .contains(&issue.state.trim().to_ascii_lowercase())
+            };
+            let runtime_overlay = snapshot_issue
+                .map(|snapshot_issue| build_runtime_overlay(snapshot_issue, dispatchable));
             let parent_id = issue
                 .parent
                 .as_ref()
