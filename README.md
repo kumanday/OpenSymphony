@@ -12,7 +12,7 @@ OpenSymphony automates software development workflows by:
 2. **Creating isolated workspaces** for each issue with lifecycle hooks
 3. **Dispatching AI agents** via OpenHands or Codex to work on issues autonomously
 4. **Managing retries, reconciliation, and cleanup** based on issue state changes
-5. **Providing a terminal UI** (FrankenTUI) for monitoring and operator control
+5. **Providing a desktop operator dashboard** for task graph, run detail, and memory navigation
 
 ### Key Features
 
@@ -20,10 +20,10 @@ OpenSymphony automates software development workflows by:
 - **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
-- **Conversation reuse policies**: Default per-issue reuse with optional fresh-per-run resets
+- **Dependency-aware Task Graph**: Shows dispatchable work, roadmap backlog, and selected-task critical paths
 - **Harness selection**: Default OpenHands agent-server execution, plus local Codex app-server support for ChatGPT subscription-backed runs
-- **Tree-sitter code intelligence**: Local AST parsing, symbols, diagnostics, and source-cited structural context for agents
-- **Local-first MVP**: Trusted-machine deployment with optional hosted mode
+- **Code Graph**: Tree-sitter-backed symbols, diagnostics, and source-cited structural context for agents
+- **Operational Knowledge Graph**: Builds agent-queriable and human-navigable memory from completed work
 
 OpenSymphony `1.0.0` is the compatibility boundary for the GraphQL-only Linear
 rewrite. See [Migration Guide](docs/migration-1.0.0.md) if you are upgrading an
@@ -41,7 +41,7 @@ not separately published crates.
 - Rust toolchain (stable)
 - Linear API key (for tracker integration)
 - For OpenHands: Python 3.13.12 with `uv`, plus an LLM API key for an OpenAI-compatible/LiteLLM provider
-- For Codex: a Codex CLI with `app-server` support and a working ChatGPT login
+- For Codex: the [Codex CLI](https://developers.openai.com/codex/cli) with a working ChatGPT login
 
 For platform-specific Rust and Python/`uv` setup steps, see [Prerequisites](docs/prerequisites.md).
 
@@ -57,13 +57,8 @@ For OpenHands runs, install the pinned local OpenHands agent-server runtime:
 opensymphony install openhands
 ```
 
-For Codex runs, install or select a Codex CLI that supports app-server mode:
-
-```bash
-codex --version
-codex app-server --help
-codex login status
-```
+For Codex runs, install the [Codex CLI](https://developers.openai.com/codex/cli)
+and sign in with ChatGPT before selecting the Codex harness below.
 
 To refresh the installed CLI later, run:
 
@@ -84,7 +79,15 @@ file, such as `~/.zshrc` or `~/.bashrc`:
 export LINEAR_API_KEY="lin_api_..."
 ```
 
-Use your real Linear API key for `LINEAR_API_KEY`.
+Create a personal Linear API key from
+[Settings -> Account -> Security & access](https://linear.app/settings/account/security),
+then use it for `LINEAR_API_KEY`. For advanced deployments, a Linear OAuth app
+created under `Settings -> API -> OAuth applications` can use OAuth tokens
+instead; Linear's [request limits](https://linear.app/developers/rate-limiting)
+are higher for OAuth apps (5,000 requests/hour) than personal API keys (2,500
+requests/hour). See Linear's
+[OAuth 2.0 authentication](https://linear.app/developers/oauth-2-0-authentication)
+docs for that path.
 
 ### OpenHands Runtime Environment
 
@@ -108,7 +111,6 @@ other way.
 For local Codex app-server runs, authenticate the Codex CLI with ChatGPT:
 
 ```bash
-codex login status
 codex login --device-auth
 ```
 
