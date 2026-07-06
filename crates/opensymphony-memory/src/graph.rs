@@ -3,12 +3,13 @@ use std::{fmt::Write as _, sync::atomic::{AtomicU64, Ordering}};
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
     memory_graph::{
-        MemoryBundleList, MemoryBundleSummary, MemoryCommunityList, MemoryConceptDetail,
-        MemoryFrontmatterView, MemoryGraphCitation, MemoryGraphCommunity, MemoryGraphEdge,
-        MemoryGraphEdgeKind, MemoryGraphFreshness, MemoryGraphLink, MemoryGraphNode,
-        MemoryGraphNodeKind, MemoryGraphNodeMetrics, MemoryGraphSnapshot, MemoryGraphSourceRef,
+        MemoryBundleList, MemoryBundleSummary, MemoryCommunityList, MemoryCompletedTask,
+        MemoryCompletedTaskSource, MemoryConceptDetail, MemoryFrontmatterView,
+        MemoryGraphCitation, MemoryGraphCommunity, MemoryGraphEdge, MemoryGraphEdgeKind,
+        MemoryGraphFreshness, MemoryGraphLink, MemoryGraphNode, MemoryGraphNodeKind,
+        MemoryGraphNodeMetrics, MemoryGraphSnapshot, MemoryGraphSourceRef,
         MemoryGraphSnapshotMetrics, MemoryGraphUpdatedEvent, MemoryGraphVisibility,
-        MemorySearchResponse, MemorySearchResult,
+        MemorySearchResponse, MemorySearchResult, MemoryTaskPullRequest,
     },
     version::SchemaVersion,
 };
@@ -469,6 +470,87 @@ pub fn memory_graph_search(
         bundle_id: Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID.to_string()),
         results,
     })
+}
+
+/// Unpaginated completed-task rows backed by captured memory capsules,
+/// including their normalized pull-request evidence. The gateway merges
+/// these with orchestrator-known completed issues and applies
+/// search/sort/pagination for `/api/v1/memory/completed-tasks`; keeping
+/// rows unpaginated here lets that merge happen before slicing.
+pub fn memory_completed_task_rows(
+    config: &MemoryConfig,
+    access: MemoryGraphAccess,
+) -> Result<Vec<MemoryCompletedTask>, MemoryGraphProjectionError> {
+    let issues = accessible_issues(config, access)?;
+    let mut prs_by_issue = load_pull_requests_by_issue(config)?;
+    Ok(issues
+        .into_iter()
+        .filter(is_completed_indexed_issue)
+        .map(|issue| {
+            let prs = prs_by_issue.remove(&issue.issue_key).unwrap_or_default();
+            MemoryCompletedTask {
+                issue_key: issue.issue_key.clone(),
+                concept_id: issue.concept_id.clone(),
+                bundle_id: Some(DEFAULT_MEMORY_GRAPH_BUNDLE_ID.to_string()),
+                title: redact_for_dto(config, &issue.title),
+                state: issue.state.clone(),
+                milestone: issue.milestone.clone(),
+                url: linear_issue_url(&issue).map(|url| redact_for_dto(config, &url)),
+                completed_at: completed_at_timestamp(&issue),
+                prs: prs
+                    .into_iter()
+                    .map(|pr| MemoryTaskPullRequest {
+                        number: pr.number,
+                        title: redact_for_dto(config, &pr.title),
+                        url: pr.url.as_ref().map(|url| redact_for_dto(config, url)),
+                        merged: pr.merged_at.is_some() || pr.merge_sha.is_some(),
+                        merged_at: pr.merged_at,
+                    })
+                    .collect(),
+                source: MemoryCompletedTaskSource::Memory,
+            }
+        })
+        .collect())
+}
+
+fn is_completed_indexed_issue(issue: &IndexedIssue) -> bool {
+    // Only issue capsules count as tasks; topic docs and generic concepts
+    // also live in the catalog but are not completed work items.
+    if issue.concept_type != "issue-capsule" {
+        return false;
+    }
+    // The state, when present, is authoritative: OKF reindexing fills
+    // `completion_time` from the frontmatter timestamp, so a bare
+    // timestamp on an "In Progress" capsule must not read as completed.
+    match issue
+        .state
+        .as_deref()
+        .map(|state| state.trim().to_ascii_lowercase())
+    {
+        Some(state) => matches!(state.as_str(), "done" | "completed" | "closed" | "merged"),
+        None => issue.completion_time.is_some(),
+    }
+}
+
+/// The task's actual completion date, from the recorded completion
+/// timestamp only. Unlike `indexed_issue_updated_at`, this never falls back
+/// to `captured_at`: reporting the capture/reindex time as the done date
+/// would corrupt the Completed table's dates and completed-date sorting for
+/// legacy or manually authored capsules that carry no completion timestamp.
+fn completed_at_timestamp(issue: &IndexedIssue) -> Option<DateTime<Utc>> {
+    issue
+        .completion_time
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn linear_issue_url(issue: &IndexedIssue) -> Option<String> {
+    issue
+        .source_refs
+        .iter()
+        .find(|source| source.kind == "linear_issue")
+        .and_then(|source| source.url.clone())
 }
 
 pub fn memory_graph_updated_event(

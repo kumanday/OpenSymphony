@@ -397,6 +397,73 @@ impl LinearClient {
         }
     }
 
+    /// Task-graph issue set from a single project scan: every requested
+    /// identifier plus all backlog-state issues. Backlog issues never enter
+    /// the control plane (they are not in `active_states`), so the task
+    /// graph endpoint asks for them here without a second Linear pass.
+    pub async fn project_task_graph_issues<S>(
+        &self,
+        identifiers: &[S],
+    ) -> Result<Vec<TrackerIssue>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        let identifiers = normalize_strings(identifiers);
+        let requested_keys = identifiers
+            .iter()
+            .map(|identifier| identifier.to_ascii_uppercase())
+            .collect::<HashSet<_>>();
+
+        let mut issues_by_identifier = HashMap::new();
+        let mut backlog = Vec::new();
+        for issue in self.project_issues(false).await? {
+            let key = issue.identifier.to_ascii_uppercase();
+            if requested_keys.contains(&key) {
+                issues_by_identifier.insert(key, issue);
+            } else if matches!(
+                issue.state_kind,
+                crate::opensymphony_domain::TrackerIssueStateKind::Backlog
+            ) {
+                backlog.push(issue);
+            }
+        }
+
+        let mut issues = Vec::new();
+        let mut missing_issue_ids = Vec::new();
+        for identifier in &identifiers {
+            match issues_by_identifier.remove(&identifier.to_ascii_uppercase()) {
+                Some(issue) => issues.push(issue),
+                None => missing_issue_ids.push(identifier.clone()),
+            }
+        }
+
+        // A tracked issue can sit outside the configured project scan — moved
+        // to another project, or lacking project metadata — while the control
+        // plane still tracks it (e.g. a failed run). Resolve those by
+        // identifier so a single miss does not fail the whole task graph;
+        // anything still unresolvable is omitted (its node and edges simply
+        // drop out) rather than 502-ing the graph.
+        for identifier in missing_issue_ids {
+            match self
+                .issues_by_identifiers(std::slice::from_ref(&identifier))
+                .await
+            {
+                Ok(mut resolved) => issues.append(&mut resolved),
+                Err(LinearError::MissingIssueIds { .. }) => {
+                    debug!(
+                        identifier = %identifier,
+                        "task graph identifier not found in project scan or by lookup; omitting"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        backlog.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        issues.extend(backlog);
+        Ok(issues)
+    }
+
     async fn project_issues(
         &self,
         include_archived: bool,

@@ -1188,6 +1188,232 @@ mod tests {
     }
 
     #[test]
+    fn memory_completed_task_rows_join_pull_request_evidence() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let source: SourceFile = serde_yaml::from_str(
+            r#"
+issues:
+  - identifier: COE-123
+    title: WebSocket reconnect recovery
+    url: https://linear.app/example/issue/COE-123
+    state: Done
+    completed_at: 2026-06-13T17:00:00Z
+    labels: [runtime]
+    linked_prs: [456, 490]
+prs:
+  - number: 456
+    title: COE-123 first attempt
+    url: https://github.com/example/repo/pull/456
+    branch: coe-123-attempt-1
+  - number: 490
+    title: COE-123 recover websocket reconnects
+    url: https://github.com/example/repo/pull/490
+    branch: coe-123-reconnect
+    merge_sha: abcdef1234567890
+    merged_at: 2026-06-13T16:00:00Z
+"#,
+        )
+        .expect("source yaml should parse");
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan =
+            plan_capture(&config, &source, &selection, true, false).expect("capture should plan");
+        write_capture_plan(&config, &plan, false).expect("capture should write");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.issue_key, "COE-123");
+        assert_eq!(row.concept_id, "issues/COE-123");
+        assert_eq!(row.state.as_deref(), Some("Done"));
+        assert!(row.completed_at.is_some());
+        // Freshly captured rows have empty source_refs in the index (they
+        // are rebuilt from capsule frontmatter on OKF reindex), so no
+        // Linear URL yet — the row is still fully usable.
+        assert_eq!(row.url, None);
+        assert_eq!(row.prs.len(), 2);
+        // The abandoned PR carries no merge evidence; the merged one keeps
+        // its merged_at so the UI can bold the most recent PR and strike
+        // through unmerged ones.
+        assert_eq!(row.prs[0].number, 456);
+        assert!(!row.prs[0].merged);
+        assert_eq!(row.prs[1].number, 490);
+        assert!(row.prs[1].merged);
+        assert!(row.prs[1].merged_at.is_some());
+    }
+
+    #[test]
+    fn memory_completed_task_rows_keep_prs_after_okf_reindex() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let source: SourceFile = serde_yaml::from_str(
+            r#"
+issues:
+  - identifier: COE-123
+    title: WebSocket reconnect recovery
+    url: https://linear.app/example/issue/COE-123
+    state: Done
+    completed_at: 2026-06-13T17:00:00Z
+    linked_prs: [456, 490]
+prs:
+  - number: 456
+    title: COE-123 first attempt
+    url: https://github.com/example/repo/pull/456
+  - number: 490
+    title: COE-123 recover websocket reconnects
+    url: https://github.com/example/repo/pull/490
+    merge_sha: abcdef1234567890
+    merged_at: 2026-06-13T16:00:00Z
+"#,
+        )
+        .expect("source yaml should parse");
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan =
+            plan_capture(&config, &source, &selection, true, false).expect("capture should plan");
+        write_capture_plan(&config, &plan, false).expect("capture should write");
+
+        // Reindex from the OKF bundle: this clears the pull_requests table and
+        // rebuilds it from the capsule frontmatter. PR links must survive so
+        // the Completed pane is not blanked after `memory import-okf`.
+        refresh_memory_index_from_okf(&config, &config.memory_root)
+            .expect("reindex should succeed");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+        let row = rows
+            .iter()
+            .find(|row| row.issue_key == "COE-123")
+            .expect("completed capsule should project after reindex");
+        assert_eq!(row.prs.len(), 2, "PR evidence must survive OKF reindex");
+        assert_eq!(row.prs[0].number, 456);
+        assert!(!row.prs[0].merged);
+        assert_eq!(row.prs[1].number, 490);
+        // Frontmatter carries merge_sha (not merged_at), so the merged flag is
+        // derived from the SHA.
+        assert!(row.prs[1].merged);
+        // The completion timestamp is persisted in the capsule frontmatter,
+        // so the Completed pane's date/sort survive reindex instead of the
+        // row becoming undated.
+        assert_eq!(
+            row.completed_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-06-13T17:00:00Z")
+                    .expect("test timestamp")
+                    .with_timezone(&Utc)
+            ),
+        );
+    }
+
+    #[test]
+    fn okf_reindex_keeps_valid_prs_when_one_entry_is_malformed() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let issues_dir = config.memory_root.join("issues");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        // One well-formed PR entry and one malformed (no `number`): the good
+        // one must survive rather than the whole list being dropped.
+        fs::write(
+            issues_dir.join("COE-800.md"),
+            r#"---
+type: issue-capsule
+title: "COE-800: Mixed PR frontmatter"
+state: Done
+timestamp: 2026-06-15T10:00:00Z
+prs:
+  - number: 512
+    url: https://github.com/example/repo/pull/512
+    merge_sha: deadbeef
+  - note: "malformed entry with no number"
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-800
+---
+
+# COE-800: Mixed PR frontmatter
+
+Body.
+"#,
+        )
+        .expect("capsule should write");
+        refresh_memory_index_from_okf(&config, &config.memory_root)
+            .expect("reindex should succeed");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+        let row = rows
+            .iter()
+            .find(|row| row.issue_key == "COE-800")
+            .expect("capsule should project");
+        assert_eq!(
+            row.prs.len(),
+            1,
+            "the valid PR must survive a malformed sibling"
+        );
+        assert_eq!(row.prs[0].number, 512);
+        assert!(row.prs[0].merged);
+    }
+
+    #[test]
+    fn memory_completed_task_rows_omit_completed_at_without_a_completion_timestamp() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let issues_dir = config.memory_root.join("issues");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        // A Done capsule with no `timestamp`/completion frontmatter: the
+        // completed date must stay null rather than borrowing captured_at
+        // (the reindex time), which would corrupt the Completed table's
+        // date column and completed-date sorting.
+        fs::write(
+            issues_dir.join("COE-700.md"),
+            r#"---
+type: issue-capsule
+title: "COE-700: Legacy done capsule"
+description: Completed but timestamp-less.
+state: Done
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-700
+---
+
+# COE-700: Legacy done capsule
+
+Body.
+"#,
+        )
+        .expect("capsule should write");
+        refresh_memory_index_from_okf(&config, &config.memory_root)
+            .expect("reindex should succeed");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+        let row = rows
+            .iter()
+            .find(|row| row.issue_key == "COE-700")
+            .expect("completed capsule should project as a completed task");
+        assert_eq!(row.state.as_deref(), Some("Done"));
+        assert_eq!(
+            row.completed_at, None,
+            "no completion timestamp must leave completed_at null, not fall back to captured_at",
+        );
+    }
+
+    #[test]
     fn okf_parses_legacy_issue_capsule_without_losing_metadata() {
         let repo = TempDir::new().expect("temp repo");
         let capsule = r#"---

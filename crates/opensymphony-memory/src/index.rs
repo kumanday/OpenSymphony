@@ -859,6 +859,59 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
     Ok(issues)
 }
 
+/// Pull-request evidence grouped by issue key, ordered by PR number. Only
+/// the columns persisted in the `pull_requests` table are populated; the
+/// nested commit/file/check/review evidence stays empty.
+fn load_pull_requests_by_issue(
+    config: &MemoryConfig,
+) -> Result<BTreeMap<String, Vec<PullRequestEvidence>>, MemoryError> {
+    if !config.index_path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let connection = open_index_read_only(config)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests ORDER BY issue_key, number",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            let merged_at: Option<String> = row.get(6)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                PullRequestEvidence {
+                    number: row.get::<_, i64>(1)?.max(0) as u64,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    branch: row.get(4)?,
+                    merge_sha: row.get(5)?,
+                    merged_at: merged_at
+                        .as_deref()
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc)),
+                    ..PullRequestEvidence::default()
+                },
+            ))
+        })
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+
+    let mut by_issue = BTreeMap::<String, Vec<PullRequestEvidence>>::new();
+    for row in rows {
+        let (issue_key, pr) = row.map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+        by_issue.entry(issue_key).or_default().push(pr);
+    }
+    Ok(by_issue)
+}
+
 fn load_issue_areas(
     connection: &Connection,
     issue_key: &str,
@@ -1132,6 +1185,25 @@ pub fn refresh_memory_index_from_okf(
                     source,
                 })?;
         }
+        for pr in &row.prs {
+            transaction
+                .execute(
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        row.issue_key,
+                        pr.number as i64,
+                        pr.title.clone(),
+                        pr.url.clone(),
+                        pr.branch.clone(),
+                        pr.merge_sha.clone(),
+                        pr.merged_at.map(|value| value.to_rfc3339()),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
     }
     transaction
         .commit()
@@ -1179,6 +1251,7 @@ struct OkfIndexRow {
     freshness: MemoryFreshness,
     warnings_json: String,
     areas: Vec<String>,
+    prs: Vec<PullRequestEvidence>,
 }
 
 impl OkfIndexRow {
@@ -1242,8 +1315,27 @@ impl OkfIndexRow {
             freshness: okf_index_freshness(&concept),
             warnings_json,
             areas: okf_index_areas(&scope_refs),
+            prs: okf_index_prs(&concept.frontmatter),
         })
     }
+}
+
+/// Pull-request evidence carried in an issue capsule's `prs` frontmatter
+/// (number/url/merge_sha, per `render_issue_capsule`). OKF reindex rewrites
+/// the `pull_requests` table from these so completed rows keep their PR
+/// links after `refresh_memory_index_from_okf`, not just after a live
+/// capture. Malformed entries are skipped rather than failing the reindex.
+fn okf_index_prs(frontmatter: &OkfFrontmatter) -> Vec<PullRequestEvidence> {
+    let Some(serde_yaml::Value::Sequence(entries)) = frontmatter.extra.get("prs") else {
+        return Vec::new();
+    };
+    // Parse entries individually so one malformed or newer-format entry
+    // (e.g. a renamed `number`) drops only itself, not every valid PR for
+    // the issue — reindex must preserve the good rows.
+    entries
+        .iter()
+        .filter_map(|entry| serde_yaml::from_value::<PullRequestEvidence>(entry.clone()).ok())
+        .collect()
 }
 
 fn okf_issue_key(

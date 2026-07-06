@@ -30,6 +30,9 @@ export type {
   MemoryBundleList,
   MemoryBundleSummary,
   MemoryCommunityList,
+  MemoryCompletedTask,
+  MemoryCompletedTaskPage,
+  MemoryCompletedTaskSource,
   MemoryConceptDetail,
   MemoryFrontmatterView,
   MemoryGraphCitation,
@@ -48,6 +51,7 @@ export type {
   MemoryGraphVisibility,
   MemorySearchResponse,
   MemorySearchResult,
+  MemoryTaskPullRequest,
 } from "./memory_graph.js";
 
 // run
