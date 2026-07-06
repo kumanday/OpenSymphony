@@ -1307,7 +1307,7 @@ prs:
         assert_eq!(
             row.completed_at,
             Some(
-                chrono::DateTime::parse_from_rfc3339("2026-06-13T17:00:00Z")
+                DateTime::parse_from_rfc3339("2026-06-13T17:00:00Z")
                     .expect("test timestamp")
                     .with_timezone(&Utc)
             ),
