@@ -1249,6 +1249,53 @@ prs:
     }
 
     #[test]
+    fn memory_completed_task_rows_omit_completed_at_without_a_completion_timestamp() {
+        let repo = TempDir::new().expect("temp repo");
+        ensure_memory_initialized(repo.path(), None).expect("memory init");
+        let config = MemoryConfig::load(repo.path(), None).expect("config should load");
+        let issues_dir = config.memory_root.join("issues");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        // A Done capsule with no `timestamp`/completion frontmatter: the
+        // completed date must stay null rather than borrowing captured_at
+        // (the reindex time), which would corrupt the Completed table's
+        // date column and completed-date sorting.
+        fs::write(
+            issues_dir.join("COE-700.md"),
+            r#"---
+type: issue-capsule
+title: "COE-700: Legacy done capsule"
+description: Completed but timestamp-less.
+state: Done
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-700
+---
+
+# COE-700: Legacy done capsule
+
+Body.
+"#,
+        )
+        .expect("capsule should write");
+        refresh_memory_index_from_okf(&config, &config.memory_root)
+            .expect("reindex should succeed");
+
+        let rows = memory_completed_task_rows(&config, MemoryGraphAccess::AllAccessible)
+            .expect("completed rows should project");
+        let row = rows
+            .iter()
+            .find(|row| row.issue_key == "COE-700")
+            .expect("completed capsule should project as a completed task");
+        assert_eq!(row.state.as_deref(), Some("Done"));
+        assert_eq!(
+            row.completed_at, None,
+            "no completion timestamp must leave completed_at null, not fall back to captured_at",
+        );
+    }
+
+    #[test]
     fn okf_parses_legacy_issue_capsule_without_losing_metadata() {
         let repo = TempDir::new().expect("temp repo");
         let capsule = r#"---

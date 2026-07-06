@@ -3034,8 +3034,17 @@ async fn get_task_graph(
         .collect::<Vec<_>>();
 
     let Some(linear_task_graph) = state.linear_task_graph.as_ref() else {
+        // With no Linear client there is nothing to expand and no backlog to
+        // discover, so an empty control plane is a valid empty project (200),
+        // not a service failure. 503 is reserved for the case where the
+        // control plane tracks issues that a missing client cannot resolve.
+        let status = if identifiers.is_empty() {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
+            status,
             Json(TaskGraphSnapshot {
                 schema_version: SchemaVersion::v1(),
                 project_id,
@@ -3047,9 +3056,9 @@ async fn get_task_graph(
             .into_response();
     };
 
-    // No early return on empty identifiers: even with nothing tracked by the
-    // control plane, the project can still have backlog-state issues that the
-    // task graph renders in its Backlog pane.
+    // No early return on empty identifiers when a client exists: even with
+    // nothing tracked by the control plane, the project can still have
+    // backlog-state issues that the task graph renders in its Backlog pane.
     let linear_issues = match linear_task_graph.task_graph_issues(&identifiers).await {
         Ok(issues) => issues,
         Err(error) => {

@@ -685,6 +685,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private clearGatewayData(): void {
     this.stopLiveRefreshTimer();
+    this.resetCompletedTasks();
     this.state.snapshot = null;
     this.state.taskGraph = null;
     this.state.selectedProjectId = null;
@@ -700,7 +701,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runApprovals = null;
   }
 
+  /**
+   * Drop the current gateway's Completed-pane rows. Called on any context
+   * change (gateway switch, disconnect) so another gateway's completed
+   * tasks — titles, PR URLs — never linger beside a new task graph.
+   */
+  private resetCompletedTasks(): void {
+    this.state.completedTasks = null;
+    this.state.completedTasksError = null;
+    this.state.completedTasksParams = { ...defaultCompletedTasksParams };
+  }
+
   private resetKnowledgeGraph(): void {
+    this.resetCompletedTasks();
     this.state.knowledgeGraph = createInitialGraphState();
     this.state.knowledgeGraphLayout = null;
     this.knowledgeGraphLayoutSize = null;
@@ -795,8 +808,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.selectedDiffPath = null;
     if (this.options.mode === "desktop") {
       // Completed pane data loads independently: a memory-server hiccup must
-      // not delay the Current/Backlog graph.
-      void this.loadCompletedTasks();
+      // not delay the Current/Backlog graph. A project switch
+      // (!preserveSelection) is a context change, so drop the prior page up
+      // front rather than showing it beside the new project's graph.
+      void this.loadCompletedTasks(!preserveSelection);
     }
     await Promise.all([
       this.fetchRunOverlays(taskGraph).then((overlays) => {
@@ -818,12 +833,29 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   /**
    * Fetch the Completed pane's current page from the memory-backed
-   * completed-tasks endpoint. Newer requests supersede in-flight ones; a
-   * failure keeps the last good page and surfaces the error inline.
+   * completed-tasks endpoint. Newer requests supersede in-flight ones.
+   *
+   * `contextChanged` (gateway/project switch) drops the previous context's
+   * rows up front and resets paging/search, so the new Current/Backlog
+   * graph never renders beside another gateway's completed tasks (titles,
+   * PR URLs) while the fetch is in flight or if it fails. In-context
+   * reloads keep the last good page on failure and surface the error
+   * inline.
    */
-  private async loadCompletedTasks(): Promise<void> {
+  private async loadCompletedTasks(contextChanged = false): Promise<void> {
     const adapter = this.graphAdapter;
+    if (contextChanged) {
+      this.state.completedTasks = null;
+      this.state.completedTasksError = null;
+      this.state.completedTasksParams = { ...defaultCompletedTasksParams };
+    }
     if (!adapter?.getCompletedTasks) {
+      // A gateway without a memory endpoint has no completed tasks: never
+      // leave the prior context's rows on screen.
+      if (contextChanged || this.state.completedTasks) {
+        this.state.completedTasks = null;
+        this.state.completedTasksError = null;
+      }
       return;
     }
     const seq = ++this.completedTasksSeq;
@@ -5551,15 +5583,25 @@ function isCurrentPaneTaskNode(node: TaskGraphNode): boolean {
 
 /**
  * Fingerprint of a snapshot's done nodes; when it changes across a live
- * refresh, a task moved between the Current pane and the Completed table,
- * so the separately-loaded Completed page must refresh too.
+ * refresh, the Completed table (loaded separately) may be stale, so it
+ * reloads. Includes the row-relevant fields — title, PR URL, timestamps —
+ * not just IDs, so a completed issue whose PR or dates change while
+ * staying done still triggers a reload.
  */
 function doneTaskGraphKey(taskGraph: TaskGraphSnapshot | null): string {
   return (taskGraph?.nodes ?? [])
     .filter((node) => node.state_category === "done")
-    .map((node) => node.node_id)
+    .map((node) =>
+      JSON.stringify([
+        node.node_id,
+        node.identifier,
+        node.title,
+        node.url ?? "",
+        node.updated_at ?? "",
+      ]),
+    )
     .sort()
-    .join("|");
+    .join("\n");
 }
 
 function stateToneForTaskNode(node: TaskGraphNode): string {

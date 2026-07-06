@@ -496,7 +496,7 @@ pub fn memory_completed_task_rows(
                 state: issue.state.clone(),
                 milestone: issue.milestone.clone(),
                 url: linear_issue_url(&issue).map(|url| redact_for_dto(config, &url)),
-                completed_at: indexed_issue_updated_at(&issue),
+                completed_at: completed_at_timestamp(&issue),
                 prs: prs
                     .into_iter()
                     .map(|pr| MemoryTaskPullRequest {
@@ -530,6 +530,19 @@ fn is_completed_indexed_issue(issue: &IndexedIssue) -> bool {
         Some(state) => matches!(state.as_str(), "done" | "completed" | "closed" | "merged"),
         None => issue.completion_time.is_some(),
     }
+}
+
+/// The task's actual completion date, from the recorded completion
+/// timestamp only. Unlike `indexed_issue_updated_at`, this never falls back
+/// to `captured_at`: reporting the capture/reindex time as the done date
+/// would corrupt the Completed table's dates and completed-date sorting for
+/// legacy or manually authored capsules that carry no completion timestamp.
+fn completed_at_timestamp(issue: &IndexedIssue) -> Option<DateTime<Utc>> {
+    issue
+        .completion_time
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn linear_issue_url(issue: &IndexedIssue) -> Option<String> {

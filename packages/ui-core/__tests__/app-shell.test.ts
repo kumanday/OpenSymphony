@@ -3720,4 +3720,95 @@ describe("three-pane task graph", () => {
 
     await handle.destroy();
   });
+
+  it("clears Completed rows when a context change hits a gateway without the endpoint", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: threePaneTaskGraph }),
+      // Bare fixture adapter: no getCompletedTasks (models a gateway with
+      // no memory endpoint) but seeded with a stale prior page.
+      graphAdapter: {
+        ...createFixtureGraphAdapter(),
+        getCompletedTasks: undefined,
+      },
+    });
+    await flushUntil(() => root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']") !== null);
+
+    // The Completed table shows its unavailable state, never rows from a
+    // different context.
+    expect(root.querySelector("[data-testid='completed-tasks-unavailable']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='completed-task-row']")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("reloads the Completed page when a done row's PR or date changes while staying done", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const rows: MemoryCompletedTask[] = [
+      {
+        issue_key: "COE-448",
+        concept_id: "issues/COE-465",
+        bundle_id: "local-default",
+        title: "Completed prerequisite",
+        state: "Done",
+        completed_at: "2026-06-10T00:00:00Z",
+        prs: [{ number: 700, title: "COE-448 landed", url: "https://example.com/pull/700", merged: true, merged_at: "2026-06-10T00:00:00Z" }],
+        source: "memory",
+      },
+    ];
+    let completedCalls = 0;
+    const adapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      getCompletedTasks: async (options) => {
+        completedCalls += 1;
+        return pageCompletedTasks(rows, options);
+      },
+    };
+    // Snapshot where the prerequisite is already Done (renders in Completed).
+    const doneGraph: TaskGraphSnapshot = {
+      ...threePaneTaskGraph,
+      nodes: threePaneTaskGraph.nodes.map((node) =>
+        node.node_id === "completed-prereq"
+          ? { ...node, url: "https://linear.app/example/issue/COE-448" }
+          : node,
+      ),
+    };
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph: doneGraph,
+      runDetails: [runDetail],
+    });
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, graphAdapter: adapter });
+    await flushUntil(() => root.querySelector("[data-task-key='COE-448']") !== null);
+    const callsBefore = completedCalls;
+
+    // The done node stays done, but its URL changes (e.g. a PR link landed).
+    // The fingerprint includes row-relevant fields, so the page reloads.
+    rows[0] = { ...rows[0], prs: [...rows[0].prs, { number: 701, title: "COE-448 follow-up", url: "https://example.com/pull/701", merged: true, merged_at: "2026-06-11T00:00:00Z" }] };
+    transport.setTaskGraph({
+      ...doneGraph,
+      nodes: doneGraph.nodes.map((node) =>
+        node.node_id === "completed-prereq"
+          ? { ...node, updated_at: "2026-06-11T00:00:00Z" }
+          : node,
+      ),
+    });
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 1, partition: "events" },
+      entity_ref: { kind: "issue", id: "completed-prereq", identifier: "COE-448" },
+      event_kind: "issue.updated",
+      emitted_at: "2026-06-11T00:00:01Z",
+      payload: {},
+    });
+    await flushUntil(() => completedCalls > callsBefore, 200);
+
+    await handle.destroy();
+  });
 });

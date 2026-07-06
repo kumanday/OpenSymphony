@@ -2462,6 +2462,44 @@ async fn gateway_task_graph_requires_linear_reader() {
 }
 
 #[tokio::test]
+async fn gateway_task_graph_empty_project_without_linear_returns_empty_ok() {
+    // A control-plane-only/local run with no tracked issues has nothing to
+    // expand and no backlog to discover, so a missing Linear client is a
+    // valid empty project (200), not a 503.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues.clear();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = response
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+    assert!(body.nodes.is_empty());
+    assert!(body.root_ids.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_run_detail() {
     let store = SnapshotStore::new(fixture_snapshot(0));
     let server = GatewayServer::new(store.clone());
