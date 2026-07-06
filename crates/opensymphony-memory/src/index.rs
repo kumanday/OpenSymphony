@@ -1151,10 +1151,16 @@ pub fn code_symbol_neighborhood(
 }
 
 fn edge_endpoints_present(edge: &CodeEdgeRecord, symbols: &BTreeMap<String, CodeSymbolRecord>) -> bool {
-    [edge.source_symbol_key.as_deref(), edge.target_symbol_key.as_deref()]
-        .into_iter()
-        .flatten()
-        .all(|key| symbols.contains_key(key))
+    let Some(source) = edge.source_symbol_key.as_deref() else {
+        return false;
+    };
+    if !symbols.contains_key(source) {
+        return false;
+    }
+    match edge.target_symbol_key.as_deref() {
+        Some(target) => symbols.contains_key(target),
+        None => edge.unresolved,
+    }
 }
 
 pub fn compare_code_symbols(
@@ -1177,18 +1183,14 @@ pub fn compare_code_symbols(
     let mut truncated = false;
 
     for key in keys {
-        if diffs.len() >= max_records {
-            truncated = true;
-            break;
-        }
-        match (base.get(&key), head.get(&key)) {
-            (None, Some(head_symbol)) => diffs.push(CodeSymbolDiff {
+        let diff = match (base.get(&key), head.get(&key)) {
+            (None, Some(head_symbol)) => Some(CodeSymbolDiff {
                 symbol_key: key,
                 status: CodeSymbolDiffStatus::Added,
                 base: None,
                 head: Some(head_symbol.clone()),
             }),
-            (Some(base_symbol), None) => diffs.push(CodeSymbolDiff {
+            (Some(base_symbol), None) => Some(CodeSymbolDiff {
                 symbol_key: key,
                 status: CodeSymbolDiffStatus::Removed,
                 base: Some(base_symbol.clone()),
@@ -1197,14 +1199,21 @@ pub fn compare_code_symbols(
             (Some(base_symbol), Some(head_symbol))
                 if base_symbol.snippet_sha256 != head_symbol.snippet_sha256 =>
             {
-                diffs.push(CodeSymbolDiff {
+                Some(CodeSymbolDiff {
                     symbol_key: key,
                     status: CodeSymbolDiffStatus::Modified,
                     base: Some(base_symbol.clone()),
                     head: Some(head_symbol.clone()),
-                });
+                })
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(diff) = diff {
+            if diffs.len() >= max_records {
+                truncated = true;
+                break;
+            }
+            diffs.push(diff);
         }
     }
 

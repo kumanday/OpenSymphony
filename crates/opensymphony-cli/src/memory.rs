@@ -5741,6 +5741,13 @@ mod tests {
                 .iter()
                 .any(|diff| matches!(diff.status, CodeSymbolDiffStatus::Modified))
         );
+        let exact_cap =
+            compare_code_symbols(&config, "repo", "base", "head", comparison.diffs.len())
+                .expect("exact capped compare");
+        assert!(
+            !exact_cap.truncated,
+            "exact-sized diff pages must not truncate on unchanged trailing keys"
+        );
         let capped =
             compare_code_symbols(&config, "repo", "base", "head", 1).expect("capped compare");
         assert!(capped.truncated);
@@ -5835,6 +5842,48 @@ mod tests {
         assert!(
             comparison.diffs.is_empty(),
             "dirty worktree rows must not be compared as committed revisions"
+        );
+    }
+
+    #[test]
+    fn code_intel_neighborhood_skips_edges_without_source_symbols() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let mut document = sample_code_intel_document("hash-a", "pack-a");
+        document.edges = vec![CodeIntelEdgeInput {
+            edge_kind: "reference.call".to_string(),
+            target_hint: Some("answer".to_string()),
+            confidence: "query_pack:calls".to_string(),
+            start_line: 2,
+            start_col: 1,
+            end_line: 2,
+            end_col: 7,
+            start_byte: 20,
+            end_byte: 26,
+        }];
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "repo".to_string(),
+                commit_sha: Some("base".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("persist source-less edge");
+
+        let symbol = code_symbols_containing_span(&config, "repo", "src/lib.rs", 1, 2, 10)
+            .expect("span containment")
+            .into_iter()
+            .next()
+            .expect("answer symbol");
+        let neighborhood = code_symbol_neighborhood(&config, &symbol.symbol_key, 1, 10)
+            .expect("neighborhood")
+            .expect("center exists");
+        assert!(neighborhood.edges.is_empty());
+        assert!(
+            neighborhood.truncated,
+            "dropped edges with missing source endpoints must be explicit"
         );
     }
 

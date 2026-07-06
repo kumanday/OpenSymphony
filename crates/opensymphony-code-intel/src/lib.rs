@@ -1536,9 +1536,7 @@ fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
         )
     });
     for index in indexes {
-        if !symbols[index].container_chain.is_empty() {
-            continue;
-        }
+        let existing_chain = symbols[index].container_chain.clone();
         let parent_index = symbols
             .iter()
             .enumerate()
@@ -1561,8 +1559,13 @@ fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
             let parent = symbols[parent_index].clone();
             let mut chain = parent.container_chain;
             chain.push(parent.name.clone());
-            symbols[index].container_name = Some(parent.name);
-            symbols[index].container_chain = chain;
+            if existing_chain.is_empty() {
+                symbols[index].container_name = Some(parent.name);
+                symbols[index].container_chain = chain;
+            } else if !existing_chain.starts_with(&chain) {
+                chain.extend(existing_chain);
+                symbols[index].container_chain = chain;
+            }
         }
     }
 }
@@ -2400,6 +2403,23 @@ mod tests {
             .expect("trait impl method");
         assert_eq!(method.container_name.as_deref(), Some("Display"));
         assert_eq!(method.container_chain, vec!["Widget", "Display"]);
+    }
+
+    #[test]
+    fn rust_impl_methods_keep_lexical_parent_chains() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/nested_impl.rs")),
+            "fn outer() {\n    struct Widget;\n    impl Widget {\n        fn run(&self) {}\n    }\n}\n",
+        )
+        .expect("rust parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
+            .expect("nested impl method");
+        assert_eq!(method.container_name.as_deref(), Some("Widget"));
+        assert_eq!(method.container_chain, vec!["outer", "Widget"]);
     }
 
     #[test]
