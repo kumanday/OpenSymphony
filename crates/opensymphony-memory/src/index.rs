@@ -861,8 +861,7 @@ fn edge_target_name(target_hint: &str) -> Option<&str> {
     let before_call = target_hint.split_once('(').map_or(target_hint, |(name, _)| name);
     before_call
         .split([':', '.'])
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .map(str::trim)
         .filter(|part| !part.is_empty())
 }
@@ -994,7 +993,7 @@ pub fn code_symbols_containing_span(
             source,
         })?;
     let rows = statement
-        .query_map(params![repo_id, path], |row| code_symbol_from_row(row))
+        .query_map(params![repo_id, path], code_symbol_from_row)
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1192,7 +1191,7 @@ fn query_symbols_for_revision(
             source,
         })?;
     let rows = statement
-        .query_map(params![repo_id, revision], |row| code_symbol_from_row(row))
+        .query_map(params![repo_id, revision], code_symbol_from_row)
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
@@ -1225,7 +1224,7 @@ fn query_edges_for_symbol_key(
             source,
         })?;
     statement
-        .query_map(params![symbol_key, symbol_key], |row| code_edge_from_row(row))
+        .query_map(params![symbol_key, symbol_key], code_edge_from_row)
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
