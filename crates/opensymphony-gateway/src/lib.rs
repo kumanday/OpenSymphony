@@ -3454,11 +3454,17 @@ async fn get_run_detail(
             _ => None,
         }
     };
+    // Resolve the run's on-disk workspace path once (root + suffix): the
+    // desktop "Workspace" / "Debug" actions need it, and the PR-url lookup
+    // reuses it. Leaving it null made both buttons reject with "workspace
+    // path unavailable" even when the workspace existed.
+    let workspace_path = workspace_path_for_issue(&envelope, issue);
     // `gh pr view` performs a network round trip, so it never runs inline:
     // the cache answers immediately (possibly with `None` on first sight of a
     // workspace) and resolves in the background for the next poll.
     let pr_url = issue.pr_url.clone().or_else(|| {
-        workspace_path_for_issue(&envelope, issue)
+        workspace_path
+            .clone()
             .and_then(|workspace_path| pr_urls.lookup(workspace_path, PR_URL_COMMAND))
     });
 
@@ -3491,7 +3497,9 @@ async fn get_run_detail(
                 .then(|| format!("conv-{}", issue.conversation_id_suffix)),
             workspace_id: (!issue.workspace_path_suffix.is_empty())
                 .then(|| issue.workspace_path_suffix.clone()),
-            workspace_path: None,
+            workspace_path: workspace_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
             branch_name: issue.branch_name.clone(),
             pr_url,
             harness_type: issue.server_base_url.as_ref().map(|_| "openhands".into()),
