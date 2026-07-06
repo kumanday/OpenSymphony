@@ -2950,13 +2950,38 @@ fn code_intel_document_input(
     source: String,
     summary: ParsedDocumentSummary,
     symbols: &BTreeSet<String>,
-    symbol_limit: usize,
+    _symbol_limit: usize,
 ) -> CodeIntelDocumentInput {
     let language = source_language_id(summary.source.language).to_string();
     let parser_version = format!(
         "{}:{}",
         summary.versions.grammar, summary.versions.tree_sitter
     );
+    let all_symbols = summary
+        .symbols
+        .iter()
+        .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
+        .map(|symbol| {
+            let snippet = source
+                .get(symbol.span.start_byte..symbol.span.end_byte)
+                .unwrap_or(symbol.name.as_str());
+            CodeIntelSymbolInput {
+                kind: symbol_kind_id(&symbol.kind).to_string(),
+                name: symbol.name.clone(),
+                container_chain: symbol.container_chain.clone(),
+                signature: None,
+                start_line: symbol.span.start_line,
+                start_col: symbol.span.start_column,
+                end_line: symbol.span.end_line,
+                end_col: symbol.span.end_column,
+                start_byte: symbol.span.start_byte,
+                end_byte: symbol.span.end_byte,
+                selection_start_line: symbol.span.start_line,
+                selection_end_line: symbol.span.end_line,
+                snippet_sha256: sha256_hex(snippet),
+            }
+        })
+        .collect::<Vec<_>>();
     CodeIntelDocumentInput {
         path,
         language,
@@ -2966,32 +2991,7 @@ fn code_intel_document_input(
         query_pack_version: summary.versions.query_pack.clone(),
         byte_len: summary.source.bytes,
         line_count: source.lines().count(),
-        symbols: summary
-            .symbols
-            .iter()
-            .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
-            .take(symbol_limit)
-            .map(|symbol| {
-                let snippet = source
-                    .get(symbol.span.start_byte..symbol.span.end_byte)
-                    .unwrap_or(symbol.name.as_str());
-                CodeIntelSymbolInput {
-                    kind: symbol_kind_id(&symbol.kind).to_string(),
-                    name: symbol.name.clone(),
-                    container_chain: symbol.container_chain.clone(),
-                    signature: None,
-                    start_line: symbol.span.start_line,
-                    start_col: symbol.span.start_column,
-                    end_line: symbol.span.end_line,
-                    end_col: symbol.span.end_column,
-                    start_byte: symbol.span.start_byte,
-                    end_byte: symbol.span.end_byte,
-                    selection_start_line: symbol.span.start_line,
-                    selection_end_line: symbol.span.end_line,
-                    snippet_sha256: sha256_hex(snippet),
-                }
-            })
-            .collect(),
+        symbols: all_symbols,
         edges: summary
             .captures
             .iter()
@@ -4953,12 +4953,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_ingest_code_intel_limit_caps_persisted_symbols() {
+    async fn memory_ingest_code_intel_limit_does_not_cap_persisted_symbols() {
         let repo = TempDir::new().expect("temp repo");
         std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
         std::fs::write(
             repo.path().join("src/lib.rs"),
-            "pub fn one() -> u8 { 1 }\npub fn two() -> u8 { 2 }\n",
+            "pub fn one() -> u8 { two() }\nfn two() -> u8 { 2 }\n",
         )
         .expect("source");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
@@ -4977,7 +4977,15 @@ mod tests {
         assert_eq!(result["persisted"], true);
         let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
             .expect("index opens");
-        assert_eq!(count_rows(&connection, "code_symbols", "current"), 1);
+        assert_eq!(count_rows(&connection, "code_symbols", "current"), 2);
+        let resolved_edges: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM code_edges WHERE freshness = 'current' AND source_symbol_key IS NOT NULL AND target_symbol_key IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("resolved edge count");
+        assert_eq!(resolved_edges, 1);
     }
 
     #[tokio::test]
@@ -5441,30 +5449,79 @@ mod tests {
     }
 
     #[test]
+    fn code_intel_read_helpers_do_not_create_index() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        assert!(
+            code_symbol_detail(&config, "missing")
+                .expect("detail read")
+                .is_none()
+        );
+        assert!(
+            code_symbols_containing_span(&config, "repo", "src/lib.rs", 1, 1, 10)
+                .expect("span read")
+                .is_empty()
+        );
+        assert!(
+            code_symbol_neighborhood(&config, "missing", 1, 10)
+                .expect("neighborhood read")
+                .is_none()
+        );
+        assert!(
+            compare_code_symbols(&config, "repo", "base", "head", 10)
+                .expect("compare read")
+                .diffs
+                .is_empty()
+        );
+        assert!(
+            !repo
+                .path()
+                .join(".opensymphony/memory/memory.duckdb")
+                .exists()
+        );
+    }
+
+    #[test]
     fn code_intel_impl_methods_link_to_owner_symbol_by_chain() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
         let mut document = sample_code_intel_document("hash-a", "pack-a");
         document.symbols = vec![
             CodeIntelSymbolInput {
-                kind: "struct".to_string(),
-                name: "Widget".to_string(),
+                kind: "module".to_string(),
+                name: "m".to_string(),
                 container_chain: Vec::new(),
                 signature: None,
                 start_line: 1,
                 start_col: 1,
-                end_line: 1,
-                end_col: 15,
+                end_line: 8,
+                end_col: 2,
                 start_byte: 0,
-                end_byte: 14,
+                end_byte: 120,
                 selection_start_line: 1,
-                selection_end_line: 1,
+                selection_end_line: 8,
+                snippet_sha256: "module".to_string(),
+            },
+            CodeIntelSymbolInput {
+                kind: "struct".to_string(),
+                name: "Widget".to_string(),
+                container_chain: vec!["m".to_string()],
+                signature: None,
+                start_line: 2,
+                start_col: 1,
+                end_line: 2,
+                end_col: 15,
+                start_byte: 16,
+                end_byte: 30,
+                selection_start_line: 2,
+                selection_end_line: 2,
                 snippet_sha256: "widget".to_string(),
             },
             CodeIntelSymbolInput {
                 kind: "method".to_string(),
                 name: "run".to_string(),
-                container_chain: vec!["Widget".to_string()],
+                container_chain: vec!["m".to_string(), "Widget".to_string()],
                 signature: None,
                 start_line: 3,
                 start_col: 5,
@@ -5479,7 +5536,7 @@ mod tests {
             CodeIntelSymbolInput {
                 kind: "method".to_string(),
                 name: "fmt".to_string(),
-                container_chain: vec!["Widget".to_string(), "Display".to_string()],
+                container_chain: vec!["m".to_string(), "Widget".to_string(), "Display".to_string()],
                 signature: None,
                 start_line: 5,
                 start_col: 5,
@@ -5509,15 +5566,23 @@ mod tests {
             .find(|symbol| symbol.name == "run")
             .expect("method symbol");
         assert!(method.container_symbol_id.is_some());
-        assert_eq!(method.container_chain, vec!["Widget"]);
+        assert_eq!(method.container_chain, vec!["m", "Widget"]);
 
+        let widget = code_symbols_containing_span(&config, "repo", "src/lib.rs", 2, 8, 10)
+            .expect("widget span containment")
+            .into_iter()
+            .find(|symbol| symbol.name == "Widget")
+            .expect("scoped widget symbol");
         let trait_method = code_symbols_containing_span(&config, "repo", "src/lib.rs", 5, 8, 10)
             .expect("trait impl span containment")
             .into_iter()
             .find(|symbol| symbol.name == "fmt")
             .expect("trait impl method symbol");
-        assert!(trait_method.container_symbol_id.is_some());
-        assert_eq!(trait_method.container_chain, vec!["Widget", "Display"]);
+        assert_eq!(
+            trait_method.container_symbol_id.as_deref(),
+            Some(widget.symbol_id.as_str())
+        );
+        assert_eq!(trait_method.container_chain, vec!["m", "Widget", "Display"]);
     }
 
     #[test]

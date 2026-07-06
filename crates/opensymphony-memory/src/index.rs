@@ -248,6 +248,13 @@ fn open_index_read_only(config: &MemoryConfig) -> Result<Connection, MemoryError
     })
 }
 
+fn open_existing_index_read_only(config: &MemoryConfig) -> Result<Option<Connection>, MemoryError> {
+    if !config.index_path.exists() {
+        return Ok(None);
+    }
+    open_index_read_only(config).map(Some)
+}
+
 fn migrate_index(connection: &Connection) -> Result<(), duckdb::Error> {
     connection.execute_batch(&format!(
         r#"
@@ -609,7 +616,6 @@ pub fn persist_code_intel_documents(
             &path,
             &document,
         );
-
         for prepared in &prepared_symbols {
             let symbol = prepared.symbol;
             transaction
@@ -875,14 +881,16 @@ fn trait_impl_owner_symbol_index(
     if child.container_chain.len() < 2 {
         return None;
     }
-    let owner_name = child.container_chain.first()?;
+    let owner_index = child.container_chain.len().saturating_sub(2);
+    let owner_name = child.container_chain.get(owner_index)?;
+    let owner_chain = &child.container_chain[..owner_index];
     let matches = symbols
         .iter()
         .enumerate()
         .filter(|(candidate_index, candidate)| {
             *candidate_index != child_index
                 && candidate.symbol.name == *owner_name
-                && candidate.symbol.container_chain.is_empty()
+                && candidate.symbol.container_chain == owner_chain
         })
         .collect::<Vec<_>>();
     (matches.len() == 1).then(|| matches[0].0)
@@ -1027,11 +1035,9 @@ pub fn code_symbol_detail(
     config: &MemoryConfig,
     symbol_key: &str,
 ) -> Result<Option<CodeSymbolRecord>, MemoryError> {
-    let connection = open_index(config)?;
-    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
-        path: config.index_path.clone(),
-        source,
-    })?;
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(None);
+    };
     query_code_symbol_by_key(&connection, symbol_key, true)
 }
 
@@ -1043,11 +1049,9 @@ pub fn code_symbols_containing_span(
     column: usize,
     limit: usize,
 ) -> Result<Vec<CodeSymbolRecord>, MemoryError> {
-    let connection = open_index(config)?;
-    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
-        path: config.index_path.clone(),
-        source,
-    })?;
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(Vec::new());
+    };
     let mut statement = connection
         .prepare(
             "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id",
@@ -1085,11 +1089,9 @@ pub fn code_symbol_neighborhood(
     max_depth: usize,
     max_records: usize,
 ) -> Result<Option<CodeNeighborhood>, MemoryError> {
-    let connection = open_index(config)?;
-    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
-        path: config.index_path.clone(),
-        source,
-    })?;
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(None);
+    };
     let Some(center) = query_code_symbol_by_key(&connection, symbol_key, true)? else {
         return Ok(None);
     };
@@ -1170,11 +1172,15 @@ pub fn compare_code_symbols(
     head_revision: &str,
     max_records: usize,
 ) -> Result<CodeSymbolComparison, MemoryError> {
-    let connection = open_index(config)?;
-    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
-        path: config.index_path.clone(),
-        source,
-    })?;
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(CodeSymbolComparison {
+            base_revision: base_revision.to_string(),
+            head_revision: head_revision.to_string(),
+            diffs: Vec::new(),
+            max_records,
+            truncated: false,
+        });
+    };
     let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
     let head = query_symbols_for_revision(&connection, repo_id, head_revision)?;
     let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();
