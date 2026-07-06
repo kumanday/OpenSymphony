@@ -2,7 +2,7 @@
 
 OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and can run issues through either the managed [OpenHands](https://github.com/OpenHands/OpenHands) agent-server or the local Codex app-server harness.
 
-![OpenSymphony desktop app showing the task graph, run detail, changed files, and diff inspector](docs/images/opensymphony-app.png)
+![OpenSymphony desktop task graph showing Completed, Current, and Backlog panes with selected-task critical path](docs/images/os-tg-ancestry-critical-path.png)
 
 ## What is OpenSymphony?
 
@@ -276,7 +276,9 @@ GitHub PR narrative, writes private memory under `.opensymphony/memory/`, and
 syncs stable learned topics into public docs. Repos initialized or updated with
 this release get the required memory config automatically.
 
-![OpenSymphony memory graph](docs/images/opensymphony-memory-graph.png)
+![OpenSymphony knowledge graph atlas showing knowledge area clouds](docs/images/os-kg-atlas.png)
+
+![OpenSymphony knowledge graph with a selected memory capsule](docs/images/os-kg-memory-capsule.png)
 
 The generated issue capsules are Markdown files, so `.opensymphony/memory/` can
 also be opened as an Obsidian vault. That gives operators a graph view of issue,
