@@ -173,11 +173,14 @@ fn map_issue(
             .unwrap_or_else(|| "-".to_string()),
         // For Codex runs the conversation id *is* the Codex thread id, so
         // carry it in full (not the display suffix) for the debug deep link.
+        // Key on the Codex runtime *contract*, not just the transport target:
+        // `--dry-run` route previews set transport_target to codex_app_server
+        // but carry a synthetic `route-preview-*` conversation id and the
+        // routing contract, so a transport-only check would publish an
+        // unresumable `codex://threads/route-preview-*` link.
         codex_thread_id: issue.conversation.as_ref().and_then(|conversation| {
-            let is_codex = conversation.transport_target.as_deref()
-                == Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND)
-                || conversation.runtime_contract_version.as_deref()
-                    == Some(crate::opensymphony_codex::CODEX_APP_SERVER_CONTRACT);
+            let is_codex = conversation.runtime_contract_version.as_deref()
+                == Some(crate::opensymphony_codex::CODEX_APP_SERVER_CONTRACT);
             is_codex.then(|| conversation.conversation_id.as_str().to_string())
         }),
         workspace_path_suffix: issue
@@ -794,6 +797,20 @@ tracker:
         let mut conversation = codex_conversation("ignored");
         conversation.transport_target = Some("loopback".to_owned());
         conversation.runtime_contract_version = Some("openhands-sdk-agent-server-v1".to_owned());
+        let issue = map_single_issue(running_issue_with_conversation(conversation));
+        assert_eq!(issue.codex_thread_id, None);
+    }
+
+    #[test]
+    fn dry_run_route_preview_records_no_codex_thread_id() {
+        // A `--dry-run` route preview to Codex targets the codex_app_server
+        // transport but carries the routing contract and a synthetic
+        // `route-preview-*` id that resumes nothing — it must not surface as
+        // a Codex thread.
+        let mut conversation = codex_conversation("route-preview-worker-1");
+        conversation.transport_target =
+            Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND.to_owned());
+        conversation.runtime_contract_version = Some("opensymphony-routing-alpha-v1".to_owned());
         let issue = map_single_issue(running_issue_with_conversation(conversation));
         assert_eq!(issue.codex_thread_id, None);
     }
