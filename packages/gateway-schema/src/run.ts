@@ -97,7 +97,11 @@ export type RunLifecycleState =
   | "completed"
   | "failed"
   | "canceled"
-  | "retry_exhausted";
+  | "retry_exhausted"
+  // Idle in the control plane but parked in a non-active tracker state
+  // (e.g. a recovered workspace waiting in Backlog/Triage): not dispatchable
+  // until its tracker state becomes active.
+  | "backlog";
 
 /** Action a client may dispatch on a run. */
 export type RunAction =

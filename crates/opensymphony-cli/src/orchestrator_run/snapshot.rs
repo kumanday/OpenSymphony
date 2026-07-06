@@ -11,8 +11,8 @@ use crate::opensymphony_control::{
     RecentEventKind, WorkerOutcome,
 };
 use crate::opensymphony_domain::{
-    HarnessInterruptStatus, HealthStatus, IssueIdentifier, OrchestratorSnapshot, SchedulerStatus,
-    WorkerOutcomeKind,
+    HarnessInterruptStatus, HealthStatus, IssueIdentifier, IssueStateCategory,
+    OrchestratorSnapshot, SchedulerStatus, WorkerOutcomeKind,
 };
 use crate::opensymphony_openhands::LocalServerSupervisor;
 use crate::opensymphony_workflow::ResolvedWorkflow;
@@ -106,6 +106,17 @@ fn map_issue(
                 | WorkerOutcomeKind::TimedOut
                 | WorkerOutcomeKind::Stalled,
             ) => IssueRuntimeState::Failed,
+            // A released execution with no recorded run never dispatched a
+            // worker (e.g. a recovered workspace parked while its issue sits
+            // in a non-active tracker state). Key on the *current* tracker
+            // state, not the release reason: `release_issue` refreshes the
+            // issue state but leaves a stale `TrackerInactive` reason when the
+            // execution is already released, so a parked issue later moved
+            // straight to a terminal state (Backlog → Done) must still surface
+            // as a completion rather than a phantom idle row.
+            None if issue.issue.state.category != IssueStateCategory::Terminal => {
+                IssueRuntimeState::Idle
+            }
             _ => IssueRuntimeState::Completed,
         },
         SchedulerStatus::Unclaimed => IssueRuntimeState::Idle,
@@ -634,5 +645,132 @@ tracker:
             Some("OpenSymphony")
         );
         assert_eq!(mapped.issues[0].workspace_label.as_deref(), Some("COE-352"));
+    }
+
+    fn released_issue_snapshot(
+        state_name: &str,
+        category: IssueStateCategory,
+        release_reason: crate::opensymphony_domain::ReleaseReason,
+    ) -> DomainIssueSnapshot {
+        DomainIssueSnapshot {
+            issue: NormalizedIssue {
+                id: must(IssueId::new("lin_532")),
+                identifier: must(IssueIdentifier::new("COE-532")),
+                title: "Symbol identity container chain".to_owned(),
+                description: None,
+                priority: None,
+                state: IssueState {
+                    id: None,
+                    name: state_name.to_owned(),
+                    category,
+                },
+                branch_name: None,
+                pr_url: None,
+                url: None,
+                labels: Vec::new(),
+                project_id: None,
+                project_slug: None,
+                project_name: None,
+                parent_id: None,
+                blocked_by: Vec::<BlockerRef>::new(),
+                sub_issues: Vec::<IssueRef>::new(),
+                created_at: None,
+                updated_at: None,
+            },
+            runtime: RuntimeStateSnapshot {
+                state: SchedulerStatus::Released,
+                claimed_at: None,
+                started_at: None,
+                released_at: Some(ts(1_500)),
+                release_reason: Some(release_reason),
+                worker: None,
+                last_event_at: None,
+                stalled_at: None,
+                interrupt: None,
+            },
+            workspace: None,
+            conversation: None,
+            retry: None,
+            last_worker_outcome: None,
+            recent_worker_outcomes: Vec::new(),
+        }
+    }
+
+    fn map_single_issue_runtime_state(
+        issue: DomainIssueSnapshot,
+    ) -> crate::opensymphony_control::IssueRuntimeState {
+        let snapshot = OrchestratorSnapshot::new(
+            ts(2_000),
+            DaemonSnapshot::new(
+                HealthStatus::Healthy,
+                1_000,
+                4,
+                Some(ts(2_000)),
+                ComponentHealthSnapshot::default(),
+                RuntimeUsageTotals::default(),
+            ),
+            vec![issue],
+        );
+        let mapped = map_snapshot(
+            &snapshot,
+            PathBuf::from("/tmp/workspaces").as_path(),
+            &terminal_state_set(&resolved_workflow_for_tests()),
+            crate::opensymphony_control::AgentServerStatus {
+                reachable: true,
+                base_url: "http://127.0.0.1:3000".to_owned(),
+                conversation_count: 0,
+                status_line: "healthy".to_owned(),
+            },
+            crate::opensymphony_control::MemoryServerStatus::default(),
+            &std::collections::VecDeque::new(),
+        );
+        mapped.issues[0].runtime_state
+    }
+
+    #[test]
+    fn tracker_inactive_release_without_a_run_maps_to_idle_not_completed() {
+        // A recovered workspace whose issue sits in Backlog is parked, not
+        // completed — Completed here surfaced phantom rows in the desktop
+        // Completed pane and blocked the Current pane from showing the issue
+        // after it moved back to an active state.
+        let state = map_single_issue_runtime_state(released_issue_snapshot(
+            "Backlog",
+            IssueStateCategory::NonActive,
+            crate::opensymphony_domain::ReleaseReason::TrackerInactive,
+        ));
+        assert_eq!(state, crate::opensymphony_control::IssueRuntimeState::Idle);
+    }
+
+    #[test]
+    fn tracker_terminal_release_without_a_run_still_maps_to_completed() {
+        // An issue moved straight to Done in the tracker was completed
+        // externally; the tracker state is authoritative.
+        let state = map_single_issue_runtime_state(released_issue_snapshot(
+            "Done",
+            IssueStateCategory::Terminal,
+            crate::opensymphony_domain::ReleaseReason::TrackerTerminal,
+        ));
+        assert_eq!(
+            state,
+            crate::opensymphony_control::IssueRuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn stale_tracker_inactive_reason_with_terminal_state_still_maps_to_completed() {
+        // A parked issue (released `TrackerInactive`) moved straight to Done
+        // keeps its stale release reason because `release_issue` does not
+        // re-release an already-released execution. The current terminal
+        // tracker state must still win so the completion reaches the
+        // Completed pane and dashboard instead of vanishing as idle.
+        let state = map_single_issue_runtime_state(released_issue_snapshot(
+            "Done",
+            IssueStateCategory::Terminal,
+            crate::opensymphony_domain::ReleaseReason::TrackerInactive,
+        ));
+        assert_eq!(
+            state,
+            crate::opensymphony_control::IssueRuntimeState::Completed
+        );
     }
 }
