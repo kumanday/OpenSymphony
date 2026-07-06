@@ -3354,10 +3354,11 @@ fn build_runtime_overlay(
 // ── Run endpoints ─────────────────────────────────────────────────────────────
 
 async fn get_run_detail(
-    State(store): State<SnapshotStore>,
-    State(pr_urls): State<PrUrls>,
+    State(state): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
+    let store = &state.store;
+    let pr_urls = &state.pr_urls;
     let envelope = store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue,
@@ -3407,7 +3408,20 @@ async fn get_run_detail(
         }
     };
 
+    // A parked recovered issue maps to Idle (it never ran) but is only
+    // dispatchable once its tracker state is a configured active state. Use
+    // the workflow's active states — the scheduler's own authority — so run
+    // detail does not advertise a parked Backlog/Triage issue as an eligible,
+    // retryable run. Fall back to treating Idle as eligible only when no
+    // active states are configured (bare test servers).
+    let dispatchable = state.active_states.is_empty()
+        || state
+            .active_states
+            .contains(&issue.tracker_state.trim().to_ascii_lowercase());
     let (status, lifecycle_state) = match issue.runtime_state {
+        ControlPlaneIssueRuntimeState::Idle if !dispatchable => {
+            (RunStatus::Unclaimed, RunLifecycleState::Backlog)
+        }
         ControlPlaneIssueRuntimeState::Idle => (RunStatus::Unclaimed, RunLifecycleState::Eligible),
         ControlPlaneIssueRuntimeState::Running => (RunStatus::Running, RunLifecycleState::Running),
         ControlPlaneIssueRuntimeState::Paused => (RunStatus::Paused, RunLifecycleState::Paused),
@@ -3484,7 +3498,7 @@ async fn get_run_detail(
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
             error: None,
-            allowed_actions: allowed_actions_for_issue(issue),
+            allowed_actions: allowed_actions_for_issue(issue, dispatchable),
             liveness: Some(build_liveness(issue)),
             diagnostics: Some(RunDiagnostics {
                 harness_scheduler_disagreement: None,
@@ -4070,7 +4084,10 @@ fn default_terminal_limit() -> usize {
     1000
 }
 
-fn allowed_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> Vec<RunAction> {
+fn allowed_actions_for_issue(
+    issue: &ControlPlaneIssueSnapshot,
+    dispatchable: bool,
+) -> Vec<RunAction> {
     let mut allowed = Vec::new();
     use ControlPlaneIssueRuntimeState as State;
     match issue.runtime_state {
@@ -4086,7 +4103,10 @@ fn allowed_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> Vec<RunAction
             allowed.push(RunAction::Retry);
             allowed.push(RunAction::Rehydrate);
         }
-        State::Idle => {
+        // Retry re-queues the issue for dispatch, which only makes sense when
+        // the scheduler will actually pick it up. A parked issue (Idle but in
+        // a non-active tracker state) is not dispatchable, so it gets no retry.
+        State::Idle if dispatchable => {
             allowed.push(RunAction::Retry);
         }
         _ => {}
@@ -4706,7 +4726,7 @@ exit 2
                 detached: false,
             },
         );
-        let actions = allowed_actions_for_issue(&issue);
+        let actions = allowed_actions_for_issue(&issue, true);
         assert!(actions.contains(&RunAction::Cancel));
         assert!(actions.contains(&RunAction::Pause));
         assert!(actions.contains(&RunAction::Comment));
@@ -4728,7 +4748,7 @@ exit 2
                 detached: false,
             },
         );
-        let actions = allowed_actions_for_issue(&issue);
+        let actions = allowed_actions_for_issue(&issue, true);
         assert!(actions.contains(&RunAction::Comment));
         assert!(actions.contains(&RunAction::CreateFollowup));
         assert!(!actions.contains(&RunAction::OpenWorkspace));
@@ -4745,7 +4765,7 @@ exit 2
                 detached: false,
             },
         );
-        let actions = allowed_actions_for_issue(&issue);
+        let actions = allowed_actions_for_issue(&issue, true);
         assert!(actions.contains(&RunAction::Retry));
         assert!(actions.contains(&RunAction::Rehydrate));
         assert!(actions.contains(&RunAction::OpenWorkspace));
@@ -4767,7 +4787,7 @@ exit 2
                 detached: false,
             },
         );
-        assert!(allowed_actions_for_issue(&stalled).contains(&RunAction::Detach));
+        assert!(allowed_actions_for_issue(&stalled, true).contains(&RunAction::Detach));
 
         let healthy = test_issue(
             ControlPlaneIssueRuntimeState::Running,
@@ -4777,7 +4797,7 @@ exit 2
                 detached: false,
             },
         );
-        assert!(!allowed_actions_for_issue(&healthy).contains(&RunAction::Detach));
+        assert!(!allowed_actions_for_issue(&healthy, true).contains(&RunAction::Detach));
 
         let already_detached = test_issue(
             ControlPlaneIssueRuntimeState::Running,
@@ -4787,7 +4807,7 @@ exit 2
                 detached: true,
             },
         );
-        assert!(!allowed_actions_for_issue(&already_detached).contains(&RunAction::Detach));
+        assert!(!allowed_actions_for_issue(&already_detached, true).contains(&RunAction::Detach));
     }
 
     #[test]

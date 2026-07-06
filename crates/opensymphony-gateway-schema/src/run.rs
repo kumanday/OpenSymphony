@@ -18,6 +18,11 @@ pub enum RunLifecycleState {
     Failed,
     Canceled,
     RetryExhausted,
+    /// The issue is idle in the control plane but its tracker state is not a
+    /// configured active state (e.g. a recovered workspace parked in Backlog
+    /// or Triage). It is not dispatchable until the tracker state becomes
+    /// active, so it is reported as backlog rather than eligible.
+    Backlog,
 }
 
 /// Run detail exposed by `/api/v1/runs/{run_id}`.

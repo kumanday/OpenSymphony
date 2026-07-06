@@ -2765,6 +2765,89 @@ async fn gateway_serves_run_detail() {
 }
 
 #[tokio::test]
+async fn gateway_run_detail_parked_non_active_issue_is_not_eligible_or_retryable() {
+    use opensymphony::opensymphony_gateway_schema::run::{RunAction, RunLifecycleState, RunStatus};
+
+    // A recovered issue parked in Backlog maps to Idle in the control plane
+    // but is not dispatchable until its tracker state becomes active. Run
+    // detail must not advertise it as an eligible, retryable run.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Backlog".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server =
+        GatewayServer::new(store).with_active_states(["Todo".to_owned(), "In Progress".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.status, RunStatus::Unclaimed);
+    assert_eq!(response.lifecycle_state, RunLifecycleState::Backlog);
+    assert!(
+        !response.allowed_actions.contains(&RunAction::Retry),
+        "a parked non-active issue must not offer a retry action"
+    );
+    assert!(!response.safe_actions.retry);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_dispatchable_idle_issue_is_eligible_and_retryable() {
+    use opensymphony::opensymphony_gateway_schema::run::{RunAction, RunLifecycleState, RunStatus};
+
+    // An Idle issue whose tracker state IS a configured active state is a
+    // genuine queued run: eligible and retryable.
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Idle;
+    snapshot.issues[0].tracker_state = "Todo".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server =
+        GatewayServer::new(store).with_active_states(["Todo".to_owned(), "In Progress".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.status, RunStatus::Unclaimed);
+    assert_eq!(response.lifecycle_state, RunLifecycleState::Eligible);
+    assert!(response.allowed_actions.contains(&RunAction::Retry));
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_run_detail_cancel_diagnostics() {
     let mut snapshot = fixture_snapshot(0);
     snapshot.issues[0].cancel_requested = true;
