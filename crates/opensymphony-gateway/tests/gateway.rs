@@ -2175,6 +2175,55 @@ async fn gateway_task_graph_includes_backlog_issues_with_cross_edges() {
 }
 
 #[tokio::test]
+async fn gateway_task_graph_keeps_failed_issues_visible_as_todo() {
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].runtime_state = IssueRuntimeState::Failed;
+    snapshot.issues[0].last_outcome = WorkerOutcome::Failed;
+    let issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, &[]))
+        .collect::<Vec<_>>();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store).with_linear_task_graph(Some(std::sync::Arc::new(
+        FakeLinearTaskGraphClient { issues },
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    // A failed run is not completed work: `done` would hide the issue from
+    // every pane (the Completed table only merges Completed rows), so it
+    // categorizes as `todo` and keeps its run entry point in Current.
+    assert_eq!(response.nodes.len(), 1);
+    assert_eq!(response.nodes[0].identifier, "COE-255");
+    assert_eq!(
+        response.nodes[0].state_category,
+        opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Todo,
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_memory_completed_tasks() {
     let repo = tempfile::tempdir().expect("memory repo");
     let config = write_completed_tasks_fixture(repo.path());

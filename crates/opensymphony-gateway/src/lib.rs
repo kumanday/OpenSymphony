@@ -3170,7 +3170,11 @@ fn map_runtime_state_to_graph_category(
         ControlPlaneIssueRuntimeState::RetryQueued => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::Releasing => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::Completed => TaskGraphStateCategory::Done,
-        ControlPlaneIssueRuntimeState::Failed => TaskGraphStateCategory::Done,
+        // A failed run is not completed work: `done` would banish the issue
+        // to the Completed pane's domain (which only merges Completed rows),
+        // hiding it from every pane. `todo` keeps it in the Current pane
+        // where its run card and evidence stay reachable for retry/triage.
+        ControlPlaneIssueRuntimeState::Failed => TaskGraphStateCategory::Todo,
     }
 }
 

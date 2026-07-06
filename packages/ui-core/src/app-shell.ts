@@ -808,7 +808,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
         this.state.runOverlays = overlays;
       }),
-      initialNode ? this.openRun(initialNode) : Promise.resolve(),
+      // A preserved backlog selection stays selected but has no run to
+      // open — probing it would only produce "Run unavailable" noise.
+      initialNode && initialNode.state_category !== "backlog"
+        ? this.openRun(initialNode)
+        : Promise.resolve(),
     ]);
   }
 
@@ -1017,6 +1021,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });
           this.render();
         }
+        // A memory update can add capsules or PR evidence for completed
+        // tasks; refresh the Completed pane's page (seq-guarded, no-op
+        // without an adapter).
+        if (this.options.mode === "desktop") {
+          void this.loadCompletedTasks();
+        }
       }
     }
     if (!handledMemoryGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
@@ -1116,9 +1126,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     const [overlays, selectedRun] = await Promise.all([
       this.fetchRunOverlays(taskGraph),
-      selectedNode ? this.fetchSelectedRunRefresh(selectedNode) : Promise.resolve(null),
+      // Backlog selections have no run: probing /runs/{backlog id} would
+      // only surface a spurious "Run unavailable" message.
+      selectedNode && selectedNode.state_category !== "backlog"
+        ? this.fetchSelectedRunRefresh(selectedNode)
+        : Promise.resolve(null),
     ]);
     if (abandoned()) return;
+
+    // A task finishing (or reopening) moves it between the Current pane and
+    // the Completed table, whose data loads separately — refresh that page
+    // whenever the set of done nodes changes so it never goes stale until a
+    // manual reload.
+    const completedSetChanged = this.options.mode === "desktop"
+      && doneTaskGraphKey(this.state.taskGraph) !== doneTaskGraphKey(taskGraph);
 
     // Apply everything atomically: the previous data stays on screen until
     // the replacement is fully loaded, so panels never flash empty.
@@ -1131,6 +1152,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = selectedRun.runDetail;
       this.state.runOverlays.set(selectedRun.runDetail.run_id, selectedRun.runDetail);
       this.applyRunDetailBundle(selectedRun.bundle);
+    }
+    if (completedSetChanged) {
+      void this.loadCompletedTasks();
     }
     if (this.state.graphPaneView === "knowledge") {
       await this.loadKnowledgeGraph();
@@ -3312,7 +3336,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             void this.openRun(node);
           } else {
             // Backlog tasks have no run to open; selecting one pins its
-            // ancestry critical path instead.
+            // ancestry critical path instead. Still a navigation: bump the
+            // guards so an in-flight openRun or live refresh cannot land a
+            // stale run detail (or probe /runs/{backlog id}) over this
+            // selection.
+            this.interactionEpoch += 1;
+            this.runOpenSeq += 1;
+            this.diffSelectSeq += 1;
             this.state.selectedNodeId = node.node_id;
             this.render();
           }
@@ -5517,6 +5547,19 @@ function initialSelectedTaskNode(nodes: TaskGraphNode[], rootIds: string[]): Tas
  */
 function isCurrentPaneTaskNode(node: TaskGraphNode): boolean {
   return node.state_category !== "backlog" && node.state_category !== "done";
+}
+
+/**
+ * Fingerprint of a snapshot's done nodes; when it changes across a live
+ * refresh, a task moved between the Current pane and the Completed table,
+ * so the separately-loaded Completed page must refresh too.
+ */
+function doneTaskGraphKey(taskGraph: TaskGraphSnapshot | null): string {
+  return (taskGraph?.nodes ?? [])
+    .filter((node) => node.state_category === "done")
+    .map((node) => node.node_id)
+    .sort()
+    .join("|");
 }
 
 function stateToneForTaskNode(node: TaskGraphNode): string {

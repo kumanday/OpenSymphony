@@ -17,7 +17,9 @@ import {
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
   initialGraphState,
+  pageCompletedTasks,
   type GraphDataAdapter,
+  type MemoryCompletedTask,
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
@@ -3608,6 +3610,101 @@ describe("three-pane task graph", () => {
       root.querySelectorAll("[data-testid='completed-task-row']").length === 25
       && root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-a']") !== null,
     );
+
+    await handle.destroy();
+  });
+
+  it("keeps a backlog selection across refresh without probing its run", async () => {
+    const { root, handle } = await mountThreePane();
+
+    (root.querySelector("[data-tg-pane='backlog'] [data-node-id='backlog-b']") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelector("[data-node-id='backlog-b']")?.classList.contains("is-selected") ?? false,
+    );
+
+    await handle.refresh();
+    await flushUntil(() =>
+      root.querySelector("[data-node-id='backlog-b']")?.classList.contains("is-selected") ?? false,
+    );
+    // The preserved backlog selection must not trigger an openRun probe
+    // against /runs/{backlog identifier}.
+    expect(root.textContent).not.toContain("Run COE-461 unavailable");
+
+    await handle.destroy();
+  });
+
+  it("refreshes the Completed pane when live updates complete a task or touch memory", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const rows: MemoryCompletedTask[] = [...completedRows];
+    let completedCalls = 0;
+    const adapter: GraphDataAdapter = {
+      ...createFixtureGraphAdapter(),
+      getCompletedTasks: async (options) => {
+        completedCalls += 1;
+        return pageCompletedTasks(rows, options);
+      },
+    };
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph: threePaneTaskGraph,
+      runDetails: [runDetail],
+    });
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, graphAdapter: adapter });
+    await flushUntil(() =>
+      root.querySelector("[data-task-key='COE-448']") !== null
+      && root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']") !== null,
+    );
+
+    // A run completing moves its node to `done` and captures a fresh
+    // completed row: the live refresh must reload the Completed page.
+    rows.unshift({
+      issue_key: "COE-449",
+      concept_id: "",
+      title: "Replace stubs with functional app",
+      state: "Done",
+      completed_at: "2026-07-01T00:00:00Z",
+      prs: [],
+      source: "orchestrator",
+    });
+    transport.setTaskGraph({
+      ...threePaneTaskGraph,
+      nodes: threePaneTaskGraph.nodes.map((node) =>
+        node.node_id === "desktop-alpha"
+          ? { ...node, state: "Done", state_category: "done" as const }
+          : node,
+      ),
+    });
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 1, partition: "events" },
+      entity_ref: { kind: "run", id: "COE-449" },
+      event_kind: "run.completed",
+      emitted_at: "2026-07-01T00:00:01Z",
+      payload: { run_id: "COE-449" },
+    });
+    await flushUntil(() => root.querySelector("[data-task-key='COE-449']") !== null, 200);
+    expect(root.querySelector("[data-tg-pane='current'] [data-node-id='desktop-alpha']")).toBeNull();
+
+    // Memory updates can add capsules/PR evidence for completed tasks: the
+    // page reloads on memory_graph_updated too.
+    const callsBeforeMemory = completedCalls;
+    transport.emit({
+      schema_version: schemaVersionV1(),
+      cursor: { sequence: 2, partition: "events" },
+      entity_ref: { kind: "unknown", id: "memory-graph:local-default" },
+      event_kind: "memory_graph_updated",
+      emitted_at: "2026-07-01T00:00:02Z",
+      payload: {
+        schema_version: schemaVersionV1(),
+        bundle_id: "local-default",
+        cursor: { sequence: 2, partition: "memory-graph:local-default" },
+        updated_at: "2026-07-01T00:00:02Z",
+      },
+    });
+    await flushUntil(() => completedCalls > callsBeforeMemory, 200);
 
     await handle.destroy();
   });
