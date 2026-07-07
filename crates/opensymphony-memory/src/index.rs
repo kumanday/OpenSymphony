@@ -693,7 +693,9 @@ pub fn persist_code_intel_documents(
                 source,
         })?;
         report.persisted_documents += 1;
-        if let Some(commit_sha) = batch.commit_sha.as_deref() {
+        if !batch.worktree_dirty
+            && let Some(commit_sha) = batch.commit_sha.as_deref()
+        {
             transaction
                 .execute(
                     "INSERT OR REPLACE INTO code_document_revisions (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

@@ -930,6 +930,10 @@ fn query_diff_blast_radius(
     diffs: &[CodeSymbolDiff],
 ) -> Result<Vec<CodeDiffBlastRadius>, MemoryError> {
     let mut radius = Vec::new();
+    let changed_symbol_keys = diffs
+        .iter()
+        .map(|diff| diff.symbol_key.clone())
+        .collect::<BTreeSet<_>>();
     for diff in diffs {
         let symbol = match diff.status {
             CodeSymbolDiffStatus::Added => None,
@@ -939,7 +943,8 @@ fn query_diff_blast_radius(
         let Some(symbol) = symbol else {
             continue;
         };
-        let inbound_count = query_retained_inbound_impact_count(connection, config, symbol)?;
+        let inbound_count =
+            query_retained_inbound_impact_count(connection, config, symbol, &changed_symbol_keys)?;
         if inbound_count > 0 {
             radius.push(CodeDiffBlastRadius {
                 symbol_key: diff.symbol_key.clone(),
@@ -985,10 +990,18 @@ fn query_retained_inbound_impact_count(
     connection: &Connection,
     config: &MemoryConfig,
     symbol: &CodeSymbolRecord,
+    changed_symbol_keys: &BTreeSet<String>,
 ) -> Result<usize, MemoryError> {
-    let inbound_count: i64 = connection
-        .query_row(
-            "SELECT COUNT(DISTINCT edge_id) FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND ((? = 'current' AND freshness = 'current') OR (? != 'current' AND commit_sha = ?))",
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT edge_id, source_symbol_key FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND ((? = 'current' AND freshness = 'current') OR (? != 'current' AND commit_sha = ?))",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = statement
+        .query_map(
             params![
                 &symbol.repo_id,
                 &symbol.symbol_key,
@@ -996,13 +1009,25 @@ fn query_retained_inbound_impact_count(
                 &symbol.freshness,
                 symbol.commit_sha.as_deref(),
             ],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
         })?;
-    Ok(inbound_count as usize)
+    Ok(rows
+        .into_iter()
+        .filter(|(_, source_symbol_key)| {
+            source_symbol_key
+                .as_ref()
+                .is_none_or(|key| !changed_symbol_keys.contains(key))
+        })
+        .count())
 }
 
 fn symbol_node(
@@ -1291,14 +1316,26 @@ fn query_revision_documents(
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, String>, MemoryError> {
-    let table = if code_document_revisions_read_model_ready(connection, &config.index_path)? {
-        "code_document_revisions"
-    } else {
-        "code_documents"
-    };
+    if code_document_revisions_read_model_ready(connection, &config.index_path)? {
+        let documents =
+            query_revision_documents_from_table(connection, config, "code_document_revisions", repo_id, revision)?;
+        if !documents.is_empty() {
+            return Ok(documents);
+        }
+    }
+    query_revision_documents_from_table(connection, config, "code_documents", repo_id, revision)
+}
+
+fn query_revision_documents_from_table(
+    connection: &Connection,
+    config: &MemoryConfig,
+    table: &str,
+    repo_id: &str,
+    revision: &str,
+) -> Result<BTreeMap<String, String>, MemoryError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? ORDER BY path, indexed_at DESC"
+            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1324,7 +1361,11 @@ fn query_revision_documents(
             path: config.index_path.clone(),
             source,
         })?;
-    Ok(rows.into_iter().collect())
+    let mut documents = BTreeMap::new();
+    for (path, document_key) in rows {
+        documents.entry(path).or_insert(document_key);
+    }
+    Ok(documents)
 }
 
 fn revision_path_has_symbols(

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use duckdb::Connection as DuckDbConnection;
 use futures_util::StreamExt;
 use opensymphony::opensymphony_control::{ControlPlaneServer, SnapshotStore};
 use opensymphony::opensymphony_domain::{
@@ -380,18 +381,39 @@ fn write_code_graph_fixture_with_revisions(
                             (22, 2, 36),
                             "legacy-base",
                         ),
+                        code_graph_symbol(
+                            "function",
+                            "helper",
+                            &["App"],
+                            "fn helper(&self)",
+                            (90, 2, 96),
+                            "helper-shared",
+                        ),
                     ],
-                    vec![CodeIntelEdgeInput {
-                        edge_kind: "reference.call".to_string(),
-                        target_hint: Some("legacy".to_string()),
-                        confidence: "query_pack:calls".to_string(),
-                        start_line: 6,
-                        start_col: 8,
-                        end_line: 6,
-                        end_col: 18,
-                        start_byte: 8,
-                        end_byte: 16,
-                    }],
+                    vec![
+                        CodeIntelEdgeInput {
+                            edge_kind: "reference.call".to_string(),
+                            target_hint: Some("legacy".to_string()),
+                            confidence: "query_pack:calls".to_string(),
+                            start_line: 6,
+                            start_col: 8,
+                            end_line: 6,
+                            end_col: 18,
+                            start_byte: 8,
+                            end_byte: 16,
+                        },
+                        CodeIntelEdgeInput {
+                            edge_kind: "reference.call".to_string(),
+                            target_hint: Some("legacy".to_string()),
+                            confidence: "query_pack:calls".to_string(),
+                            start_line: 90,
+                            start_col: 8,
+                            end_line: 90,
+                            end_col: 18,
+                            start_byte: 80,
+                            end_byte: 88,
+                        },
+                    ],
                     Vec::new(),
                 ),
                 code_graph_document_with_path(
@@ -476,6 +498,14 @@ fn code_graph_head_document() -> CodeIntelDocumentInput {
                 (38, 2, 54),
                 "new-feature-head",
             ),
+            code_graph_symbol(
+                "function",
+                "helper",
+                &["App"],
+                "fn helper(&self)",
+                (90, 2, 96),
+                "helper-shared",
+            ),
         ],
         vec![
             CodeIntelEdgeInput {
@@ -499,6 +529,17 @@ fn code_graph_head_document() -> CodeIntelDocumentInput {
                 end_col: 18,
                 start_byte: 40,
                 end_byte: 48,
+            },
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("run".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 90,
+                start_col: 8,
+                end_line: 90,
+                end_col: 18,
+                start_byte: 80,
+                end_byte: 88,
             },
             CodeIntelEdgeInput {
                 edge_kind: "reference.call".to_string(),
@@ -2529,7 +2570,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             })
         })
         .expect("removed legacy symbol should count base-side inbound edges");
-    assert!(legacy_radius.inbound_count > 0);
+    assert_eq!(legacy_radius.inbound_count, 1);
     assert_eq!(
         diff.unanalyzed_files,
         vec![
@@ -2589,8 +2630,8 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(report.status, CodeIndexStatus::Completed);
     assert_eq!(report.parsed_files, 5);
     assert_eq!(report.persisted_documents, 5);
-    assert_eq!(report.persisted_symbols, 3);
-    assert_eq!(report.persisted_edges, 3);
+    assert_eq!(report.persisted_symbols, 4);
+    assert_eq!(report.persisted_edges, 4);
     assert_eq!(report.persisted_diagnostics, 1);
     assert!(report.stale_rows > 0);
     assert_eq!(report.cursor.partition, "code-graph:opensymphony");
@@ -2662,6 +2703,32 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("fetch same-content replacement diff");
     assert_eq!(same_content_diff.status(), reqwest::StatusCode::OK);
+
+    {
+        let connection = DuckDbConnection::open(&config_for_revision_regression.index_path)
+            .expect("open fixture index");
+        connection
+            .execute(
+                "DELETE FROM code_document_revisions WHERE repo_id = 'opensymphony'",
+                [],
+            )
+            .expect("delete revision document rows");
+    }
+    let legacy_document_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=base-rev&head_revision=head-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch legacy document diff")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode legacy document diff");
+    assert!(
+        legacy_document_diff
+            .unanalyzed_files
+            .contains(&"src/empty.rs".to_string())
+    );
 
     persist_code_intel_documents(
         &config_for_revision_regression,
