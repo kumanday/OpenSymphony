@@ -1622,12 +1622,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const startY = event.clientY;
     const startHeight = this.state.lowerRowHeight;
     const shell = this.options.root.querySelector<HTMLElement>(".os-lower-columns");
+    // The graph pane above is fixed-height, so a growing row extends downward
+    // and the handle would drift away from the cursor. Scroll the page by the
+    // same amount the row actually grows so the handle tracks the cursor and
+    // the divider + panes visually move up as the row expands.
+    const scroller = scrollContainerFor(shell);
+    const startScrollTop = scroller.get();
     const move = (moveEvent: PointerEvent) => {
       // The divider sits above the row, so dragging up (clientY decreases)
       // grows the row below and dragging down shrinks it.
       const next = clamp(startHeight - (moveEvent.clientY - startY), lowerRowHeightBounds.min, lowerRowHeightBounds.max);
       this.state.lowerRowHeight = next;
       shell?.style.setProperty("--os-lower-row-height", `${next}px`);
+      scroller.set(startScrollTop + (next - startHeight));
     };
     const done = () => {
       window.removeEventListener("pointermove", move);
@@ -4522,6 +4529,27 @@ function renderPaneResizer(handle: WorkspacePaneResizeHandle, label: string, val
       <span aria-hidden="true"></span>
     </div>
   `;
+}
+
+/**
+ * Nearest scrollable ancestor of `el` (vertical), falling back to the
+ * document scrolling element. Used so the lower-row resizer can scroll the
+ * page as the row grows, keeping the divider under the cursor.
+ */
+function scrollContainerFor(el: HTMLElement | null): { get(): number; set(value: number): void } {
+  const doc = el?.ownerDocument ?? document;
+  const view = doc.defaultView;
+  let node: HTMLElement | null = el?.parentElement ?? null;
+  while (node) {
+    const overflowY = view?.getComputedStyle(node).overflowY;
+    if ((overflowY === "auto" || overflowY === "scroll") && node.scrollHeight > node.clientHeight) {
+      const target = node;
+      return { get: () => target.scrollTop, set: (value) => { target.scrollTop = value; } };
+    }
+    node = node.parentElement;
+  }
+  const root = doc.scrollingElement ?? doc.documentElement;
+  return { get: () => root.scrollTop, set: (value) => { root.scrollTop = value; } };
 }
 
 function renderLowerRowResizer(height: number): string {
