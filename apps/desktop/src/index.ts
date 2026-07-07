@@ -335,10 +335,10 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
 
   private async openOrCopyDebugTarget(run: RunDetail): Promise<ActionReceipt> {
     if (run.harness_type === "codex_app_server") {
-      if (!run.conversation_id) {
+      if (!run.codex_thread_id) {
         return desktopActionReceipt("debug", run.run_id, "rejected", "Codex thread id unavailable");
       }
-      const url = `codex://threads/${run.conversation_id}`;
+      const url = `codex://threads/${run.codex_thread_id}`;
       try {
         await openDeeplink(url);
         return desktopActionReceipt("debug", run.run_id, "accepted", "Codex thread opened");

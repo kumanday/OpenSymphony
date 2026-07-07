@@ -1114,13 +1114,21 @@ fn route_decision_payload(
     })
 }
 
+/// Prefix of the synthetic conversation id a `--dry-run` route preview uses.
+/// A real conversation/Codex thread id never starts with this, so it marks
+/// preview metadata that must not be surfaced as a resumable Codex thread.
+pub(super) const ROUTE_PREVIEW_CONVERSATION_PREFIX: &str = "route-preview-";
+
 fn dry_run_conversation_metadata(
     run: &crate::opensymphony_domain::RunAttempt,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
 ) -> ConversationMetadata {
     ConversationMetadata {
-        conversation_id: ConversationId::new(format!("route-preview-{}", run.worker_id))
-            .expect("route preview conversation id should not be empty"),
+        conversation_id: ConversationId::new(format!(
+            "{ROUTE_PREVIEW_CONVERSATION_PREFIX}{}",
+            run.worker_id
+        ))
+        .expect("route preview conversation id should not be empty"),
         server_base_url: None,
         transport_target: Some(route.harness_kind.clone()),
         http_auth_mode: None,

@@ -61,9 +61,13 @@ pub struct RunDetail {
     /// Pull request URL associated with the issue workspace, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
-    /// Harness type (e.g. "openhands").
+    /// Harness type (e.g. "openhands", "codex_app_server").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_type: Option<String>,
+    /// Full Codex thread id for Codex-app-server runs, so the desktop can open
+    /// the `codex://threads/<id>` deep link directly. Absent for OpenHands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
     /// Brief human-readable summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,

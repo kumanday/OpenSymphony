@@ -48,6 +48,7 @@ fn fixture() -> SnapshotEnvelope {
                 last_outcome: WorkerOutcome::Continued,
                 last_event_at: now,
                 conversation_id_suffix: "269-live".to_owned(),
+                codex_thread_id: None,
                 workspace_path_suffix: "COE-269".to_owned(),
                 branch_name: None,
                 pr_url: None,

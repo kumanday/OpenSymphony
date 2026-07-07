@@ -151,8 +151,13 @@ export interface RunDetail {
   branch_name?: string;
   /** Pull request URL associated with the issue workspace, when known. */
   pr_url?: string;
-  /** Harness type (e.g. "openhands"). */
+  /** Harness type (e.g. "openhands", "codex_app_server"). */
   harness_type?: string;
+  /**
+   * Full Codex thread id for Codex-app-server runs, so the desktop can open
+   * the `codex://threads/<id>` deep link directly. Absent for OpenHands.
+   */
+  codex_thread_id?: string;
   /** Brief human-readable summary of the run. */
   summary?: string;
   /** Blocker description when the run is blocked. */

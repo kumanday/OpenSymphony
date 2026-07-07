@@ -80,6 +80,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             last_outcome: WorkerOutcome::Completed,
             last_event_at: now,
             conversation_id_suffix: "c0e405".to_owned(),
+            codex_thread_id: None,
             workspace_path_suffix: "COE-405".to_owned(),
             branch_name: None,
             pr_url: None,
