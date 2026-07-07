@@ -1,6 +1,5 @@
 import type {
   TaskGraphNode,
-  TaskGraphNodeKind,
   TaskGraphSnapshot,
   RunDetail,
   TaskGraphRuntimeOverlay,
@@ -8,19 +7,12 @@ import type {
   TaskGraphStateCategory,
 } from "@opensymphony/gateway-schema";
 
-export type TaskGraphFilterKind = TaskGraphNodeKind | "all";
-export type TaskGraphFilterRuntime = RuntimeBadgeKind | "all";
-
 export interface TaskGraphFilter {
-  kind: TaskGraphFilterKind;
-  runtime: TaskGraphFilterRuntime;
   stateCategory: TaskGraphStateCategory | "all";
   search: string;
 }
 
 export const defaultTaskGraphFilter: TaskGraphFilter = {
-  kind: "all",
-  runtime: "all",
   stateCategory: "all",
   search: "",
 };
@@ -86,19 +78,13 @@ export function buildRuntimeOverlay(
   };
 }
 
-/** Apply kind, runtime badge, state category, and text filters to task graph nodes. */
+/** Apply status (state category) and text filters to task graph nodes. */
 export function filterTaskGraphNodes(
   nodes: TaskGraphNode[],
   filter: TaskGraphFilter,
-  getOverlay: (node: TaskGraphNode) => TaskGraphRuntimeOverlay,
 ): TaskGraphNode[] {
   return nodes.filter((node) => {
-    if (filter.kind !== "all" && node.kind !== filter.kind) return false;
     if (filter.stateCategory !== "all" && node.state_category !== filter.stateCategory) return false;
-    if (filter.runtime !== "all") {
-      const overlay = getOverlay(node);
-      if (!overlay.badges.includes(filter.runtime)) return false;
-    }
     if (filter.search) {
       const term = filter.search.toLowerCase();
       const haystack = `${node.identifier} ${node.title} ${node.state} ${node.labels.join(" ")}`.toLowerCase();
@@ -115,33 +101,8 @@ export function renderBadge(kind: RuntimeBadgeKind): string {
 
 /** Render the filter bar for the task graph editor. */
 export function renderTaskGraphFilters(filter: TaskGraphFilter): string {
-  const kindOptions = [
-    { value: "all", label: "All kinds" },
-    { value: "milestone", label: "Milestone" },
-    { value: "issue", label: "Issue" },
-    { value: "sub_issue", label: "Sub-issue" },
-  ]
-    .map((opt) => `<option value="${opt.value}" ${filter.kind === opt.value ? "selected" : ""}>${opt.label}</option>`)
-    .join("");
-
-  const runtimeOptions = [
-    { value: "all", label: "All runtime" },
-    { value: "running", label: "Running" },
-    { value: "queued", label: "Queued" },
-    { value: "complete", label: "Complete" },
-    { value: "failed", label: "Failed" },
-    { value: "stale", label: "Stale" },
-    { value: "blocker", label: "Blocker" },
-    { value: "retry", label: "Retry" },
-    { value: "workspace", label: "Workspace" },
-    { value: "harness", label: "Harness" },
-    { value: "validation", label: "Validation" },
-  ]
-    .map((opt) => `<option value="${opt.value}" ${filter.runtime === opt.value ? "selected" : ""}>${opt.label}</option>`)
-    .join("");
-
   const stateOptions = [
-    { value: "all", label: "All states" },
+    { value: "all", label: "All statuses" },
     { value: "backlog", label: "Backlog" },
     { value: "todo", label: "Todo" },
     { value: "in_progress", label: "In Progress" },
@@ -154,15 +115,7 @@ export function renderTaskGraphFilters(filter: TaskGraphFilter): string {
   return `
     <div class="os-filter-bar">
       <label class="os-field">
-        <span>Kind</span>
-        <select data-tg-filter="kind">${kindOptions}</select>
-      </label>
-      <label class="os-field">
-        <span>Runtime</span>
-        <select data-tg-filter="runtime">${runtimeOptions}</select>
-      </label>
-      <label class="os-field">
-        <span>State</span>
+        <span>Status</span>
         <select data-tg-filter="state">${stateOptions}</select>
       </label>
       <label class="os-field">
