@@ -173,15 +173,22 @@ fn map_issue(
             .unwrap_or_else(|| "-".to_string()),
         // For Codex runs the conversation id *is* the Codex thread id, so
         // carry it in full (not the display suffix) for the debug deep link.
-        // Key on the Codex runtime *contract*, not just the transport target:
-        // `--dry-run` route previews set transport_target to codex_app_server
-        // but carry a synthetic `route-preview-*` conversation id and the
-        // routing contract, so a transport-only check would publish an
-        // unresumable `codex://threads/route-preview-*` link.
+        // Match the same Codex detection the manifest recovery uses (transport
+        // target or the Codex runtime contract) so legacy/recovered manifests
+        // that only recorded the transport target still expose their thread
+        // id — but exclude `--dry-run` route previews, whose synthetic
+        // `route-preview-*` conversation id resumes nothing.
         codex_thread_id: issue.conversation.as_ref().and_then(|conversation| {
-            let is_codex = conversation.runtime_contract_version.as_deref()
-                == Some(crate::opensymphony_codex::CODEX_APP_SERVER_CONTRACT);
-            is_codex.then(|| conversation.conversation_id.as_str().to_string())
+            let is_codex = conversation.transport_target.as_deref()
+                == Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND)
+                || conversation.runtime_contract_version.as_deref()
+                    == Some(crate::opensymphony_codex::CODEX_APP_SERVER_CONTRACT);
+            let is_route_preview = conversation
+                .conversation_id
+                .as_str()
+                .starts_with(super::backends::ROUTE_PREVIEW_CONVERSATION_PREFIX);
+            (is_codex && !is_route_preview)
+                .then(|| conversation.conversation_id.as_str().to_string())
         }),
         workspace_path_suffix: issue
             .workspace
@@ -813,6 +820,22 @@ tracker:
         conversation.runtime_contract_version = Some("opensymphony-routing-alpha-v1".to_owned());
         let issue = map_single_issue(running_issue_with_conversation(conversation));
         assert_eq!(issue.codex_thread_id, None);
+    }
+
+    #[test]
+    fn legacy_codex_manifest_without_contract_still_records_thread_id() {
+        // A run recovered from an older manifest may record only the Codex
+        // transport target (no runtime contract). It is still a real Codex
+        // thread, so its full id must survive for the debug deep link.
+        let mut conversation = codex_conversation("019f3979-3aa3-71f3-86b1-18e92c71fbc9");
+        conversation.transport_target =
+            Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND.to_owned());
+        conversation.runtime_contract_version = None;
+        let issue = map_single_issue(running_issue_with_conversation(conversation));
+        assert_eq!(
+            issue.codex_thread_id.as_deref(),
+            Some("019f3979-3aa3-71f3-86b1-18e92c71fbc9")
+        );
     }
 
     #[test]
