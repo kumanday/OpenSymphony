@@ -758,9 +758,12 @@ describe("OpenSymphonyApp mount", () => {
     expect(shellStyleText).toMatch(/\.os-tg-hue-0 \{[^}]*marker-end: url\(#os-task-arrow-0\)/);
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-indent")).toBe("34px");
-    expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-height")).toBe("78px");
-    expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-450, COE-452");
-    expect(root.querySelector("[data-node-id='app-shell'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-449");
+    expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-node-height")).toBe("44px");
+    // Dependencies are read from the connector glyph + arrows now, not a text
+    // line on the card: a downstream-only blocker shows ">", a blocked task "<".
+    expect(root.querySelector("[data-node-id='desktop-alpha'] .os-node-gutter")?.textContent).toContain(">");
+    expect(root.querySelector("[data-node-id='app-shell'] .os-node-gutter")?.textContent).toContain("<");
+    expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")).toBeNull();
     expect(root.querySelector("[data-node-id='app-shell'] .os-badge-blocker")).toBeNull();
     expect(root.querySelector("[data-node-id='desktop-alpha'] .os-badge-blocker")).not.toBeNull();
     expect(root.textContent).not.toContain("blocked by COE-448");
@@ -2150,10 +2153,14 @@ describe("OpenSymphonyApp mount", () => {
     expect(headings[1]).toContain("issues=2 running=0 todo=2 blocked=1");
     expect(headings[2]).toContain("issues=1 running=0 todo=1 blocked=0");
     expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='COE-705']")).not.toBeNull();
-    expect(root.querySelector("[data-node-id='COE-700'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-701");
-    expect(root.querySelector("[data-node-id='COE-701'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-700");
-    expect(root.querySelector("[data-node-id='COE-702'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by 1 hidden");
-    expect(root.querySelector("[data-node-id='COE-703'] [data-testid='dependency-suffix']")?.textContent ?? "").not.toContain("blocked by COE-704");
+    // Dependencies now surface as connector glyphs + arrows instead of a text
+    // line: ">" downstream (blocks), "<" upstream (blocked, visible or hidden).
+    expect(root.querySelector("[data-testid='task-graph-link'][data-link-from='COE-700'][data-link-to='COE-701']")).not.toBeNull();
+    expect(root.querySelector("[data-node-id='COE-700'] .os-node-gutter")?.textContent).toContain(">");
+    expect(root.querySelector("[data-node-id='COE-701'] .os-node-gutter")?.textContent).toContain("<");
+    expect(root.querySelector("[data-node-id='COE-702'] .os-node-gutter")?.textContent).toContain("<");
+    // COE-704 is terminal, so it is not an active blocker of COE-703 (no "<").
+    expect(root.querySelector("[data-node-id='COE-703'] .os-node-gutter")?.textContent ?? "").not.toContain("<");
 
     (root.querySelector("[data-project-group-toggle='beta-project']") as HTMLButtonElement).click();
     await flushUntil(
@@ -3501,11 +3508,10 @@ describe("three-pane task graph", () => {
     // the Canceled state filter can still surface them.
     expect(root.querySelector("[data-tg-pane='current'] [data-node-id='canceled-node']")).not.toBeNull();
 
-    // Backlog dependency suffix names the Current blocker instead of
-    // calling it hidden: both graph panes count as visible.
-    expect(
-      root.querySelector("[data-node-id='backlog-a'] [data-testid='dependency-suffix']")?.textContent,
-    ).toContain("blocked by COE-449");
+    // The backlog task's upstream blocker lives in the Current pane (both
+    // graph panes count as visible), so its connector glyph shows "<" and the
+    // specific blocker is named by the cross-pane edge below.
+    expect(root.querySelector("[data-node-id='backlog-a'] .os-node-gutter")?.textContent).toContain("<");
 
     // The cross-pane edge from the Current blocker into the Backlog exists
     // with the shared link data contract (geometry is measured in-browser).

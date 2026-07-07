@@ -87,11 +87,22 @@ The knowledge-graph surface is a 3D command center:
   node's neighborhood or an area hull. Camera and drag overrides persist in
   `KnowledgeGraphViewState` across live refreshes.
 
-Task-graph dependency arrows route skip-level edges through a left gutter
-with one lane and one hue per blocker (rounded corners, colored arrowheads);
-hovering a task spotlights its incident arrows. See
+Task-graph dependency arrows distinguish depth by where and how they meet the
+target's connector circle: next-level edges arrive vertically at the **top** of
+the circle (arrowhead pointing down), while skip-level edges route through a
+left gutter — one lane and one hue per blocker, rounded corners, colored
+arrowheads — and arrive horizontally at the **left** edge of the circle
+(arrowhead pointing right). Hovering a task spotlights its incident arrows. See
 `renderTaskGraphLink`/`buildTaskGraphLinks` in
 `packages/ui-core/src/app-shell.ts`.
+
+Read-only task cards are a single row: the connector circle, the identifier and
+title, then the run **Status** pill and a **BLOCKER** badge (when the task is
+actively blocking others) pinned to the right. Dependencies read from the
+arrows and the connector glyph (`<`, `>`, `<>`), not a text line; the full
+`blocked by … | blocks …` breakdown lives in the Run Detail panel. The task
+filters are **Status** and **Search** only — every node is a task, so there is
+no kind or runtime filter.
 
 ### Three-pane task graph
 
@@ -109,7 +120,7 @@ The desktop task surface splits into three panes
   the task's capsule through `openMemoryDeepLink`.
 - **Current** (center, never collapses) — the dispatchable dependency graph
   as before (Todo / In Progress / Human Review / Rework). Canceled nodes
-  also stay here (they have no other pane, and the Canceled state filter
+  also stay here (they have no other pane, and the Canceled status filter
   must still surface them). Selecting or hovering a task boldens its
   incoming and outgoing edges, including outgoing edges that leave the
   pane's right side toward blocked Backlog tasks.

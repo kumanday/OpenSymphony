@@ -234,6 +234,9 @@ interface AppState {
   // Widths (px) of the collapsible task-graph side panes; the Current pane
   // between them flexes to absorb the remainder.
   taskPaneSizes: { done: number; backlog: number };
+  // Height (px) of the lower Run Detail / Inspector row; drag the divider
+  // between the graph pane and this row to resize it vertically.
+  lowerRowHeight: number;
   eventLogModalOpen: boolean;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
@@ -315,6 +318,11 @@ const taskPaneSizeBounds: Record<TaskSidePane, { min: number; max: number }> = {
   backlog: { min: 240, max: 620 },
 };
 const taskPaneResizeStep = 24;
+// Lower Run Detail / Inspector row: taller by default than the old fixed
+// clamp, and drag-resizable vertically between these bounds.
+const defaultLowerRowHeight = 520;
+const lowerRowHeightBounds = { min: 240, max: 1000 };
+const lowerRowResizeStep = 24;
 const completedTasksPageSize = 25;
 const defaultCompletedTasksParams = { query: "", sort: "completed_desc", page: 1 } as const;
 
@@ -409,6 +417,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       collapsedActivityEvents: new Set(),
       workspacePaneSizes: createDefaultWorkspacePaneSizes(),
       taskPaneSizes: { ...defaultTaskPaneSizes },
+      lowerRowHeight: defaultLowerRowHeight,
       eventLogModalOpen: false,
       runValidation: null,
       runApprovals: null,
@@ -1604,6 +1613,54 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
   }
 
+  /** Drag the divider between the graph pane and the lower row to a new px height. */
+  private startLowerRowResize(handle: string | undefined, event: PointerEvent): void {
+    if (handle !== "lower") {
+      return;
+    }
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = this.state.lowerRowHeight;
+    const shell = this.options.root.querySelector<HTMLElement>(".os-lower-columns");
+    // The graph pane above is fixed-height, so a growing row extends downward
+    // and the handle would drift away from the cursor. Scroll the page by the
+    // same amount the row actually grows so the handle tracks the cursor and
+    // the divider + panes visually move up as the row expands.
+    const scroller = scrollContainerFor(shell);
+    const startScrollTop = scroller.get();
+    const move = (moveEvent: PointerEvent) => {
+      // The divider sits above the row, so dragging up (clientY decreases)
+      // grows the row below and dragging down shrinks it.
+      const next = clamp(startHeight - (moveEvent.clientY - startY), lowerRowHeightBounds.min, lowerRowHeightBounds.max);
+      this.state.lowerRowHeight = next;
+      shell?.style.setProperty("--os-lower-row-height", `${next}px`);
+      scroller.set(startScrollTop + (next - startHeight));
+    };
+    const done = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", done);
+      this.render();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", done, { once: true });
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
+
+  private onLowerRowResizeKey(handle: string | undefined, event: KeyboardEvent): void {
+    if (handle !== "lower") {
+      return;
+    }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+      return;
+    }
+    event.preventDefault();
+    // The divider sits above the row: ArrowUp grows it, ArrowDown shrinks it,
+    // matching the pointer drag direction.
+    const delta = event.key === "ArrowUp" ? lowerRowResizeStep : -lowerRowResizeStep;
+    this.state.lowerRowHeight = clamp(this.state.lowerRowHeight + delta, lowerRowHeightBounds.min, lowerRowHeightBounds.max);
+    this.render();
+  }
+
   private async dispatchRunAction(action: RunAction): Promise<void> {
     const runId = this.state.runDetail?.run_id;
     if (!runId) return;
@@ -2168,7 +2225,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     return `
       <section class="os-workspace-shell" data-testid="workspace-pane-shell" data-graph-surface="${escapeAttr(this.state.graphPaneView)}">
         ${this.renderGraphPane()}
-        <section class="os-lower-columns" data-testid="workspace-lower-columns" style="--os-left-column: ${panePercent(sizes.left)}; --os-right-column: ${panePercent(sizes.right)};">
+        ${renderLowerRowResizer(this.state.lowerRowHeight)}
+        <section class="os-lower-columns" data-testid="workspace-lower-columns" style="--os-left-column: ${panePercent(sizes.left)}; --os-right-column: ${panePercent(sizes.right)}; --os-lower-row-height: ${this.state.lowerRowHeight}px;">
           ${this.renderLowerColumn("left")}
           ${renderPaneResizer("lower-columns", "Resize lower workspace columns", sizes.left)}
           ${this.renderLowerColumn("right")}
@@ -2554,7 +2612,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         buildRuntimeOverlay(node, run),
       );
     };
-    const filtered = filterTaskGraphNodes(taskGraph.nodes, this.state.taskGraphFilter, getOverlay);
+    const filtered = filterTaskGraphNodes(taskGraph.nodes, this.state.taskGraphFilter);
     if (this.options.mode === "web") {
       return this.renderEditableTaskGraph(taskGraph, filtered, getOverlay);
     }
@@ -3564,6 +3622,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.onTaskPaneResizeKey(handle.dataset.tgResizer, event as KeyboardEvent);
       });
     });
+    this.options.root.querySelectorAll<HTMLElement>("[data-row-resizer]").forEach((handle) => {
+      this.listen(handle, "row-resizer", "pointerdown", (event) => {
+        this.startLowerRowResize(handle.dataset.rowResizer, event as PointerEvent);
+      });
+      this.listen(handle, "row-resizer", "keydown", (event) => {
+        this.onLowerRowResizeKey(handle.dataset.rowResizer, event as KeyboardEvent);
+      });
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-activity-toggle]").forEach((button) => {
       this.listen(button, "activity-toggle", "click", () => {
         const eventKey = button.dataset.activityToggle;
@@ -3993,11 +4059,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private onFilterChange(): void {
     const root = this.options.root;
-    const kind = (root.querySelector<HTMLSelectElement>("[data-tg-filter='kind']")?.value ?? "all") as TaskGraphFilter["kind"];
-    const runtime = (root.querySelector<HTMLSelectElement>("[data-tg-filter='runtime']")?.value ?? "all") as TaskGraphFilter["runtime"];
     const state = (root.querySelector<HTMLSelectElement>("[data-tg-filter='state']")?.value ?? "all") as TaskGraphFilter["stateCategory"];
     const search = root.querySelector<HTMLInputElement>("[data-tg-filter='search']")?.value ?? "";
-    this.state.taskGraphFilter = { kind, runtime, stateCategory: state, search };
+    this.state.taskGraphFilter = { stateCategory: state, search };
     this.renderPreservingFocus();
   }
 
@@ -4462,6 +4526,35 @@ function restoreShellScrollPositions(
 function renderPaneResizer(handle: WorkspacePaneResizeHandle, label: string, value: number): string {
   return `
     <div class="os-pane-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="${escapeAttr(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(value)}" data-pane-resizer="${handle}">
+      <span aria-hidden="true"></span>
+    </div>
+  `;
+}
+
+/**
+ * Nearest scrollable ancestor of `el` (vertical), falling back to the
+ * document scrolling element. Used so the lower-row resizer can scroll the
+ * page as the row grows, keeping the divider under the cursor.
+ */
+function scrollContainerFor(el: HTMLElement | null): { get(): number; set(value: number): void } {
+  const doc = el?.ownerDocument ?? document;
+  const view = doc.defaultView;
+  let node: HTMLElement | null = el?.parentElement ?? null;
+  while (node) {
+    const overflowY = view?.getComputedStyle(node).overflowY;
+    if ((overflowY === "auto" || overflowY === "scroll") && node.scrollHeight > node.clientHeight) {
+      const target = node;
+      return { get: () => target.scrollTop, set: (value) => { target.scrollTop = value; } };
+    }
+    node = node.parentElement;
+  }
+  const root = doc.scrollingElement ?? doc.documentElement;
+  return { get: () => root.scrollTop, set: (value) => { root.scrollTop = value; } };
+}
+
+function renderLowerRowResizer(height: number): string {
+  return `
+    <div class="os-pane-resizer os-row-resizer" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Resize lower workspace row" aria-valuemin="${lowerRowHeightBounds.min}" aria-valuemax="${lowerRowHeightBounds.max}" aria-valuenow="${Math.round(height)}" data-row-resizer="lower">
       <span aria-hidden="true"></span>
     </div>
   `;
@@ -5017,8 +5110,10 @@ interface TaskGraphLink {
   hue: number;
 }
 
-const taskGraphRowHeight = 78;
+const taskGraphRowHeight = 44;
 const taskGraphRowGap = 8;
+/** Radius of the connector circle (.os-node-gutter, 22px) centred on each row. */
+const taskGraphNodeRadius = 11;
 /**
  * Skip-level dependency arrows route through a dedicated left gutter, one
  * lane and one hue per blocker, so several long-range dependencies stay
@@ -5570,25 +5665,36 @@ function renderTaskGraphLink(
   const y1 = link.from.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
   const y2 = link.to.index * (taskGraphRowHeight + taskGraphRowGap) + taskGraphRowHeight / 2;
   const linkAttrs = `data-testid="task-graph-link" data-link-from="${escapeAttr(link.from.node.node_id)}" data-link-to="${escapeAttr(link.to.node.node_id)}"`;
+  const r = taskGraphNodeRadius;
   if (link.span > 1) {
+    // Skip-level arrows sweep out through the left gutter and arrive
+    // horizontally at the LEFT edge of the target circle (pointing right), so
+    // several long-range blockers on one task stay individually legible.
     const routeX = Math.max(4, railX - 16 - link.routeLane * taskGraphSkipLaneGap);
     const turn = Math.min(14, Math.abs(y2 - y1) / 2, Math.max(4, x1 - routeX));
     const direction = y2 > y1 ? 1 : -1;
+    const endX = x2 - r;
     const d = [
       `M ${x1} ${y1}`,
       `H ${routeX + turn}`,
       `Q ${routeX} ${y1} ${routeX} ${y1 + turn * direction}`,
       `V ${y2 - turn * direction}`,
       `Q ${routeX} ${y2} ${routeX + turn} ${y2}`,
-      `H ${x2}`,
+      `H ${endX}`,
     ].join(" ");
     // The hue-specific marker is applied via CSS (see .os-tg-hue-* rules):
     // a `marker-end` presentation attribute here would lose to the base
     // `.os-task-graph-link` CSS rule, leaving every skip arrowhead default.
     return `<path class="os-task-graph-link os-task-graph-link-skip os-tg-hue-${link.hue}" ${linkAttrs} d="${escapeAttr(d)}"></path>`;
   }
-  const bend = Math.max(34, Math.abs(y2 - y1) * 0.24);
-  const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${Math.max(x2 - bend, x1 + 18)} ${y2}, ${x2} ${y2}`;
+  // Next-level arrows arrive vertically at the TOP of the target circle
+  // (pointing down, orient=auto follows the tangent). Same lane → a straight
+  // drop; one lane deeper → an S-curve that shifts right while still landing
+  // vertically, which distinguishes it from the sideways skip-level arrows.
+  const dir = y2 >= y1 ? 1 : -1;
+  const endY = y2 - r * dir;
+  const bend = Math.min(20, Math.max(8, Math.abs(endY - y1) * 0.5));
+  const d = `M ${x1} ${y1} C ${x1} ${y1 + bend * dir}, ${x2} ${endY - bend * dir}, ${x2} ${endY}`;
   return `<path class="os-task-graph-link" ${linkAttrs} d="${escapeAttr(d)}"></path>`;
 }
 
@@ -5627,16 +5733,13 @@ function renderReadOnlyTaskGraphNode(
 ): string {
   const { node, signal } = model;
   const isSelected = node.node_id === selectedNodeId;
-  const overlayBadges = overlay.badges.length ? overlay.badges.map(renderBadge).join("") : "";
-  const runMeta = overlay.run_id
-    ? `<span class="os-run-meta">run ${escapeHtml(overlay.run_id)}</span>`
-    : "";
   const stateTone = stateToneForTaskNode(node);
   const hasUpstream = signal.upstreamVisible.length > 0 || signal.upstreamHiddenCount > 0;
   const hasDownstream = signal.downstreamVisible.length > 0 || signal.downstreamHiddenCount > 0;
-  const dependencyMeta = signal.suffix
-    ? `<span class="os-node-dependency" data-testid="dependency-suffix">${escapeHtml(signal.suffix)}</span>`
-    : "";
+  // Dependencies read from the connector arrows now, so the card only keeps
+  // the two badges that can't be inferred from position: the run status and
+  // whether this task is actively blocking others.
+  const blockerBadge = overlay.badges.includes("blocker") ? renderBadge("blocker") : "";
   const dependencyGlyph = hasUpstream && hasDownstream
     ? "<>"
     : hasUpstream
@@ -5648,18 +5751,13 @@ function renderReadOnlyTaskGraphNode(
   return `
     <button type="button" class="os-node os-node-readonly ${isSelected ? "is-selected" : ""} ${hasUpstream ? "os-node-has-upstream" : ""} ${hasDownstream ? "os-node-has-downstream" : ""}" data-node-id="${escapeAttr(node.node_id)}" style="--os-lane: ${model.lane}; --os-node-indent: ${model.lane * taskGraphLaneWidth}px; --os-node-height: ${taskGraphRowHeight}px;">
       <span class="os-node-gutter" aria-hidden="true">${escapeHtml(dependencyGlyph)}</span>
-      <span class="os-node-main">
-        <span class="os-node-line">
-          <strong>${escapeHtml(node.identifier)}</strong>
-          <span>${escapeHtml(node.title)}</span>
-        </span>
-        ${dependencyMeta}
-        <span class="os-node-subline">
-          <span class="os-node-kind">${escapeHtml(node.kind.replace(/_/g, " "))}</span>
-          <em class="os-node-state os-node-state-${escapeAttr(stateTone)}">${escapeHtml(node.state)}</em>
-          <span class="os-node-badges">${overlayBadges}</span>
-          ${runMeta}
-        </span>
+      <span class="os-node-line">
+        <strong>${escapeHtml(node.identifier)}</strong>
+        <span>${escapeHtml(node.title)}</span>
+      </span>
+      <span class="os-node-tags">
+        <em class="os-node-state os-node-state-${escapeAttr(stateTone)}">${escapeHtml(node.state)}</em>
+        ${blockerBadge}
       </span>
     </button>
   `;
@@ -5886,13 +5984,16 @@ function appShellStyles(): string {
     .os-graph-hero-toolbar h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
     .os-graph-hero-toolbar span { display: block; color: #667788; font-size: 12px; margin-top: 2px; }
     .os-graph-hero-body { min-width: 0; }
-    .os-lower-columns { display: flex; align-items: stretch; gap: 0; min-height: 360px; }
-    .os-lower-columns > .os-panel { box-sizing: border-box; max-height: clamp(320px, calc(100vh - 560px), 560px); min-height: 320px; overflow: auto; }
+    .os-lower-columns { display: flex; align-items: stretch; gap: 0; height: var(--os-lower-row-height, 520px); min-height: 0; }
+    .os-lower-columns > .os-panel { box-sizing: border-box; height: 100%; min-height: 0; overflow: auto; }
     .os-lower-columns > .os-panel:first-child { flex: 0 0 calc(var(--os-left-column, 50%) - 5px); }
     .os-lower-columns > .os-panel:last-child { flex: 0 0 calc(var(--os-right-column, 50%) - 5px); }
     .os-pane-resizer { flex: 0 0 10px; min-width: 10px; display: grid; place-items: center; cursor: col-resize; touch-action: none; outline: none; }
     .os-pane-resizer span { width: 2px; height: 100%; min-height: 44px; border-radius: 999px; background: #cad3dd; transition-property: background-color, width; transition-duration: 150ms; transition-timing-function: cubic-bezier(0.2, 0, 0, 1); }
     .os-pane-resizer:hover span, .os-pane-resizer:focus-visible span { width: 3px; background: #39708f; }
+    .os-row-resizer { flex: none; width: 100%; height: 12px; cursor: row-resize; }
+    .os-row-resizer span { width: 100%; min-width: 44px; height: 2px; min-height: 0; }
+    .os-row-resizer:hover span, .os-row-resizer:focus-visible span { width: 100%; height: 3px; background: #39708f; }
     .os-panel-collapsed { padding-bottom: 12px; }
     .os-section-head > div { min-width: 0; }
     .os-section-head > div span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6081,7 +6182,7 @@ function appShellStyles(): string {
     .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-project-group-header strong { color: #17202a; font-size: 12px; }
     .os-project-group-header em { color: #667788; font-size: 11px; font-style: normal; }
-    .os-node-readonly { box-sizing: border-box; grid-template-columns: 28px minmax(0, 1fr); align-items: center; height: var(--os-node-height, 78px); width: calc(100% - var(--os-node-indent, 0px) - 8px); margin-left: var(--os-node-indent, 0px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; overflow: hidden; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
+    .os-node-readonly { box-sizing: border-box; grid-template-columns: 28px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; height: var(--os-node-height, 44px); width: calc(100% - var(--os-node-indent, 0px) - 8px); margin-left: var(--os-node-indent, 0px); margin-right: 8px; padding: 6px 10px; border-radius: 8px; font-size: 12px; overflow: hidden; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
     .os-node-readonly:active { transform: scale(0.996); }
     .os-node-gutter { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 11px; font-weight: 800; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.28); }
     .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.18); }
@@ -6089,6 +6190,7 @@ function appShellStyles(): string {
     .os-node-has-downstream .os-node-gutter { background: #e7f1f5; color: #23566f; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.34); }
     .os-node-has-upstream.os-node-has-downstream .os-node-gutter { background: #fef3c7; color: #78350f; box-shadow: 0 0 0 1px rgba(146, 64, 14, 0.38); }
     .os-node-main, .os-node-line, .os-node-subline { min-width: 0; }
+    .os-node-tags { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
     .os-node-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: nowrap; }
     .os-node-line > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .os-node-line strong { flex: 0 0 auto; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -6321,7 +6423,8 @@ function appShellStyles(): string {
       .os-grid { grid-template-columns: 1fr; }
       .os-profile-panel, .os-model-panel, .os-task-graph-panel, .os-graph-hero-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
       .os-workspace-shell, .os-lower-columns { display: grid; grid-template-columns: 1fr; gap: 14px; min-height: 0; }
-      .os-lower-columns > .os-panel { max-height: none; min-height: 0; overflow: visible; }
+      .os-lower-columns { height: auto; }
+      .os-lower-columns > .os-panel { height: auto; max-height: none; min-height: 0; overflow: visible; }
       .os-pane-resizer { display: none; }
       .os-inline-fields, .os-model-layout, .os-advanced-grid, .os-run-grid { grid-template-columns: 1fr; }
       .os-topbar, .os-status-strip { grid-template-columns: 1fr; align-items: stretch; }
