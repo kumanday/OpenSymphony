@@ -229,60 +229,6 @@ describe("TaskGraphEditor", () => {
     await handle.destroy();
   });
 
-  it("filters task nodes by runtime badge", async () => {
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const handle = renderOpenSymphonyApp({
-      root,
-      mode: "web",
-      transport: buildTransport(),
-    });
-
-    await flushUntil(() => root.querySelector("[data-tg-filter='runtime']") !== null);
-
-    let runtimeSelect = root.querySelector("[data-tg-filter='runtime']") as HTMLSelectElement;
-    runtimeSelect.value = "running";
-    runtimeSelect.dispatchEvent(new Event("change"));
-    await flushAsync();
-
-    expect(root.querySelector("[data-node-id='editor-1']")).not.toBeNull();
-    expect(root.querySelector("[data-node-id='editor-2']")).toBeNull();
-    expect(root.querySelector("[data-node-id='editor-3']")).toBeNull();
-
-    runtimeSelect = root.querySelector("[data-tg-filter='runtime']") as HTMLSelectElement;
-    runtimeSelect.value = "complete";
-    runtimeSelect.dispatchEvent(new Event("change"));
-    await flushAsync();
-
-    expect(root.querySelector("[data-node-id='editor-1']")).toBeNull();
-    expect(root.querySelector("[data-node-id='editor-2']")).not.toBeNull();
-
-    await handle.destroy();
-  });
-
-  it("filters the runtime badge option to match the emitted badge", async () => {
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const handle = renderOpenSymphonyApp({
-      root,
-      mode: "web",
-      transport: buildTransport(),
-    });
-
-    await flushUntil(() => root.querySelector("[data-tg-filter='runtime']") !== null);
-    expect(root.querySelector("[data-node-id='editor-1']")?.querySelector(".os-badge-blocker")).not.toBeNull();
-
-    const runtimeSelect = root.querySelector("[data-tg-filter='runtime']") as HTMLSelectElement;
-    runtimeSelect.value = "blocker";
-    runtimeSelect.dispatchEvent(new Event("change"));
-    await flushAsync();
-
-    expect(root.querySelector("[data-node-id='editor-1']")).not.toBeNull();
-    expect(root.querySelector("[data-node-id='editor-2']")).toBeNull();
-
-    await handle.destroy();
-  });
-
   it("preserves search input focus and cursor position while typing", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -309,7 +255,7 @@ describe("TaskGraphEditor", () => {
     await handle.destroy();
   });
 
-  it("filters task nodes by kind and state", async () => {
+  it("filters task nodes by status", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -318,20 +264,7 @@ describe("TaskGraphEditor", () => {
       transport: buildTransport(),
     });
 
-    await flushUntil(() => root.querySelector("[data-tg-filter='kind']") !== null);
-
-    let kindSelect = root.querySelector("[data-tg-filter='kind']") as HTMLSelectElement;
-    kindSelect.value = "milestone";
-    kindSelect.dispatchEvent(new Event("change"));
-    await flushAsync();
-
-    expect(root.querySelector("[data-node-id='m1']")).not.toBeNull();
-    expect(root.querySelector("[data-node-id='editor-1']")).toBeNull();
-
-    kindSelect = root.querySelector("[data-tg-filter='kind']") as HTMLSelectElement;
-    kindSelect.value = "all";
-    kindSelect.dispatchEvent(new Event("change"));
-    await flushAsync();
+    await flushUntil(() => root.querySelector("[data-tg-filter='state']") !== null);
 
     const stateSelect = root.querySelector("[data-tg-filter='state']") as HTMLSelectElement;
     stateSelect.value = "done";
@@ -340,6 +273,7 @@ describe("TaskGraphEditor", () => {
 
     expect(root.querySelector("[data-node-id='editor-2']")).not.toBeNull();
     expect(root.querySelector("[data-node-id='editor-1']")).toBeNull();
+    expect(root.querySelector("[data-node-id='m1']")).toBeNull();
 
     await handle.destroy();
   });
@@ -375,11 +309,11 @@ describe("TaskGraphEditor", () => {
       transport: buildTransport(),
     });
 
-    await flushUntil(() => root.querySelector("[data-tg-filter='kind']") !== null);
+    await flushUntil(() => root.querySelector("[data-tg-filter='state']") !== null);
 
-    let kindSelect = root.querySelector("[data-tg-filter='kind']") as HTMLSelectElement;
-    kindSelect.value = "milestone";
-    kindSelect.dispatchEvent(new Event("change"));
+    const stateSelect = root.querySelector("[data-tg-filter='state']") as HTMLSelectElement;
+    stateSelect.value = "done";
+    stateSelect.dispatchEvent(new Event("change"));
     await flushAsync();
     expect(root.querySelector("[data-node-id='editor-1']")).toBeNull();
 
