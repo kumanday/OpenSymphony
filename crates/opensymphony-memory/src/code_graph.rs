@@ -268,7 +268,7 @@ pub fn code_graph_diff_overlay(
         modified_symbols,
         blast_radius,
         unanalyzed_files,
-        truncation: truncation(comparison.truncated, "diff symbols capped"),
+        truncation: truncation(comparison.dropped_records, 0, "diff symbols capped"),
         generated_at: Utc::now(),
     })
 }
@@ -448,6 +448,11 @@ fn code_graph_atlas_snapshot(
     repo_id: &str,
     options: CodeGraphSnapshotOptions,
 ) -> Result<CodeGraphSnapshot, CodeGraphProjectionError> {
+    if options.aggregate == Some(CodeGraphAggregate::Community) {
+        return Err(CodeGraphProjectionError::InvalidRequest(
+            "community aggregation is not available for code graph atlas snapshots".to_string(),
+        ));
+    }
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
     };
@@ -478,7 +483,7 @@ fn code_graph_atlas_snapshot(
             path: config.index_path.clone(),
             source,
         })?;
-    let truncated = docs.len() > CODE_GRAPH_MAX_RECORDS;
+    let dropped = docs.len().saturating_sub(CODE_GRAPH_MAX_RECORDS);
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeMap::new();
     for (path, language, freshness) in docs.into_iter().take(CODE_GRAPH_MAX_RECORDS) {
@@ -494,7 +499,7 @@ fn code_graph_atlas_snapshot(
         edges,
         options.include_stale,
         options.aggregate,
-        truncation(truncated, "atlas documents capped"),
+        truncation(dropped, 0, "atlas documents capped"),
     ))
 }
 
@@ -648,7 +653,11 @@ fn code_graph_neighborhood_snapshot(
         edges,
         include_stale,
         None,
-        truncation(neighborhood.truncated, "neighborhood records capped"),
+        truncation(
+            neighborhood.dropped_nodes,
+            neighborhood.dropped_edges,
+            "neighborhood records capped",
+        ),
     ))
 }
 
@@ -922,7 +931,7 @@ fn query_diff_blast_radius(
         let Some(symbol) = symbol else {
             continue;
         };
-        let inbound_count = query_revision_inbound_impact_count(connection, config, symbol)?;
+        let inbound_count = query_retained_inbound_impact_count(connection, config, symbol)?;
         if inbound_count > 0 {
             radius.push(CodeDiffBlastRadius {
                 symbol_key: diff.symbol_key.clone(),
@@ -964,16 +973,15 @@ fn code_revision_exists_in_table(
         .is_some())
 }
 
-fn query_revision_inbound_impact_count(
+fn query_retained_inbound_impact_count(
     connection: &Connection,
     config: &MemoryConfig,
     symbol: &CodeSymbolRecord,
 ) -> Result<usize, MemoryError> {
-    let commit_sha = symbol.commit_sha.as_deref().unwrap_or("");
     let inbound_count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM code_edges WHERE repo_id = ? AND commit_sha = ? AND target_symbol_key = ? AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%')",
-            params![&symbol.repo_id, commit_sha, &symbol.symbol_key],
+            "SELECT COUNT(DISTINCT edge_id) FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND freshness = 'current' AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%')",
+            params![&symbol.repo_id, &symbol.symbol_key],
             |row| row.get(0),
         )
         .map_err(|source| MemoryError::DuckDb {
@@ -1244,7 +1252,16 @@ fn query_unanalyzed_diff_files(
 
     let mut unanalyzed = Vec::new();
     for path in paths {
-        let changed = base.get(&path) != head.get(&path);
+        let changed = match (base.get(&path), head.get(&path)) {
+            (Some(left), Some(right)) => left != right,
+            (None, Some(_)) => {
+                revision_path_has_analysis_rows(connection, config, repo_id, base_revision, &path)?
+            }
+            (Some(_), None) => {
+                revision_path_has_analysis_rows(connection, config, repo_id, head_revision, &path)?
+            }
+            (None, None) => false,
+        };
         if !changed {
             continue;
         }
@@ -1257,6 +1274,65 @@ fn query_unanalyzed_diff_files(
         }
     }
     Ok(unanalyzed)
+}
+
+fn revision_path_has_analysis_rows(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+) -> Result<bool, MemoryError> {
+    for (table, ready) in [
+        (
+            "code_symbols",
+            code_symbols_read_model_ready(connection, &config.index_path)?,
+        ),
+        (
+            "code_edges",
+            code_edges_read_model_ready(connection, &config.index_path)?,
+        ),
+        (
+            "code_diagnostics",
+            code_diagnostics_read_model_ready(connection, &config.index_path)?,
+        ),
+    ] {
+        if ready && code_revision_path_exists_in_table(connection, config, table, repo_id, revision, path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn code_revision_path_exists_in_table(
+    connection: &Connection,
+    config: &MemoryConfig,
+    table: &str,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+) -> Result<bool, MemoryError> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? AND path = ? LIMIT 1"
+        ))
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![repo_id, revision, path])
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(rows
+        .next()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .is_some())
 }
 
 fn query_revision_documents(
@@ -1472,11 +1548,11 @@ fn symbol_kind_id(kind: &SymbolKind) -> &'static str {
     }
 }
 
-fn truncation(truncated: bool, reason: &str) -> CodeGraphTruncation {
-    if truncated {
+fn truncation(nodes_dropped: usize, edges_dropped: usize, reason: &str) -> CodeGraphTruncation {
+    if nodes_dropped > 0 || edges_dropped > 0 {
         CodeGraphTruncation {
-            nodes_dropped: 1,
-            edges_dropped: 0,
+            nodes_dropped,
+            edges_dropped,
             reason: Some(reason.to_string()),
         }
     } else {

@@ -1603,6 +1603,7 @@ struct RunCodeDiffOverlayQuery {
 
 struct RunCodeDiffOverlayResolution {
     base_revision: String,
+    indexed_head_revision: String,
     head_revision: String,
     unanalyzed_files: Vec<String>,
     worktree_dirty: bool,
@@ -1756,9 +1757,18 @@ async fn get_run_code_outline(
     let repo_id = params
         .repo_id
         .or_else(|| code_repo_id_for_workspace(&workspace_path));
-    code_file_outline_from_source(&issue.identifier, repo_id, &relative_path, &source)
-        .map(Json)
-        .map_err(code_graph_memory_error)
+    let run_id = issue.identifier.clone();
+    tokio::task::spawn_blocking(move || {
+        code_file_outline_from_source(&run_id, repo_id, &relative_path, &source)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        Err(MemoryError::InvalidInput(format!(
+            "code outline parser task failed: {error}"
+        )))
+    })
+    .map(Json)
+    .map_err(code_graph_memory_error)
 }
 
 async fn get_run_code_diff_overlay(
@@ -1809,10 +1819,11 @@ async fn get_run_code_diff_overlay(
             let head_revision = if worktree_dirty {
                 format!("{head}+worktree")
             } else {
-                head
+                head.clone()
             };
             Ok::<_, String>(RunCodeDiffOverlayResolution {
                 base_revision: base.merge_base,
+                indexed_head_revision: head,
                 head_revision,
                 unanalyzed_files,
                 worktree_dirty,
@@ -1829,19 +1840,19 @@ async fn get_run_code_diff_overlay(
         )
     })?;
     if resolution.worktree_dirty {
-        return Ok(Json(CodeDiffOverlay {
-            schema_version: SchemaVersion::v1(),
-            repo_id,
-            base_revision: resolution.base_revision,
-            head_revision: resolution.head_revision,
-            added_symbols: Vec::new(),
-            removed_symbols: Vec::new(),
-            modified_symbols: Vec::new(),
-            blast_radius: Vec::new(),
-            unanalyzed_files: resolution.unanalyzed_files,
-            truncation: CodeGraphTruncation::default(),
-            generated_at: Utc::now(),
-        }));
+        let mut overlay = code_graph_diff_overlay(
+            config,
+            &repo_id,
+            &resolution.base_revision,
+            &resolution.indexed_head_revision,
+            params.limit.unwrap_or(500).clamp(1, 5_000),
+        )
+        .map_err(code_graph_error)?;
+        overlay.head_revision = resolution.head_revision;
+        overlay.unanalyzed_files.extend(resolution.unanalyzed_files);
+        overlay.unanalyzed_files.sort();
+        overlay.unanalyzed_files.dedup();
+        return Ok(Json(overlay));
     }
     code_graph_diff_overlay(
         config,

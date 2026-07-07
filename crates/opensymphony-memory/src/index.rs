@@ -286,7 +286,34 @@ fn code_symbols_read_model_ready(connection: &Connection, path: &Path) -> Result
         connection,
         path,
         "code_symbols",
-        &["symbol_key", "container_chain", "worktree_dirty"],
+        &[
+            "symbol_id",
+            "symbol_key",
+            "repo_id",
+            "commit_sha",
+            "path",
+            "language",
+            "kind",
+            "name",
+            "container_symbol_id",
+            "container_chain",
+            "signature",
+            "start_line",
+            "start_col",
+            "end_line",
+            "end_col",
+            "start_byte",
+            "end_byte",
+            "selection_start_line",
+            "selection_end_line",
+            "content_sha256",
+            "snippet_sha256",
+            "parser_version",
+            "query_pack_version",
+            "freshness",
+            "indexed_at",
+            "worktree_dirty",
+        ],
     )
 }
 
@@ -1056,6 +1083,8 @@ pub struct CodeNeighborhood {
     pub max_depth: usize,
     pub max_records: usize,
     pub truncated: bool,
+    pub dropped_nodes: usize,
+    pub dropped_edges: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1080,6 +1109,7 @@ pub struct CodeSymbolComparison {
     pub diffs: Vec<CodeSymbolDiff>,
     pub max_records: usize,
     pub truncated: bool,
+    pub dropped_records: usize,
 }
 
 const CODE_SYMBOL_SELECT: &str = "symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, freshness, indexed_at";
@@ -1173,6 +1203,8 @@ fn code_symbol_neighborhood_with_stale(
     let mut edges = BTreeMap::<String, CodeEdgeRecord>::new();
     let mut frontier = BTreeSet::from([center.symbol_key.clone()]);
     let mut truncated = false;
+    let mut dropped_nodes = 0;
+    let mut dropped_edges = 0;
 
     for _ in 0..max_depth {
         let mut next_frontier = BTreeSet::new();
@@ -1180,7 +1212,8 @@ fn code_symbol_neighborhood_with_stale(
             for edge in query_edges_for_symbol_key_with_stale(&connection, key, include_stale)? {
                 if edges.len() >= max_records {
                     truncated = true;
-                    break;
+                    dropped_edges += 1;
+                    continue;
                 }
                 for adjacent in [
                     edge.source_symbol_key.as_deref(),
@@ -1192,6 +1225,7 @@ fn code_symbol_neighborhood_with_stale(
                     if !symbols.contains_key(adjacent) {
                         if symbols.len() >= max_records {
                             truncated = true;
+                            dropped_nodes += 1;
                             continue;
                         }
                         if let Some(symbol) =
@@ -1204,15 +1238,13 @@ fn code_symbol_neighborhood_with_stale(
                 }
                 if !edge_endpoints_present(&edge, &symbols) {
                     truncated = true;
+                    dropped_edges += 1;
                     continue;
                 }
                 edges.insert(edge.edge_id.clone(), edge);
             }
-            if truncated {
-                break;
-            }
         }
-        if truncated || next_frontier.is_empty() {
+        if next_frontier.is_empty() {
             break;
         }
         frontier = next_frontier;
@@ -1225,6 +1257,8 @@ fn code_symbol_neighborhood_with_stale(
         max_depth,
         max_records,
         truncated,
+        dropped_nodes,
+        dropped_edges,
     }))
 }
 
@@ -1255,6 +1289,7 @@ pub fn compare_code_symbols(
             diffs: Vec::new(),
             max_records,
             truncated: false,
+            dropped_records: 0,
         });
     };
     if !code_symbols_read_model_ready(&connection, &config.index_path)? {
@@ -1264,6 +1299,7 @@ pub fn compare_code_symbols(
             diffs: Vec::new(),
             max_records,
             truncated: false,
+            dropped_records: 0,
         });
     }
     let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
@@ -1271,7 +1307,7 @@ pub fn compare_code_symbols(
     let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();
     keys.extend(head.keys().cloned());
     let mut diffs = Vec::new();
-    let mut truncated = false;
+    let mut dropped_records = 0;
 
     for key in keys {
         let diff = match (base.get(&key), head.get(&key)) {
@@ -1301,8 +1337,8 @@ pub fn compare_code_symbols(
         };
         if let Some(diff) = diff {
             if diffs.len() >= max_records {
-                truncated = true;
-                break;
+                dropped_records += 1;
+                continue;
             }
             diffs.push(diff);
         }
@@ -1313,7 +1349,8 @@ pub fn compare_code_symbols(
         head_revision: head_revision.to_string(),
         diffs,
         max_records,
-        truncated,
+        truncated: dropped_records > 0,
+        dropped_records,
     })
 }
 

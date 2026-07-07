@@ -352,30 +352,53 @@ fn write_code_graph_fixture_with_revisions(
             repo_id: "opensymphony".to_string(),
             commit_sha: Some(base_revision.to_string()),
             worktree_dirty: false,
-            documents: vec![code_graph_document(
-                "base-content",
-                vec![
-                    code_graph_symbol("struct", "App", &[], "struct App", (1, 0, 4), "app-base"),
-                    code_graph_symbol(
-                        "function",
-                        "run",
-                        &["App"],
-                        "fn run(&self)",
-                        (6, 2, 20),
-                        "run-base",
-                    ),
-                    code_graph_symbol(
-                        "function",
-                        "legacy",
-                        &["App"],
-                        "fn legacy(&self)",
-                        (22, 2, 36),
-                        "legacy-base",
-                    ),
-                ],
-                Vec::new(),
-                Vec::new(),
-            )],
+            documents: vec![
+                code_graph_document(
+                    "base-content",
+                    vec![
+                        code_graph_symbol(
+                            "struct",
+                            "App",
+                            &[],
+                            "struct App",
+                            (1, 0, 4),
+                            "app-base",
+                        ),
+                        code_graph_symbol(
+                            "function",
+                            "run",
+                            &["App"],
+                            "fn run(&self)",
+                            (6, 2, 20),
+                            "run-base",
+                        ),
+                        code_graph_symbol(
+                            "function",
+                            "legacy",
+                            &["App"],
+                            "fn legacy(&self)",
+                            (22, 2, 36),
+                            "legacy-base",
+                        ),
+                    ],
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                code_graph_document_with_path(
+                    "src/empty.rs",
+                    "empty-base",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                code_graph_document_with_path(
+                    "src/unchanged_empty.rs",
+                    "unchanged-empty",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
         },
     )
     .expect("base code graph fixture should persist");
@@ -390,6 +413,13 @@ fn write_code_graph_fixture_with_revisions(
                 code_graph_document_with_path(
                     "src/empty.rs",
                     "empty-content",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                code_graph_document_with_path(
+                    "src/unchanged_empty.rs",
+                    "unchanged-empty",
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -2217,7 +2247,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(repos.schema_version.major, 1);
     assert_eq!(repos.repos.len(), 1);
     assert_eq!(repos.repos[0].repo_id, "opensymphony");
-    assert_eq!(repos.repos[0].document_count, 2);
+    assert_eq!(repos.repos[0].document_count, 3);
     assert_eq!(repos.repos[0].freshness, CodeGraphFreshness::Current);
     assert!(
         !serde_json::to_string(&repos)
@@ -2242,6 +2272,14 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert!(atlas_graph.nodes.iter().any(|node| {
         node.kind == CodeGraphNodeKind::File && node.path_display.as_deref() == Some("src/lib.rs")
     }));
+    let unsupported_atlas = client
+        .get(format!(
+            "{base}/repos/opensymphony/graph?mode=atlas&aggregate=community"
+        ))
+        .send()
+        .await
+        .expect("fetch unsupported aggregate code graph");
+    assert_eq!(unsupported_atlas.status(), reqwest::StatusCode::BAD_REQUEST);
 
     let graph = client
         .get(format!(
@@ -2455,6 +2493,11 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert!(run_radius.inbound_count > 0);
     assert_eq!(run_radius.outbound_count, 0);
     assert_eq!(diff.unanalyzed_files, vec!["src/empty.rs".to_string()]);
+    assert!(
+        !diff
+            .unanalyzed_files
+            .contains(&"src/unchanged_empty.rs".to_string())
+    );
 
     let unindexed_diff = client
         .get(format!(
@@ -2499,8 +2542,8 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("decode code index report");
     assert_eq!(report.status, CodeIndexStatus::Completed);
-    assert_eq!(report.parsed_files, 2);
-    assert_eq!(report.persisted_documents, 2);
+    assert_eq!(report.parsed_files, 3);
+    assert_eq!(report.persisted_documents, 3);
     assert_eq!(report.persisted_symbols, 3);
     assert_eq!(report.persisted_edges, 3);
     assert_eq!(report.persisted_diagnostics, 1);
@@ -2739,7 +2782,11 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
     assert!(dirty_overlay.head_revision.ends_with("+worktree"));
     assert_eq!(
         dirty_overlay.unanalyzed_files,
-        vec!["src/lib.rs".to_string()]
+        vec!["src/empty.rs".to_string(), "src/lib.rs".to_string()]
+    );
+    assert!(
+        !dirty_overlay.added_symbols.is_empty(),
+        "dirty overlays should keep indexed base-to-HEAD symbol diffs"
     );
     let dirty_overlay_json = serde_json::to_string(&dirty_overlay).expect("overlay serializes");
     assert!(!dirty_overlay_json.contains("workspace_path"));
