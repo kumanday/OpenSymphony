@@ -398,9 +398,12 @@ impl LinearClient {
     }
 
     /// Task-graph issue set from a single project scan: every requested
-    /// identifier plus all backlog-state issues. Backlog issues never enter
-    /// the control plane (they are not in `active_states`), so the task
-    /// graph endpoint asks for them here without a second Linear pass.
+    /// identifier plus all backlog- and active-state issues. Backlog issues
+    /// never enter the control plane (they are not in `active_states`), and
+    /// active (unstarted/started) issues only enter it once the orchestrator
+    /// picks them up — until then a freshly promoted Backlog→Todo issue is
+    /// tracked nowhere, so the scan carries both without a second Linear
+    /// pass.
     pub async fn project_task_graph_issues<S>(
         &self,
         identifiers: &[S],
@@ -415,7 +418,7 @@ impl LinearClient {
             .collect::<HashSet<_>>();
 
         let mut issues_by_identifier = HashMap::new();
-        let mut backlog = Vec::new();
+        let mut unrequested = Vec::new();
         for issue in self.project_issues(false).await? {
             let key = issue.identifier.to_ascii_uppercase();
             if requested_keys.contains(&key) {
@@ -423,8 +426,10 @@ impl LinearClient {
             } else if matches!(
                 issue.state_kind,
                 crate::opensymphony_domain::TrackerIssueStateKind::Backlog
+                    | crate::opensymphony_domain::TrackerIssueStateKind::Unstarted
+                    | crate::opensymphony_domain::TrackerIssueStateKind::Started
             ) {
-                backlog.push(issue);
+                unrequested.push(issue);
             }
         }
 
@@ -459,8 +464,8 @@ impl LinearClient {
             }
         }
 
-        backlog.sort_by(|left, right| left.identifier.cmp(&right.identifier));
-        issues.extend(backlog);
+        unrequested.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        issues.extend(unrequested);
         Ok(issues)
     }
 

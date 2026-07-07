@@ -322,7 +322,7 @@ async fn project_issues_by_identifiers_fetches_project_issue_details_in_one_quer
 }
 
 #[tokio::test]
-async fn project_task_graph_issues_return_requested_and_backlog_from_one_scan() {
+async fn project_task_graph_issues_return_requested_backlog_and_active_from_one_scan() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(
         project_issues_response_with_states(&[
             (
@@ -357,14 +357,16 @@ async fn project_task_graph_issues_return_requested_and_backlog_from_one_scan() 
         .await
         .expect("task graph lookup should succeed");
 
-    // Requested identifiers first, then backlog issues; issues that are
-    // neither requested nor backlog-state stay out of the task graph set.
+    // Requested identifiers first, then unrequested backlog AND active
+    // issues. COE-310 is Todo but untracked by the control plane (e.g. just
+    // promoted from Backlog, not yet dispatched) — dropping it would make the
+    // issue vanish from every pane until the orchestrator picks it up.
     assert_eq!(
         issues
             .iter()
             .map(|issue| issue.identifier.as_str())
             .collect::<Vec<_>>(),
-        vec!["COE-260", "COE-300"],
+        vec!["COE-260", "COE-300", "COE-310"],
     );
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1, "one project scan serves both buckets");
