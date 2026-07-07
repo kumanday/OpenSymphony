@@ -1623,7 +1623,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const startHeight = this.state.lowerRowHeight;
     const shell = this.options.root.querySelector<HTMLElement>(".os-lower-columns");
     const move = (moveEvent: PointerEvent) => {
-      const next = clamp(startHeight + (moveEvent.clientY - startY), lowerRowHeightBounds.min, lowerRowHeightBounds.max);
+      // The divider sits above the row, so dragging up (clientY decreases)
+      // grows the row below and dragging down shrinks it.
+      const next = clamp(startHeight - (moveEvent.clientY - startY), lowerRowHeightBounds.min, lowerRowHeightBounds.max);
       this.state.lowerRowHeight = next;
       shell?.style.setProperty("--os-lower-row-height", `${next}px`);
     };
@@ -1645,8 +1647,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     event.preventDefault();
-    // The divider sits above the row: ArrowDown grows it, ArrowUp shrinks it.
-    const delta = event.key === "ArrowDown" ? lowerRowResizeStep : -lowerRowResizeStep;
+    // The divider sits above the row: ArrowUp grows it, ArrowDown shrinks it,
+    // matching the pointer drag direction.
+    const delta = event.key === "ArrowUp" ? lowerRowResizeStep : -lowerRowResizeStep;
     this.state.lowerRowHeight = clamp(this.state.lowerRowHeight + delta, lowerRowHeightBounds.min, lowerRowHeightBounds.max);
     this.render();
   }
