@@ -347,15 +347,13 @@ fn write_code_graph_fixture(repo: &std::path::Path) -> MemoryConfig {
             documents: vec![code_graph_document(
                 "base-content",
                 vec![
-                    code_graph_symbol("struct", "App", &[], "struct App", 1, 0, 4, "app-base"),
+                    code_graph_symbol("struct", "App", &[], "struct App", (1, 0, 4), "app-base"),
                     code_graph_symbol(
                         "function",
                         "run",
                         &["App"],
                         "fn run(&self)",
-                        6,
-                        2,
-                        20,
+                        (6, 2, 20),
                         "run-base",
                     ),
                     code_graph_symbol(
@@ -363,9 +361,7 @@ fn write_code_graph_fixture(repo: &std::path::Path) -> MemoryConfig {
                         "legacy",
                         &["App"],
                         "fn legacy(&self)",
-                        22,
-                        2,
-                        36,
+                        (22, 2, 36),
                         "legacy-base",
                     ),
                 ],
@@ -384,15 +380,13 @@ fn write_code_graph_fixture(repo: &std::path::Path) -> MemoryConfig {
             documents: vec![code_graph_document(
                 "head-content",
                 vec![
-                    code_graph_symbol("struct", "App", &[], "struct App", 1, 0, 4, "app-base"),
+                    code_graph_symbol("struct", "App", &[], "struct App", (1, 0, 4), "app-base"),
                     code_graph_symbol(
                         "function",
                         "run",
                         &["App"],
                         "fn run(&self) -> Result<()>",
-                        6,
-                        2,
-                        20,
+                        (6, 2, 20),
                         "run-head",
                     ),
                     code_graph_symbol(
@@ -400,9 +394,7 @@ fn write_code_graph_fixture(repo: &std::path::Path) -> MemoryConfig {
                         "new_feature",
                         &["App"],
                         "fn new_feature(&self)",
-                        38,
-                        2,
-                        54,
+                        (38, 2, 54),
                         "new-feature-head",
                     ),
                 ],
@@ -461,11 +453,10 @@ fn code_graph_symbol(
     name: &str,
     container_chain: &[&str],
     signature: &str,
-    start_line: usize,
-    start_col: usize,
-    end_byte: usize,
+    span: (usize, usize, usize),
     snippet_sha256: &str,
 ) -> CodeIntelSymbolInput {
+    let (start_line, start_col, end_byte) = span;
     CodeIntelSymbolInput {
         kind: kind.to_string(),
         name: name.to_string(),
@@ -2174,7 +2165,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(repos.repos[0].freshness, CodeGraphFreshness::Current);
     assert!(
         !serde_json::to_string(&repos)
-            .unwrap()
+            .expect("code repo list serializes")
             .contains(&repo.path().display().to_string())
     );
 
@@ -2263,7 +2254,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     );
     assert!(
         serde_json::to_string(&stale_graph)
-            .unwrap()
+            .expect("stale graph serializes")
             .contains("legacy")
     );
 
