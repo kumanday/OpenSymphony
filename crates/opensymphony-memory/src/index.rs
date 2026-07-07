@@ -1108,6 +1108,8 @@ pub struct CodeEdgeRecord {
     pub confidence: String,
     pub unresolved: bool,
     pub path: String,
+    pub commit_sha: Option<String>,
+    pub freshness: String,
     pub start_line: usize,
     pub start_col: usize,
     pub end_line: usize,
@@ -1490,7 +1492,7 @@ fn query_edges_for_symbol_key_with_stale(
     };
     let mut statement = connection
         .prepare(&format!(
-            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, start_line, start_col, end_line, end_col FROM code_edges WHERE {freshness} AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id"
+            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges WHERE {freshness} AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
@@ -1605,10 +1607,12 @@ fn code_edge_from_row(row: &duckdb::Row<'_>) -> Result<CodeEdgeRecord, duckdb::E
         target_hint: row.get(4)?,
         confidence: row.get(5)?,
         path: row.get(6)?,
-        start_line: row.get::<_, i64>(7)? as usize,
-        start_col: row.get::<_, i64>(8)? as usize,
-        end_line: row.get::<_, i64>(9)? as usize,
-        end_col: row.get::<_, i64>(10)? as usize,
+        commit_sha: row.get(7)?,
+        freshness: row.get(8)?,
+        start_line: row.get::<_, i64>(9)? as usize,
+        start_col: row.get::<_, i64>(10)? as usize,
+        end_line: row.get::<_, i64>(11)? as usize,
+        end_col: row.get::<_, i64>(12)? as usize,
     })
 }
 

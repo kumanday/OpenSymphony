@@ -330,7 +330,13 @@ pub fn code_file_outline_from_source(
 ) -> Result<CodeFileOutline, MemoryError> {
     let safe_path = normalize_code_path(path)
         .map_err(|message| MemoryError::InvalidInput(format!("invalid code path: {message}")))?;
-    let summary = parse_path(&safe_path, source)?;
+    let summary = match parse_path(&safe_path, source) {
+        Ok(summary) => summary,
+        Err(CodeIntelError::UnsupportedLanguage { .. }) => {
+            return Ok(empty_code_file_outline(run_id, repo_id, safe_path));
+        }
+        Err(error) => return Err(error.into()),
+    };
     let language = summary.source.language.id().to_string();
     let parser_version = format!(
         "{}:{}",
@@ -404,6 +410,17 @@ pub fn code_file_outline_from_source(
         symbols: outline,
         generated_at: Utc::now(),
     })
+}
+
+fn empty_code_file_outline(run_id: &str, repo_id: Option<String>, path: String) -> CodeFileOutline {
+    CodeFileOutline {
+        schema_version: SchemaVersion::v1(),
+        run_id: run_id.to_string(),
+        repo_id,
+        path,
+        symbols: Vec::new(),
+        generated_at: Utc::now(),
+    }
 }
 
 #[derive(Default)]
@@ -520,6 +537,18 @@ fn code_graph_file_snapshot(
         return Err(CodeGraphProjectionError::FileNotFound(path));
     };
     let symbols = query_file_symbols(&connection, config, repo_id, &path, include_stale)?;
+    let selected_symbol_revisions = symbols
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.symbol_key.clone(),
+                SelectedSymbolRevision {
+                    commit_sha: symbol.commit_sha.clone(),
+                    freshness: symbol.freshness.clone(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let edges = query_file_edges(&connection, config, repo_id, &path, include_stale)?;
     let mut nodes = BTreeMap::new();
     let mut graph_edges = BTreeMap::new();
@@ -542,6 +571,9 @@ fn code_graph_file_snapshot(
         nodes.entry(node.id.clone()).or_insert(node);
     }
     for edge in edges {
+        if !edge_matches_selected_symbol_revisions(&edge, &selected_symbol_revisions) {
+            continue;
+        }
         let source_id = edge.source_symbol_key.as_ref().map(symbol_node_id);
         let Some(source_id) = source_id else {
             continue;
@@ -797,7 +829,7 @@ fn query_file_edges(
     let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
-            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, start_line, start_col, end_line, end_col FROM code_edges WHERE repo_id = ? AND path = ? AND {freshness} ORDER BY edge_kind, path, start_line, start_col, edge_id"
+            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges WHERE repo_id = ? AND path = ? AND {freshness} ORDER BY edge_kind, path, start_line, start_col, edge_id"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -816,6 +848,38 @@ fn query_file_edges(
         })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedSymbolRevision {
+    commit_sha: Option<String>,
+    freshness: String,
+}
+
+fn edge_matches_selected_symbol_revisions(
+    edge: &CodeEdgeRecord,
+    selected_symbols: &BTreeMap<String, SelectedSymbolRevision>,
+) -> bool {
+    edge_symbol_matches_selected_revision(edge, edge.source_symbol_key.as_deref(), selected_symbols)
+        && edge_symbol_matches_selected_revision(
+            edge,
+            edge.target_symbol_key.as_deref(),
+            selected_symbols,
+        )
+}
+
+fn edge_symbol_matches_selected_revision(
+    edge: &CodeEdgeRecord,
+    symbol_key: Option<&str>,
+    selected_symbols: &BTreeMap<String, SelectedSymbolRevision>,
+) -> bool {
+    let Some(symbol_key) = symbol_key else {
+        return true;
+    };
+    let Some(selected) = selected_symbols.get(symbol_key) else {
+        return true;
+    };
+    selected.commit_sha == edge.commit_sha && selected.freshness == edge.freshness
+}
+
 fn query_symbol_diagnostics(
     connection: &Connection,
     config: &MemoryConfig,
@@ -825,7 +889,7 @@ fn query_symbol_diagnostics(
     let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
-            "SELECT kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostics WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL)) AND start_line <= ? AND end_line >= ? ORDER BY severity, start_line, start_col, diagnostic_id"
+            "SELECT kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostics WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL)) AND start_line <= ? AND end_line >= ? ORDER BY start_line, start_col, diagnostic_id"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -965,7 +1029,7 @@ fn code_revision_exists_in_table(
 ) -> Result<bool, MemoryError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? LIMIT 1"
+            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty LIMIT 1"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -994,7 +1058,7 @@ fn query_retained_inbound_impact_count(
 ) -> Result<usize, MemoryError> {
     let mut statement = connection
         .prepare(
-            "SELECT DISTINCT edge_id, source_symbol_key FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND ((? = 'current' AND freshness = 'current') OR (? != 'current' AND commit_sha = ?))",
+            "SELECT DISTINCT edge_id, source_symbol_key FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL))",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1005,8 +1069,7 @@ fn query_retained_inbound_impact_count(
             params![
                 &symbol.repo_id,
                 &symbol.symbol_key,
-                &symbol.freshness,
-                &symbol.freshness,
+                symbol.commit_sha.as_deref(),
                 symbol.commit_sha.as_deref(),
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
@@ -1052,9 +1115,22 @@ fn symbol_node(
         selection_span: Some(selection_span_from_symbol(symbol)),
         freshness: freshness_from_str(&symbol.freshness),
         diagnostic_count: diagnostics.len(),
-        diagnostic_severity: diagnostics.first().map(|diagnostic| diagnostic.severity.clone()),
+        diagnostic_severity: diagnostics
+            .iter()
+            .max_by_key(|diagnostic| diagnostic_severity_rank(&diagnostic.severity))
+            .map(|diagnostic| diagnostic.severity.clone()),
         metrics: CodeGraphNodeMetrics::default(),
     })
+}
+
+fn diagnostic_severity_rank(severity: &str) -> u8 {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "fatal" | "error" => 4,
+        "warning" | "warn" => 3,
+        "info" | "information" => 2,
+        "hint" | "note" => 1,
+        _ => 0,
+    }
 }
 
 fn insert_path_nodes(
@@ -1316,14 +1392,22 @@ fn query_revision_documents(
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, String>, MemoryError> {
+    let mut documents = BTreeMap::new();
     if code_document_revisions_read_model_ready(connection, &config.index_path)? {
-        let documents =
-            query_revision_documents_from_table(connection, config, "code_document_revisions", repo_id, revision)?;
-        if !documents.is_empty() {
-            return Ok(documents);
-        }
+        documents = query_revision_documents_from_table(
+            connection,
+            config,
+            "code_document_revisions",
+            repo_id,
+            revision,
+        )?;
     }
-    query_revision_documents_from_table(connection, config, "code_documents", repo_id, revision)
+    for (path, document_key) in
+        query_revision_documents_from_table(connection, config, "code_documents", repo_id, revision)?
+    {
+        documents.entry(path).or_insert(document_key);
+    }
+    Ok(documents)
 }
 
 fn query_revision_documents_from_table(
@@ -1335,7 +1419,7 @@ fn query_revision_documents_from_table(
 ) -> Result<BTreeMap<String, String>, MemoryError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC"
+            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1380,7 +1464,7 @@ fn revision_path_has_symbols(
     }
     let mut statement = connection
         .prepare(
-            "SELECT 1 FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND path = ? AND symbol_key != '' LIMIT 1",
+            "SELECT 1 FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND path = ? AND symbol_key != '' AND NOT worktree_dirty LIMIT 1",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1480,6 +1564,7 @@ fn code_document_revisions_read_model_ready(
             "content_sha256",
             "parser_version",
             "query_pack_version",
+            "worktree_dirty",
         ],
     )
 }

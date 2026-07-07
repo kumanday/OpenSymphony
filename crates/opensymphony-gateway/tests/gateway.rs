@@ -553,17 +553,30 @@ fn code_graph_head_document() -> CodeIntelDocumentInput {
                 end_byte: 32,
             },
         ],
-        vec![CodeIntelDiagnosticInput {
-            kind: "warning".to_string(),
-            severity: "warning".to_string(),
-            message: "fixture diagnostic".to_string(),
-            start_line: 60,
-            start_col: 2,
-            end_line: 60,
-            end_col: 20,
-            start_byte: 8,
-            end_byte: 16,
-        }],
+        vec![
+            CodeIntelDiagnosticInput {
+                kind: "warning".to_string(),
+                severity: "warning".to_string(),
+                message: "fixture diagnostic".to_string(),
+                start_line: 60,
+                start_col: 2,
+                end_line: 60,
+                end_col: 20,
+                start_byte: 8,
+                end_byte: 16,
+            },
+            CodeIntelDiagnosticInput {
+                kind: "info".to_string(),
+                severity: "info".to_string(),
+                message: "secondary fixture diagnostic".to_string(),
+                start_line: 60,
+                start_col: 4,
+                end_line: 60,
+                end_col: 18,
+                start_byte: 10,
+                end_byte: 14,
+            },
+        ],
     )
 }
 
@@ -2373,7 +2386,8 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     let run_symbol_key = run_node.symbol_key.as_deref().expect("symbol key");
     assert_eq!(run_node.path_display.as_deref(), Some("src/lib.rs"));
     assert_eq!(run_node.container_chain, vec!["App".to_string()]);
-    assert!(run_node.diagnostic_count > 0);
+    assert_eq!(run_node.diagnostic_count, 2);
+    assert_eq!(run_node.diagnostic_severity.as_deref(), Some("warning"));
     let node_ids = graph
         .nodes
         .iter()
@@ -2471,12 +2485,22 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         stale_run.signature.as_deref(),
         Some("fn run(&self) -> Result<()>")
     );
-    let legacy_symbol_key = stale_graph
+    let legacy_node = stale_graph
         .nodes
         .iter()
         .find(|node| node.kind == CodeGraphNodeKind::Symbol && node.label == "legacy")
-        .and_then(|node| node.symbol_key.as_deref())
+        .expect("stale legacy symbol");
+    let legacy_symbol_key = legacy_node
+        .symbol_key
+        .as_deref()
         .expect("stale legacy symbol key");
+    assert!(
+        !stale_graph
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == stale_run.id && edge.target_id == legacy_node.id),
+        "file graph must not bind current symbol edges to stale symbol nodes"
+    );
     let stale_neighborhood = client
         .get(format!(
             "{base}/repos/opensymphony/graph?mode=neighborhood&symbol_key={legacy_symbol_key}&depth=1&include_stale=true"
@@ -2632,7 +2656,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(report.persisted_documents, 5);
     assert_eq!(report.persisted_symbols, 4);
     assert_eq!(report.persisted_edges, 4);
-    assert_eq!(report.persisted_diagnostics, 1);
+    assert_eq!(report.persisted_diagnostics, 2);
     assert!(report.stale_rows > 0);
     assert_eq!(report.cursor.partition, "code-graph:opensymphony");
     let second_report = client
@@ -2704,15 +2728,42 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .expect("fetch same-content replacement diff");
     assert_eq!(same_content_diff.status(), reqwest::StatusCode::OK);
 
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("dirty-only-rev".to_string()),
+            worktree_dirty: true,
+            documents: vec![code_graph_head_document()],
+        },
+    )
+    .expect("dirty-only revision should persist");
+    let dirty_only_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=head-rev&head_revision=dirty-only-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch dirty-only revision diff");
+    assert_eq!(dirty_only_diff.status(), reqwest::StatusCode::NOT_FOUND);
+    let dirty_only_body = dirty_only_diff
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode dirty-only revision response");
+    assert_eq!(
+        dirty_only_body.pointer("/error/code"),
+        Some(&serde_json::json!("code_revision_not_found"))
+    );
+
     {
         let connection = DuckDbConnection::open(&config_for_revision_regression.index_path)
             .expect("open fixture index");
         connection
             .execute(
-                "DELETE FROM code_document_revisions WHERE repo_id = 'opensymphony'",
+                "DELETE FROM code_document_revisions WHERE repo_id = 'opensymphony' AND path = 'src/empty.rs'",
                 [],
             )
-            .expect("delete revision document rows");
+            .expect("delete one revision document row");
     }
     let legacy_document_diff = client
         .get(format!(
@@ -2773,6 +2824,7 @@ async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
         "pub struct App;\nimpl App { pub fn run(&self) {} }\n",
     )
     .expect("workspace file");
+    std::fs::write(workspace.join("data.txt"), "fixture\n").expect("workspace text file");
     let mut snapshot = fixture_snapshot(0);
     snapshot.daemon.workspace_root = root.path().to_string_lossy().to_string();
     snapshot.issues[0].identifier = "COE-533".to_string();
@@ -2812,6 +2864,22 @@ async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
     }));
     assert!(!outline_json.contains("workspace_path"));
     assert!(!outline_json.contains(&root.path().display().to_string()));
+
+    let unsupported_outline = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/outline?file_path=data.txt"
+        ))
+        .send()
+        .await
+        .expect("fetch unsupported run outline");
+    assert_eq!(unsupported_outline.status(), reqwest::StatusCode::OK);
+    let unsupported_outline = unsupported_outline
+        .json::<CodeFileOutline>()
+        .await
+        .expect("decode unsupported run outline");
+    assert_eq!(unsupported_outline.run_id, "COE-533");
+    assert_eq!(unsupported_outline.path, "data.txt");
+    assert!(unsupported_outline.symbols.is_empty());
 
     let invalid_outline = client
         .get(format!(
