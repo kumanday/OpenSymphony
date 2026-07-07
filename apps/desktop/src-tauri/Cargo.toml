@@ -1,6 +1,6 @@
 [package]
 name = "opensymphony-desktop"
-version = "2.9.2"
+version = "2.9.3"
 description = "OpenSymphony Tauri desktop application shell"
 license = "MIT"
 homepage = "https://opensymphony.dev"

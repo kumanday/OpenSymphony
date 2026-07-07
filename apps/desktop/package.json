@@ -1,6 +1,6 @@
 {
   "name": "@opensymphony/desktop",
-  "version": "2.9.2",
+  "version": "2.9.3",
   "description": "OpenSymphony Tauri desktop app shell",
   "type": "module",
   "private": true,
