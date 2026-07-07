@@ -2767,6 +2767,10 @@ fn code_intel_documents_for_persistence(
             })?
             .to_path_buf();
         let relative_display = relative.to_string_lossy().to_string();
+        if resolved.is_dir() {
+            skipped_files.push(format!("{relative_display}: directory"));
+            continue;
+        }
         let Some(language) = crate::opensymphony_code_intel::detect_language(&relative) else {
             record_skipped_code_intel_file(
                 &mut skipped_files,
@@ -4976,6 +4980,49 @@ mod tests {
         assert!(count_rows(&connection, "code_symbols", "current") > 0);
         assert!(count_rows(&connection, "code_edges", "current") > 0);
         assert!(count_rows(&connection, "code_diagnostics", "current") > 0);
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_skips_requested_directories() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("valid source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src", "src/lib.rs"],
+                "persist": true,
+                "limit": 20
+            }),
+        )
+        .await
+        .expect("directory path should be skipped without aborting ingest");
+
+        assert_eq!(result["persisted"], true);
+        assert_eq!(result["parsedFiles"], 1);
+        assert!(
+            result["skippedFiles"]
+                .as_array()
+                .expect("skipped files")
+                .iter()
+                .any(|file| file.as_str() == Some("src: directory"))
+        );
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>("SELECT count(*) FROM code_skipped_files", [], |row| row
+                    .get(0))
+                .expect("skipped file count"),
+            0
+        );
     }
 
     #[tokio::test]

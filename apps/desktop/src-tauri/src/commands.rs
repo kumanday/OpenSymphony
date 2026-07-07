@@ -1186,6 +1186,29 @@ pub async fn code_symbol_detail(
     gateway_get_json(state, &path).await
 }
 
+/// Get a repository code diff overlay through the active gateway.
+#[command]
+pub async fn code_diff_overlay(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    repo_id: String,
+    base_revision: String,
+    head_revision: String,
+    limit: Option<u64>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "base_revision", Some(&base_revision));
+    push_query_param(&mut params, "head_revision", Some(&head_revision));
+    push_query_param_value(&mut params, "limit", limit);
+    let path = path_with_query(
+        &format!(
+            "/api/v1/code/repos/{}/diff-overlay",
+            urlencoding::encode(&repo_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
 /// Get a run-scoped file outline through the active gateway.
 #[command]
 pub async fn run_code_outline(
@@ -1697,6 +1720,20 @@ mod tests {
                 urlencoding::encode("sym:key#2")
             ),
             "/api/v1/code/repos/local%20repo/symbols/sym%3Akey%232"
+        );
+        params.clear();
+        push_query_param(&mut params, "base_revision", Some("base rev"));
+        push_query_param(&mut params, "head_revision", Some("head/rev"));
+        push_query_param_value(&mut params, "limit", Some(12_u64));
+        assert_eq!(
+            path_with_query(
+                &format!(
+                    "/api/v1/code/repos/{}/diff-overlay",
+                    urlencoding::encode("local repo")
+                ),
+                &params
+            ),
+            "/api/v1/code/repos/local%20repo/diff-overlay?base_revision=base%20rev&head_revision=head%2Frev&limit=12"
         );
     }
 

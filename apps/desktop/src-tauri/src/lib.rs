@@ -71,6 +71,7 @@ pub fn run() {
             commands::code_repos,
             commands::code_graph,
             commands::code_symbol_detail,
+            commands::code_diff_overlay,
             commands::run_code_outline,
             commands::run_code_diff_overlay,
             commands::code_index_repo,

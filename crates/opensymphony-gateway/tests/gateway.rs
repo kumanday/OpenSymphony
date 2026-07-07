@@ -2608,6 +2608,42 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             .unanalyzed_files
             .contains(&"src/unchanged_empty.rs".to_string())
     );
+    {
+        let connection = DuckDbConnection::open(&config_for_revision_regression.index_path)
+            .expect("index opens for legacy edge fallback fixture");
+        connection
+            .execute(
+                "DELETE FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ?",
+                duckdb::params!["opensymphony", "head-rev"],
+            )
+            .expect("delete head revision edge rows");
+    }
+    let legacy_edge_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=base-rev&head_revision=head-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch legacy edge fallback diff")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode legacy edge fallback diff");
+    let legacy_edge_radius = legacy_edge_diff
+        .blast_radius
+        .iter()
+        .find(|radius| radius.symbol_key == run_symbol_key)
+        .expect("legacy code_edges should backfill missing revision edge rows");
+    assert!(legacy_edge_radius.inbound_count > 0);
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("head-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_head_document()],
+        },
+    )
+    .expect("head revision edge rows should restore after fallback assertion");
 
     let unindexed_diff = client
         .get(format!(

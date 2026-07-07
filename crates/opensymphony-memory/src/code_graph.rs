@@ -1060,7 +1060,9 @@ fn query_retained_inbound_impact_count(
     symbol: &CodeSymbolRecord,
     changed_symbol_keys: &BTreeSet<String>,
 ) -> Result<usize, MemoryError> {
-    let edge_table = if code_edge_revisions_read_model_ready(connection, &config.index_path)? {
+    let edge_table = if let Some(commit_sha) = symbol.commit_sha.as_deref()
+        && code_edge_revision_rows_available(connection, config, &symbol.repo_id, commit_sha)?
+    {
         "code_edge_revisions"
     } else {
         "code_edges"
@@ -1100,6 +1102,39 @@ fn query_retained_inbound_impact_count(
                 .is_none_or(|key| !changed_symbol_keys.contains(key))
         })
         .count())
+}
+
+fn code_edge_revision_rows_available(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+) -> Result<bool, MemoryError> {
+    if !code_edge_revisions_read_model_ready(connection, &config.index_path)? {
+        return Ok(false);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT 1 FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty LIMIT 1",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows =
+        statement
+            .query(params![repo_id, revision])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    Ok(rows
+        .next()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .is_some())
 }
 
 fn symbol_node(
