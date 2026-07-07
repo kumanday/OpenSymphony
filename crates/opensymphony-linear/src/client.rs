@@ -398,9 +398,12 @@ impl LinearClient {
     }
 
     /// Task-graph issue set from a single project scan: every requested
-    /// identifier plus all backlog-state issues. Backlog issues never enter
-    /// the control plane (they are not in `active_states`), so the task
-    /// graph endpoint asks for them here without a second Linear pass.
+    /// identifier plus unrequested backlog, dispatchable (`active_states`),
+    /// and started-kind issues. Backlog issues never enter the control
+    /// plane, and active issues only enter it once the orchestrator picks
+    /// them up — until then a freshly promoted Backlog→Todo issue is
+    /// tracked nowhere, so the scan carries all of them without a second
+    /// Linear pass.
     pub async fn project_task_graph_issues<S>(
         &self,
         identifiers: &[S],
@@ -414,17 +417,35 @@ impl LinearClient {
             .map(|identifier| identifier.to_ascii_uppercase())
             .collect::<HashSet<_>>();
 
+        let active_state_names = self
+            .config
+            .active_states
+            .iter()
+            .map(|state| state.trim().to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        // Unrequested issues worth carrying: backlog (Backlog pane), states
+        // the scheduler dispatches from (`active_states` — a freshly promoted
+        // Todo issue the control plane does not track yet), and started-kind
+        // states (in-flight work like Human Review / Rework belongs in the
+        // Current pane even when not dispatchable). Parked unstarted states
+        // outside `active_states` stay out: the orchestrator will never pick
+        // them up, so showing them as queued work would mislead.
+        let carry_unrequested = |issue: &TrackerIssue| {
+            matches!(
+                issue.state_kind,
+                crate::opensymphony_domain::TrackerIssueStateKind::Backlog
+                    | crate::opensymphony_domain::TrackerIssueStateKind::Started
+            ) || active_state_names.contains(&issue.state.trim().to_ascii_lowercase())
+        };
+
         let mut issues_by_identifier = HashMap::new();
-        let mut backlog = Vec::new();
+        let mut unrequested = Vec::new();
         for issue in self.project_issues(false).await? {
             let key = issue.identifier.to_ascii_uppercase();
             if requested_keys.contains(&key) {
                 issues_by_identifier.insert(key, issue);
-            } else if matches!(
-                issue.state_kind,
-                crate::opensymphony_domain::TrackerIssueStateKind::Backlog
-            ) {
-                backlog.push(issue);
+            } else if carry_unrequested(&issue) {
+                unrequested.push(issue);
             }
         }
 
@@ -459,8 +480,8 @@ impl LinearClient {
             }
         }
 
-        backlog.sort_by(|left, right| left.identifier.cmp(&right.identifier));
-        issues.extend(backlog);
+        unrequested.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        issues.extend(unrequested);
         Ok(issues)
     }
 

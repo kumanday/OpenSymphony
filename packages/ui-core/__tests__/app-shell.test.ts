@@ -3678,6 +3678,48 @@ describe("three-pane task graph", () => {
     await handle.destroy();
   });
 
+  it("selects an untracked active task without a spurious run-unavailable banner", async () => {
+    // An issue promoted Backlog→Todo arrives from the tracker scan alone:
+    // no run_id and no runtime_overlay, and the gateway has no run detail
+    // for it. Clicking it must select the card graph-locally, not surface
+    // "Run unavailable" noise.
+    const promotedGraph: TaskGraphSnapshot = {
+      ...threePaneTaskGraph,
+      nodes: [
+        ...threePaneTaskGraph.nodes,
+        {
+          schema_version: schemaVersionV1(),
+          node_id: "promoted-todo",
+          kind: "issue",
+          identifier: "COE-533",
+          title: "Freshly promoted todo",
+          state: "Todo",
+          state_category: "todo",
+          children: [],
+          blocked_by: [],
+          labels: [],
+        },
+      ],
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: promotedGraph }),
+      graphAdapter: createFixtureGraphAdapter({ completedTasks: completedRows }),
+    });
+    await flushUntil(() => root.querySelector("[data-node-id='promoted-todo']") !== null);
+
+    (root.querySelector("[data-node-id='promoted-todo']") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      root.querySelector("[data-node-id='promoted-todo']")?.classList.contains("is-selected") ?? false,
+    );
+    expect(root.textContent).not.toContain("Run COE-533 unavailable");
+
+    await handle.destroy();
+  });
+
   it("refreshes the Completed pane when live updates complete a task or touch memory", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
