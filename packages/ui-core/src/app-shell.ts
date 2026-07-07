@@ -1235,7 +1235,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ]);
       return { runDetail, bundle };
     } catch (error) {
-      this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      // Same as openRun: an untracked active node has no run detail by
+      // design, so a background refresh miss is not worth a banner.
+      if (nodeHasRun(node)) {
+        this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      }
       return null;
     }
   }
@@ -1297,7 +1301,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.selectedDiffPath = null;
-      this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      // An active issue the control plane does not track yet (e.g. just
+      // promoted from Backlog, no run dispatched) has no run detail to
+      // serve — the miss is expected, so the selection stays graph-local
+      // without a spurious "Run unavailable" banner. Real lookup failures
+      // on run-carrying nodes still surface.
+      if (nodeHasRun(node)) {
+        this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      }
     }
     this.state.loading = false;
     this.render();
@@ -5703,6 +5714,17 @@ function nodeLabel(node: TaskGraphNode): string {
 
 function runIdForNode(node: TaskGraphNode): string {
   return node.run_id || node.identifier || node.node_id;
+}
+
+/**
+ * Whether the control plane is expected to serve a run detail for this
+ * node. Backlog nodes and active issues the orchestrator has not picked up
+ * yet arrive from the tracker scan alone (no run linkage, no runtime
+ * overlay) — a /runs/{id} miss on them is by design, so it should not
+ * raise a "Run unavailable" banner.
+ */
+function nodeHasRun(node: TaskGraphNode): boolean {
+  return Boolean(node.run_id || node.runtime_overlay);
 }
 
 function findNodeByRef(nodes: TaskGraphNode[], ref: string): TaskGraphNode | undefined {

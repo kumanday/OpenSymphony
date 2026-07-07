@@ -116,7 +116,9 @@ The desktop task surface splits into three panes
 - **Backlog** (collapsible, right) — backlog-state Linear issues, now
   included in the task-graph snapshot (`LinearClient::project_task_graph_issues`
   returns them from the same single project scan that already served the
-  identifier lookup). Cards use the Current pane's grammar with faded
+  identifier lookup; the scan also carries unrequested *active*-state issues,
+  so a task promoted Backlog→Todo appears in Current even before the
+  orchestrator control plane tracks it). Cards use the Current pane's grammar with faded
   edges; hovering or selecting a backlog task boldens its full **ancestry
   critical path** — every unfinished upstream chain that must complete to
   unblock it — across both panes, and dims unrelated backlog cards.
@@ -215,7 +217,7 @@ testing, `?memory=<deep-link>` on the desktop dev server (composable with
   (`gateway_task_graph_includes_backlog_issues_with_cross_edges`,
   `gateway_serves_memory_completed_tasks`),
   `crates/opensymphony-linear/tests/linear_client.rs`
-  (`project_task_graph_issues_return_requested_and_backlog_from_one_scan`),
+  (`project_task_graph_issues_return_requested_backlog_and_active_from_one_scan`),
   and the memory crate's PR-evidence projection unit test.
 
 When iterating on visuals, extend these fixtures and tests rather than

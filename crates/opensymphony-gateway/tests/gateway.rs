@@ -65,11 +65,12 @@ impl LinearTaskGraphClient for FakeLinearTaskGraphClient {
 }
 
 /// Fake that mirrors the real client's task-graph contract: requested
-/// identifiers plus every backlog-state issue from the project scan.
+/// identifiers plus every unrequested backlog- or active-state issue from
+/// the project scan.
 #[derive(Clone)]
 struct BacklogLinearTaskGraphClient {
     issues: Vec<TrackerIssue>,
-    backlog: Vec<TrackerIssue>,
+    unrequested: Vec<TrackerIssue>,
 }
 
 #[async_trait]
@@ -91,7 +92,7 @@ impl LinearTaskGraphClient for BacklogLinearTaskGraphClient {
 
     async fn task_graph_issues(&self, identifiers: &[String]) -> Result<Vec<TrackerIssue>, String> {
         let mut issues = self.issues_by_identifiers(identifiers).await?;
-        issues.extend(self.backlog.iter().cloned());
+        issues.extend(self.unrequested.iter().cloned());
         Ok(issues)
     }
 }
@@ -2133,11 +2134,36 @@ async fn gateway_task_graph_includes_backlog_issues_with_cross_edges() {
         created_at: now,
         updated_at: now,
     };
+    // An issue just promoted Backlog→Todo: active in Linear but untracked by
+    // the control plane, so it arrives only via the unrequested scan bucket.
+    let promoted_issue = TrackerIssue {
+        id: "COE-901".to_owned(),
+        identifier: "COE-901".to_owned(),
+        url: "https://linear.app/kumanday/issue/COE-901".to_owned(),
+        title: "Freshly promoted todo".to_owned(),
+        description: None,
+        priority: None,
+        state: "Todo".to_owned(),
+        state_kind: TrackerIssueStateKind::Unstarted,
+        branch_name: None,
+        pr_url: None,
+        labels: Vec::new(),
+        project_id: Some("proj-open".to_owned()),
+        project_slug: Some("opensymphony-bootstrap".to_owned()),
+        project_name: Some("OpenSymphony".to_owned()),
+        parent_id: None,
+        parent: None,
+        project_milestone: None,
+        blocked_by: Vec::new(),
+        sub_issues: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
     let store = SnapshotStore::new(snapshot);
     let server = GatewayServer::new(store).with_linear_task_graph(Some(std::sync::Arc::new(
         BacklogLinearTaskGraphClient {
             issues,
-            backlog: vec![backlog_issue],
+            unrequested: vec![backlog_issue, promoted_issue],
         },
     )));
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -2162,7 +2188,19 @@ async fn gateway_task_graph_includes_backlog_issues_with_cross_edges() {
         .await
         .expect("decode task graph");
 
-    assert_eq!(response.nodes.len(), 2);
+    assert_eq!(response.nodes.len(), 3);
+    // The untracked-but-active issue lands in the Current pane as Todo
+    // instead of vanishing until the orchestrator picks it up.
+    let promoted_node = response
+        .nodes
+        .iter()
+        .find(|node| node.identifier == "COE-901")
+        .expect("promoted todo issue should be present in the task graph");
+    assert_eq!(
+        promoted_node.state_category,
+        opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphStateCategory::Todo,
+    );
+    assert!(promoted_node.runtime_overlay.is_none());
     let backlog_node = response
         .nodes
         .iter()
