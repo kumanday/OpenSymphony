@@ -431,6 +431,7 @@ pub struct CodeIntelDocumentInput {
 pub struct CodeIntelSymbolInput {
     pub kind: String,
     pub name: String,
+    pub container_chain: Vec<String>,
     pub signature: Option<String>,
     pub start_line: usize,
     pub start_col: usize,
