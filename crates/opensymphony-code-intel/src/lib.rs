@@ -388,6 +388,10 @@ pub struct SymbolRecord {
     pub name: String,
     pub span: SourceSpan,
     pub rendered_span: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub container_chain: Vec<String>,
     pub parser_version: String,
     pub query_pack_version: String,
 }
@@ -1491,11 +1495,15 @@ fn run_query_pack(
                     && let Some(name) =
                         symbol_name_for_capture(&capture_name, capture.node, source)?
                 {
+                    let (container_name, container_chain) =
+                        rust_impl_container(language, &kind, capture.node, source)?;
                     symbols.push(SymbolRecord {
                         kind,
                         name,
                         span: span.clone(),
                         rendered_span: rendered_span.clone(),
+                        container_name,
+                        container_chain,
                         parser_version: TREE_SITTER_VERSION.to_string(),
                         query_pack_version: query_pack.version.clone(),
                     });
@@ -1512,7 +1520,113 @@ fn run_query_pack(
         }
     }
 
+    assign_symbol_containers(&mut symbols);
+
     Ok((symbols, captures))
+}
+
+fn assign_symbol_containers(symbols: &mut [SymbolRecord]) {
+    let mut indexes = (0..symbols.len()).collect::<Vec<_>>();
+    indexes.sort_by_key(|index| {
+        std::cmp::Reverse(
+            symbols[*index]
+                .span
+                .end_byte
+                .saturating_sub(symbols[*index].span.start_byte),
+        )
+    });
+    for index in indexes {
+        let existing_chain = symbols[index].container_chain.clone();
+        let parent_index = symbols
+            .iter()
+            .enumerate()
+            .filter(|(candidate_index, candidate)| {
+                *candidate_index != index
+                    && span_strictly_contains(&candidate.span, &symbols[index].span)
+            })
+            .min_by_key(|(_, candidate)| {
+                (
+                    candidate
+                        .span
+                        .end_byte
+                        .saturating_sub(candidate.span.start_byte),
+                    std::cmp::Reverse(candidate.span.start_byte),
+                )
+            })
+            .map(|(candidate_index, _)| candidate_index);
+
+        if let Some(parent_index) = parent_index {
+            let parent = symbols[parent_index].clone();
+            let mut chain = parent.container_chain;
+            chain.push(parent.name.clone());
+            if existing_chain.is_empty() {
+                symbols[index].container_name = Some(parent.name);
+                symbols[index].container_chain = chain;
+            } else if !existing_chain.starts_with(&chain) {
+                chain.extend(existing_chain);
+                symbols[index].container_chain = chain;
+            }
+        }
+    }
+}
+
+fn rust_impl_container(
+    language: SourceLanguage,
+    kind: &SymbolKind,
+    node: Node<'_>,
+    source: &[u8],
+) -> Result<(Option<String>, Vec<String>), CodeIntelError> {
+    if language != SourceLanguage::Rust || kind != &SymbolKind::Method {
+        return Ok((None, Vec::new()));
+    }
+    let Some(impl_item) = ancestor_node(node, "impl_item") else {
+        return Ok((None, Vec::new()));
+    };
+    let Some(owner) = impl_item
+        .child_by_field_name("type")
+        .or_else(|| first_named_child_kind(impl_item, &["type_identifier", "generic_type"]))
+    else {
+        return Ok((None, Vec::new()));
+    };
+    let owner_parts = owner
+        .utf8_text(source)
+        .map(rust_container_parts)?
+        .unwrap_or_default();
+    let Some(owner_name) = owner_parts.last() else {
+        return Ok((None, Vec::new()));
+    };
+    let trait_name = impl_item
+        .child_by_field_name("trait")
+        .and_then(|node| node.utf8_text(source).ok())
+        .and_then(rust_container_part);
+    if let Some(trait_name) = trait_name {
+        let mut chain = owner_parts;
+        chain.push(trait_name.to_string());
+        Ok((Some(trait_name.to_string()), chain))
+    } else {
+        Ok((Some(owner_name.to_string()), owner_parts))
+    }
+}
+
+fn rust_container_part(text: &str) -> Option<&str> {
+    let trimmed = text.split('<').next().unwrap_or(text).trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn rust_container_parts(text: &str) -> Option<Vec<String>> {
+    let parts = rust_container_part(text)?
+        .split("::")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn span_strictly_contains(outer: &SourceSpan, inner: &SourceSpan) -> bool {
+    outer.start_byte <= inner.start_byte
+        && outer.end_byte >= inner.end_byte
+        && (outer.start_byte < inner.start_byte || outer.end_byte > inner.end_byte)
 }
 
 fn symbol_kind_for_capture(
@@ -1672,14 +1786,24 @@ fn is_test_function(language: SourceLanguage, node: Node<'_>, source: &[u8]) -> 
     }
 }
 
-fn has_ancestor(mut node: Node<'_>, kind: &str) -> bool {
+fn has_ancestor(node: Node<'_>, kind: &str) -> bool {
+    ancestor_node(node, kind).is_some()
+}
+
+fn ancestor_node<'tree>(mut node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     while let Some(parent) = node.parent() {
         if parent.kind() == kind {
-            return true;
+            return Some(parent);
         }
         node = parent;
     }
-    false
+    None
+}
+
+fn first_named_child_kind<'tree>(node: Node<'tree>, kinds: &[&str]) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|child| kinds.contains(&child.kind()))
 }
 
 fn has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
@@ -1778,6 +1902,8 @@ fn parse_lightweight_source(
                 .to_string(),
             rendered_span: span.render(),
             span,
+            container_name: None,
+            container_chain: Vec::new(),
             parser_version: LIGHTWEIGHT_PARSER_VERSION.to_string(),
             query_pack_version: query_pack,
         }],
@@ -2235,6 +2361,108 @@ mod tests {
             symbols.contains(&(SymbolKind::Test, "exercises_widget", "30:1-33:2")),
             "{symbols:?}"
         );
+    }
+
+    #[test]
+    fn rust_fixture_extracts_container_chains() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/complete.rs")),
+            RUST_COMPLETE,
+        )
+        .expect("fixture parses");
+
+        let trait_method = summary
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind == SymbolKind::Method
+                    && symbol.name == "run"
+                    && symbol.rendered_span == "15:5-15:19"
+            })
+            .expect("trait method symbol");
+
+        assert_eq!(trait_method.container_name.as_deref(), Some("Runnable"));
+        assert_eq!(trait_method.container_chain, vec!["Runnable"]);
+
+        let impl_method = summary
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind == SymbolKind::Method
+                    && symbol.name == "run"
+                    && symbol.rendered_span == "23:5-25:6"
+            })
+            .expect("impl method symbol");
+        assert_eq!(impl_method.container_name.as_deref(), Some("Widget"));
+        assert_eq!(impl_method.container_chain, vec!["Widget"]);
+    }
+
+    #[test]
+    fn rust_trait_impl_methods_include_trait_in_container_chain() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/trait_impl.rs")),
+            "struct Widget;\nimpl Display for Widget {\n    fn fmt(&self) {}\n}\n",
+        )
+        .expect("rust parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "fmt")
+            .expect("trait impl method");
+        assert_eq!(method.container_name.as_deref(), Some("Display"));
+        assert_eq!(method.container_chain, vec!["Widget", "Display"]);
+    }
+
+    #[test]
+    fn rust_impl_methods_keep_lexical_parent_chains() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/nested_impl.rs")),
+            "fn outer() {\n    struct Widget;\n    impl Widget {\n        fn run(&self) {}\n    }\n}\n",
+        )
+        .expect("rust parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
+            .expect("nested impl method");
+        assert_eq!(method.container_name.as_deref(), Some("Widget"));
+        assert_eq!(method.container_chain, vec!["outer", "Widget"]);
+    }
+
+    #[test]
+    fn rust_qualified_impl_owners_split_into_container_chain_parts() {
+        let summary = parse_rust_source(
+            Some(PathBuf::from("fixtures/rust/qualified_impl.rs")),
+            "mod m {\n    struct Widget;\n}\nimpl m::Widget {\n    fn run(&self) {}\n}\n",
+        )
+        .expect("rust parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
+            .expect("qualified impl method");
+        assert_eq!(method.container_name.as_deref(), Some("Widget"));
+        assert_eq!(method.container_chain, vec!["m", "Widget"]);
+    }
+
+    #[test]
+    fn nested_symbols_get_complete_parent_chains() {
+        let summary = parse_path(
+            "fixtures/python/nested.py",
+            "class Outer:\n    class Inner:\n        def run(self):\n            pass\n",
+        )
+        .expect("python parses");
+
+        let method = summary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
+            .expect("nested method");
+        assert_eq!(method.container_name.as_deref(), Some("Inner"));
+        assert_eq!(method.container_chain, vec!["Outer", "Inner"]);
     }
 
     #[test]
