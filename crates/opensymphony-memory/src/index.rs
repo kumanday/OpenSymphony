@@ -1015,14 +1015,21 @@ pub struct CodeSymbolRecord {
     pub name: String,
     pub container_symbol_id: Option<String>,
     pub container_chain: Vec<String>,
+    pub signature: Option<String>,
     pub start_line: usize,
     pub start_col: usize,
     pub end_line: usize,
     pub end_col: usize,
     pub start_byte: usize,
     pub end_byte: usize,
+    pub selection_start_line: usize,
+    pub selection_end_line: usize,
+    pub content_sha256: String,
     pub snippet_sha256: String,
+    pub parser_version: String,
+    pub query_pack_version: String,
     pub freshness: String,
+    pub indexed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1075,6 +1082,8 @@ pub struct CodeSymbolComparison {
     pub truncated: bool,
 }
 
+const CODE_SYMBOL_SELECT: &str = "symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, freshness, indexed_at";
+
 pub fn code_symbol_detail(
     config: &MemoryConfig,
     symbol_key: &str,
@@ -1103,9 +1112,9 @@ pub fn code_symbols_containing_span(
         return Ok(Vec::new());
     }
     let mut statement = connection
-        .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id",
-        )
+        .prepare(&format!(
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1302,12 +1311,16 @@ fn query_code_symbol_by_key(
     current_only: bool,
 ) -> Result<Option<CodeSymbolRecord>, MemoryError> {
     let sql = if current_only {
-        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        )
     } else {
-        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        )
     };
     let mut statement = connection
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
@@ -1340,7 +1353,7 @@ fn query_symbols_for_revision(
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id",
+            &format!("SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id"),
         )
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
@@ -1348,7 +1361,7 @@ fn query_symbols_for_revision(
         })?;
     let rows = statement
         .query_map(params![repo_id, revision], |row| {
-            let dirty = row.get::<_, i64>(18)?;
+            let dirty = row.get::<_, i64>(25)?;
             if dirty != 0 {
                 Ok(None)
             } else {
@@ -1469,14 +1482,21 @@ fn code_symbol_from_row(row: &duckdb::Row<'_>) -> Result<CodeSymbolRecord, duckd
             .filter(|part| !part.is_empty())
             .map(str::to_string)
             .collect(),
-        start_line: row.get::<_, i64>(10)? as usize,
-        start_col: row.get::<_, i64>(11)? as usize,
-        end_line: row.get::<_, i64>(12)? as usize,
-        end_col: row.get::<_, i64>(13)? as usize,
-        start_byte: row.get::<_, i64>(14)? as usize,
-        end_byte: row.get::<_, i64>(15)? as usize,
-        snippet_sha256: row.get(16)?,
-        freshness: row.get(17)?,
+        signature: row.get(10)?,
+        start_line: row.get::<_, i64>(11)? as usize,
+        start_col: row.get::<_, i64>(12)? as usize,
+        end_line: row.get::<_, i64>(13)? as usize,
+        end_col: row.get::<_, i64>(14)? as usize,
+        start_byte: row.get::<_, i64>(15)? as usize,
+        end_byte: row.get::<_, i64>(16)? as usize,
+        selection_start_line: row.get::<_, i64>(17)? as usize,
+        selection_end_line: row.get::<_, i64>(18)? as usize,
+        content_sha256: row.get(19)?,
+        snippet_sha256: row.get(20)?,
+        parser_version: row.get(21)?,
+        query_pack_version: row.get(22)?,
+        freshness: row.get(23)?,
+        indexed_at: row.get(24)?,
     })
 }
 

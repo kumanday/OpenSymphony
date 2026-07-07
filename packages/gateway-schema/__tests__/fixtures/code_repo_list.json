@@ -1,0 +1,17 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "repos": [
+    {
+      "repo_id": "opensymphony",
+      "display_root": "opensymphony",
+      "languages": ["rust"],
+      "document_count": 1,
+      "symbol_count": 2,
+      "edge_count": 1,
+      "freshness": "current",
+      "indexed_at": "2026-07-07T03:00:00Z",
+      "head_revision": "head-rev",
+      "worktree_dirty": false
+    }
+  ]
+}

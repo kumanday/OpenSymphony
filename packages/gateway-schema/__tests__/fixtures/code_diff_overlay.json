@@ -1,0 +1,27 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "repo_id": "opensymphony",
+  "base_revision": "base-rev",
+  "head_revision": "head-rev",
+  "added_symbols": [
+    {
+      "symbol_key": "new_feature",
+      "status": "added",
+      "after": {
+        "symbol_id": "new-feature-head",
+        "kind": "function",
+        "name": "new_feature",
+        "path_display": "src/lib.rs",
+        "container_chain": ["App"],
+        "span": { "start_line": 8, "start_col": 2, "end_line": 9, "end_col": 14 },
+        "freshness": "current"
+      }
+    }
+  ],
+  "removed_symbols": [],
+  "modified_symbols": [],
+  "blast_radius": [],
+  "unanalyzed_files": [],
+  "truncation": { "nodes_dropped": 0, "edges_dropped": 0 },
+  "generated_at": "2026-07-07T03:00:00Z"
+}

@@ -1,6 +1,7 @@
 pub mod action;
 pub mod approval;
 pub mod capability;
+pub mod code_graph;
 pub mod cursor;
 pub mod envelope;
 pub mod event_journal;

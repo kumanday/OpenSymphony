@@ -1071,6 +1071,7 @@ include!("okf.rs");
 include!("capture.rs");
 include!("query.rs");
 include!("graph.rs");
+include!("code_graph.rs");
 include!("docs_sync.rs");
 include!("archive.rs");
 include!("capture_render.rs");

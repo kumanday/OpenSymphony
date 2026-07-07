@@ -21,6 +21,10 @@ use opensymphony::opensymphony_gateway::{
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
+use opensymphony::opensymphony_gateway_schema::code_graph::{
+    CodeDiffOverlay, CodeFileOutline, CodeGraphFreshness, CodeGraphNodeKind, CodeGraphSnapshot,
+    CodeIndexReport, CodeIndexStatus, CodeRepoList, CodeSymbolDetail,
+};
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
 use opensymphony::opensymphony_gateway_schema::memory_graph::{
     MemoryBundleList, MemoryCommunityList, MemoryCompletedTaskPage, MemoryConceptDetail,
@@ -32,7 +36,11 @@ use opensymphony::opensymphony_gateway_schema::model_settings::{
 };
 use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
-use opensymphony::opensymphony_memory::{MemoryConfig, refresh_memory_index_from_okf};
+use opensymphony::opensymphony_memory::{
+    CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput, CodeIntelPersistBatch,
+    CodeIntelSymbolInput, MemoryConfig, persist_code_intel_documents,
+    refresh_memory_index_from_okf,
+};
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -326,6 +334,171 @@ Private graph body.
     )
     .expect("private concept should write");
     MemoryConfig::load(repo, Some(&config_path)).expect("memory config should load")
+}
+
+fn write_code_graph_fixture(repo: &std::path::Path) -> MemoryConfig {
+    let config = MemoryConfig::load(repo, None).expect("memory config should load");
+    persist_code_intel_documents(
+        &config,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("base-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_document(
+                "base-content",
+                vec![
+                    code_graph_symbol("struct", "App", &[], "struct App", 1, 0, 4, "app-base"),
+                    code_graph_symbol(
+                        "function",
+                        "run",
+                        &["App"],
+                        "fn run(&self)",
+                        6,
+                        2,
+                        20,
+                        "run-base",
+                    ),
+                    code_graph_symbol(
+                        "function",
+                        "legacy",
+                        &["App"],
+                        "fn legacy(&self)",
+                        22,
+                        2,
+                        36,
+                        "legacy-base",
+                    ),
+                ],
+                Vec::new(),
+                Vec::new(),
+            )],
+        },
+    )
+    .expect("base code graph fixture should persist");
+    persist_code_intel_documents(
+        &config,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("head-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_document(
+                "head-content",
+                vec![
+                    code_graph_symbol("struct", "App", &[], "struct App", 1, 0, 4, "app-base"),
+                    code_graph_symbol(
+                        "function",
+                        "run",
+                        &["App"],
+                        "fn run(&self) -> Result<()>",
+                        6,
+                        2,
+                        20,
+                        "run-head",
+                    ),
+                    code_graph_symbol(
+                        "function",
+                        "new_feature",
+                        &["App"],
+                        "fn new_feature(&self)",
+                        38,
+                        2,
+                        54,
+                        "new-feature-head",
+                    ),
+                ],
+                vec![CodeIntelEdgeInput {
+                    edge_kind: "reference.call".to_string(),
+                    target_hint: Some("new_feature".to_string()),
+                    confidence: "query_pack:calls".to_string(),
+                    start_line: 6,
+                    start_col: 6,
+                    end_line: 6,
+                    end_col: 18,
+                    start_byte: 8,
+                    end_byte: 16,
+                }],
+                vec![CodeIntelDiagnosticInput {
+                    kind: "warning".to_string(),
+                    severity: "warning".to_string(),
+                    message: "fixture diagnostic".to_string(),
+                    start_line: 6,
+                    start_col: 2,
+                    end_line: 6,
+                    end_col: 20,
+                    start_byte: 8,
+                    end_byte: 16,
+                }],
+            )],
+        },
+    )
+    .expect("head code graph fixture should persist");
+    config
+}
+
+fn code_graph_document(
+    content_sha256: &str,
+    symbols: Vec<CodeIntelSymbolInput>,
+    edges: Vec<CodeIntelEdgeInput>,
+    diagnostics: Vec<CodeIntelDiagnosticInput>,
+) -> CodeIntelDocumentInput {
+    CodeIntelDocumentInput {
+        path: "src/lib.rs".into(),
+        language: "rust".to_string(),
+        content_sha256: content_sha256.to_string(),
+        parser_id: "tree-sitter".to_string(),
+        parser_version: "tree-sitter-rust-vfixture".to_string(),
+        query_pack_version: "rust-query-pack-vfixture".to_string(),
+        byte_len: 96,
+        line_count: 8,
+        symbols,
+        edges,
+        diagnostics,
+    }
+}
+
+fn code_graph_symbol(
+    kind: &str,
+    name: &str,
+    container_chain: &[&str],
+    signature: &str,
+    start_line: usize,
+    start_col: usize,
+    end_byte: usize,
+    snippet_sha256: &str,
+) -> CodeIntelSymbolInput {
+    CodeIntelSymbolInput {
+        kind: kind.to_string(),
+        name: name.to_string(),
+        container_chain: container_chain
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        signature: Some(signature.to_string()),
+        start_line,
+        start_col,
+        end_line: start_line + 1,
+        end_col: start_col + 12,
+        start_byte: start_col,
+        end_byte,
+        selection_start_line: start_line,
+        selection_end_line: start_line,
+        snippet_sha256: snippet_sha256.to_string(),
+    }
+}
+
+fn run_git(workspace: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(args)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
@@ -1959,6 +2132,393 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
         invalid_visibility_body.pointer("/error/code"),
         Some(&serde_json::json!("invalid_visibility"))
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_code_graph_contract_endpoints() {
+    let repo = tempfile::tempdir().expect("memory repo");
+    let config = write_code_graph_fixture(repo.path());
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = opensymphony::opensymphony_domain::InMemoryEventJournal::new(100, 16);
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = GatewayServer::with_journal(store, journal.clone(), broker)
+        .with_memory_config(Some(config));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}/api/v1/code");
+
+    let repos = client
+        .get(format!("{base}/repos"))
+        .send()
+        .await
+        .expect("fetch code repos")
+        .json::<CodeRepoList>()
+        .await
+        .expect("decode code repos");
+    assert_eq!(repos.schema_version.major, 1);
+    assert_eq!(repos.repos.len(), 1);
+    assert_eq!(repos.repos[0].repo_id, "opensymphony");
+    assert_eq!(repos.repos[0].document_count, 1);
+    assert_eq!(repos.repos[0].freshness, CodeGraphFreshness::Current);
+    assert!(
+        !serde_json::to_string(&repos)
+            .unwrap()
+            .contains(&repo.path().display().to_string())
+    );
+
+    let atlas_graph = client
+        .get(format!(
+            "{base}/repos/opensymphony/graph?mode=atlas&aggregate=directory"
+        ))
+        .send()
+        .await
+        .expect("fetch atlas code graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode atlas code graph");
+    assert_eq!(
+        atlas_graph.mode,
+        opensymphony::opensymphony_gateway_schema::code_graph::CodeGraphMode::Atlas
+    );
+    assert!(atlas_graph.nodes.iter().any(|node| {
+        node.kind == CodeGraphNodeKind::File && node.path_display.as_deref() == Some("src/lib.rs")
+    }));
+
+    let graph = client
+        .get(format!(
+            "{base}/repos/opensymphony/graph?mode=file&path=src/lib.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch code graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode code graph");
+    let graph_json = serde_json::to_string(&graph).expect("graph serializes");
+    assert_eq!(
+        graph.mode,
+        opensymphony::opensymphony_gateway_schema::code_graph::CodeGraphMode::File
+    );
+    assert!(graph_json.contains("new_feature"));
+    assert!(!graph_json.contains("legacy"));
+    assert!(!graph_json.contains("workspace_path"));
+    assert!(!graph_json.contains(&repo.path().display().to_string()));
+    let run_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CodeGraphNodeKind::Symbol && node.label == "run")
+        .expect("run symbol node");
+    let run_symbol_key = run_node.symbol_key.as_deref().expect("symbol key");
+    assert_eq!(run_node.path_display.as_deref(), Some("src/lib.rs"));
+    assert_eq!(run_node.container_chain, vec!["App".to_string()]);
+    assert!(run_node.diagnostic_count > 0);
+
+    let neighborhood_graph = client
+        .get(format!(
+            "{base}/repos/opensymphony/graph?mode=neighborhood&symbol_key={run_symbol_key}&depth=1"
+        ))
+        .send()
+        .await
+        .expect("fetch neighborhood code graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode neighborhood code graph");
+    assert_eq!(
+        neighborhood_graph.mode,
+        opensymphony::opensymphony_gateway_schema::code_graph::CodeGraphMode::Neighborhood
+    );
+    assert!(
+        neighborhood_graph
+            .nodes
+            .iter()
+            .any(|node| node.symbol_key.as_deref() == Some(run_symbol_key))
+    );
+
+    let stale_graph = client
+        .get(format!(
+            "{base}/repos/opensymphony/graph?mode=file&path=src/lib.rs&include_stale=true"
+        ))
+        .send()
+        .await
+        .expect("fetch stale code graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode stale code graph");
+    assert!(
+        stale_graph
+            .filters_applied
+            .contains(&"include_stale:true".to_string())
+    );
+    assert!(
+        serde_json::to_string(&stale_graph)
+            .unwrap()
+            .contains("legacy")
+    );
+
+    let detail = client
+        .get(format!(
+            "{base}/repos/opensymphony/symbols/{}",
+            run_symbol_key
+        ))
+        .send()
+        .await
+        .expect("fetch code symbol")
+        .json::<CodeSymbolDetail>()
+        .await
+        .expect("decode code symbol");
+    assert_eq!(detail.symbol_key, run_symbol_key);
+    assert_eq!(detail.path_display, "src/lib.rs");
+    assert_eq!(detail.container_chain, vec!["App".to_string()]);
+    assert!(detail.source_snippet.is_none());
+    assert!(
+        detail
+            .diagnostics
+            .iter()
+            .any(|diag| diag.severity == "warning")
+    );
+
+    let diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=base-rev&head_revision=head-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch code diff overlay")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode code diff overlay");
+    assert_eq!(diff.base_revision, "base-rev");
+    assert_eq!(diff.head_revision, "head-rev");
+    assert!(diff.added_symbols.iter().any(|symbol| {
+        symbol
+            .after
+            .as_ref()
+            .is_some_and(|side| side.name == "new_feature")
+    }));
+    assert!(diff.removed_symbols.iter().any(|symbol| {
+        symbol
+            .before
+            .as_ref()
+            .is_some_and(|side| side.name == "legacy")
+    }));
+    assert!(
+        diff.modified_symbols
+            .iter()
+            .any(|symbol| { symbol.after.as_ref().is_some_and(|side| side.name == "run") })
+    );
+
+    let invalid_path = client
+        .get(format!(
+            "{base}/repos/opensymphony/graph?mode=file&path=/tmp/src/lib.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch invalid code graph");
+    assert_eq!(invalid_path.status(), reqwest::StatusCode::BAD_REQUEST);
+    let invalid_path_body = invalid_path
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode invalid code graph response");
+    assert_eq!(
+        invalid_path_body.pointer("/error/code"),
+        Some(&serde_json::json!("invalid_code_graph_request"))
+    );
+
+    let report = client
+        .post(format!("{base}/repos/opensymphony/index"))
+        .send()
+        .await
+        .expect("index code repo")
+        .json::<CodeIndexReport>()
+        .await
+        .expect("decode code index report");
+    assert_eq!(report.status, CodeIndexStatus::Completed);
+    assert_eq!(report.cursor.partition, "code-graph:opensymphony");
+    let second_report = client
+        .post(format!("{base}/repos/opensymphony/index"))
+        .send()
+        .await
+        .expect("index code repo again")
+        .json::<CodeIndexReport>()
+        .await
+        .expect("decode second code index report");
+    assert_eq!(second_report.status, CodeIndexStatus::Completed);
+    let events = journal.all_events().await;
+    let code_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeGraphUpdated { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(code_events.len(), 2);
+    let code_event = code_events[0];
+    let second_code_event = code_events[1];
+    let first_cursor_sequence = code_event
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.pointer("/cursor/sequence"))
+        .and_then(|value| value.as_u64())
+        .expect("first code graph cursor sequence");
+    let second_cursor_sequence = second_code_event
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.pointer("/cursor/sequence"))
+        .and_then(|value| value.as_u64())
+        .expect("second code graph cursor sequence");
+    assert!(second_cursor_sequence > first_cursor_sequence);
+    assert_eq!(code_event.kind.kind_tag(), "code_graph_updated");
+    let payload = code_event.payload.as_ref().expect("event payload");
+    assert_eq!(
+        payload.pointer("/repo_id"),
+        Some(&serde_json::json!("opensymphony"))
+    );
+    assert_eq!(
+        payload.pointer("/head_revision"),
+        Some(&serde_json::json!("head-rev"))
+    );
+    assert_eq!(
+        payload.pointer("/cursor/partition"),
+        Some(&serde_json::json!("code-graph:opensymphony"))
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("COE-533");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace dirs");
+    std::fs::write(
+        workspace.join("src/lib.rs"),
+        "pub struct App;\nimpl App { pub fn run(&self) {} }\n",
+    )
+    .expect("workspace file");
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.daemon.workspace_root = root.path().to_string_lossy().to_string();
+    snapshot.issues[0].identifier = "COE-533".to_string();
+    snapshot.issues[0].workspace_path_suffix = "COE-533".to_string();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let outline = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/outline?file_path=src/lib.rs&repo_id=opensymphony"
+        ))
+        .send()
+        .await
+        .expect("fetch run outline")
+        .json::<CodeFileOutline>()
+        .await
+        .expect("decode run outline");
+    assert_eq!(outline.run_id, "COE-533");
+    assert_eq!(outline.repo_id.as_deref(), Some("opensymphony"));
+    assert_eq!(outline.path, "src/lib.rs");
+    let outline_json = serde_json::to_string(&outline).expect("outline serializes");
+    assert!(outline.symbols.iter().all(|symbol| {
+        symbol.path == "src/lib.rs"
+            && symbol.span.end_line >= symbol.span.start_line
+            && symbol.selection_span.end_line >= symbol.selection_span.start_line
+    }));
+    assert!(!outline_json.contains("workspace_path"));
+    assert!(!outline_json.contains(&root.path().display().to_string()));
+
+    let invalid_outline = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/outline?file_path=../secret.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch invalid run outline");
+    assert_eq!(invalid_outline.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
+    let memory_repo = tempfile::tempdir().expect("memory repo");
+    let config = write_code_graph_fixture(memory_repo.path());
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("COE-533");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace dirs");
+    run_git(&workspace, &["init"]);
+    run_git(&workspace, &["checkout", "-b", "main"]);
+    run_git(&workspace, &["config", "user.email", "test@example.com"]);
+    run_git(&workspace, &["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join("src/lib.rs"), "pub fn base() {}\n").expect("base file");
+    run_git(&workspace, &["add", "src/lib.rs"]);
+    run_git(&workspace, &["commit", "-m", "base"]);
+    let base_revision = run_git(&workspace, &["rev-parse", "HEAD"]);
+    run_git(&workspace, &["checkout", "-b", "feat/code-graph"]);
+    std::fs::write(
+        workspace.join("src/lib.rs"),
+        "pub fn base() {}\npub fn head() {}\n",
+    )
+    .expect("head file");
+    run_git(&workspace, &["add", "src/lib.rs"]);
+    run_git(&workspace, &["commit", "-m", "head"]);
+    let head_revision = run_git(&workspace, &["rev-parse", "HEAD"]);
+
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.daemon.workspace_root = root.path().to_string_lossy().to_string();
+    snapshot.issues[0].identifier = "COE-533".to_string();
+    snapshot.issues[0].workspace_path_suffix = "COE-533".to_string();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store).with_memory_config(Some(config));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let overlay = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/diff-overlay?repo_id=opensymphony"
+        ))
+        .send()
+        .await
+        .expect("fetch run code diff overlay")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode run code diff overlay");
+    assert_eq!(overlay.repo_id, "opensymphony");
+    assert_eq!(overlay.base_revision, base_revision);
+    assert_eq!(overlay.head_revision, head_revision);
+    let overlay_json = serde_json::to_string(&overlay).expect("overlay serializes");
+    assert!(!overlay_json.contains("workspace_path"));
+    assert!(!overlay_json.contains(&root.path().display().to_string()));
 
     server_task.abort();
 }

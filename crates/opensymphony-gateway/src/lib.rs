@@ -35,6 +35,7 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
+    envelope::{EntityKind, EntityRef},
     event_journal::{EventKind, EventPage, EventRecord, JournalError, StreamError},
     terminal::TerminalSnapshot,
     timeline::{
@@ -42,9 +43,12 @@ use crate::opensymphony_gateway_schema::{
     },
 };
 use crate::opensymphony_memory::{
-    DEFAULT_MEMORY_GRAPH_BUNDLE_ID, MemoryConfig, MemoryError, MemoryGraphAccess,
-    MemoryGraphCommunityOptions, MemoryGraphProjectionError, memory_completed_task_rows,
-    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
+    CodeGraphProjectionError, CodeGraphSnapshotOptions, DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
+    MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
+    code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
+    code_graph_updated_event, memory_completed_task_rows, memory_concept_detail,
+    memory_graph_bundles, memory_graph_communities_with_options,
     memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
@@ -81,7 +85,12 @@ pub use crate::opensymphony_gateway_schema::{
     capability::{
         AuthMode, FeatureCapability, GatewayCapabilities, HarnessCapability, TransportCapability,
     },
+    code_graph::{
+        CodeDiffOverlay, CodeFileOutline, CodeGraphAggregate, CodeGraphMode, CodeGraphSnapshot,
+        CodeIndexReport, CodeRepoList, CodeSymbolDetail,
+    },
     cursor::PageCursor,
+    event_journal::EventActor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
     memory_graph::{
         MemoryBundleList, MemoryCommunityList, MemoryCompletedTask, MemoryCompletedTaskPage,
@@ -745,6 +754,17 @@ impl GatewayServer {
                 "/api/v1/memory/completed-tasks",
                 get(get_memory_completed_tasks),
             )
+            .route("/api/v1/code/repos", get(get_code_repos))
+            .route("/api/v1/code/repos/{repo_id}/graph", get(get_code_graph))
+            .route(
+                "/api/v1/code/repos/{repo_id}/symbols/{symbol_key}",
+                get(get_code_symbol_detail),
+            )
+            .route(
+                "/api/v1/code/repos/{repo_id}/diff-overlay",
+                get(get_code_diff_overlay),
+            )
+            .route("/api/v1/code/repos/{repo_id}/index", post(index_code_repo))
             .route("/api/v1/projects", get(list_projects))
             .route("/api/v1/projects/{project_id}", get(get_project))
             .route(
@@ -752,6 +772,14 @@ impl GatewayServer {
                 get(get_task_graph),
             )
             .route("/api/v1/runs/{run_id}", get(get_run_detail))
+            .route(
+                "/api/v1/runs/{run_id}/code/outline",
+                get(get_run_code_outline),
+            )
+            .route(
+                "/api/v1/runs/{run_id}/code/diff-overlay",
+                get(get_run_code_diff_overlay),
+            )
             .route("/api/v1/runs/{run_id}/events", get(get_run_events))
             .route("/api/v1/runs/{run_id}/files", get(get_run_files))
             .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
@@ -1529,6 +1557,459 @@ fn completed_task_matches(row: &MemoryCompletedTask, needle: &str) -> bool {
             pr.title.to_ascii_lowercase().contains(needle)
                 || format!("#{}", pr.number).contains(needle)
         })
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct CodeReposQuery {
+    include_stale: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct CodeGraphQuery {
+    mode: Option<String>,
+    path: Option<String>,
+    symbol_key: Option<String>,
+    depth: Option<usize>,
+    aggregate: Option<String>,
+    include_stale: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct CodeSymbolQuery {
+    include_stale: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct CodeDiffQuery {
+    base_revision: Option<String>,
+    base: Option<String>,
+    head_revision: Option<String>,
+    head: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RunCodeOutlineQuery {
+    file_path: Option<String>,
+    path: Option<String>,
+    repo_id: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RunCodeDiffOverlayQuery {
+    repo_id: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn get_code_repos(
+    State(state): State<GatewayState>,
+    Query(params): Query<CodeReposQuery>,
+) -> Result<Json<CodeRepoList>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?;
+    code_graph_repos(config, params.include_stale.unwrap_or(false))
+        .map(Json)
+        .map_err(code_graph_error)
+}
+
+async fn get_code_graph(
+    State(state): State<GatewayState>,
+    AxumPath(repo_id): AxumPath<String>,
+    Query(params): Query<CodeGraphQuery>,
+) -> Result<Json<CodeGraphSnapshot>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?;
+    let options = CodeGraphSnapshotOptions {
+        mode: parse_code_graph_mode(params.mode.as_deref())?,
+        path: params.path,
+        symbol_key: params.symbol_key,
+        depth: params.depth.unwrap_or(1).clamp(1, 8),
+        aggregate: parse_code_graph_aggregate(params.aggregate.as_deref())?,
+        include_stale: params.include_stale.unwrap_or(false),
+    };
+    code_graph_snapshot(config, &repo_id, options)
+        .map(Json)
+        .map_err(code_graph_error)
+}
+
+async fn get_code_symbol_detail(
+    State(state): State<GatewayState>,
+    AxumPath((repo_id, symbol_key)): AxumPath<(String, String)>,
+    Query(params): Query<CodeSymbolQuery>,
+) -> Result<Json<CodeSymbolDetail>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?;
+    code_graph_symbol_detail(
+        config,
+        &repo_id,
+        &symbol_key,
+        params.include_stale.unwrap_or(false),
+    )
+    .map(Json)
+    .map_err(code_graph_error)
+}
+
+async fn get_code_diff_overlay(
+    State(state): State<GatewayState>,
+    AxumPath(repo_id): AxumPath<String>,
+    Query(params): Query<CodeDiffQuery>,
+) -> Result<Json<CodeDiffOverlay>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?;
+    let base_revision = revision_param(params.base_revision, params.base, "base_revision")?;
+    let head_revision = revision_param(params.head_revision, params.head, "head_revision")?;
+    code_graph_diff_overlay(
+        config,
+        &repo_id,
+        &base_revision,
+        &head_revision,
+        params.limit.unwrap_or(500).clamp(1, 5_000),
+    )
+    .map(Json)
+    .map_err(code_graph_error)
+}
+
+async fn index_code_repo(
+    State(state): State<GatewayState>,
+    AxumPath(repo_id): AxumPath<String>,
+) -> Result<Json<CodeIndexReport>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?;
+    let report = code_graph_index_report(config, &repo_id).map_err(code_graph_error)?;
+    if matches!(
+        report.status,
+        crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Completed
+    ) {
+        let update = code_graph_updated_event(config, &repo_id, report.head_revision.clone())
+            .map_err(code_graph_error)?;
+        let payload = serde_json::to_value(&update).map_err(|_| {
+            code_graph_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "code_graph_event_error",
+                "failed to serialize code graph update event",
+            )
+        })?;
+        let event = EventRecord::builder()
+            .actor(EventActor::system("gateway"))
+            .entity_ref(EntityRef {
+                kind: EntityKind::Repository,
+                id: repo_id.clone(),
+                identifier: None,
+            })
+            .kind(EventKind::CodeGraphUpdated {
+                repo_id: repo_id.clone(),
+            })
+            .summary(format!("code graph updated for {repo_id}"))
+            .payload(payload)
+            .happened_at(update.updated_at)
+            .build();
+        state.journal.append(event).await.map_err(|_| {
+            code_graph_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "event_journal_error",
+                "failed to append code graph update event",
+            )
+        })?;
+    }
+    Ok(Json(report))
+}
+
+async fn get_run_code_outline(
+    State(state): State<GatewayState>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(params): Query<RunCodeOutlineQuery>,
+) -> Result<Json<CodeFileOutline>, (StatusCode, Json<serde_json::Value>)> {
+    let envelope = state.store.current().await;
+    let issue = find_issue_snapshot(&envelope, &run_id).ok_or_else(|| {
+        code_graph_response(StatusCode::NOT_FOUND, "run_not_found", "run not found")
+    })?;
+    let workspace_path = workspace_path_for_issue(&envelope, issue).ok_or_else(|| {
+        code_graph_response(
+            StatusCode::NOT_FOUND,
+            "workspace_not_found",
+            "run workspace is not available",
+        )
+    })?;
+    let raw_path = params
+        .file_path
+        .as_deref()
+        .or(params.path.as_deref())
+        .ok_or_else(|| {
+            code_graph_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_code_path",
+                "`file_path` is required",
+            )
+        })?;
+    let relative_path = validate_workspace_relative_path(raw_path)?;
+    let file_path = contained_workspace_path(&workspace_path, &relative_path)?;
+    let source = tokio::fs::read_to_string(&file_path).await.map_err(|_| {
+        code_graph_response(
+            StatusCode::NOT_FOUND,
+            "code_file_not_found",
+            "requested run file is not available",
+        )
+    })?;
+    let repo_id = params
+        .repo_id
+        .or_else(|| code_repo_id_for_workspace(&workspace_path));
+    code_file_outline_from_source(&issue.identifier, repo_id, &relative_path, &source)
+        .map(Json)
+        .map_err(code_graph_memory_error)
+}
+
+async fn get_run_code_diff_overlay(
+    State(state): State<GatewayState>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(params): Query<RunCodeDiffOverlayQuery>,
+) -> Result<Json<CodeDiffOverlay>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?;
+    let envelope = state.store.current().await;
+    let issue = find_issue_snapshot(&envelope, &run_id).ok_or_else(|| {
+        code_graph_response(StatusCode::NOT_FOUND, "run_not_found", "run not found")
+    })?;
+    let workspace_path = workspace_path_for_issue(&envelope, issue).ok_or_else(|| {
+        code_graph_response(
+            StatusCode::NOT_FOUND,
+            "workspace_not_found",
+            "run workspace is not available",
+        )
+    })?;
+    let repo_id = params
+        .repo_id
+        .or_else(|| code_repo_id_for_workspace(&workspace_path))
+        .ok_or_else(|| {
+            code_graph_response(
+                StatusCode::BAD_REQUEST,
+                "repo_id_required",
+                "run code diff overlay requires a repo id",
+            )
+        })?;
+    let (base_revision, head_revision) = tokio::task::spawn_blocking({
+        let workspace_path = workspace_path.clone();
+        move || {
+            let base = workspace_comparison_base(&workspace_path)?;
+            let head = command_single_line(&workspace_path, "git", &["rev-parse", "HEAD"])?;
+            Ok::<_, String>((base.merge_base, head))
+        }
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("code diff resolver task failed: {error}")))
+    .map_err(|_| {
+        code_graph_response(
+            StatusCode::CONFLICT,
+            "revision_unavailable",
+            "run revisions could not be resolved",
+        )
+    })?;
+    code_graph_diff_overlay(
+        config,
+        &repo_id,
+        &base_revision,
+        &head_revision,
+        params.limit.unwrap_or(500).clamp(1, 5_000),
+    )
+    .map(Json)
+    .map_err(code_graph_error)
+}
+
+fn revision_param(
+    canonical: Option<String>,
+    alias: Option<String>,
+    name: &str,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    canonical
+        .or(alias)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            code_graph_response(
+                StatusCode::BAD_REQUEST,
+                "revision_required",
+                &format!("`{name}` is required"),
+            )
+        })
+}
+
+fn parse_code_graph_mode(
+    value: Option<&str>,
+) -> Result<CodeGraphMode, (StatusCode, Json<serde_json::Value>)> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None | Some("atlas") => Ok(CodeGraphMode::Atlas),
+        Some("file") => Ok(CodeGraphMode::File),
+        Some("neighborhood") => Ok(CodeGraphMode::Neighborhood),
+        Some(_) => Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_graph_mode",
+            "unsupported code graph mode",
+        )),
+    }
+}
+
+fn parse_code_graph_aggregate(
+    value: Option<&str>,
+) -> Result<Option<CodeGraphAggregate>, (StatusCode, Json<serde_json::Value>)> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None => Ok(None),
+        Some("directory") => Ok(Some(CodeGraphAggregate::Directory)),
+        Some("community") => Ok(Some(CodeGraphAggregate::Community)),
+        Some(_) => Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_graph_aggregate",
+            "unsupported code graph aggregate",
+        )),
+    }
+}
+
+fn validate_workspace_relative_path(
+    raw_path: &str,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let path = StdPath::new(raw_path);
+    if path.is_absolute() {
+        return Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_path",
+            "absolute paths are not allowed",
+        ));
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_string_lossy().to_string());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(code_graph_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_code_path",
+                    "parent traversal is not allowed",
+                ));
+            }
+            _ => {
+                return Err(code_graph_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_code_path",
+                    "unsupported path component",
+                ));
+            }
+        }
+    }
+    if parts.is_empty() {
+        Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_path",
+            "path must not be empty",
+        ))
+    } else {
+        Ok(parts.join("/"))
+    }
+}
+
+fn contained_workspace_path(
+    workspace_path: &StdPath,
+    relative_path: &str,
+) -> Result<PathBuf, (StatusCode, Json<serde_json::Value>)> {
+    let root = normalize_path(workspace_path);
+    let candidate = normalize_path(&root.join(relative_path));
+    if candidate.starts_with(&root) {
+        Ok(candidate)
+    } else {
+        Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_path",
+            "path is outside the workspace",
+        ))
+    }
+}
+
+fn code_repo_id_for_workspace(workspace_path: &StdPath) -> Option<String> {
+    let remote = command_single_line(workspace_path, "git", &["remote", "get-url", "origin"]).ok();
+    remote
+        .as_deref()
+        .and_then(repo_id_from_remote_url)
+        .or_else(|| {
+            workspace_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+        })
+}
+
+fn repo_id_from_remote_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches(".git").trim_end_matches('/');
+    let name = trimmed
+        .rsplit(['/', ':'])
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    Some(name.to_string())
+}
+
+fn configured_code_memory(
+    state: &GatewayState,
+) -> Result<&MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
+    state.memory_config.as_ref().ok_or_else(|| {
+        code_graph_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "memory_not_configured",
+            "code graph endpoints require a configured memory catalog",
+        )
+    })
+}
+
+fn code_graph_error(error: CodeGraphProjectionError) -> (StatusCode, Json<serde_json::Value>) {
+    let message = error.to_string();
+    match error {
+        CodeGraphProjectionError::RepoNotFound(_) => {
+            code_graph_response(StatusCode::NOT_FOUND, "code_repo_not_found", &message)
+        }
+        CodeGraphProjectionError::SymbolNotFound(_) => {
+            code_graph_response(StatusCode::NOT_FOUND, "code_symbol_not_found", &message)
+        }
+        CodeGraphProjectionError::InvalidRequest(_) => code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_graph_request",
+            &message,
+        ),
+        CodeGraphProjectionError::Memory(source) => code_graph_memory_error(source),
+    }
+}
+
+fn code_graph_memory_error(error: MemoryError) -> (StatusCode, Json<serde_json::Value>) {
+    match error {
+        MemoryError::InvalidInput(_) => code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_graph_request",
+            "invalid code graph request",
+        ),
+        _ => code_graph_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "code_graph_error",
+            "code graph projection failed",
+        ),
+    }
+}
+
+fn code_graph_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "code": code,
+                "message": message
+            }
+        })),
+    )
 }
 
 fn pull_request_from_url(url: &str) -> MemoryTaskPullRequest {
