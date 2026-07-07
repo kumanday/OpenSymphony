@@ -457,6 +457,7 @@ fn code_graph_atlas_snapshot(
         return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
     };
     let freshness = code_freshness_filter(options.include_stale);
+    let total_documents = count_code_documents(&connection, config, repo_id, options.include_stale)?;
     let mut statement = connection
         .prepare(&format!(
             "SELECT path, language, freshness FROM code_documents WHERE repo_id = ? AND {freshness} ORDER BY path LIMIT {}",
@@ -483,7 +484,7 @@ fn code_graph_atlas_snapshot(
             path: config.index_path.clone(),
             source,
         })?;
-    let dropped = docs.len().saturating_sub(CODE_GRAPH_MAX_RECORDS);
+    let dropped = total_documents.saturating_sub(CODE_GRAPH_MAX_RECORDS);
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeMap::new();
     for (path, language, freshness) in docs.into_iter().take(CODE_GRAPH_MAX_RECORDS) {
@@ -824,7 +825,7 @@ fn query_symbol_diagnostics(
     let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
-            "SELECT kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostics WHERE repo_id = ? AND path = ? AND {freshness} AND start_line <= ? AND end_line >= ? ORDER BY severity, start_line, start_col, diagnostic_id"
+            "SELECT kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostics WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL)) AND start_line <= ? AND end_line >= ? ORDER BY severity, start_line, start_col, diagnostic_id"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -835,6 +836,9 @@ fn query_symbol_diagnostics(
             params![
                 &symbol.repo_id,
                 &symbol.path,
+                &symbol.content_sha256,
+                symbol.commit_sha.as_deref(),
+                symbol.commit_sha.as_deref(),
                 symbol.end_line as i64,
                 symbol.start_line as i64
             ],
@@ -896,6 +900,10 @@ fn code_revision_indexed(
     revision: &str,
 ) -> Result<bool, MemoryError> {
     for (table, ready) in [
+        (
+            "code_document_revisions",
+            code_document_revisions_read_model_ready(connection, &config.index_path)?,
+        ),
         (
             "code_documents",
             code_documents_read_model_ready(connection, &config.index_path)?,
@@ -980,8 +988,14 @@ fn query_retained_inbound_impact_count(
 ) -> Result<usize, MemoryError> {
     let inbound_count: i64 = connection
         .query_row(
-            "SELECT COUNT(DISTINCT edge_id) FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND freshness = 'current' AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%')",
-            params![&symbol.repo_id, &symbol.symbol_key],
+            "SELECT COUNT(DISTINCT edge_id) FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND ((? = 'current' AND freshness = 'current') OR (? != 'current' AND commit_sha = ?))",
+            params![
+                &symbol.repo_id,
+                &symbol.symbol_key,
+                &symbol.freshness,
+                &symbol.freshness,
+                symbol.commit_sha.as_deref(),
+            ],
             |row| row.get(0),
         )
         .map_err(|source| MemoryError::DuckDb {
@@ -1254,12 +1268,7 @@ fn query_unanalyzed_diff_files(
     for path in paths {
         let changed = match (base.get(&path), head.get(&path)) {
             (Some(left), Some(right)) => left != right,
-            (None, Some(_)) => {
-                revision_path_has_analysis_rows(connection, config, repo_id, base_revision, &path)?
-            }
-            (Some(_), None) => {
-                revision_path_has_analysis_rows(connection, config, repo_id, head_revision, &path)?
-            }
+            (None, Some(_)) | (Some(_), None) => true,
             (None, None) => false,
         };
         if !changed {
@@ -1276,75 +1285,21 @@ fn query_unanalyzed_diff_files(
     Ok(unanalyzed)
 }
 
-fn revision_path_has_analysis_rows(
-    connection: &Connection,
-    config: &MemoryConfig,
-    repo_id: &str,
-    revision: &str,
-    path: &str,
-) -> Result<bool, MemoryError> {
-    for (table, ready) in [
-        (
-            "code_symbols",
-            code_symbols_read_model_ready(connection, &config.index_path)?,
-        ),
-        (
-            "code_edges",
-            code_edges_read_model_ready(connection, &config.index_path)?,
-        ),
-        (
-            "code_diagnostics",
-            code_diagnostics_read_model_ready(connection, &config.index_path)?,
-        ),
-    ] {
-        if ready && code_revision_path_exists_in_table(connection, config, table, repo_id, revision, path)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn code_revision_path_exists_in_table(
-    connection: &Connection,
-    config: &MemoryConfig,
-    table: &str,
-    repo_id: &str,
-    revision: &str,
-    path: &str,
-) -> Result<bool, MemoryError> {
-    let mut statement = connection
-        .prepare(&format!(
-            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? AND path = ? LIMIT 1"
-        ))
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-        })?;
-    let mut rows = statement
-        .query(params![repo_id, revision, path])
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-        })?;
-    Ok(rows
-        .next()
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-        })?
-        .is_some())
-}
-
 fn query_revision_documents(
     connection: &Connection,
     config: &MemoryConfig,
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, String>, MemoryError> {
+    let table = if code_document_revisions_read_model_ready(connection, &config.index_path)? {
+        "code_document_revisions"
+    } else {
+        "code_documents"
+    };
     let mut statement = connection
-        .prepare(
-            "SELECT path, content_sha256, parser_version, query_pack_version FROM code_documents WHERE repo_id = ? AND commit_sha = ? ORDER BY path, indexed_at DESC",
-        )
+        .prepare(&format!(
+            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? ORDER BY path, indexed_at DESC"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1429,6 +1384,26 @@ fn count_code_rows(
     Ok(count as usize)
 }
 
+fn count_code_documents(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    include_stale: bool,
+) -> Result<usize, MemoryError> {
+    let freshness = code_freshness_filter(include_stale);
+    let count: i64 = connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND {freshness}"),
+            params![repo_id],
+            |row| row.get(0),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(count as usize)
+}
+
 fn code_documents_read_model_ready(
     connection: &Connection,
     path: &Path,
@@ -1445,6 +1420,25 @@ fn code_documents_read_model_ready(
             "freshness",
             "commit_sha",
             "worktree_dirty",
+        ],
+    )
+}
+
+fn code_document_revisions_read_model_ready(
+    connection: &Connection,
+    path: &Path,
+) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_document_revisions",
+        &[
+            "repo_id",
+            "commit_sha",
+            "path",
+            "content_sha256",
+            "parser_version",
+            "query_pack_version",
         ],
     )
 }

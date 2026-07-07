@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     convert::Infallible,
     ffi::OsStr,
     path::{Path as StdPath, PathBuf},
@@ -1807,12 +1807,7 @@ async fn get_run_code_diff_overlay(
             let head = command_single_line(&workspace_path, "git", &["rev-parse", "HEAD"])?;
             let worktree_dirty = !dirty_status.is_empty();
             let unanalyzed_files = if worktree_dirty {
-                build_workspace_run_file_changes_with_base(&workspace_path, &base)?
-                    .into_iter()
-                    .map(|change| change.path)
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
+                dirty_workspace_paths(&workspace_path)?
             } else {
                 Vec::new()
             };
@@ -2015,16 +2010,10 @@ async fn resolve_contained_workspace_file(
 }
 
 fn code_repo_id_for_workspace(workspace_path: &StdPath) -> Option<String> {
-    let remote = command_single_line(workspace_path, "git", &["remote", "get-url", "origin"]).ok();
-    remote
+    command_single_line(workspace_path, "git", &["remote", "get-url", "origin"])
+        .ok()
         .as_deref()
         .and_then(repo_id_from_remote_url)
-        .or_else(|| {
-            workspace_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.to_string())
-        })
 }
 
 fn repo_id_from_remote_url(url: &str) -> Option<String> {
@@ -2967,6 +2956,31 @@ fn build_workspace_run_file_changes_with_base(
     files.extend(untracked_workspace_file_changes(workspace_path)?);
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
+}
+
+fn dirty_workspace_paths(workspace_path: &StdPath) -> Result<Vec<String>, String> {
+    let mut paths = BTreeSet::new();
+    for output in [
+        command_output_args(
+            workspace_path,
+            "git",
+            ["diff", "--name-only", "-z", "HEAD", "--"],
+        )?,
+        command_output_args(
+            workspace_path,
+            "git",
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+        )?,
+    ] {
+        paths.extend(
+            output
+                .split_terminator('\0')
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    Ok(paths.into_iter().collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5283,7 +5297,7 @@ exit 2
 
     #[test]
     fn web_asset_mime_table_is_the_extension_source_of_truth() {
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
 
         for (extension, mime) in KNOWN_ASSET_MIME_TYPES {
             assert!(!extension.is_empty(), "extension should not be empty");

@@ -381,12 +381,29 @@ fn write_code_graph_fixture_with_revisions(
                             "legacy-base",
                         ),
                     ],
-                    Vec::new(),
+                    vec![CodeIntelEdgeInput {
+                        edge_kind: "reference.call".to_string(),
+                        target_hint: Some("legacy".to_string()),
+                        confidence: "query_pack:calls".to_string(),
+                        start_line: 6,
+                        start_col: 8,
+                        end_line: 6,
+                        end_col: 18,
+                        start_byte: 8,
+                        end_byte: 16,
+                    }],
                     Vec::new(),
                 ),
                 code_graph_document_with_path(
                     "src/empty.rs",
                     "empty-base",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                code_graph_document_with_path(
+                    "src/deleted_empty.rs",
+                    "deleted-empty-base",
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -413,6 +430,13 @@ fn write_code_graph_fixture_with_revisions(
                 code_graph_document_with_path(
                     "src/empty.rs",
                     "empty-content",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                code_graph_document_with_path(
+                    "src/added_empty.rs",
+                    "added-empty-head",
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -2247,7 +2271,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(repos.schema_version.major, 1);
     assert_eq!(repos.repos.len(), 1);
     assert_eq!(repos.repos[0].repo_id, "opensymphony");
-    assert_eq!(repos.repos[0].document_count, 3);
+    assert_eq!(repos.repos[0].document_count, 5);
     assert_eq!(repos.repos[0].freshness, CodeGraphFreshness::Current);
     assert!(
         !serde_json::to_string(&repos)
@@ -2492,7 +2516,28 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .expect("modified run symbol should have inbound blast radius");
     assert!(run_radius.inbound_count > 0);
     assert_eq!(run_radius.outbound_count, 0);
-    assert_eq!(diff.unanalyzed_files, vec!["src/empty.rs".to_string()]);
+    let legacy_radius = diff
+        .blast_radius
+        .iter()
+        .find(|radius| {
+            diff.removed_symbols.iter().any(|symbol| {
+                symbol.symbol_key == radius.symbol_key
+                    && symbol
+                        .before
+                        .as_ref()
+                        .is_some_and(|side| side.name == "legacy")
+            })
+        })
+        .expect("removed legacy symbol should count base-side inbound edges");
+    assert!(legacy_radius.inbound_count > 0);
+    assert_eq!(
+        diff.unanalyzed_files,
+        vec![
+            "src/added_empty.rs".to_string(),
+            "src/deleted_empty.rs".to_string(),
+            "src/empty.rs".to_string()
+        ]
+    );
     assert!(
         !diff
             .unanalyzed_files
@@ -2542,8 +2587,8 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("decode code index report");
     assert_eq!(report.status, CodeIndexStatus::Completed);
-    assert_eq!(report.parsed_files, 3);
-    assert_eq!(report.persisted_documents, 3);
+    assert_eq!(report.parsed_files, 5);
+    assert_eq!(report.persisted_documents, 5);
     assert_eq!(report.persisted_symbols, 3);
     assert_eq!(report.persisted_edges, 3);
     assert_eq!(report.persisted_diagnostics, 1);
@@ -2617,6 +2662,36 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("fetch same-content replacement diff");
     assert_eq!(same_content_diff.status(), reqwest::StatusCode::OK);
+
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "large-repo".to_string(),
+            commit_sha: Some("large-rev".to_string()),
+            worktree_dirty: false,
+            documents: (0..505)
+                .map(|index| {
+                    code_graph_document_with_path(
+                        &format!("src/file_{index}.rs"),
+                        &format!("large-content-{index}"),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+        },
+    )
+    .expect("large code graph fixture should persist");
+    let large_atlas = client
+        .get(format!("{base}/repos/large-repo/graph?mode=atlas"))
+        .send()
+        .await
+        .expect("fetch large atlas graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode large atlas graph");
+    assert_eq!(large_atlas.truncation.nodes_dropped, 5);
 
     server_task.abort();
 }
@@ -2782,7 +2857,12 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
     assert!(dirty_overlay.head_revision.ends_with("+worktree"));
     assert_eq!(
         dirty_overlay.unanalyzed_files,
-        vec!["src/empty.rs".to_string(), "src/lib.rs".to_string()]
+        vec![
+            "src/added_empty.rs".to_string(),
+            "src/deleted_empty.rs".to_string(),
+            "src/empty.rs".to_string(),
+            "src/lib.rs".to_string()
+        ]
     );
     assert!(
         !dirty_overlay.added_symbols.is_empty(),

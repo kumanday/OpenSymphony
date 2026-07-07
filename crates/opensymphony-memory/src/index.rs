@@ -467,6 +467,20 @@ CREATE TABLE IF NOT EXISTS code_documents (
   freshness TEXT NOT NULL,
   PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
 );
+CREATE TABLE IF NOT EXISTS code_document_revisions (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_id TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, parser_version, query_pack_version)
+);
 CREATE TABLE IF NOT EXISTS code_symbols (
   symbol_id TEXT PRIMARY KEY,
   symbol_key TEXT NOT NULL,
@@ -677,8 +691,31 @@ pub fn persist_code_intel_documents(
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
-            })?;
+        })?;
         report.persisted_documents += 1;
+        if let Some(commit_sha) = batch.commit_sha.as_deref() {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_document_revisions (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        batch.repo_id,
+                        commit_sha,
+                        worktree_dirty,
+                        path,
+                        document.language,
+                        document.content_sha256,
+                        document.parser_id,
+                        document.parser_version,
+                        document.query_pack_version,
+                        indexed_at,
+                        MemoryFreshness::Current.as_str(),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
 
         let prepared_symbols = prepare_code_symbols(
             &batch.repo_id,
@@ -1593,6 +1630,10 @@ fn stale_code_rows(
     let mut stale_rows = 0;
     stale_rows += connection.execute(
         "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
