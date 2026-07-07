@@ -980,6 +980,10 @@ fn code_revision_indexed(
             "code_edges",
             code_edges_read_model_ready(connection, &config.index_path)?,
         ),
+        (
+            "code_skipped_files",
+            code_skipped_files_read_model_ready(connection, &config.index_path)?,
+        ),
     ] {
         if ready && code_revision_exists_in_table(connection, config, table, repo_id, revision)? {
             return Ok(true);
@@ -1056,10 +1060,15 @@ fn query_retained_inbound_impact_count(
     symbol: &CodeSymbolRecord,
     changed_symbol_keys: &BTreeSet<String>,
 ) -> Result<usize, MemoryError> {
+    let edge_table = if code_edge_revisions_read_model_ready(connection, &config.index_path)? {
+        "code_edge_revisions"
+    } else {
+        "code_edges"
+    };
     let mut statement = connection
-        .prepare(
-            "SELECT DISTINCT edge_id, source_symbol_key FROM code_edges WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL))",
-        )
+        .prepare(&format!(
+            "SELECT DISTINCT edge_id, source_symbol_key FROM {edge_table} WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL))"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1375,10 +1384,30 @@ fn query_unanalyzed_diff_files(
         if !changed {
             continue;
         }
-        let base_unanalyzed = base.contains_key(&path)
-            && !revision_path_has_symbols(connection, config, repo_id, base_revision, &path)?;
-        let head_unanalyzed = head.contains_key(&path)
-            && !revision_path_has_symbols(connection, config, repo_id, head_revision, &path)?;
+        let base_unanalyzed = match base.get(&path) {
+            Some(document) if !document.analyzed => true,
+            Some(document) => !revision_path_has_symbols(
+                connection,
+                config,
+                repo_id,
+                base_revision,
+                &path,
+                document,
+            )?,
+            None => false,
+        };
+        let head_unanalyzed = match head.get(&path) {
+            Some(document) if !document.analyzed => true,
+            Some(document) => !revision_path_has_symbols(
+                connection,
+                config,
+                repo_id,
+                head_revision,
+                &path,
+                document,
+            )?,
+            None => false,
+        };
         if base_unanalyzed || head_unanalyzed {
             unanalyzed.push(path);
         }
@@ -1386,12 +1415,20 @@ fn query_unanalyzed_diff_files(
     Ok(unanalyzed)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RevisionDocumentKey {
+    content_sha256: String,
+    parser_version: String,
+    query_pack_version: String,
+    analyzed: bool,
+}
+
 fn query_revision_documents(
     connection: &Connection,
     config: &MemoryConfig,
     repo_id: &str,
     revision: &str,
-) -> Result<BTreeMap<String, String>, MemoryError> {
+) -> Result<BTreeMap<String, RevisionDocumentKey>, MemoryError> {
     let mut documents = BTreeMap::new();
     if code_document_revisions_read_model_ready(connection, &config.index_path)? {
         documents = query_revision_documents_from_table(
@@ -1407,6 +1444,10 @@ fn query_revision_documents(
     {
         documents.entry(path).or_insert(document_key);
     }
+    for (path, document_key) in query_revision_skipped_files(connection, config, repo_id, revision)?
+    {
+        documents.entry(path).or_insert(document_key);
+    }
     Ok(documents)
 }
 
@@ -1416,7 +1457,7 @@ fn query_revision_documents_from_table(
     table: &str,
     repo_id: &str,
     revision: &str,
-) -> Result<BTreeMap<String, String>, MemoryError> {
+) -> Result<BTreeMap<String, RevisionDocumentKey>, MemoryError> {
     let mut statement = connection
         .prepare(&format!(
             "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC"
@@ -1433,7 +1474,57 @@ fn query_revision_documents_from_table(
             let query_pack_version = row.get::<_, String>(3)?;
             Ok((
                 path,
-                format!("{content_sha256}:{parser_version}:{query_pack_version}"),
+                RevisionDocumentKey {
+                    content_sha256,
+                    parser_version,
+                    query_pack_version,
+                    analyzed: true,
+                },
+            ))
+        })
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut documents = BTreeMap::new();
+    for (path, document_key) in rows {
+        documents.entry(path).or_insert(document_key);
+    }
+    Ok(documents)
+}
+
+fn query_revision_skipped_files(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+) -> Result<BTreeMap<String, RevisionDocumentKey>, MemoryError> {
+    if !code_skipped_files_read_model_ready(connection, &config.index_path)? {
+        return Ok(BTreeMap::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT path, content_sha256 FROM code_skipped_files WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = statement
+        .query_map(params![repo_id, revision], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                RevisionDocumentKey {
+                    content_sha256: row.get(1)?,
+                    parser_version: String::new(),
+                    query_pack_version: String::new(),
+                    analyzed: false,
+                },
             ))
         })
         .map_err(|source| MemoryError::DuckDb {
@@ -1458,20 +1549,28 @@ fn revision_path_has_symbols(
     repo_id: &str,
     revision: &str,
     path: &str,
+    document: &RevisionDocumentKey,
 ) -> Result<bool, MemoryError> {
     if !code_symbols_read_model_ready(connection, &config.index_path)? {
         return Ok(false);
     }
     let mut statement = connection
         .prepare(
-            "SELECT 1 FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND path = ? AND symbol_key != '' AND NOT worktree_dirty LIMIT 1",
+            "SELECT 1 FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND symbol_key != '' AND NOT worktree_dirty LIMIT 1",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
         })?;
     let mut rows = statement
-        .query(params![repo_id, revision, path])
+        .query(params![
+            repo_id,
+            revision,
+            path,
+            document.content_sha256,
+            document.parser_version,
+            document.query_pack_version,
+        ])
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1564,6 +1663,44 @@ fn code_document_revisions_read_model_ready(
             "content_sha256",
             "parser_version",
             "query_pack_version",
+            "worktree_dirty",
+        ],
+    )
+}
+
+fn code_edge_revisions_read_model_ready(
+    connection: &Connection,
+    path: &Path,
+) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_edge_revisions",
+        &[
+            "edge_id",
+            "repo_id",
+            "commit_sha",
+            "target_symbol_key",
+            "source_symbol_key",
+            "edge_kind",
+            "worktree_dirty",
+        ],
+    )
+}
+
+fn code_skipped_files_read_model_ready(
+    connection: &Connection,
+    path: &Path,
+) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_skipped_files",
+        &[
+            "repo_id",
+            "commit_sha",
+            "path",
+            "content_sha256",
             "worktree_dirty",
         ],
     )

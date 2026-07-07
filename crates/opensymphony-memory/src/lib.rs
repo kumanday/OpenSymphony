@@ -413,6 +413,13 @@ pub struct CodeIntelPersistBatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeIntelSkippedFileInput {
+    pub path: PathBuf,
+    pub reason: String,
+    pub content_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeIntelDocumentInput {
     pub path: PathBuf,
     pub language: String,

@@ -535,6 +535,44 @@ CREATE TABLE IF NOT EXISTS code_edges (
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_edge_revisions (
+  edge_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  edge_kind TEXT NOT NULL,
+  source_symbol_id TEXT,
+  source_symbol_key TEXT,
+  target_symbol_id TEXT,
+  target_symbol_key TEXT,
+  target_hint TEXT,
+  confidence TEXT NOT NULL,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, edge_id)
+);
+CREATE TABLE IF NOT EXISTS code_skipped_files (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, content_sha256)
+);
 CREATE TABLE IF NOT EXISTS code_diagnostics (
   diagnostic_id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
@@ -592,6 +630,8 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_source ON code_edges(source_symbol_id)
 CREATE INDEX IF NOT EXISTS idx_code_edges_target ON code_edges(target_symbol_id);
 CREATE INDEX IF NOT EXISTS idx_code_edges_source_key ON code_edges(source_symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_edges_target_key ON code_edges(target_symbol_key);
+CREATE INDEX IF NOT EXISTS idx_code_edge_revisions_target_key ON code_edge_revisions(target_symbol_key);
+CREATE INDEX IF NOT EXISTS idx_code_skipped_files_revision ON code_skipped_files(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 "#,
     ))?;
@@ -769,6 +809,8 @@ pub fn persist_code_intel_documents(
 
         for edge in &document.edges {
             let resolved = resolve_code_edge(edge, &prepared_symbols);
+            let normalized_confidence =
+                normalize_edge_confidence(&edge.confidence, resolved.target_resolved);
             let edge_id = code_row_id(&[
                 &batch.repo_id,
                 &path,
@@ -800,7 +842,7 @@ pub fn persist_code_intel_documents(
                         resolved.target_symbol_id,
                         resolved.target_symbol_key,
                         edge.target_hint,
-                        normalize_edge_confidence(&edge.confidence, resolved.target_resolved),
+                        normalized_confidence,
                         edge.start_line as i64,
                         edge.start_col as i64,
                         edge.end_line as i64,
@@ -818,6 +860,44 @@ pub fn persist_code_intel_documents(
                     path: config.index_path.clone(),
                     source,
                 })?;
+            if !batch.worktree_dirty
+                && let Some(commit_sha) = batch.commit_sha.as_deref()
+            {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_edge_revisions (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            edge_id,
+                            batch.repo_id,
+                            commit_sha,
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            edge.edge_kind,
+                            resolved.source_symbol_id,
+                            resolved.source_symbol_key,
+                            resolved.target_symbol_id,
+                            resolved.target_symbol_key,
+                            edge.target_hint,
+                            normalized_confidence,
+                            edge.start_line as i64,
+                            edge.start_col as i64,
+                            edge.end_line as i64,
+                            edge.end_col as i64,
+                            edge.start_byte as i64,
+                            edge.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            MemoryFreshness::Current.as_str(),
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             report.persisted_edges += 1;
         }
 
@@ -876,8 +956,70 @@ pub fn persist_code_intel_documents(
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
-        })?;
+    })?;
     Ok(report)
+}
+
+pub fn persist_code_intel_skipped_files(
+    config: &MemoryConfig,
+    repo_id: &str,
+    commit_sha: Option<&str>,
+    worktree_dirty: bool,
+    skipped_files: &[CodeIntelSkippedFileInput],
+) -> Result<usize, MemoryError> {
+    let Some(commit_sha) = commit_sha.filter(|_| !worktree_dirty) else {
+        return Ok(0);
+    };
+    if skipped_files.is_empty() {
+        return Ok(0);
+    }
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let indexed_at = Utc::now().to_rfc3339();
+    for skipped in skipped_files {
+        let path = skipped.path.to_string_lossy().to_string();
+        transaction
+            .execute(
+                "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
+                params![repo_id, path, commit_sha, skipped.content_sha256],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO code_skipped_files (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    repo_id,
+                    commit_sha,
+                    0_i64,
+                    path,
+                    skipped.reason,
+                    skipped.content_sha256,
+                    indexed_at,
+                    MemoryFreshness::Current.as_str(),
+                ],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    Ok(skipped_files.len())
 }
 
 struct PreparedCodeSymbol<'a> {
@@ -1651,6 +1793,10 @@ fn stale_code_rows(
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
+        "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![key.repo_id, key.path],
+    )?;
+    stale_rows += connection.execute(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
@@ -2344,8 +2490,12 @@ fn okf_index_freshness(concept: &OkfConcept) -> MemoryFreshness {
 }
 
 pub fn sha256_hex(contents: &str) -> String {
+    sha256_bytes_hex(contents.as_bytes())
+}
+
+pub fn sha256_bytes_hex(contents: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(contents.as_bytes());
+    hasher.update(contents);
     let digest = hasher.finalize();
     digest
         .iter()

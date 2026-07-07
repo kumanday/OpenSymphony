@@ -39,8 +39,8 @@ use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
 use opensymphony::opensymphony_memory::{
     CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput, CodeIntelPersistBatch,
-    CodeIntelSymbolInput, MemoryConfig, persist_code_intel_documents,
-    refresh_memory_index_from_okf,
+    CodeIntelSkippedFileInput, CodeIntelSymbolInput, MemoryConfig, persist_code_intel_documents,
+    persist_code_intel_skipped_files, refresh_memory_index_from_okf,
 };
 use tokio::net::TcpListener;
 use url::Url;
@@ -2727,6 +2727,122 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("fetch same-content replacement diff");
     assert_eq!(same_content_diff.status(), reqwest::StatusCode::OK);
+    let retained_edge_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=base-rev&head_revision=head-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch retained edge diff")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode retained edge diff");
+    let retained_run_radius = retained_edge_diff
+        .blast_radius
+        .iter()
+        .find(|radius| radius.symbol_key == run_symbol_key)
+        .expect("head revision edges should survive same-content replacement commits");
+    assert!(retained_run_radius.inbound_count > 0);
+
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("stale-symbol-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_head_document()],
+        },
+    )
+    .expect("symbol-bearing stale revision should persist");
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("stale-symbol-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_document(
+                "no-symbol-head",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        },
+    )
+    .expect("symbol-free selected document revision should persist");
+    let stale_symbol_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=base-rev&head_revision=stale-symbol-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch stale symbol diff")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode stale symbol diff");
+    assert!(
+        stale_symbol_diff
+            .unanalyzed_files
+            .contains(&"src/lib.rs".to_string())
+    );
+
+    persist_code_intel_skipped_files(
+        &config_for_revision_regression,
+        "opensymphony",
+        Some("base-rev"),
+        false,
+        &[
+            CodeIntelSkippedFileInput {
+                path: "README.md".into(),
+                reason: "unsupported language".to_string(),
+                content_sha256: "readme-base".to_string(),
+            },
+            CodeIntelSkippedFileInput {
+                path: "assets/logo.png".into(),
+                reason: "unsupported language".to_string(),
+                content_sha256: "logo-base".to_string(),
+            },
+        ],
+    )
+    .expect("base skipped files should persist");
+    persist_code_intel_skipped_files(
+        &config_for_revision_regression,
+        "opensymphony",
+        Some("head-rev"),
+        false,
+        &[
+            CodeIntelSkippedFileInput {
+                path: "README.md".into(),
+                reason: "unsupported language".to_string(),
+                content_sha256: "readme-head".to_string(),
+            },
+            CodeIntelSkippedFileInput {
+                path: "assets/logo.png".into(),
+                reason: "unsupported language".to_string(),
+                content_sha256: "logo-base".to_string(),
+            },
+        ],
+    )
+    .expect("head skipped files should persist");
+    let skipped_file_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=base-rev&head_revision=head-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch skipped-file diff")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode skipped-file diff");
+    assert!(
+        skipped_file_diff
+            .unanalyzed_files
+            .contains(&"README.md".to_string())
+    );
+    assert!(
+        !skipped_file_diff
+            .unanalyzed_files
+            .contains(&"assets/logo.png".to_string())
+    );
 
     persist_code_intel_documents(
         &config_for_revision_regression,
