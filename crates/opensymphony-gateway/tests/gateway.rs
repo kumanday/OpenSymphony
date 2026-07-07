@@ -386,57 +386,7 @@ fn write_code_graph_fixture_with_revisions(
             commit_sha: Some(head_revision.to_string()),
             worktree_dirty: false,
             documents: vec![
-                code_graph_document(
-                    "head-content",
-                    vec![
-                        code_graph_symbol(
-                            "struct",
-                            "App",
-                            &[],
-                            "struct App",
-                            (1, 0, 4),
-                            "app-base",
-                        ),
-                        code_graph_symbol(
-                            "function",
-                            "run",
-                            &["App"],
-                            "fn run(&self) -> Result<()>",
-                            (6, 2, 20),
-                            "run-head",
-                        ),
-                        code_graph_symbol(
-                            "function",
-                            "new_feature",
-                            &["App"],
-                            "fn new_feature(&self)",
-                            (38, 2, 54),
-                            "new-feature-head",
-                        ),
-                    ],
-                    vec![CodeIntelEdgeInput {
-                        edge_kind: "reference.call".to_string(),
-                        target_hint: Some("new_feature".to_string()),
-                        confidence: "query_pack:calls".to_string(),
-                        start_line: 6,
-                        start_col: 6,
-                        end_line: 6,
-                        end_col: 18,
-                        start_byte: 8,
-                        end_byte: 16,
-                    }],
-                    vec![CodeIntelDiagnosticInput {
-                        kind: "warning".to_string(),
-                        severity: "warning".to_string(),
-                        message: "fixture diagnostic".to_string(),
-                        start_line: 6,
-                        start_col: 2,
-                        end_line: 6,
-                        end_col: 20,
-                        start_byte: 8,
-                        end_byte: 16,
-                    }],
-                ),
+                code_graph_head_document(),
                 code_graph_document_with_path(
                     "src/empty.rs",
                     "empty-content",
@@ -449,6 +399,77 @@ fn write_code_graph_fixture_with_revisions(
     )
     .expect("head code graph fixture should persist");
     config
+}
+
+fn code_graph_head_document() -> CodeIntelDocumentInput {
+    code_graph_document(
+        "head-content",
+        vec![
+            code_graph_symbol("struct", "App", &[], "struct App", (1, 0, 4), "app-base"),
+            code_graph_symbol(
+                "function",
+                "run",
+                &["App"],
+                "fn run(&self) -> Result<()>",
+                (60, 2, 80),
+                "run-head",
+            ),
+            code_graph_symbol(
+                "function",
+                "new_feature",
+                &["App"],
+                "fn new_feature(&self)",
+                (38, 2, 54),
+                "new-feature-head",
+            ),
+        ],
+        vec![
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("new_feature".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 60,
+                start_col: 6,
+                end_line: 60,
+                end_col: 18,
+                start_byte: 8,
+                end_byte: 16,
+            },
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("run".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 38,
+                start_col: 8,
+                end_line: 38,
+                end_col: 18,
+                start_byte: 40,
+                end_byte: 48,
+            },
+            CodeIntelEdgeInput {
+                edge_kind: "reference.call".to_string(),
+                target_hint: Some("missing_call".to_string()),
+                confidence: "query_pack:calls".to_string(),
+                start_line: 60,
+                start_col: 20,
+                end_line: 60,
+                end_col: 32,
+                start_byte: 20,
+                end_byte: 32,
+            },
+        ],
+        vec![CodeIntelDiagnosticInput {
+            kind: "warning".to_string(),
+            severity: "warning".to_string(),
+            message: "fixture diagnostic".to_string(),
+            start_line: 60,
+            start_col: 2,
+            end_line: 60,
+            end_col: 20,
+            start_byte: 8,
+            end_byte: 16,
+        }],
+    )
 }
 
 fn code_graph_document(
@@ -2165,6 +2186,7 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
 async fn gateway_serves_code_graph_contract_endpoints() {
     let repo = tempfile::tempdir().expect("memory repo");
     let config = write_code_graph_fixture(repo.path());
+    let config_for_revision_regression = config.clone();
     let store = SnapshotStore::new(fixture_snapshot(0));
     let journal = opensymphony::opensymphony_domain::InMemoryEventJournal::new(100, 16);
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
@@ -2249,6 +2271,27 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(run_node.path_display.as_deref(), Some("src/lib.rs"));
     assert_eq!(run_node.container_chain, vec!["App".to_string()]);
     assert!(run_node.diagnostic_count > 0);
+    let node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        graph
+            .edges
+            .iter()
+            .all(|edge| node_ids.contains(edge.source_id.as_str())
+                && node_ids.contains(edge.target_id.as_str())),
+        "file graph edges must not reference missing nodes"
+    );
+    assert!(
+        graph.nodes.iter().any(|node| {
+            node.kind == CodeGraphNodeKind::Symbol
+                && node.symbol_key.is_none()
+                && node.label == "missing_call"
+        }),
+        "unresolved edge targets should be represented as placeholder nodes"
+    );
 
     let empty_graph = client
         .get(format!(
@@ -2315,6 +2358,15 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         serde_json::to_string(&stale_graph)
             .expect("stale graph serializes")
             .contains("legacy")
+    );
+    let stale_run = stale_graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CodeGraphNodeKind::Symbol && node.label == "run")
+        .expect("stale-inclusive run symbol");
+    assert_eq!(
+        stale_run.signature.as_deref(),
+        Some("fn run(&self) -> Result<()>")
     );
     let legacy_symbol_key = stale_graph
         .nodes
@@ -2395,11 +2447,14 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             .iter()
             .any(|symbol| { symbol.after.as_ref().is_some_and(|side| side.name == "run") })
     );
-    assert!(
-        diff.blast_radius
-            .iter()
-            .any(|radius| radius.inbound_count + radius.outbound_count > 0)
-    );
+    let run_radius = diff
+        .blast_radius
+        .iter()
+        .find(|radius| radius.symbol_key == run_symbol_key)
+        .expect("modified run symbol should have inbound blast radius");
+    assert!(run_radius.inbound_count > 0);
+    assert_eq!(run_radius.outbound_count, 0);
+    assert_eq!(diff.unanalyzed_files, vec!["src/empty.rs".to_string()]);
 
     let unindexed_diff = client
         .get(format!(
@@ -2444,6 +2499,12 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("decode code index report");
     assert_eq!(report.status, CodeIndexStatus::Completed);
+    assert_eq!(report.parsed_files, 2);
+    assert_eq!(report.persisted_documents, 2);
+    assert_eq!(report.persisted_symbols, 3);
+    assert_eq!(report.persisted_edges, 3);
+    assert_eq!(report.persisted_diagnostics, 1);
+    assert!(report.stale_rows > 0);
     assert_eq!(report.cursor.partition, "code-graph:opensymphony");
     let second_report = client
         .post(format!("{base}/repos/opensymphony/index"))
@@ -2494,6 +2555,25 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         payload.pointer("/cursor/partition"),
         Some(&serde_json::json!("code-graph:opensymphony"))
     );
+
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "opensymphony".to_string(),
+            commit_sha: Some("same-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_head_document()],
+        },
+    )
+    .expect("same-content replacement revision should persist");
+    let same_content_diff = client
+        .get(format!(
+            "{base}/repos/opensymphony/diff-overlay?base_revision=head-rev&head_revision=same-rev"
+        ))
+        .send()
+        .await
+        .expect("fetch same-content replacement diff");
+    assert_eq!(same_content_diff.status(), reqwest::StatusCode::OK);
 
     server_task.abort();
 }
@@ -2650,8 +2730,20 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
         ))
         .send()
         .await
-        .expect("fetch dirty run code diff overlay");
-    assert_eq!(dirty_overlay.status(), reqwest::StatusCode::CONFLICT);
+        .expect("fetch dirty run code diff overlay")
+        .json::<CodeDiffOverlay>()
+        .await
+        .expect("decode dirty run code diff overlay");
+    assert_eq!(dirty_overlay.repo_id, "opensymphony");
+    assert_eq!(dirty_overlay.base_revision, base_revision);
+    assert!(dirty_overlay.head_revision.ends_with("+worktree"));
+    assert_eq!(
+        dirty_overlay.unanalyzed_files,
+        vec!["src/lib.rs".to_string()]
+    );
+    let dirty_overlay_json = serde_json::to_string(&dirty_overlay).expect("overlay serializes");
+    assert!(!dirty_overlay_json.contains("workspace_path"));
+    assert!(!dirty_overlay_json.contains(&root.path().display().to_string()));
 
     server_task.abort();
 }

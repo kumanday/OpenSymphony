@@ -234,6 +234,8 @@ pub fn code_graph_diff_overlay(
         max_records.max(1),
     )?;
     let blast_radius = query_diff_blast_radius(&connection, config, &comparison.diffs)?;
+    let unanalyzed_files =
+        query_unanalyzed_diff_files(&connection, config, repo_id, base_revision, head_revision)?;
     let mut added_symbols = Vec::new();
     let mut removed_symbols = Vec::new();
     let mut modified_symbols = Vec::new();
@@ -265,7 +267,7 @@ pub fn code_graph_diff_overlay(
         removed_symbols,
         modified_symbols,
         blast_radius,
-        unanalyzed_files: Vec::new(),
+        unanalyzed_files,
         truncation: truncation(comparison.truncated, "diff symbols capped"),
         generated_at: Utc::now(),
     })
@@ -286,17 +288,18 @@ pub fn code_graph_index_report(
         CodeIndexStatus::Unavailable
     };
     let head_revision = repo.and_then(|repo| repo.head_revision);
+    let counts = code_index_counts(config, repo_id)?;
     Ok(CodeIndexReport {
         schema_version: SchemaVersion::v1(),
         repo_id: repo_id.to_string(),
         status,
         head_revision: head_revision.clone(),
-        parsed_files: 0,
-        persisted_documents: 0,
-        persisted_symbols: 0,
-        persisted_edges: 0,
-        persisted_diagnostics: 0,
-        stale_rows: 0,
+        parsed_files: counts.documents,
+        persisted_documents: counts.documents,
+        persisted_symbols: counts.symbols,
+        persisted_edges: counts.edges,
+        persisted_diagnostics: counts.diagnostics,
+        stale_rows: counts.stale_rows,
         skipped_files: Vec::new(),
         diagnostics: Vec::new(),
         cursor: code_graph_cursor(repo_id, indexed_at),
@@ -530,7 +533,7 @@ fn code_graph_file_snapshot(
             false,
             None,
         );
-        nodes.insert(node.id.clone(), node);
+        nodes.entry(node.id.clone()).or_insert(node);
     }
     for edge in edges {
         let source_id = edge.source_symbol_key.as_ref().map(symbol_node_id);
@@ -547,6 +550,11 @@ fn code_graph_file_snapshot(
             .unwrap_or_else(|| format!("hint:{}", edge.edge_id));
         if edge.target_symbol_key.is_some() && !nodes.contains_key(&target_id) {
             continue;
+        }
+        if edge.target_symbol_key.is_none() {
+            nodes
+                .entry(target_id.clone())
+                .or_insert_with(|| hint_node(&target_id, edge.target_hint.as_deref()));
         }
         insert_code_graph_edge(
             &mut graph_edges,
@@ -622,6 +630,16 @@ fn code_graph_neighborhood_snapshot(
         .collect::<Vec<_>>();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
     edges.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    for edge in &edges {
+        if edge.unresolved && !node_ids.contains(&edge.target_id) {
+            nodes.push(hint_node(&edge.target_id, edge.target_hint.as_deref()));
+            node_ids.insert(edge.target_id.clone());
+        }
+    }
     apply_code_node_metrics(&mut nodes, &edges);
     Ok(snapshot(
         repo_id,
@@ -691,7 +709,7 @@ fn query_file_symbols(
     let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
-            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE repo_id = ? AND path = ? AND {freshness} AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id"
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE repo_id = ? AND path = ? AND {freshness} AND symbol_key != '' ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, start_line, start_col, end_line DESC, end_col DESC, symbol_key, symbol_id"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -868,11 +886,65 @@ fn code_revision_indexed(
     repo_id: &str,
     revision: &str,
 ) -> Result<bool, MemoryError> {
-    if !code_documents_read_model_ready(connection, &config.index_path)? {
-        return Ok(false);
+    for (table, ready) in [
+        (
+            "code_documents",
+            code_documents_read_model_ready(connection, &config.index_path)?,
+        ),
+        (
+            "code_symbols",
+            code_symbols_read_model_ready(connection, &config.index_path)?,
+        ),
+        (
+            "code_edges",
+            code_edges_read_model_ready(connection, &config.index_path)?,
+        ),
+    ] {
+        if ready && code_revision_exists_in_table(connection, config, table, repo_id, revision)? {
+            return Ok(true);
+        }
     }
+    Ok(false)
+}
+
+fn query_diff_blast_radius(
+    connection: &Connection,
+    config: &MemoryConfig,
+    diffs: &[CodeSymbolDiff],
+) -> Result<Vec<CodeDiffBlastRadius>, MemoryError> {
+    let mut radius = Vec::new();
+    for diff in diffs {
+        let symbol = match diff.status {
+            CodeSymbolDiffStatus::Added => None,
+            CodeSymbolDiffStatus::Removed => diff.base.as_ref(),
+            CodeSymbolDiffStatus::Modified => diff.head.as_ref().or(diff.base.as_ref()),
+        };
+        let Some(symbol) = symbol else {
+            continue;
+        };
+        let inbound_count = query_revision_inbound_impact_count(connection, config, symbol)?;
+        if inbound_count > 0 {
+            radius.push(CodeDiffBlastRadius {
+                symbol_key: diff.symbol_key.clone(),
+                inbound_count,
+                outbound_count: 0,
+            });
+        }
+    }
+    Ok(radius)
+}
+
+fn code_revision_exists_in_table(
+    connection: &Connection,
+    config: &MemoryConfig,
+    table: &str,
+    repo_id: &str,
+    revision: &str,
+) -> Result<bool, MemoryError> {
     let mut statement = connection
-        .prepare("SELECT 1 FROM code_documents WHERE repo_id = ? AND commit_sha = ? LIMIT 1")
+        .prepare(&format!(
+            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? LIMIT 1"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -892,53 +964,23 @@ fn code_revision_indexed(
         .is_some())
 }
 
-fn query_diff_blast_radius(
-    connection: &Connection,
-    config: &MemoryConfig,
-    diffs: &[CodeSymbolDiff],
-) -> Result<Vec<CodeDiffBlastRadius>, MemoryError> {
-    let mut radius = Vec::new();
-    for diff in diffs {
-        let Some(symbol) = diff.head.as_ref().or(diff.base.as_ref()) else {
-            continue;
-        };
-        let (inbound_count, outbound_count) =
-            query_revision_edge_counts(connection, config, symbol)?;
-        if inbound_count > 0 || outbound_count > 0 {
-            radius.push(CodeDiffBlastRadius {
-                symbol_key: diff.symbol_key.clone(),
-                inbound_count,
-                outbound_count,
-            });
-        }
-    }
-    Ok(radius)
-}
-
-fn query_revision_edge_counts(
+fn query_revision_inbound_impact_count(
     connection: &Connection,
     config: &MemoryConfig,
     symbol: &CodeSymbolRecord,
-) -> Result<(usize, usize), MemoryError> {
+) -> Result<usize, MemoryError> {
     let commit_sha = symbol.commit_sha.as_deref().unwrap_or("");
-    let (inbound_count, outbound_count): (i64, i64) = connection
+    let inbound_count: i64 = connection
         .query_row(
-            "SELECT COALESCE(SUM(CASE WHEN target_symbol_key = ? THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN source_symbol_key = ? THEN 1 ELSE 0 END), 0) FROM code_edges WHERE repo_id = ? AND commit_sha = ? AND (source_symbol_key = ? OR target_symbol_key = ?)",
-            params![
-                &symbol.symbol_key,
-                &symbol.symbol_key,
-                &symbol.repo_id,
-                commit_sha,
-                &symbol.symbol_key,
-                &symbol.symbol_key,
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT COUNT(*) FROM code_edges WHERE repo_id = ? AND commit_sha = ? AND target_symbol_key = ? AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%')",
+            params![&symbol.repo_id, commit_sha, &symbol.symbol_key],
+            |row| row.get(0),
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
         })?;
-    Ok((inbound_count as usize, outbound_count as usize))
+    Ok(inbound_count as usize)
 }
 
 fn symbol_node(
@@ -1058,6 +1100,27 @@ fn file_node(
     }
 }
 
+fn hint_node(id: &str, label: Option<&str>) -> CodeGraphNode {
+    CodeGraphNode {
+        id: id.to_string(),
+        kind: CodeGraphNodeKind::Symbol,
+        label: label.unwrap_or("unresolved").to_string(),
+        symbol_kind: None,
+        symbol_key: None,
+        symbol_id: None,
+        path_display: None,
+        language: None,
+        container_chain: Vec::new(),
+        signature: None,
+        span: None,
+        selection_span: None,
+        freshness: CodeGraphFreshness::Unknown,
+        diagnostic_count: 0,
+        diagnostic_severity: None,
+        metrics: CodeGraphNodeMetrics::default(),
+    }
+}
+
 fn insert_code_graph_edge(
     edges: &mut BTreeMap<String, CodeGraphEdge>,
     kind: String,
@@ -1104,6 +1167,168 @@ fn diff_side_from_symbol(symbol: &CodeSymbolRecord) -> CodeDiffSymbolSide {
     }
 }
 
+#[derive(Default)]
+struct CodeIndexCounts {
+    documents: usize,
+    symbols: usize,
+    edges: usize,
+    diagnostics: usize,
+    stale_rows: usize,
+}
+
+fn code_index_counts(config: &MemoryConfig, repo_id: &str) -> Result<CodeIndexCounts, MemoryError> {
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(CodeIndexCounts::default());
+    };
+    let mut counts = CodeIndexCounts::default();
+    if code_documents_read_model_ready(&connection, &config.index_path)? {
+        counts.documents =
+            count_code_table_rows(&connection, config, "code_documents", repo_id, "current")?;
+        counts.stale_rows +=
+            count_code_table_rows(&connection, config, "code_documents", repo_id, "stale")?;
+    }
+    if code_symbols_read_model_ready(&connection, &config.index_path)? {
+        counts.symbols =
+            count_code_table_rows(&connection, config, "code_symbols", repo_id, "current")?;
+        counts.stale_rows +=
+            count_code_table_rows(&connection, config, "code_symbols", repo_id, "stale")?;
+    }
+    if code_edges_read_model_ready(&connection, &config.index_path)? {
+        counts.edges = count_code_table_rows(&connection, config, "code_edges", repo_id, "current")?;
+        counts.stale_rows +=
+            count_code_table_rows(&connection, config, "code_edges", repo_id, "stale")?;
+    }
+    if code_diagnostics_read_model_ready(&connection, &config.index_path)? {
+        counts.diagnostics =
+            count_code_table_rows(&connection, config, "code_diagnostics", repo_id, "current")?;
+        counts.stale_rows +=
+            count_code_table_rows(&connection, config, "code_diagnostics", repo_id, "stale")?;
+    }
+    Ok(counts)
+}
+
+fn count_code_table_rows(
+    connection: &Connection,
+    config: &MemoryConfig,
+    table: &str,
+    repo_id: &str,
+    freshness: &str,
+) -> Result<usize, MemoryError> {
+    let count: i64 = connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE repo_id = ? AND freshness = ?"),
+            params![repo_id, freshness],
+            |row| row.get(0),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(count as usize)
+}
+
+fn query_unanalyzed_diff_files(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    base_revision: &str,
+    head_revision: &str,
+) -> Result<Vec<String>, MemoryError> {
+    if !code_documents_read_model_ready(connection, &config.index_path)? {
+        return Ok(Vec::new());
+    }
+    let base = query_revision_documents(connection, config, repo_id, base_revision)?;
+    let head = query_revision_documents(connection, config, repo_id, head_revision)?;
+    let mut paths = base.keys().cloned().collect::<BTreeSet<_>>();
+    paths.extend(head.keys().cloned());
+
+    let mut unanalyzed = Vec::new();
+    for path in paths {
+        let changed = base.get(&path) != head.get(&path);
+        if !changed {
+            continue;
+        }
+        let base_unanalyzed = base.contains_key(&path)
+            && !revision_path_has_symbols(connection, config, repo_id, base_revision, &path)?;
+        let head_unanalyzed = head.contains_key(&path)
+            && !revision_path_has_symbols(connection, config, repo_id, head_revision, &path)?;
+        if base_unanalyzed || head_unanalyzed {
+            unanalyzed.push(path);
+        }
+    }
+    Ok(unanalyzed)
+}
+
+fn query_revision_documents(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+) -> Result<BTreeMap<String, String>, MemoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT path, content_sha256, parser_version, query_pack_version FROM code_documents WHERE repo_id = ? AND commit_sha = ? ORDER BY path, indexed_at DESC",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = statement
+        .query_map(params![repo_id, revision], |row| {
+            let path = row.get::<_, String>(0)?;
+            let content_sha256 = row.get::<_, String>(1)?;
+            let parser_version = row.get::<_, String>(2)?;
+            let query_pack_version = row.get::<_, String>(3)?;
+            Ok((
+                path,
+                format!("{content_sha256}:{parser_version}:{query_pack_version}"),
+            ))
+        })
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(rows.into_iter().collect())
+}
+
+fn revision_path_has_symbols(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+) -> Result<bool, MemoryError> {
+    if !code_symbols_read_model_ready(connection, &config.index_path)? {
+        return Ok(false);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT 1 FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND path = ? AND symbol_key != '' LIMIT 1",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![repo_id, revision, path])
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(rows
+        .next()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .is_some())
+}
+
 fn count_code_rows(
     connection: &Connection,
     config: &MemoryConfig,
@@ -1145,6 +1370,18 @@ fn code_documents_read_model_ready(
             "commit_sha",
             "worktree_dirty",
         ],
+    )
+}
+
+fn code_diagnostics_read_model_ready(
+    connection: &Connection,
+    path: &Path,
+) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_diagnostics",
+        &["repo_id", "path", "freshness", "commit_sha", "worktree_dirty"],
     )
 }
 

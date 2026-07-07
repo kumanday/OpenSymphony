@@ -87,7 +87,7 @@ pub use crate::opensymphony_gateway_schema::{
     },
     code_graph::{
         CodeDiffOverlay, CodeFileOutline, CodeGraphAggregate, CodeGraphMode, CodeGraphSnapshot,
-        CodeIndexReport, CodeRepoList, CodeSymbolDetail,
+        CodeGraphTruncation, CodeIndexReport, CodeRepoList, CodeSymbolDetail,
     },
     cursor::PageCursor,
     event_journal::EventActor,
@@ -1601,6 +1601,13 @@ struct RunCodeDiffOverlayQuery {
     limit: Option<usize>,
 }
 
+struct RunCodeDiffOverlayResolution {
+    base_revision: String,
+    head_revision: String,
+    unanalyzed_files: Vec<String>,
+    worktree_dirty: bool,
+}
+
 async fn get_code_repos(
     State(state): State<GatewayState>,
     Query(params): Query<CodeReposQuery>,
@@ -1781,16 +1788,35 @@ async fn get_run_code_diff_overlay(
                 "run code diff overlay requires a repo id",
             )
         })?;
-    let (base_revision, head_revision) = tokio::task::spawn_blocking({
+    let resolution = tokio::task::spawn_blocking({
         let workspace_path = workspace_path.clone();
         move || {
             let base = workspace_comparison_base(&workspace_path)?;
-            let dirty = command_single_line(&workspace_path, "git", &["status", "--porcelain"])?;
-            if !dirty.is_empty() {
-                return Err("workspace has uncommitted changes".to_string());
-            }
+            let dirty_status =
+                command_single_line(&workspace_path, "git", &["status", "--porcelain"])?;
             let head = command_single_line(&workspace_path, "git", &["rev-parse", "HEAD"])?;
-            Ok::<_, String>((base.merge_base, head))
+            let worktree_dirty = !dirty_status.is_empty();
+            let unanalyzed_files = if worktree_dirty {
+                build_workspace_run_file_changes_with_base(&workspace_path, &base)?
+                    .into_iter()
+                    .map(|change| change.path)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let head_revision = if worktree_dirty {
+                format!("{head}+worktree")
+            } else {
+                head
+            };
+            Ok::<_, String>(RunCodeDiffOverlayResolution {
+                base_revision: base.merge_base,
+                head_revision,
+                unanalyzed_files,
+                worktree_dirty,
+            })
         }
     })
     .await
@@ -1802,11 +1828,26 @@ async fn get_run_code_diff_overlay(
             "run revisions could not be resolved",
         )
     })?;
+    if resolution.worktree_dirty {
+        return Ok(Json(CodeDiffOverlay {
+            schema_version: SchemaVersion::v1(),
+            repo_id,
+            base_revision: resolution.base_revision,
+            head_revision: resolution.head_revision,
+            added_symbols: Vec::new(),
+            removed_symbols: Vec::new(),
+            modified_symbols: Vec::new(),
+            blast_radius: Vec::new(),
+            unanalyzed_files: resolution.unanalyzed_files,
+            truncation: CodeGraphTruncation::default(),
+            generated_at: Utc::now(),
+        }));
+    }
     code_graph_diff_overlay(
         config,
         &repo_id,
-        &base_revision,
-        &head_revision,
+        &resolution.base_revision,
+        &resolution.head_revision,
         params.limit.unwrap_or(500).clamp(1, 5_000),
     )
     .map(Json)

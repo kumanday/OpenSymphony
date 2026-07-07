@@ -1328,7 +1328,7 @@ fn query_code_symbol_by_key(
         )
     } else {
         format!(
-            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, symbol_id LIMIT 1"
         )
     };
     let mut statement = connection
