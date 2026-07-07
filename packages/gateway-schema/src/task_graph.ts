@@ -39,6 +39,32 @@ export interface TaskGraphNode {
   run_id?: string;
   /** Count of comments / evidence notes attached to this node. */
   comment_count?: number;
+  /**
+   * Runtime overlay, present exactly when the orchestrator control plane
+   * tracks this node (queued/eligible flags, run linkage). Absent for nodes
+   * known only from the tracker scan (backlog, freshly promoted issues).
+   */
+  runtime_overlay?: TaskGraphNodeRuntimeOverlay;
+}
+
+/**
+ * Runtime overlay embedded on a control-plane-tracked task graph node.
+ * Distinct from `TaskGraphRuntimeOverlay` (task_graph_runtime.ts), the
+ * separately fetched run-status overlay keyed by run id.
+ */
+export interface TaskGraphNodeRuntimeOverlay {
+  eligible: boolean;
+  queued: boolean;
+  active_run_id?: string;
+  last_outcome?: string;
+  retry_count: number;
+  workspace_id?: string;
+  harness_type?: string;
+  conversation_id?: string;
+  last_event_at?: string;
+  diff_summary?: unknown;
+  validation_status?: string;
+  blocker_summary?: string;
 }
 
 /** Flat list response for a project task graph. */

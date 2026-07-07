@@ -14,7 +14,7 @@ export type { EntityKind, EntityRef, GatewayEnvelope } from "./envelope.js";
 export type { GatewayHealth, GatewayMetrics, ProjectSummary, SnapshotEventKind, SnapshotEventSummary, DashboardSnapshot } from "./snapshot.js";
 
 // task_graph
-export type { TaskGraphNodeKind, TaskGraphStateCategory, TaskGraphNode, TaskGraphSnapshot } from "./task_graph.js";
+export type { TaskGraphNodeKind, TaskGraphStateCategory, TaskGraphNode, TaskGraphNodeRuntimeOverlay, TaskGraphSnapshot } from "./task_graph.js";
 export type {
   RuntimeBadgeKind,
   TaskGraphRuntimeOverlay,

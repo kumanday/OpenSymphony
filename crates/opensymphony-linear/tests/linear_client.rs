@@ -346,27 +346,46 @@ async fn project_task_graph_issues_return_requested_backlog_and_active_from_one_
                 "Todo",
                 "unstarted",
             ),
+            (
+                "issue-320",
+                "COE-320",
+                "Unrequested human review issue",
+                "Human Review",
+                "started",
+            ),
+            (
+                "issue-330",
+                "COE-330",
+                "Parked unstarted issue",
+                "Ready for Spec",
+                "unstarted",
+            ),
         ]),
     )])
     .await;
-    let client = LinearClient::new(test_config(server.base_url()))
-        .expect("client configuration should work");
+    let mut config = test_config(server.base_url());
+    config.active_states = vec!["Todo".to_string(), "In Progress".to_string()];
+    let client = LinearClient::new(config).expect("client configuration should work");
 
     let issues = client
         .project_task_graph_issues(&["COE-260"])
         .await
         .expect("task graph lookup should succeed");
 
-    // Requested identifiers first, then unrequested backlog AND active
-    // issues. COE-310 is Todo but untracked by the control plane (e.g. just
-    // promoted from Backlog, not yet dispatched) — dropping it would make the
-    // issue vanish from every pane until the orchestrator picks it up.
+    // Requested identifiers first, then unrequested backlog, dispatchable,
+    // and started-kind issues. COE-310 is Todo but untracked by the control
+    // plane (e.g. just promoted from Backlog, not yet dispatched) — dropping
+    // it would make the issue vanish from every pane until the orchestrator
+    // picks it up. COE-320 is in-flight (started kind) so it belongs in the
+    // Current pane even though "Human Review" is not dispatchable. COE-330
+    // sits in a parked unstarted state outside `active_states`, which the
+    // scheduler will never dispatch, so it stays out of the task graph.
     assert_eq!(
         issues
             .iter()
             .map(|issue| issue.identifier.as_str())
             .collect::<Vec<_>>(),
-        vec!["COE-260", "COE-300", "COE-310"],
+        vec!["COE-260", "COE-300", "COE-310", "COE-320"],
     );
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1, "one project scan serves both buckets");
