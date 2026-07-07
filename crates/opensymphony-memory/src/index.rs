@@ -1148,6 +1148,16 @@ pub fn code_symbol_neighborhood(
     max_depth: usize,
     max_records: usize,
 ) -> Result<Option<CodeNeighborhood>, MemoryError> {
+    code_symbol_neighborhood_with_stale(config, symbol_key, max_depth, max_records, false)
+}
+
+fn code_symbol_neighborhood_with_stale(
+    config: &MemoryConfig,
+    symbol_key: &str,
+    max_depth: usize,
+    max_records: usize,
+    include_stale: bool,
+) -> Result<Option<CodeNeighborhood>, MemoryError> {
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Ok(None);
     };
@@ -1156,7 +1166,7 @@ pub fn code_symbol_neighborhood(
     {
         return Ok(None);
     }
-    let Some(center) = query_code_symbol_by_key(&connection, symbol_key, true)? else {
+    let Some(center) = query_code_symbol_by_key(&connection, symbol_key, !include_stale)? else {
         return Ok(None);
     };
     let mut symbols = BTreeMap::from([(center.symbol_key.clone(), center.clone())]);
@@ -1167,7 +1177,7 @@ pub fn code_symbol_neighborhood(
     for _ in 0..max_depth {
         let mut next_frontier = BTreeSet::new();
         for key in &frontier {
-            for edge in query_edges_for_symbol_key(&connection, key)? {
+            for edge in query_edges_for_symbol_key_with_stale(&connection, key, include_stale)? {
                 if edges.len() >= max_records {
                     truncated = true;
                     break;
@@ -1184,7 +1194,9 @@ pub fn code_symbol_neighborhood(
                             truncated = true;
                             continue;
                         }
-                        if let Some(symbol) = query_code_symbol_by_key(&connection, adjacent, true)? {
+                        if let Some(symbol) =
+                            query_code_symbol_by_key(&connection, adjacent, !include_stale)?
+                        {
                             next_frontier.insert(adjacent.to_string());
                             symbols.insert(adjacent.to_string(), symbol);
                         }
@@ -1390,14 +1402,20 @@ fn query_symbols_for_revision(
     Ok(symbols)
 }
 
-fn query_edges_for_symbol_key(
+fn query_edges_for_symbol_key_with_stale(
     connection: &Connection,
     symbol_key: &str,
+    include_stale: bool,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
+    let freshness = if include_stale {
+        "1 = 1"
+    } else {
+        "freshness = 'current'"
+    };
     let mut statement = connection
-        .prepare(
-            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, start_line, start_col, end_line, end_col FROM code_edges WHERE freshness = 'current' AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id",
-        )
+        .prepare(&format!(
+            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, start_line, start_col, end_line, end_col FROM code_edges WHERE {freshness} AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,

@@ -18,6 +18,10 @@ const CODE_GRAPH_MAX_RECORDS: usize = 500;
 pub enum CodeGraphProjectionError {
     #[error("unknown code repo `{0}`")]
     RepoNotFound(String),
+    #[error("unknown indexed code file `{0}`")]
+    FileNotFound(String),
+    #[error("unknown indexed code revision `{0}`")]
+    RevisionNotFound(String),
     #[error("no code symbol found for `{0}`")]
     SymbolNotFound(String),
     #[error("{0}")]
@@ -144,7 +148,13 @@ pub fn code_graph_snapshot(
                     "neighborhood mode requires `symbol_key`".to_string(),
                 )
             })?;
-            code_graph_neighborhood_snapshot(config, repo_id, symbol_key, options.depth)
+            code_graph_neighborhood_snapshot(
+                config,
+                repo_id,
+                symbol_key,
+                options.depth,
+                options.include_stale,
+            )
         }
     }
 }
@@ -168,7 +178,7 @@ pub fn code_graph_symbol_detail(
         return Err(CodeGraphProjectionError::SymbolNotFound(symbol_key.to_string()));
     }
     let diagnostics = query_symbol_diagnostics(&connection, config, &symbol, include_stale)?;
-    let edge_summary = query_symbol_edge_summary(&connection, &symbol)?;
+    let edge_summary = query_symbol_edge_summary(&connection, &symbol, include_stale)?;
 
     Ok(CodeSymbolDetail {
         schema_version: SchemaVersion::v1(),
@@ -205,6 +215,17 @@ pub fn code_graph_diff_overlay(
     head_revision: &str,
     max_records: usize,
 ) -> Result<CodeDiffOverlay, CodeGraphProjectionError> {
+    ensure_code_repo(config, repo_id, true)?;
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
+    };
+    for revision in [base_revision, head_revision] {
+        if !code_revision_indexed(&connection, config, repo_id, revision)? {
+            return Err(CodeGraphProjectionError::RevisionNotFound(
+                revision.to_string(),
+            ));
+        }
+    }
     let comparison = compare_code_symbols(
         config,
         repo_id,
@@ -212,6 +233,7 @@ pub fn code_graph_diff_overlay(
         head_revision,
         max_records.max(1),
     )?;
+    let blast_radius = query_diff_blast_radius(&connection, config, &comparison.diffs)?;
     let mut added_symbols = Vec::new();
     let mut removed_symbols = Vec::new();
     let mut modified_symbols = Vec::new();
@@ -242,7 +264,7 @@ pub fn code_graph_diff_overlay(
         added_symbols,
         removed_symbols,
         modified_symbols,
-        blast_radius: Vec::<CodeDiffBlastRadius>::new(),
+        blast_radius,
         unanalyzed_files: Vec::new(),
         truncation: truncation(comparison.truncated, "diff symbols capped"),
         generated_at: Utc::now(),
@@ -483,19 +505,19 @@ fn code_graph_file_snapshot(
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
     };
+    let Some((language, freshness)) =
+        query_code_document(&connection, config, repo_id, &path, include_stale)?
+    else {
+        return Err(CodeGraphProjectionError::FileNotFound(path));
+    };
     let symbols = query_file_symbols(&connection, config, repo_id, &path, include_stale)?;
     let edges = query_file_edges(&connection, config, repo_id, &path, include_stale)?;
-    let file_freshness = symbols
-        .iter()
-        .map(|symbol| freshness_from_str(&symbol.freshness))
-        .next()
-        .unwrap_or(CodeGraphFreshness::Unknown);
     let mut nodes = BTreeMap::new();
     let mut graph_edges = BTreeMap::new();
     let file_id = file_node_id(&path);
     nodes.insert(
         file_id.clone(),
-        file_node(&path, symbols.first().map(|symbol| symbol.language.clone()), file_freshness),
+        file_node(&path, Some(language), freshness_from_str(&freshness)),
     );
     for symbol in symbols {
         let node = symbol_node(&connection, config, &symbol, include_stale)?;
@@ -555,9 +577,15 @@ fn code_graph_neighborhood_snapshot(
     repo_id: &str,
     symbol_key: &str,
     depth: usize,
+    include_stale: bool,
 ) -> Result<CodeGraphSnapshot, CodeGraphProjectionError> {
-    let Some(neighborhood) =
-        code_symbol_neighborhood(config, symbol_key, depth.max(1), CODE_GRAPH_MAX_RECORDS)?
+    let Some(neighborhood) = code_symbol_neighborhood_with_stale(
+        config,
+        symbol_key,
+        depth.max(1),
+        CODE_GRAPH_MAX_RECORDS,
+        include_stale,
+    )?
     else {
         return Err(CodeGraphProjectionError::SymbolNotFound(symbol_key.to_string()));
     };
@@ -569,7 +597,7 @@ fn code_graph_neighborhood_snapshot(
     };
     let mut nodes = Vec::new();
     for symbol in &neighborhood.symbols {
-        nodes.push(symbol_node(&connection, config, symbol, false)?);
+        nodes.push(symbol_node(&connection, config, symbol, include_stale)?);
     }
     let mut edges = neighborhood
         .edges
@@ -600,7 +628,7 @@ fn code_graph_neighborhood_snapshot(
         CodeGraphMode::Neighborhood,
         nodes,
         edges,
-        false,
+        include_stale,
         None,
         truncation(neighborhood.truncated, "neighborhood records capped"),
     ))
@@ -690,6 +718,47 @@ fn query_file_symbols(
         .collect()
 }
 
+fn query_code_document(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    path: &str,
+    include_stale: bool,
+) -> Result<Option<(String, String)>, MemoryError> {
+    let freshness = code_freshness_filter(include_stale);
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT language, freshness FROM code_documents WHERE repo_id = ? AND path = ? AND {freshness} ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC LIMIT 1"
+        ))
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![repo_id, path])
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let Some(row) = rows.next().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get::<_, String>(0).map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?,
+        row.get::<_, String>(1).map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?,
+    )))
+}
+
 fn query_file_edges(
     connection: &Connection,
     config: &MemoryConfig,
@@ -770,9 +839,11 @@ fn query_symbol_diagnostics(
 fn query_symbol_edge_summary(
     connection: &Connection,
     symbol: &CodeSymbolRecord,
+    include_stale: bool,
 ) -> Result<Vec<CodeEdgeSummary>, MemoryError> {
     let mut groups = BTreeMap::<(String, CodeGraphConfidence), (usize, usize)>::new();
-    for edge in query_edges_for_symbol_key(connection, &symbol.symbol_key)? {
+    for edge in query_edges_for_symbol_key_with_stale(connection, &symbol.symbol_key, include_stale)?
+    {
         let key = (edge.edge_kind, confidence_from_str(&edge.confidence));
         let entry = groups.entry(key).or_default();
         entry.0 += 1;
@@ -789,6 +860,85 @@ fn query_symbol_edge_summary(
             unresolved_count,
         })
         .collect())
+}
+
+fn code_revision_indexed(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+) -> Result<bool, MemoryError> {
+    if !code_documents_read_model_ready(connection, &config.index_path)? {
+        return Ok(false);
+    }
+    let mut statement = connection
+        .prepare("SELECT 1 FROM code_documents WHERE repo_id = ? AND commit_sha = ? LIMIT 1")
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![repo_id, revision])
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(rows
+        .next()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .is_some())
+}
+
+fn query_diff_blast_radius(
+    connection: &Connection,
+    config: &MemoryConfig,
+    diffs: &[CodeSymbolDiff],
+) -> Result<Vec<CodeDiffBlastRadius>, MemoryError> {
+    let mut radius = Vec::new();
+    for diff in diffs {
+        let Some(symbol) = diff.head.as_ref().or(diff.base.as_ref()) else {
+            continue;
+        };
+        let (inbound_count, outbound_count) =
+            query_revision_edge_counts(connection, config, symbol)?;
+        if inbound_count > 0 || outbound_count > 0 {
+            radius.push(CodeDiffBlastRadius {
+                symbol_key: diff.symbol_key.clone(),
+                inbound_count,
+                outbound_count,
+            });
+        }
+    }
+    Ok(radius)
+}
+
+fn query_revision_edge_counts(
+    connection: &Connection,
+    config: &MemoryConfig,
+    symbol: &CodeSymbolRecord,
+) -> Result<(usize, usize), MemoryError> {
+    let commit_sha = symbol.commit_sha.as_deref().unwrap_or("");
+    let (inbound_count, outbound_count): (i64, i64) = connection
+        .query_row(
+            "SELECT COALESCE(SUM(CASE WHEN target_symbol_key = ? THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN source_symbol_key = ? THEN 1 ELSE 0 END), 0) FROM code_edges WHERE repo_id = ? AND commit_sha = ? AND (source_symbol_key = ? OR target_symbol_key = ?)",
+            params![
+                &symbol.symbol_key,
+                &symbol.symbol_key,
+                &symbol.repo_id,
+                commit_sha,
+                &symbol.symbol_key,
+                &symbol.symbol_key,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok((inbound_count as usize, outbound_count as usize))
 }
 
 fn symbol_node(

@@ -1738,6 +1738,7 @@ async fn get_run_code_outline(
         })?;
     let relative_path = validate_workspace_relative_path(raw_path)?;
     let file_path = contained_workspace_path(&workspace_path, &relative_path)?;
+    let file_path = resolve_contained_workspace_file(&workspace_path, &file_path).await?;
     let source = tokio::fs::read_to_string(&file_path).await.map_err(|_| {
         code_graph_response(
             StatusCode::NOT_FOUND,
@@ -1784,6 +1785,10 @@ async fn get_run_code_diff_overlay(
         let workspace_path = workspace_path.clone();
         move || {
             let base = workspace_comparison_base(&workspace_path)?;
+            let dirty = command_single_line(&workspace_path, "git", &["status", "--porcelain"])?;
+            if !dirty.is_empty() {
+                return Err("workspace has uncommitted changes".to_string());
+            }
             let head = command_single_line(&workspace_path, "git", &["rev-parse", "HEAD"])?;
             Ok::<_, String>((base.merge_base, head))
         }
@@ -1928,6 +1933,35 @@ fn contained_workspace_path(
     }
 }
 
+async fn resolve_contained_workspace_file(
+    workspace_path: &StdPath,
+    file_path: &StdPath,
+) -> Result<PathBuf, (StatusCode, Json<serde_json::Value>)> {
+    let root = tokio::fs::canonicalize(workspace_path).await.map_err(|_| {
+        code_graph_response(
+            StatusCode::NOT_FOUND,
+            "workspace_not_found",
+            "run workspace is not available",
+        )
+    })?;
+    let resolved = tokio::fs::canonicalize(file_path).await.map_err(|_| {
+        code_graph_response(
+            StatusCode::NOT_FOUND,
+            "code_file_not_found",
+            "requested run file is not available",
+        )
+    })?;
+    if resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_code_path",
+            "path is outside the workspace",
+        ))
+    }
+}
+
 fn code_repo_id_for_workspace(workspace_path: &StdPath) -> Option<String> {
     let remote = command_single_line(workspace_path, "git", &["remote", "get-url", "origin"]).ok();
     remote
@@ -1968,6 +2002,12 @@ fn code_graph_error(error: CodeGraphProjectionError) -> (StatusCode, Json<serde_
     match error {
         CodeGraphProjectionError::RepoNotFound(_) => {
             code_graph_response(StatusCode::NOT_FOUND, "code_repo_not_found", &message)
+        }
+        CodeGraphProjectionError::FileNotFound(_) => {
+            code_graph_response(StatusCode::NOT_FOUND, "code_file_not_found", &message)
+        }
+        CodeGraphProjectionError::RevisionNotFound(_) => {
+            code_graph_response(StatusCode::NOT_FOUND, "code_revision_not_found", &message)
         }
         CodeGraphProjectionError::SymbolNotFound(_) => {
             code_graph_response(StatusCode::NOT_FOUND, "code_symbol_not_found", &message)
