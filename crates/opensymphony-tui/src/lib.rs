@@ -4327,6 +4327,7 @@ mod tests {
                         last_outcome: WorkerOutcome::Running,
                         last_event_at: now,
                         conversation_id_suffix: format!("conv-{index}"),
+                        codex_thread_id: None,
                         workspace_path_suffix: format!("workspace-{index}"),
                         branch_name: None,
                         pr_url: None,

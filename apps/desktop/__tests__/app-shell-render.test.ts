@@ -638,7 +638,7 @@ describe("desktop app shell render", () => {
               run_id: args?.runId,
               issue_identifier: "COE-491",
               harness_type: "codex_app_server",
-              conversation_id: "thread_123-ABC",
+              codex_thread_id: "thread_123-ABC",
             };
           }
           if (command === "open_deeplink") {

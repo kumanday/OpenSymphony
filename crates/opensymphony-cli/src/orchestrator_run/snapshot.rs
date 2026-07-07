@@ -171,6 +171,25 @@ fn map_issue(
             .as_ref()
             .map(|conversation| suffix(conversation.conversation_id.as_str()))
             .unwrap_or_else(|| "-".to_string()),
+        // For Codex runs the conversation id *is* the Codex thread id, so
+        // carry it in full (not the display suffix) for the debug deep link.
+        // Match the same Codex detection the manifest recovery uses (transport
+        // target or the Codex runtime contract) so legacy/recovered manifests
+        // that only recorded the transport target still expose their thread
+        // id — but exclude `--dry-run` route previews, whose synthetic
+        // `route-preview-*` conversation id resumes nothing.
+        codex_thread_id: issue.conversation.as_ref().and_then(|conversation| {
+            let is_codex = conversation.transport_target.as_deref()
+                == Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND)
+                || conversation.runtime_contract_version.as_deref()
+                    == Some(crate::opensymphony_codex::CODEX_APP_SERVER_CONTRACT);
+            let is_route_preview = conversation
+                .conversation_id
+                .as_str()
+                .starts_with(super::backends::ROUTE_PREVIEW_CONVERSATION_PREFIX);
+            (is_codex && !is_route_preview)
+                .then(|| conversation.conversation_id.as_str().to_string())
+        }),
         workspace_path_suffix: issue
             .workspace
             .as_ref()
@@ -696,9 +715,7 @@ tracker:
         }
     }
 
-    fn map_single_issue_runtime_state(
-        issue: DomainIssueSnapshot,
-    ) -> crate::opensymphony_control::IssueRuntimeState {
+    fn map_single_issue(issue: DomainIssueSnapshot) -> crate::opensymphony_control::IssueSnapshot {
         let snapshot = OrchestratorSnapshot::new(
             ts(2_000),
             DaemonSnapshot::new(
@@ -711,7 +728,7 @@ tracker:
             ),
             vec![issue],
         );
-        let mapped = map_snapshot(
+        let mut mapped = map_snapshot(
             &snapshot,
             PathBuf::from("/tmp/workspaces").as_path(),
             &terminal_state_set(&resolved_workflow_for_tests()),
@@ -724,7 +741,101 @@ tracker:
             crate::opensymphony_control::MemoryServerStatus::default(),
             &std::collections::VecDeque::new(),
         );
-        mapped.issues[0].runtime_state
+        mapped.issues.remove(0)
+    }
+
+    fn map_single_issue_runtime_state(
+        issue: DomainIssueSnapshot,
+    ) -> crate::opensymphony_control::IssueRuntimeState {
+        map_single_issue(issue).runtime_state
+    }
+
+    fn codex_conversation(thread_id: &str) -> ConversationMetadata {
+        ConversationMetadata {
+            conversation_id: must(ConversationId::new(thread_id.to_owned())),
+            server_base_url: None,
+            transport_target: Some("codex_app_server".to_owned()),
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
+            fresh_conversation: false,
+            runtime_contract_version: Some("codex-app-server-json-rpc-v2".to_owned()),
+            stream_state: RuntimeStreamState::Ready,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+            recent_activity: Vec::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: 0,
+            runtime_seconds: 0,
+            next_activity_sequence: 0,
+        }
+    }
+
+    fn running_issue_with_conversation(conversation: ConversationMetadata) -> DomainIssueSnapshot {
+        let mut issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::Completed,
+        );
+        issue.conversation = Some(conversation);
+        issue
+    }
+
+    #[test]
+    fn codex_conversation_records_full_thread_id() {
+        // For a Codex run the conversation id is the Codex thread id: the
+        // snapshot must carry it in full (not the display suffix) so the
+        // desktop can open codex://threads/<id>.
+        let issue = map_single_issue(running_issue_with_conversation(codex_conversation(
+            "019f3979-3aa3-71f3-86b1-18e92c71fbc9",
+        )));
+        assert_eq!(
+            issue.codex_thread_id.as_deref(),
+            Some("019f3979-3aa3-71f3-86b1-18e92c71fbc9")
+        );
+    }
+
+    #[test]
+    fn openhands_conversation_records_no_codex_thread_id() {
+        let mut conversation = codex_conversation("ignored");
+        conversation.transport_target = Some("loopback".to_owned());
+        conversation.runtime_contract_version = Some("openhands-sdk-agent-server-v1".to_owned());
+        let issue = map_single_issue(running_issue_with_conversation(conversation));
+        assert_eq!(issue.codex_thread_id, None);
+    }
+
+    #[test]
+    fn dry_run_route_preview_records_no_codex_thread_id() {
+        // A `--dry-run` route preview to Codex targets the codex_app_server
+        // transport but carries the routing contract and a synthetic
+        // `route-preview-*` id that resumes nothing — it must not surface as
+        // a Codex thread.
+        let mut conversation = codex_conversation("route-preview-worker-1");
+        conversation.transport_target =
+            Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND.to_owned());
+        conversation.runtime_contract_version = Some("opensymphony-routing-alpha-v1".to_owned());
+        let issue = map_single_issue(running_issue_with_conversation(conversation));
+        assert_eq!(issue.codex_thread_id, None);
+    }
+
+    #[test]
+    fn legacy_codex_manifest_without_contract_still_records_thread_id() {
+        // A run recovered from an older manifest may record only the Codex
+        // transport target (no runtime contract). It is still a real Codex
+        // thread, so its full id must survive for the debug deep link.
+        let mut conversation = codex_conversation("019f3979-3aa3-71f3-86b1-18e92c71fbc9");
+        conversation.transport_target =
+            Some(crate::opensymphony_codex::CODEX_APP_SERVER_KIND.to_owned());
+        conversation.runtime_contract_version = None;
+        let issue = map_single_issue(running_issue_with_conversation(conversation));
+        assert_eq!(
+            issue.codex_thread_id.as_deref(),
+            Some("019f3979-3aa3-71f3-86b1-18e92c71fbc9")
+        );
     }
 
     #[test]

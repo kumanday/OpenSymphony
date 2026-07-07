@@ -92,6 +92,11 @@ pub struct ControlPlaneIssueSnapshot {
     pub last_outcome: ControlPlaneWorkerOutcome,
     pub last_event_at: DateTime<Utc>,
     pub conversation_id_suffix: String,
+    /// Full Codex thread id for Codex-app-server runs, so operators can open
+    /// the `codex://threads/<id>` deep link directly. `None` for OpenHands
+    /// runs (their debug entry point is the workspace, not a Codex thread).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
     pub workspace_path_suffix: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_name: Option<String>,

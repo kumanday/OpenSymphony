@@ -563,6 +563,7 @@ fn run_detail_roundtrips() {
         pr_url: Some("https://github.com/kumanday/OpenSymphony/pull/42".into()),
         workspace_id: Some("COE-390".into()),
         harness_type: Some("openhands".into()),
+        codex_thread_id: None,
         summary: Some("Processing run".into()),
         blocker: None,
         error: None,

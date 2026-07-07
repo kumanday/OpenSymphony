@@ -3390,6 +3390,7 @@ async fn get_run_detail(
                     branch_name: None,
                     pr_url: None,
                     harness_type: None,
+                    codex_thread_id: None,
                     summary: None,
                     blocker: None,
                     error: Some("Run not found".into()),
@@ -3502,7 +3503,15 @@ async fn get_run_detail(
                 .map(|path| path.display().to_string()),
             branch_name: issue.branch_name.clone(),
             pr_url,
-            harness_type: issue.server_base_url.as_ref().map(|_| "openhands".into()),
+            // A Codex run carries a Codex thread id; report the harness so the
+            // desktop opens the codex:// deep link instead of the OpenHands
+            // workspace-copy fallback.
+            harness_type: if issue.codex_thread_id.is_some() {
+                Some("codex_app_server".into())
+            } else {
+                issue.server_base_url.as_ref().map(|_| "openhands".into())
+            },
+            codex_thread_id: issue.codex_thread_id.clone(),
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
             error: None,
@@ -4897,6 +4906,7 @@ exit 2
             } else {
                 String::new()
             },
+            codex_thread_id: None,
             workspace_path_suffix: if flags.workspace {
                 "/workspace".into()
             } else {

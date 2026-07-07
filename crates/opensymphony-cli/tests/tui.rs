@@ -67,6 +67,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             last_outcome: WorkerOutcome::Running,
             last_event_at: now,
             conversation_id_suffix: "conv-0".to_owned(),
+            codex_thread_id: None,
             workspace_path_suffix: "workspace-0".to_owned(),
             branch_name: None,
             pr_url: None,
