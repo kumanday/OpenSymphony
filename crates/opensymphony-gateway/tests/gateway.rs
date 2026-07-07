@@ -2522,6 +2522,24 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             .filters_applied
             .contains(&"include_stale:true".to_string())
     );
+    let stale_neighborhood_run = stale_neighborhood
+        .nodes
+        .iter()
+        .find(|node| node.kind == CodeGraphNodeKind::Symbol && node.label == "run")
+        .expect("stale neighborhood should include base run caller");
+    assert_eq!(
+        stale_neighborhood_run.signature.as_deref(),
+        Some("fn run(&self)"),
+        "stale neighborhood edges must bind adjacent symbols from the edge revision"
+    );
+    assert!(
+        !stale_neighborhood.nodes.iter().any(|node| {
+            node.kind == CodeGraphNodeKind::Symbol
+                && node.label == "run"
+                && node.signature.as_deref() == Some("fn run(&self) -> Result<()>")
+        }),
+        "stale neighborhood must not pull current head symbols into stale/base edges"
+    );
 
     let detail = client
         .get(format!(
@@ -2879,6 +2897,57 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             .unanalyzed_files
             .contains(&"assets/logo.png".to_string())
     );
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "skip-repo".to_string(),
+            commit_sha: Some("parsed-rev".to_string()),
+            worktree_dirty: false,
+            documents: vec![code_graph_head_document()],
+        },
+    )
+    .expect("parsed skip-repo file should persist");
+    persist_code_intel_skipped_files(
+        &config_for_revision_regression,
+        "skip-repo",
+        Some("skip-rev"),
+        false,
+        &[CodeIntelSkippedFileInput {
+            path: "src/lib.rs".into(),
+            reason: "parse error".to_string(),
+            content_sha256: "skip-content".to_string(),
+        }],
+    )
+    .expect("later skipped file should persist");
+    let skipped_current_graph = client
+        .get(format!(
+            "{base}/repos/skip-repo/graph?mode=file&path=src/lib.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch skipped current graph");
+    assert_eq!(
+        skipped_current_graph.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a clean skipped revision must stale previously current parsed rows"
+    );
+    let skipped_stale_graph = client
+        .get(format!(
+            "{base}/repos/skip-repo/graph?mode=file&path=src/lib.rs&include_stale=true"
+        ))
+        .send()
+        .await
+        .expect("fetch skipped stale graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode skipped stale graph");
+    assert!(
+        skipped_stale_graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == CodeGraphNodeKind::Symbol && node.label == "run"),
+        "stale-inclusive requests may still inspect prior parsed symbols"
+    );
 
     persist_code_intel_documents(
         &config_for_revision_regression,
@@ -2962,6 +3031,57 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("decode large atlas graph");
     assert_eq!(large_atlas.truncation.nodes_dropped, 5);
+    persist_code_intel_documents(
+        &config_for_revision_regression,
+        CodeIntelPersistBatch {
+            repo_id: "dedupe-repo".to_string(),
+            commit_sha: Some("dedupe-rev".to_string()),
+            worktree_dirty: false,
+            documents: (0..505)
+                .map(|index| {
+                    code_graph_document_with_path(
+                        "src/dup.rs",
+                        &format!("dedupe-content-{index}"),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                })
+                .chain(std::iter::once(code_graph_document_with_path(
+                    "src/z_current.rs",
+                    "dedupe-current-z",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )))
+                .collect(),
+        },
+    )
+    .expect("duplicate-heavy atlas fixture should persist");
+    let deduped_atlas = client
+        .get(format!(
+            "{base}/repos/dedupe-repo/graph?mode=atlas&include_stale=true"
+        ))
+        .send()
+        .await
+        .expect("fetch deduped atlas graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode deduped atlas graph");
+    assert_eq!(deduped_atlas.truncation.nodes_dropped, 0);
+    assert!(deduped_atlas.nodes.iter().any(|node| {
+        node.kind == CodeGraphNodeKind::File
+            && node.path_display.as_deref() == Some("src/z_current.rs")
+    }));
+    let duplicate_file = deduped_atlas
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CodeGraphNodeKind::File
+                && node.path_display.as_deref() == Some("src/dup.rs")
+        })
+        .expect("duplicate path should still produce one file node");
+    assert_eq!(duplicate_file.freshness, CodeGraphFreshness::Current);
 
     server_task.abort();
 }

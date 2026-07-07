@@ -477,7 +477,20 @@ fn code_graph_atlas_snapshot(
     let total_documents = count_code_documents(&connection, config, repo_id, options.include_stale)?;
     let mut statement = connection
         .prepare(&format!(
-            "SELECT path, language, freshness FROM code_documents WHERE repo_id = ? AND {freshness} ORDER BY path LIMIT {}",
+            "SELECT path, language, freshness FROM (
+                SELECT path, language, freshness,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY path
+                        ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END,
+                            indexed_at DESC,
+                            content_sha256
+                    ) AS row_rank
+                FROM code_documents
+                WHERE repo_id = ? AND {freshness}
+            ) ranked
+            WHERE row_rank = 1
+            ORDER BY path
+            LIMIT {}",
             CODE_GRAPH_MAX_RECORDS + 1
         ))
         .map_err(|source| MemoryError::DuckDb {
@@ -1652,7 +1665,7 @@ fn count_code_documents(
     let freshness = code_freshness_filter(include_stale);
     let count: i64 = connection
         .query_row(
-            &format!("SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND {freshness}"),
+            &format!("SELECT COUNT(DISTINCT path) FROM code_documents WHERE repo_id = ? AND {freshness}"),
             params![repo_id],
             |row| row.get(0),
         )

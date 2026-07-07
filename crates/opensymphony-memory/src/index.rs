@@ -987,6 +987,12 @@ pub fn persist_code_intel_skipped_files(
     let indexed_at = Utc::now().to_rfc3339();
     for skipped in skipped_files {
         let path = skipped.path.to_string_lossy().to_string();
+        stale_code_rows_for_skipped_file(&transaction, repo_id, &path).map_err(|source| {
+            MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }
+        })?;
         transaction
             .execute(
                 "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
@@ -1411,9 +1417,12 @@ fn code_symbol_neighborhood_with_stale(
                             dropped_nodes += 1;
                             continue;
                         }
-                        if let Some(symbol) =
-                            query_code_symbol_by_key(&connection, adjacent, !include_stale)?
-                        {
+                        if let Some(symbol) = query_code_symbol_for_edge(
+                            &connection,
+                            adjacent,
+                            &edge,
+                            include_stale,
+                        )? {
                             next_frontier.insert(adjacent.to_string());
                             symbols.insert(adjacent.to_string(), symbol);
                         }
@@ -1576,6 +1585,46 @@ fn query_code_symbol_by_key(
     })?;
     fill_container_chain(connection, &mut symbol)?;
     Ok(Some(symbol))
+}
+
+fn query_code_symbol_for_edge(
+    connection: &Connection,
+    symbol_key: &str,
+    edge: &CodeEdgeRecord,
+    include_stale: bool,
+) -> Result<Option<CodeSymbolRecord>, MemoryError> {
+    if !include_stale {
+        return query_code_symbol_by_key(connection, symbol_key, true);
+    }
+    if let Some(commit_sha) = edge.commit_sha.as_deref() {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND commit_sha = ? AND freshness = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+            ))
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+        let mut rows = statement
+            .query(params![symbol_key, commit_sha, &edge.freshness])
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+        if let Some(row) = rows.next().map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })? {
+            let mut symbol = code_symbol_from_row(row).map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+            fill_container_chain(connection, &mut symbol)?;
+            return Ok(Some(symbol));
+        }
+        return Ok(None);
+    }
+    query_code_symbol_by_key(connection, symbol_key, false)
 }
 
 fn query_symbols_for_revision(
@@ -1799,6 +1848,35 @@ fn stale_code_rows(
     stale_rows += connection.execute(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    Ok(stale_rows)
+}
+
+fn stale_code_rows_for_skipped_file(
+    connection: &Connection,
+    repo_id: &str,
+    path: &str,
+) -> Result<usize, duckdb::Error> {
+    let mut stale_rows = 0;
+    stale_rows += connection.execute(
+        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
     )?;
     Ok(stale_rows)
 }
