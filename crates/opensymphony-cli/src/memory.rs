@@ -5901,26 +5901,27 @@ CREATE TABLE code_edges (
             .expect("persist revision");
         }
 
-        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
-            .expect("index opens");
-        let rows = connection
-            .prepare(
-                "SELECT commit_sha, symbol_id, symbol_key FROM code_symbols ORDER BY commit_sha",
-            )
-            .expect("prepare symbols")
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .expect("query symbols")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("symbol rows");
-        assert_eq!(rows.len(), 2);
-        assert_ne!(rows[0].1, rows[1].1);
-        assert_eq!(rows[0].2, rows[1].2);
+        {
+            let connection = Connection::open(&config.index_path).expect("index opens");
+            let rows = connection
+                .prepare(
+                    "SELECT commit_sha, symbol_id, symbol_key FROM code_symbols ORDER BY commit_sha",
+                )
+                .expect("prepare symbols")
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .expect("query symbols")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("symbol rows");
+            assert_eq!(rows.len(), 2);
+            assert_ne!(rows[0].1, rows[1].1);
+            assert_eq!(rows[0].2, rows[1].2);
+        }
 
         let comparison =
             compare_code_symbols(&config, "repo", "base", "head", 10).expect("compare revisions");
@@ -5949,6 +5950,8 @@ CREATE TABLE code_edges (
             },
         )
         .expect("dirty revision persist");
+        let connection =
+            Connection::open(&config.index_path).expect("index reopens after dirty persist");
         for table in [
             "code_documents",
             "code_symbols",
