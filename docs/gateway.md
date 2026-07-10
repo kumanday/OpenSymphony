@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-21T19:11:22.242702+00:00
 
 ## Current model
 
-- PR-196 contributed: PR #196: perf(desktop): fix task/diff click latency and live-refresh selection clobbering (merge `428acc9`)
+- COE-532 contributed: PR #201: fix(orchestrator): stop reporting parked recovered issues as completed (merge `f6cddee`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-21T19:11:22.242702+00:00
 
 ## Recent changes
 
-- PR-196: Desktop task and diff latency plus live-refresh UX fixes
+- COE-532: Symbol Identity Container Chain And Code Read Model
 
 ## Source refs
 
-- PR-196
+- COE-532
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

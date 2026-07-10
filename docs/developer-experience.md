@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-14T22:09:16.647708+00:00
 
 ## Current model
 
-- COE-531 contributed: PR #195: Promote workspace graph surfaces into hero shell (merge `932991f`)
+- COE-532 contributed: PR #201: fix(orchestrator): stop reporting parked recovered issues as completed (merge `f6cddee`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-14T22:09:16.647708+00:00
 
 ## Recent changes
 
-- COE-531: Workspace Shell Graph Hero And Surface State
+- COE-532: Symbol Identity Container Chain And Code Read Model
 
 ## Source refs
 
-- COE-531
+- COE-532
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

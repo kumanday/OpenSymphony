@@ -11,7 +11,7 @@ last_memory_sync: 2026-07-02T03:46:15.373401+00:00
 
 ## Current model
 
-- PR-197 contributed: PR #197: feat(graph): 3D knowledge-graph command center, differentiated task-graph arrows, shared viz fixtures (merge `8e341b5`)
+- COE-532 contributed: PR #201: fix(orchestrator): stop reporting parked recovered issues as completed (merge `f6cddee`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-07-02T03:46:15.373401+00:00
 
 ## Recent changes
 
-- PR-197: Graph visualization command center and shared fixtures
+- COE-532: Symbol Identity Container Chain And Code Read Model
 
 ## Source refs
 
-- PR-197
+- COE-532
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
