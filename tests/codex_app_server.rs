@@ -317,6 +317,23 @@ fn codex_installed_schema_accepts_automation_payloads_when_requested() {
     validator
         .validate_request(&turn.request)
         .expect("turn/start should match installed schema");
+    let resume = adapter
+        .resume_issue_request(
+            &mut session,
+            "thread-1",
+            "/tmp/issue-workspace",
+            Some("gpt-5-codex".into()),
+        )
+        .expect("thread/resume should serialize");
+    validator
+        .validate_request(&resume.request)
+        .expect("thread/resume should match installed schema");
+    let archive = adapter
+        .archive_issue_thread_request(&mut session, "thread-1")
+        .expect("thread/archive should serialize");
+    validator
+        .validate_request(&archive.request)
+        .expect("thread/archive should match installed schema");
     let default_thread = adapter
         .start_issue_thread_request(
             &mut session,
@@ -961,16 +978,26 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     );
 
     let resume = adapter
-        .resume_issue_request(&mut session, "thread-1", "/tmp/issue-workspace", "continue")
+        .resume_issue_request(
+            &mut session,
+            "thread-1",
+            "/tmp/issue-workspace",
+            Some("gpt-5-codex".into()),
+        )
         .expect("resume request serializes");
     assert_eq!(resume.lifecycle, CodexLifecycleRequest::Resume);
-    assert_eq!(resume.request.method, "turn/start");
+    assert_eq!(resume.request.method, "thread/resume");
     assert_eq!(resume.request.params["threadId"], "thread-1");
     assert_eq!(resume.request.params["approvalPolicy"], "never");
-    assert_eq!(
-        resume.request.params["sandboxPolicy"],
-        json!({ "type": "dangerFullAccess" })
-    );
+    assert_eq!(resume.request.params["sandbox"], "danger-full-access");
+    assert_eq!(resume.request.params["model"], "gpt-5-codex");
+
+    let archive = adapter
+        .archive_issue_thread_request(&mut session, "thread-1")
+        .expect("archive request serializes");
+    assert_eq!(archive.lifecycle, CodexLifecycleRequest::Archive);
+    assert_eq!(archive.request.method, "thread/archive");
+    assert_eq!(archive.request.params["threadId"], "thread-1");
 
     let interrupt = adapter.interrupt_turn_request(&mut session, "thread-1", "turn-1");
     assert_eq!(interrupt.lifecycle, CodexLifecycleRequest::Interrupt);

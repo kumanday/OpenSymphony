@@ -22,8 +22,9 @@ lifecycle is defined in the
 The Rust module provides:
 
 - launch argument construction for stdio and loopback WebSocket,
-- JSON-RPC request construction for `initialize`, `thread/start`, and
-  `turn/start`, plus resume, `turn/interrupt`, and approval responses,
+- JSON-RPC request construction for `initialize`, `thread/start`,
+  `thread/resume`, `turn/start`, and first-manifest rollback `thread/archive`,
+  plus `turn/interrupt` and approval responses,
 - normalization of thread, turn, item, approval, cancellation, error, and
   unknown notifications while preserving the raw payload,
 - bounded human-readable summaries for high-value notifications such as
@@ -256,12 +257,13 @@ codex app-server generate-ts --out <dir>
 
 OpenSymphony does not pin or vendor a Codex binary. It asks the installed Codex
 CLI to generate its current app-server JSON Schema, validates outbound
-`initialize`, `thread/start`, and `turn/start` requests against that schema, and
-fails with update guidance if the installed Codex is too old or incompatible
-with the required automation fields.
+`initialize`, `thread/start`, `thread/resume`, `turn/start`, and rollback
+`thread/archive` requests against that schema, and fails with update guidance
+if the installed Codex is too old or incompatible with the required automation
+fields.
 
-The generated protocol includes `initialize`, `thread/start`, `turn/start`,
-`thread/started`, `turn/started`, `turn/completed`,
+The generated protocol includes `initialize`, `thread/start`, `thread/resume`,
+`thread/archive`, `turn/start`, `thread/started`, `turn/started`, `turn/completed`,
 `item/agentMessage/delta`, `item/started`, `item/completed`, and server-side
 approval request shapes.
 
@@ -418,8 +420,8 @@ subscription credentials. The current mapping is:
   subscription launch normalizes bare OpenAI model names to the
   `openai/<model>` SDK shape.
 - selected model strings from `routing.model` or `OPENSYMPHONY_MODEL` are
-  passed to Codex `thread/start` and `turn/start` where the installed app-server
-  supports per-session/per-turn model overrides.
+  passed to Codex `thread/start`, `thread/resume`, and `turn/start` where the
+  installed app-server supports per-session/per-turn model overrides.
 - when no model is selected for the Codex harness, OpenSymphony omits the model
   field and lets the Codex CLI/app-server use its own configured default, such
   as `~/.codex/config.toml`.
@@ -457,12 +459,27 @@ worker errors or run manifests. JSON-RPC initialize/start waits currently use
 fixed alpha bounds of 30 seconds per response and 300 seconds for terminal
 notification wait.
 
-After `thread/start` succeeds, the worker records the Codex thread id in the
-issue workspace `.opensymphony/conversation.json` manifest with
-`transport_target: codex_app_server`. `opensymphony debug <issue-key>` uses that
-recorded thread id to run `codex resume <thread-id>` from the issue workspace.
-`opensymphony debug <issue-key> --app` prints the matching
-`codex://threads/<thread-id>` deep link.
+The conversation manifest is the canonical thread record for a Codex-backed
+issue. On a first run, the worker renders the full workflow prompt before it
+sends `thread/start`, persists the returned id with an unseeded manifest, and
+only marks the prompt seeded after `turn/start` accepts that prompt. If that
+first manifest write fails, it best-effort archives the newly started thread
+and does not start a turn. On later runs, the worker validates the existing
+manifest, sends `thread/resume` for the recorded id, verifies that Codex returns
+the same id, and then starts a full or continuation turn as appropriate. It
+never starts a replacement thread after manifest, resume, response-validation,
+or turn failures.
+
+Terminal workspace cleanup delegates to `WorkspaceManager`, so the configured
+retention decision and lifecycle hooks apply once per retained workspace in a
+runtime. The current runtime policy retains terminal workspaces and therefore
+preserves `.opensymphony/conversation.json` for future archive/debug recovery
+work. Terminal archival and debug unarchive remain the separate follow-on
+lifecycle slice.
+
+`opensymphony debug <issue-key>` uses the recorded thread id to run
+`codex resume <thread-id>` from the issue workspace. `opensymphony debug
+<issue-key> --app` prints the matching `codex://threads/<thread-id>` deep link.
 
 After `turn/start` yields an active turn id, the runtime backend retains a live
 stdio interrupt channel for the running Codex child. Scheduler interrupts such

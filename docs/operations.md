@@ -350,11 +350,15 @@ The local Codex app-server harness path launches
 `codex --dangerously-bypass-hook-trust app-server --stdio` and is advertised as
 available when clients read `/api/v1/capabilities`. Before starting a run,
 OpenSymphony generates the JSON Schema from the installed Codex CLI and
-validates its full-automation `thread/start` and `turn/start` payloads. If the
-installed schema rejects those payloads, update Codex before running the Codex
-harness. Unsupported or logged-out Codex installations must fail with the
-readiness guidance above instead of partially starting an issue. Loopback
-WebSocket and hosted Codex worker pools remain non-production paths.
+validates its full-automation `thread/start`, `thread/resume`, rollback
+`thread/archive`, and `turn/start` payloads. A new issue starts a thread; a
+workspace with its canonical manifest resumes it. If the first manifest write
+fails after a start, OpenSymphony archives that newly created thread and does
+not start a turn. If the installed schema rejects any lifecycle payload, update
+Codex before running the Codex harness. Unsupported or logged-out Codex
+installations must fail with the readiness guidance above instead of partially
+starting an issue. Loopback WebSocket and hosted Codex worker pools remain
+non-production paths.
 
 For cross-harness route testing, run `opensymphony run --dry-run`.
 OpenSymphony will still poll Linear and prepare workspaces, but the worker
