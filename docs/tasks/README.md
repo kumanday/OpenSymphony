@@ -30,6 +30,7 @@ Rich client, hosted mode, collaborative planning, subscription-auth, and future 
 - OSYM-856 Workflow target branch configuration
 - OSYM-860 Desktop app installer and auto-update
 - OSYM-870 Code Graph View
+- OSYM-877 Codex thread lifecycle
 
 See `milestones.md` for the new task set and `../host-client-implementation_plan.md` for the source implementation strategy.
 

@@ -13,6 +13,7 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/specs/tui-dependency-gutter-spec.md`
 - `docs/specs/opensymphony_tree_sitter_ast_spec.md`
 - `docs/specs/desktop-app-installer-auto-update-spec.md`
+- `docs/specs/codex-thread-lifecycle-spec.md`
 - `docs/specs/code-graph-view-spec.md`
 
 ## M6: Gateway And Stream Contract
@@ -243,6 +244,17 @@ Tasks:
 - OSYM-863 Source Build Fallback And Prerequisites
 - OSYM-864 Desktop Auto-Update Flow
 - OSYM-865 Installer Docs And End-To-End Validation
+
+## M12.85: Codex Thread Lifecycle
+
+Goal: Keep one recoverable Codex app-server thread per issue by reusing its
+manifest-backed id across retries, retaining terminal workspaces, and archiving
+or unarchiving that same thread at terminal and debug boundaries.
+
+Tasks:
+
+- OSYM-877 Canonical Codex Thread Reuse And Workspace Retention
+- OSYM-878 Durable Codex Thread Archive And Debug Recovery
 
 ## M12.9: Code Graph View
 
