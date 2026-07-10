@@ -282,11 +282,13 @@ areas:
     source_refs:
       linear_labels:
       - area:cli
+      - area:code-intelligence
       - area:code-review
       - area:desktop
       - area:documentation
       - area:graph-view
       - area:installer
+      - area:memory
       - area:release
       - area:template
       - area:web
@@ -766,11 +768,13 @@ areas:
     source_refs:
       linear_labels:
       - area:cli
+      - area:code-intelligence
       - area:code-review
       - area:desktop
       - area:documentation
       - area:graph-view
       - area:installer
+      - area:memory
       - area:operations
       - area:release
       - area:target-repo-bootstrap
@@ -1829,10 +1833,12 @@ areas:
     source_refs:
       linear_labels:
       - area:cli
+      - area:code-intelligence
       - area:desktop
       - area:documentation
       - area:graph-view
       - area:installer
+      - area:memory
       - area:release
       - area:web
       linear_milestones:
@@ -2067,11 +2073,13 @@ areas:
     source_refs:
       linear_labels:
       - area:cli
+      - area:code-intelligence
       - area:code-review
       - area:desktop
       - area:documentation
       - area:graph-view
       - area:installer
+      - area:memory
       - area:release
       - area:target-repo-bootstrap
       - area:template
@@ -2092,10 +2100,12 @@ areas:
     source_refs:
       linear_labels:
       - area:cli
+      - area:code-intelligence
       - area:desktop
       - area:documentation
       - area:graph-view
       - area:installer
+      - area:memory
       - area:release
       - area:template
       - area:web
@@ -2422,8 +2432,10 @@ areas:
     - web
     source_refs:
       linear_labels:
+      - area:code-intelligence
       - area:desktop
       - area:graph-view
+      - area:memory
       - area:web
       linear_milestones:
       - 'M12.9: Code Graph View'

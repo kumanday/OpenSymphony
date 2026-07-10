@@ -568,7 +568,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-531 contributed: PR #195: Promote workspace graph surfaces into hero shell (merge `932991f`)
+- COE-532 contributed: PR #201: fix(orchestrator): stop reporting parked recovered issues as completed (merge `f6cddee`)
 
 ## Important invariants
 
@@ -585,10 +585,10 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Recent changes
 
-- COE-531: Workspace Shell Graph Hero And Surface State
+- COE-532: Symbol Identity Container Chain And Code Read Model
 
 ## Source refs
 
-- COE-531
+- COE-532
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
