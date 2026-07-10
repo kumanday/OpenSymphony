@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: runtime
+area: workspace-lifecycle
 visibility: public
-last_memory_sync: 2026-06-21T19:11:22.264899+00:00
+last_memory_sync: 2026-07-10T23:53:09.834546+00:00
 ---
 
-# Runtime
+# Workspace Lifecycle
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
