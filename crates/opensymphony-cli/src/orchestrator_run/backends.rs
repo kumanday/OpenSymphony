@@ -133,6 +133,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
+    terminal_cleanup_paths: HashSet<PathBuf>,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -627,6 +628,7 @@ impl RuntimeWorkspaceBackend {
                 .iter()
                 .map(|state| normalized_state_name(state))
                 .collect(),
+            terminal_cleanup_paths: HashSet::new(),
         }
     }
 }
@@ -640,6 +642,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         _observed_at: TimestampMs,
     ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
         let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
+        self.terminal_cleanup_paths
+            .remove(ensured.handle.workspace_path());
         Ok(crate::opensymphony_domain::WorkspaceRecord {
             path: ensured.handle.workspace_path().to_path_buf(),
             workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())?,
@@ -700,7 +704,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        if terminal {
+        if terminal && !self.terminal_cleanup_paths.contains(&workspace.path) {
             let handle = self
                 .manager
                 .list_all_workspaces()
@@ -715,6 +719,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             self.manager
                 .cleanup(&handle, IssueLifecycleState::Terminal)
                 .await?;
+            self.terminal_cleanup_paths.insert(workspace.path.clone());
         }
         Ok(())
     }
@@ -1365,6 +1370,17 @@ async fn try_run_codex_stdio_issue(
     let existing_manifest = load_codex_conversation_manifest(workspace_manager, workspace, issue)
         .await
         .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let first_run_prompt = if existing_manifest.is_none() {
+        Some(
+            workflow
+                .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+                .map_err(|source| {
+                    format!("failed to render workflow prompt for Codex route: {source}")
+                })?,
+        )
+    } else {
+        None
+    };
     let (conversation_id, mut manifest, prompt_kind) = match existing_manifest {
         Some(manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
@@ -1540,13 +1556,14 @@ async fn try_run_codex_stdio_issue(
             (conversation_id, manifest, IssueSessionPromptKind::Full)
         }
     };
-    let prompt = match prompt_kind {
-        IssueSessionPromptKind::Full => workflow
+    let prompt = match (prompt_kind, first_run_prompt) {
+        (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
+        (IssueSessionPromptKind::Full, None) => workflow
             .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
             .map_err(|source| {
                 format!("failed to render workflow prompt for Codex route: {source}")
             })?,
-        IssueSessionPromptKind::Continuation => build_continuation_guidance(issue, run),
+        (IssueSessionPromptKind::Continuation, _) => build_continuation_guidance(issue, run),
     };
     let turn_start = adapter
         .start_issue_turn_request(
@@ -3808,7 +3825,7 @@ mod tests {
                 root: workspace_root,
                 hooks: HookConfig {
                     before_remove: Some(HookDefinition::shell(
-                        "echo before_remove > .opensymphony/logs/before_remove.txt",
+                        "echo before_remove >> .opensymphony/logs/before_remove.txt",
                     )),
                     ..HookConfig::default()
                 },
@@ -3846,6 +3863,10 @@ mod tests {
             .cleanup_workspace(&workspace, true)
             .await
             .expect("manager-owned cleanup should succeed");
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("repeated terminal cleanup should be a no-op");
 
         assert!(ensured.handle.workspace_path().is_dir());
         assert!(ensured.handle.conversation_manifest_path().is_file());
@@ -3855,6 +3876,76 @@ mod tests {
                 .trim(),
             "before_remove"
         );
+
+        let mut reopened_issue = issue.clone();
+        reopened_issue.state = IssueState {
+            id: None,
+            name: "In Progress".to_string(),
+            category: IssueStateCategory::Active,
+        };
+        backend
+            .ensure_workspace(&reopened_issue, TimestampMs::new(2))
+            .await
+            .expect("reopened workspace should be ensured");
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("a later terminal transition should run cleanup again");
+        assert_eq!(
+            fs::read_to_string(ensured.handle.logs_dir().join("before_remove.txt"))
+                .expect("before-remove hook should run after reopen")
+                .lines()
+                .collect::<Vec<_>>(),
+            ["before_remove", "before_remove"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_first_run_prompt_render_failure_does_not_start_a_thread() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow_with_prompt(
+            tempdir.path(),
+            &workspace_root,
+            "{{ issue.missing_field }}",
+        );
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let log_path = tempdir.path().join("fake-codex-render-failure.log");
+        let fake_codex = tempdir.path().join("fake-codex-render-failure");
+        write_fake_codex_child(&fake_codex, &log_path);
+
+        let (outcome, _, launch) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &codex_test_route(false),
+            &fake_codex,
+            "render-failure",
+            1,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert!(
+            matches!(launch, LaunchReport::Failed(detail) if detail.contains("failed to render workflow prompt"))
+        );
+        assert!(
+            !ensured.handle.conversation_manifest_path().exists(),
+            "a failed first render must not persist an unseeded manifest"
+        );
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(!log.contains(r#""method":"thread/start""#));
+        assert!(!log.contains(r#""method":"thread/archive""#));
+        assert!(!log.contains(r#""method":"turn/start""#));
     }
 
     #[cfg(unix)]
@@ -5091,9 +5182,21 @@ Run the scheduler.
     }
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
+        sample_workflow_with_prompt(
+            base_dir,
+            workspace_root,
+            "# Test Workflow\n\nRun the scheduler.",
+        )
+    }
+
+    fn sample_workflow_with_prompt(
+        base_dir: &Path,
+        workspace_root: &Path,
+        prompt: &str,
+    ) -> ResolvedWorkflow {
         let source = format!(
-            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
-            workspace_root.display()
+            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n{prompt}\n",
+            workspace_root.display(),
         );
         WorkflowDefinition::parse(&source)
             .expect("workflow should parse")

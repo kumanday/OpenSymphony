@@ -460,20 +460,22 @@ fixed alpha bounds of 30 seconds per response and 300 seconds for terminal
 notification wait.
 
 The conversation manifest is the canonical thread record for a Codex-backed
-issue. On a first run, the worker sends one `thread/start`, persists its id with
-an unseeded manifest, and only marks the prompt seeded after `turn/start`
-accepts the full workflow prompt. If that first manifest write fails, it
-best-effort archives the newly started thread and does not start a turn. On
-later runs, the worker validates the existing manifest, sends `thread/resume`
-for the recorded id, verifies that Codex returns the same id, and then starts a
-full or continuation turn as appropriate. It never starts a replacement thread
-after manifest, resume, response-validation, or turn failures.
+issue. On a first run, the worker renders the full workflow prompt before it
+sends `thread/start`, persists the returned id with an unseeded manifest, and
+only marks the prompt seeded after `turn/start` accepts that prompt. If that
+first manifest write fails, it best-effort archives the newly started thread
+and does not start a turn. On later runs, the worker validates the existing
+manifest, sends `thread/resume` for the recorded id, verifies that Codex returns
+the same id, and then starts a full or continuation turn as appropriate. It
+never starts a replacement thread after manifest, resume, response-validation,
+or turn failures.
 
 Terminal workspace cleanup delegates to `WorkspaceManager`, so the configured
-retention decision and lifecycle hooks apply. The current runtime policy retains
-terminal workspaces and therefore preserves `.opensymphony/conversation.json`
-for future archive/debug recovery work. Terminal archival and debug unarchive
-remain the separate follow-on lifecycle slice.
+retention decision and lifecycle hooks apply once per retained workspace in a
+runtime. The current runtime policy retains terminal workspaces and therefore
+preserves `.opensymphony/conversation.json` for future archive/debug recovery
+work. Terminal archival and debug unarchive remain the separate follow-on
+lifecycle slice.
 
 `opensymphony debug <issue-key>` uses the recorded thread id to run
 `codex resume <thread-id>` from the issue workspace. `opensymphony debug
