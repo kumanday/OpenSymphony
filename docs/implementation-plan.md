@@ -200,6 +200,7 @@ of broadening the existing hardening milestone:
 | M12.6 Tree-sitter Code Intelligence | after M13 ACP debugging, before M15 release hardening | trusted Tree-sitter provider, memory-context AST integration, query packs, persistence, read-only MCP/CLI AST tools, performance and docs |
 | M12.7 Workflow Target Branch Configuration | after M12.6 code intelligence, before M15 release hardening | configurable target branch markers, init prompt and flag, marker-only update settings mode, template/docs hardening |
 | M12.8 Desktop App Installer And Auto-Update | after M12.7 workflow target branch configuration, before M15 release hardening | lazy desktop installer/launcher, verified release bundles, source-build fallback, auto-update prompts, and installer docs |
+| M12.85 Codex Thread Lifecycle | after M10.3 Codex production harness, before M15 release hardening | manifest-backed per-issue thread reuse, retained terminal workspaces, durable archive transitions, and debug/reopen recovery |
 | M12.9 Code Graph View | after M12.8 desktop installer and after M12.6 code-intelligence foundations, before M15 release hardening | graph-hero shell, stable symbol identity, code graph DTOs, shared frontend surface, run-diff overlays, cross-graph chips, and hardening |
 
 M10.3 pulls the shared harness adapter, model/credential settings, OpenHands
@@ -237,13 +238,17 @@ M12.8 follows the desktop installer and auto-update specification with release
 metadata, verified bundles, app install/launch flow, source-build fallback,
 update prompts, and end-to-end installer documentation.
 
+M12.85 follows the Codex thread lifecycle specification with its required two
+deployment-ordered slices: canonical per-issue thread reuse and retained
+workspaces first, then terminal archival and debug/reopen recovery.
+
 M12.9 follows the Code Graph specification with the smallest useful split:
 workspace shell geometry first, stable symbol identity and code read contracts,
 shared frontend adapters, run-diff symbol navigation, cross-graph chips, and
 scale/accessibility hardening.
 
 The current default planning source is `docs/tasks/task-package.yaml` for the
-M12.9 code-graph-view wave. The ACP debugging wave remains in
+M12.85 codex-thread-lifecycle wave. The ACP debugging wave remains in
 `docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
 `docs/tasks/linear-publish.yaml` records the latest published planning wave.
 

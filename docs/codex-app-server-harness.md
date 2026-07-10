@@ -5,6 +5,10 @@ the local stdio path into a supported OpenSymphony harness capability while
 leaving hosted worker pools and loopback WebSocket routing out of production
 scope.
 
+The proposed canonical thread reuse, terminal archive, and debug recovery
+lifecycle is defined in the
+[Codex Thread Lifecycle Specification](specs/codex-thread-lifecycle-spec.md).
+
 ## Local Harness Scope
 
 - Runtime kind: `codex_app_server`.

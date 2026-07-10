@@ -1,19 +1,9 @@
-planningWave: code-graph-view
+planningWave: codex-thread-lifecycle
 tasksDir: docs/tasks
 milestones:
-  - "M12.9: Code Graph View"
+  - "M12.85: Codex Thread Lifecycle"
 tasks:
-  - id: OSYM-870
-    file: docs/tasks/osym-870-workspace-shell-graph-hero-and-surface-state.md
-  - id: OSYM-871
-    file: docs/tasks/osym-871-symbol-identity-container-chain-and-code-read-model.md
-  - id: OSYM-872
-    file: docs/tasks/osym-872-code-graph-dtos-gateway-routes-and-native-commands.md
-  - id: OSYM-873
-    file: docs/tasks/osym-873-code-graph-frontend-surface-adapters-and-inspector.md
-  - id: OSYM-874
-    file: docs/tasks/osym-874-run-diff-symbol-navigation-and-code-overlay.md
-  - id: OSYM-875
-    file: docs/tasks/osym-875-cross-graph-code-memory-and-work-chips.md
-  - id: OSYM-876
-    file: docs/tasks/osym-876-code-graph-scale-accessibility-and-parity-hardening.md
+  - id: OSYM-877
+    file: docs/tasks/osym-877-canonical-codex-thread-reuse-and-workspace-retention.md
+  - id: OSYM-878
+    file: docs/tasks/osym-878-durable-codex-thread-archive-and-debug-recovery.md
