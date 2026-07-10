@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 
 ## Current model
 
-- COE-532 contributed: PR #201: fix(orchestrator): stop reporting parked recovered issues as completed (merge `f6cddee`)
+- COE-540 contributed: PR #206: feat(codex): reuse canonical issue threads (merge `e49e5ab`)
 
 ## Important invariants
 
@@ -28,11 +28,11 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 
 ## Recent changes
 
-- COE-532: Symbol Identity Container Chain And Code Read Model
+- COE-540: Canonical Codex Thread Reuse And Workspace Retention
 
 ## Source refs
 
-- COE-532
+- COE-540
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
 ## Local Build And Run
