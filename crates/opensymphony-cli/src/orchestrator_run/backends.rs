@@ -27,7 +27,7 @@ use crate::opensymphony_openhands::{
     IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, MemoryWorkerAccess,
     OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient, OpenHandsConversationStorePaths,
     OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
-    WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
+    WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
 };
 use crate::opensymphony_orchestrator::{
     RecoveredRun, RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
@@ -36,8 +36,9 @@ use crate::opensymphony_orchestrator::{
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
-    RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
+    RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
+    WorkspaceManagerConfig,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -71,12 +72,6 @@ pub(super) enum CliWorkspaceError {
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
-    #[error("failed to remove workspace {path}: {source}")]
-    RemoveWorkspace {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 #[derive(Debug, Error)]
@@ -136,6 +131,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
+    terminal_cleanup_paths: HashSet<PathBuf>,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -630,6 +626,7 @@ impl RuntimeWorkspaceBackend {
                 .iter()
                 .map(|state| normalized_state_name(state))
                 .collect(),
+            terminal_cleanup_paths: HashSet::new(),
         }
     }
 }
@@ -643,6 +640,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         _observed_at: TimestampMs,
     ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
         let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
+        self.terminal_cleanup_paths
+            .remove(ensured.handle.workspace_path());
         Ok(crate::opensymphony_domain::WorkspaceRecord {
             path: ensured.handle.workspace_path().to_path_buf(),
             workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())?,
@@ -703,17 +702,22 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        if terminal {
-            match fs::remove_dir_all(&workspace.path).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(CliWorkspaceError::RemoveWorkspace {
-                        path: workspace.path.clone(),
-                        source,
-                    });
-                }
-            }
+        if terminal && !self.terminal_cleanup_paths.contains(&workspace.path) {
+            let Some(handle) = self
+                .manager
+                .list_all_workspaces()
+                .await?
+                .into_iter()
+                .find_map(|(handle, _)| {
+                    (handle.workspace_path() == workspace.path).then_some(handle)
+                })
+            else {
+                return Ok(());
+            };
+            self.manager
+                .cleanup(&handle, IssueLifecycleState::Terminal)
+                .await?;
+            self.terminal_cleanup_paths.insert(workspace.path.clone());
         }
         Ok(())
     }
@@ -1360,49 +1364,210 @@ async fn try_run_codex_stdio_issue(
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
 
-    let prompt = workflow
-        .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
-        .map_err(|source| format!("failed to render workflow prompt for Codex route: {source}"))?;
     let model = codex_model_from_route(route);
-    let thread_start = adapter
-        .start_issue_thread_request(
-            &mut session,
-            workspace.workspace_path().display().to_string(),
-            model.clone(),
-            serde_json::json!({
-                "opensymphonyRoute": {
-                    "harness": &route.harness_kind,
-                    "model": &model,
-                    "modelProfile": &route.model_profile,
-                    "reason": &route.reason,
-                }
-            }),
-        )
-        .map_err(|source| format!("failed to build Codex thread/start request: {source}"))?;
-    write_codex_request(
-        &mut stdin,
-        &schema_validator,
-        &thread_start.request,
-        "thread/start",
-        &stderr_tail,
-    )
-    .await?;
-    let thread_start_response = read_response_line(
-        &mut reader,
-        thread_start.request.id,
-        updates_tx,
-        &run.worker_id.to_string(),
-        issue,
-        run,
-        &mut read_state,
-    )
-    .await
-    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    let conversation_id = codex_thread_id_from_start_response(&thread_start_response)
-        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    write_codex_conversation_manifest(workspace_manager, workspace, issue, &conversation_id, route)
+    let existing_manifest = load_codex_conversation_manifest(workspace_manager, workspace, issue)
         .await
-        .map_err(|error| with_codex_stderr(error.to_string(), &stderr_tail))?;
+        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let first_run_prompt = if existing_manifest.is_none() {
+        Some(
+            workflow
+                .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+                .map_err(|source| {
+                    format!("failed to render workflow prompt for Codex route: {source}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
+        Some(manifest) => {
+            let conversation_id = manifest.conversation_id.to_string();
+            let resume = adapter
+                .resume_issue_request(
+                    &mut session,
+                    conversation_id.clone(),
+                    workspace.workspace_path().display().to_string(),
+                    model.clone(),
+                )
+                .map_err(|source| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "thread/resume request",
+                        source,
+                    )
+                })?;
+            write_codex_request(
+                &mut stdin,
+                &schema_validator,
+                &resume.request,
+                "thread/resume",
+                &stderr_tail,
+            )
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&conversation_id),
+                    "thread/resume",
+                    with_codex_stderr(error, &stderr_tail),
+                )
+            })?;
+            let resume_response = read_response_line(
+                &mut reader,
+                resume.request.id,
+                updates_tx,
+                &run.worker_id.to_string(),
+                issue,
+                run,
+                &mut read_state,
+            )
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&conversation_id),
+                    "thread/resume",
+                    with_codex_stderr(error, &stderr_tail),
+                )
+            })?;
+            let resumed_thread_id =
+                codex_thread_id_from_response(&resume_response).map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "thread/resume response validation",
+                        error,
+                    )
+                })?;
+            if resumed_thread_id != conversation_id {
+                return Err(codex_lifecycle_error(
+                    issue,
+                    Some(&conversation_id),
+                    "thread/resume response validation",
+                    format!("returned thread id `{resumed_thread_id}` instead"),
+                ));
+            }
+            let prompt_kind = if manifest.workflow_prompt_seeded {
+                IssueSessionPromptKind::Continuation
+            } else {
+                IssueSessionPromptKind::Full
+            };
+            (conversation_id, manifest, prompt_kind, false)
+        }
+        None => {
+            let thread_start = adapter
+                .start_issue_thread_request(
+                    &mut session,
+                    workspace.workspace_path().display().to_string(),
+                    model.clone(),
+                    serde_json::json!({
+                        "opensymphonyRoute": {
+                            "harness": &route.harness_kind,
+                            "model": &model,
+                            "modelProfile": &route.model_profile,
+                            "reason": &route.reason,
+                        }
+                    }),
+                )
+                .map_err(|source| {
+                    format!("failed to build Codex thread/start request: {source}")
+                })?;
+            write_codex_request(
+                &mut stdin,
+                &schema_validator,
+                &thread_start.request,
+                "thread/start",
+                &stderr_tail,
+            )
+            .await?;
+            let thread_start_response = read_response_line(
+                &mut reader,
+                thread_start.request.id,
+                updates_tx,
+                &run.worker_id.to_string(),
+                issue,
+                run,
+                &mut read_state,
+            )
+            .await
+            .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+            let conversation_id = codex_thread_id_from_response(&thread_start_response)
+                .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+            let manifest = match write_codex_conversation_manifest(
+                workspace_manager,
+                workspace,
+                issue,
+                &conversation_id,
+                route,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    let rollback = match adapter
+                        .archive_issue_thread_request(&mut session, conversation_id.clone())
+                    {
+                        Ok(archive) => match write_codex_request(
+                            &mut stdin,
+                            &schema_validator,
+                            &archive.request,
+                            "thread/archive rollback",
+                            &stderr_tail,
+                        )
+                        .await
+                        {
+                            Ok(()) => match read_response_line(
+                                &mut reader,
+                                archive.request.id,
+                                updates_tx,
+                                &run.worker_id.to_string(),
+                                issue,
+                                run,
+                                &mut read_state,
+                            )
+                            .await
+                            {
+                                Ok(_) => "rollback archive accepted".to_string(),
+                                Err(rollback_error) => format!(
+                                    "rollback archive response failed: {}",
+                                    with_codex_stderr(rollback_error, &stderr_tail)
+                                ),
+                            },
+                            Err(rollback_error) => format!(
+                                "rollback archive request failed: {}",
+                                with_codex_stderr(rollback_error, &stderr_tail)
+                            ),
+                        },
+                        Err(rollback_error) => {
+                            format!("rollback archive could not be built: {rollback_error}")
+                        }
+                    };
+                    return Err(codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "initial manifest persistence",
+                        format!("{error}; {rollback}"),
+                    ));
+                }
+            };
+            (
+                conversation_id,
+                manifest,
+                IssueSessionPromptKind::Full,
+                true,
+            )
+        }
+    };
+    let prompt = match (prompt_kind, first_run_prompt) {
+        (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
+        (IssueSessionPromptKind::Full, None) => workflow
+            .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+            .map_err(|source| {
+                format!("failed to render workflow prompt for Codex route: {source}")
+            })?,
+        (IssueSessionPromptKind::Continuation, _) => build_continuation_guidance(issue, run),
+    };
     let turn_start = adapter
         .start_issue_turn_request(
             &mut session,
@@ -1431,6 +1596,23 @@ async fn try_run_codex_stdio_issue(
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    update_codex_conversation_manifest(
+        workspace_manager,
+        workspace,
+        &mut manifest,
+        prompt_kind,
+        fresh_conversation,
+        route,
+    )
+    .await
+    .map_err(|error| {
+        codex_lifecycle_error(
+            issue,
+            Some(&conversation_id),
+            "turn/start manifest update",
+            with_codex_stderr(error, &stderr_tail),
+        )
+    })?;
     let turn_id = match codex_turn_id_from_start_response(&turn_start_response)
         .or_else(|| read_state.pending_turn_id.take())
     {
@@ -1793,28 +1975,45 @@ fn codex_model_from_route(
     route.model.clone()
 }
 
-fn codex_thread_id_from_start_response(value: &serde_json::Value) -> Result<String, String> {
-    let thread_id = value
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexThreadResponse {
+    #[serde(default, alias = "thread_id")]
+    thread_id: Option<String>,
+    #[serde(default)]
+    thread: Option<CodexThreadResponseThread>,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexThreadResponseThread {
+    id: String,
+}
+
+fn codex_thread_id_from_response(value: &serde_json::Value) -> Result<String, String> {
+    let result = value
         .get("result")
-        .and_then(|result| {
-            result
-                .get("threadId")
-                .or_else(|| result.get("thread_id"))
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    result
-                        .get("thread")
-                        .and_then(|thread| thread.get("id"))
-                        .and_then(serde_json::Value::as_str)
-                })
-        })
+        .cloned()
+        .ok_or_else(|| "Codex thread response did not include a result object".to_string())?;
+    let response: CodexThreadResponse = serde_json::from_value(result)
+        .map_err(|error| format!("Codex thread response had an invalid result shape: {error}"))?;
+    response
+        .thread_id
+        .or_else(|| response.thread.map(|thread| thread.id))
         .filter(|thread_id| !thread_id.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "Codex thread/start response missing non-empty threadId/thread_id or thread.id: {value}"
-            )
-    })?;
-    Ok(thread_id.to_string())
+        .ok_or_else(|| "Codex thread response missing a non-empty thread id".to_string())
+}
+
+fn codex_lifecycle_error(
+    issue: &NormalizedIssue,
+    thread_id: Option<&str>,
+    operation: &str,
+    detail: impl std::fmt::Display,
+) -> String {
+    let thread_id = thread_id.unwrap_or("<unknown>");
+    format!(
+        "Codex lifecycle {operation} failed for issue {} and canonical thread {thread_id}: {detail}",
+        issue.identifier
+    )
 }
 
 fn codex_turn_id_from_start_response(value: &serde_json::Value) -> Option<String> {
@@ -2206,7 +2405,7 @@ async fn write_codex_conversation_manifest(
     issue: &NormalizedIssue,
     thread_id: &str,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
-) -> Result<(), String> {
+) -> Result<IssueConversationManifest, String> {
     let now = chrono::Utc::now();
     let conversation_id = ConversationId::new(thread_id.to_string())
         .map_err(|error| format!("invalid Codex thread id for conversation manifest: {error}"))?;
@@ -2227,11 +2426,12 @@ async fn write_codex_conversation_manifest(
         launch_profile: None,
         llm_config_fingerprint: None,
         fresh_conversation: true,
-        workflow_prompt_seeded: true,
+        workflow_prompt_seeded: false,
         reset_reason: None,
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
-        last_prompt_kind: Some(IssueSessionPromptKind::Full),
-        last_prompt_at: Some(now),
+        codex_archive_state: Some("active".to_string()),
+        last_prompt_kind: None,
+        last_prompt_at: None,
         last_prompt_path: None,
         last_execution_status: None,
         last_event_id: None,
@@ -2249,6 +2449,90 @@ async fn write_codex_conversation_manifest(
             &workspace.conversation_manifest_path(),
             &manifest,
         )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(manifest)
+}
+
+async fn load_codex_conversation_manifest(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+) -> Result<Option<IssueConversationManifest>, String> {
+    let path = workspace.conversation_manifest_path();
+    let Some(raw) = workspace_manager
+        .read_text_artifact(workspace, &path)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to read conversation manifest {}: {error}",
+                path.display()
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    let manifest: IssueConversationManifest = serde_json::from_str(&raw)
+        .map_err(|error| format!("invalid conversation manifest {}: {error}", path.display()))?;
+    let thread_id = manifest.conversation_id.as_str();
+    if !conversation_manifest_is_codex(&manifest) {
+        return Err(codex_lifecycle_error(
+            issue,
+            Some(thread_id),
+            "manifest validation",
+            "manifest belongs to a different harness",
+        ));
+    }
+    if manifest.issue_id != issue.id
+        || manifest.identifier != issue.identifier
+        || manifest.reuse_policy != "per_issue"
+        || manifest.persistence_dir != workspace.metadata_dir()
+        || thread_id.trim().is_empty()
+    {
+        return Err(codex_lifecycle_error(
+            issue,
+            Some(thread_id),
+            "manifest validation",
+            format!(
+                "manifest {} is incompatible with the current issue workspace",
+                path.display()
+            ),
+        ));
+    }
+    if !matches!(
+        manifest.codex_archive_state.as_deref(),
+        None | Some("active")
+    ) {
+        return Err(codex_lifecycle_error(
+            issue,
+            Some(thread_id),
+            "manifest validation",
+            "archive recovery is not available in the canonical-reuse slice",
+        ));
+    }
+    Ok(Some(manifest))
+}
+
+async fn update_codex_conversation_manifest(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    prompt_kind: IssueSessionPromptKind,
+    fresh_conversation: bool,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    manifest.workflow_prompt_seeded = true;
+    manifest.fresh_conversation = fresh_conversation;
+    manifest.updated_at = now;
+    manifest.last_attached_at = now;
+    manifest.last_prompt_kind = Some(prompt_kind);
+    manifest.last_prompt_at = Some(now);
+    manifest.last_event_kind = Some("turn/start".to_string());
+    manifest.last_event_at = Some(now);
+    manifest.last_event_summary = Some(route.summary());
+    workspace_manager
+        .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
         .await
         .map_err(|error| error.to_string())
 }
@@ -2618,7 +2902,7 @@ mod tests {
     use crate::opensymphony_domain::{
         ConversationId, HarnessInterruptCommand, HarnessInterruptExpectedNextState,
         HarnessInterruptReason, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-        RunAttempt, TrackerIssueStateKind, WorkerId, WorkspaceKey,
+        RetryAttempt, RunAttempt, TrackerIssueStateKind, WorkerId, WorkspaceKey,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
@@ -2632,6 +2916,55 @@ mod tests {
 
     fn empty_codex_interrupt_registry() -> CodexInterruptRegistry {
         Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    async fn run_fake_codex_attempt(
+        workflow: &ResolvedWorkflow,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        issue: &NormalizedIssue,
+        route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+        codex_bin: &Path,
+        run_id: &str,
+        attempt: u32,
+        retry_attempt: Option<u32>,
+    ) -> (WorkerOutcomeRecord, RunManifest, LaunchReport) {
+        let mut run_manifest = workspace_manager
+            .start_run(workspace, &RunDescriptor::new(run_id, attempt))
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new(format!("worker-{run_id}")).expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.workspace_path().to_path_buf(),
+            TimestampMs::new(u64::from(attempt)),
+            retry_attempt.map(|value| RetryAttempt::new(value).expect("retry attempt is valid")),
+            8,
+        );
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let outcome = run_codex_stdio_issue(
+            route,
+            workspace_manager,
+            workspace,
+            &mut run_manifest,
+            issue,
+            &run,
+            workflow,
+            codex_bin.to_str().expect("fake codex path should be utf-8"),
+            &empty_codex_schema_cache(),
+            &empty_codex_interrupt_registry(),
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+        )
+        .await;
+        let launch = launch_rx.await.expect("worker should report launch result");
+        (outcome, run_manifest, launch)
     }
 
     fn sample_conversation_manifest(conversation_id: &str) -> IssueConversationManifest {
@@ -2657,6 +2990,7 @@ mod tests {
             workflow_prompt_seeded: true,
             reset_reason: None,
             runtime_contract_version: None,
+            codex_archive_state: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -2780,8 +3114,8 @@ mod tests {
     }
 
     #[test]
-    fn codex_start_response_requires_real_thread_id() {
-        let thread_id = codex_thread_id_from_start_response(&serde_json::json!({
+    fn codex_thread_response_requires_real_thread_id() {
+        let thread_id = codex_thread_id_from_response(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
@@ -2791,15 +3125,15 @@ mod tests {
         .expect("threadId should be accepted");
         assert_eq!(thread_id, "thread-7");
 
-        let missing = codex_thread_id_from_start_response(&serde_json::json!({
+        let missing = codex_thread_id_from_response(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 7,
             "result": {}
         }))
         .expect_err("missing thread id should fail launch");
-        assert!(missing.contains("missing non-empty threadId/thread_id"));
+        assert!(missing.contains("missing a non-empty thread id"));
 
-        let empty = codex_thread_id_from_start_response(&serde_json::json!({
+        let empty = codex_thread_id_from_response(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
@@ -2807,7 +3141,7 @@ mod tests {
             }
         }))
         .expect_err("empty thread id should fail launch");
-        assert!(empty.contains("missing non-empty threadId/thread_id"));
+        assert!(empty.contains("missing a non-empty thread id"));
     }
 
     #[test]
@@ -3155,6 +3489,8 @@ mod tests {
             manifest.runtime_contract_version.as_deref(),
             Some(CODEX_APP_SERVER_CONTRACT)
         );
+        assert!(manifest.workflow_prompt_seeded);
+        assert_eq!(manifest.codex_archive_state.as_deref(), Some("active"));
         assert!(
             std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
                 matches!(
@@ -3167,6 +3503,479 @@ mod tests {
             }),
             "terminal Codex notification should be forwarded as a runtime event"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_reuses_one_thread_across_retries() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let log_path = tempdir.path().join("fake-codex-reuse.log");
+        let fake_codex = tempdir.path().join("fake-codex-reuse");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let mut route = codex_test_route(false);
+        route.model = Some("gpt-5-codex".to_string());
+
+        let (initial, _, _) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &route,
+            &fake_codex,
+            "initial",
+            1,
+            None,
+        )
+        .await;
+        assert_eq!(initial.outcome, WorkerOutcomeKind::Succeeded);
+        let initial_manifest_raw = fs::read_to_string(ensured.handle.conversation_manifest_path())
+            .expect("initial manifest should exist");
+        let mut unseeded_manifest: IssueConversationManifest =
+            serde_json::from_str(&initial_manifest_raw).expect("initial manifest should decode");
+        assert!(unseeded_manifest.fresh_conversation);
+        let created_at = unseeded_manifest.created_at;
+        unseeded_manifest.workflow_prompt_seeded = false;
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &unseeded_manifest,
+            )
+            .await
+            .expect("unseeded manifest should persist");
+
+        let (unseeded_retry, _, _) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &route,
+            &fake_codex,
+            "unseeded-retry",
+            2,
+            Some(1),
+        )
+        .await;
+        assert_eq!(unseeded_retry.outcome, WorkerOutcomeKind::Succeeded);
+        let seeded_manifest_raw = fs::read_to_string(ensured.handle.conversation_manifest_path())
+            .expect("seeded manifest should exist");
+        let seeded_manifest: IssueConversationManifest =
+            serde_json::from_str(&seeded_manifest_raw).expect("seeded manifest should decode");
+        assert_eq!(seeded_manifest.conversation_id.as_str(), "fake-thread");
+        assert_eq!(seeded_manifest.created_at, created_at);
+        assert!(seeded_manifest.workflow_prompt_seeded);
+        assert!(
+            !seeded_manifest.fresh_conversation,
+            "resuming an unseeded manifest must not be recorded as a fresh conversation"
+        );
+
+        let (seeded_retry, _, _) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &route,
+            &fake_codex,
+            "seeded-retry",
+            3,
+            Some(2),
+        )
+        .await;
+        assert_eq!(seeded_retry.outcome, WorkerOutcomeKind::Succeeded);
+
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert_eq!(log.matches(r#""method":"thread/start""#).count(), 1);
+        assert_eq!(log.matches(r#""method":"thread/resume""#).count(), 2);
+        assert_eq!(log.matches(r#""method":"turn/start""#).count(), 3);
+        assert!(log.contains(r#""model":"gpt-5-codex""#));
+        assert!(log.contains("Run the scheduler."));
+        assert!(log.contains("The original workflow prompt is already present"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_reuses_manifest_for_every_retry_state() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let log_path = tempdir.path().join("fake-codex-retry-states.log");
+        let fake_codex = tempdir.path().join("fake-codex-retry-states");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let route = codex_test_route(false);
+        let (initial, _, _) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &route,
+            &fake_codex,
+            "initial",
+            1,
+            None,
+        )
+        .await;
+        assert_eq!(initial.outcome, WorkerOutcomeKind::Succeeded);
+        let manifest_path = ensured.handle.conversation_manifest_path();
+        let initial_manifest: IssueConversationManifest = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).expect("initial manifest should exist"),
+        )
+        .expect("initial manifest should decode");
+        let canonical_thread_id = initial_manifest.conversation_id.to_string();
+        let created_at = initial_manifest.created_at;
+
+        for (attempt, status) in ["failed", "stalled", "cancelled", "recovery"]
+            .iter()
+            .enumerate()
+        {
+            let mut manifest: IssueConversationManifest = serde_json::from_str(
+                &fs::read_to_string(&manifest_path).expect("manifest should exist"),
+            )
+            .expect("manifest should decode");
+            manifest.last_execution_status = Some((*status).to_string());
+            workspace_manager
+                .write_json_artifact(&ensured.handle, &manifest_path, &manifest)
+                .await
+                .expect("retry-state manifest should persist");
+            let (outcome, _, _) = run_fake_codex_attempt(
+                &workflow,
+                &workspace_manager,
+                &ensured.handle,
+                &issue,
+                &route,
+                &fake_codex,
+                &format!("retry-{status}"),
+                attempt as u32 + 2,
+                Some(attempt as u32 + 1),
+            )
+            .await;
+            assert_eq!(
+                outcome.outcome,
+                WorkerOutcomeKind::Succeeded,
+                "{status} retry"
+            );
+            let manifest: IssueConversationManifest = serde_json::from_str(
+                &fs::read_to_string(&manifest_path).expect("manifest should remain readable"),
+            )
+            .expect("manifest should decode after retry");
+            assert_eq!(manifest.conversation_id.to_string(), canonical_thread_id);
+            assert_eq!(manifest.created_at, created_at);
+        }
+
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert_eq!(log.matches(r#""method":"thread/start""#).count(), 1);
+        assert_eq!(log.matches(r#""method":"thread/resume""#).count(), 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_resume_failure_preserves_the_manifest() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let log_path = tempdir.path().join("fake-codex-resume-error.log");
+        let fake_codex = tempdir.path().join("fake-codex-resume-error");
+        let route = codex_test_route(false);
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (initial, _, _) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &route,
+            &fake_codex,
+            "initial",
+            1,
+            None,
+        )
+        .await;
+        assert_eq!(initial.outcome, WorkerOutcomeKind::Succeeded);
+        let manifest_path = ensured.handle.conversation_manifest_path();
+        let before = fs::read_to_string(&manifest_path).expect("manifest should exist");
+
+        write_fake_codex_resume_error_child(&fake_codex, &log_path);
+        let (outcome, _, launch) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &route,
+            &fake_codex,
+            "resume-failure",
+            2,
+            Some(1),
+        )
+        .await;
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        let error = outcome.error.expect("failure should include diagnostics");
+        assert!(error.contains("issue COE-284"));
+        assert!(error.contains("canonical thread fake-thread"));
+        assert!(matches!(launch, LaunchReport::Failed(detail) if detail.contains("thread/resume")));
+        assert_eq!(
+            fs::read_to_string(&manifest_path).expect("manifest should remain readable"),
+            before
+        );
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
+        assert!(!log.contains(r#""method":"thread/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_manifest_write_failure_archives_without_starting_a_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let log_path = tempdir.path().join("fake-codex-manifest-write.log");
+        let fake_codex = tempdir.path().join("fake-codex-manifest-write");
+        write_fake_codex_manifest_write_failure_child(&fake_codex, &log_path);
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-manifest-write-failure", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-manifest-write-failure").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let route = codex_test_route(false);
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &empty_codex_schema_cache(),
+            &empty_codex_interrupt_registry(),
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+        )
+        .await;
+        let launch = launch_rx
+            .await
+            .expect("worker should report launch failure");
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        let error = outcome.error.expect("failure should include diagnostics");
+        assert!(error.contains("canonical thread fake-thread"));
+        assert!(
+            matches!(launch, LaunchReport::Failed(detail) if detail.contains("rollback archive accepted"))
+        );
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/start""#));
+        assert!(log.contains(r#""method":"thread/archive""#));
+        assert!(!log.contains(r#""method":"turn/start""#));
+        assert!(ensured.handle.conversation_manifest_path().is_dir());
+    }
+
+    #[tokio::test]
+    async fn runtime_workspace_cleanup_uses_manager_retention_and_hooks() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                hooks: HookConfig {
+                    before_remove: Some(HookDefinition::shell(
+                        "echo before_remove >> .opensymphony/logs/before_remove.txt",
+                    )),
+                    ..HookConfig::default()
+                },
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                "{\"canonical\":\"thread\"}",
+            )
+            .await
+            .expect("conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("manager-owned cleanup should succeed");
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("repeated terminal cleanup should be a no-op");
+
+        assert!(ensured.handle.workspace_path().is_dir());
+        assert!(ensured.handle.conversation_manifest_path().is_file());
+        assert_eq!(
+            fs::read_to_string(ensured.handle.logs_dir().join("before_remove.txt"))
+                .expect("before-remove hook should run")
+                .trim(),
+            "before_remove"
+        );
+
+        let mut reopened_issue = issue.clone();
+        reopened_issue.state = IssueState {
+            id: None,
+            name: "In Progress".to_string(),
+            category: IssueStateCategory::Active,
+        };
+        backend
+            .ensure_workspace(&reopened_issue, TimestampMs::new(2))
+            .await
+            .expect("reopened workspace should be ensured");
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("a later terminal transition should run cleanup again");
+        assert_eq!(
+            fs::read_to_string(ensured.handle.logs_dir().join("before_remove.txt"))
+                .expect("before-remove hook should run after reopen")
+                .lines()
+                .collect::<Vec<_>>(),
+            ["before_remove", "before_remove"]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_workspace_cleanup_ignores_removed_terminal_workspace() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        fs::remove_dir_all(ensured.handle.workspace_path())
+            .expect("terminal workspace should be removable out of band");
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("an already-removed terminal workspace should be a no-op");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_first_run_prompt_render_failure_does_not_start_a_thread() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow_with_prompt(
+            tempdir.path(),
+            &workspace_root,
+            "{{ issue.missing_field }}",
+        );
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let log_path = tempdir.path().join("fake-codex-render-failure.log");
+        let fake_codex = tempdir.path().join("fake-codex-render-failure");
+        write_fake_codex_child(&fake_codex, &log_path);
+
+        let (outcome, _, launch) = run_fake_codex_attempt(
+            &workflow,
+            &workspace_manager,
+            &ensured.handle,
+            &issue,
+            &codex_test_route(false),
+            &fake_codex,
+            "render-failure",
+            1,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert!(
+            matches!(launch, LaunchReport::Failed(detail) if detail.contains("failed to render workflow prompt"))
+        );
+        assert!(
+            !ensured.handle.conversation_manifest_path().exists(),
+            "a failed first render must not persist an unseeded manifest"
+        );
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(!log.contains(r#""method":"thread/start""#));
+        assert!(!log.contains(r#""method":"thread/archive""#));
+        assert!(!log.contains(r#""method":"turn/start""#));
     }
 
     #[cfg(unix)]
@@ -4403,9 +5212,21 @@ Run the scheduler.
     }
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
+        sample_workflow_with_prompt(
+            base_dir,
+            workspace_root,
+            "# Test Workflow\n\nRun the scheduler.",
+        )
+    }
+
+    fn sample_workflow_with_prompt(
+        base_dir: &Path,
+        workspace_root: &Path,
+        prompt: &str,
+    ) -> ResolvedWorkflow {
         let source = format!(
-            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
-            workspace_root.display()
+            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n{prompt}\n",
+            workspace_root.display(),
         );
         WorkflowDefinition::parse(&source)
             .expect("workflow should parse")
@@ -4465,10 +5286,76 @@ Run the scheduler.
         }
     }
 
-    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
+    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","thread/resume","thread/archive","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
 
     #[cfg(unix)]
     fn write_fake_codex_child(path: &Path, log_path: &Path) {
+        write_fake_codex_child_with_thread_start_setup(path, log_path, "");
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_manifest_write_failure_child(path: &Path, log_path: &Path) {
+        write_fake_codex_child_with_thread_start_setup(
+            path,
+            log_path,
+            "mkdir -p .opensymphony/conversation.json",
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_child_with_thread_start_setup(
+        path: &Path,
+        log_path: &Path,
+        thread_start_setup: &str,
+    ) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" >> "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      {thread_start_setup}
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"thread/archive"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA,
+                thread_start_setup = thread_start_setup
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_resume_error_child(path: &Path, log_path: &Path) {
         write_executable(
             path,
             &format!(
@@ -4483,7 +5370,6 @@ JSON
   exit 0
 fi
 printf 'PWD=%s\n' "$PWD" > "{log}"
-printf 'ARGS=%s\n' "$*" >> "{log}"
 while IFS= read -r line; do
   printf 'STDIN=%s\n' "$line" >> "{log}"
   id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
@@ -4491,12 +5377,9 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
-    *'"method":"thread/start"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
-      ;;
-    *'"method":"turn/start"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
-      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+    *'"method":"thread/resume"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32000,"message":"fake resume rejected"}}}}\n' "$id"
+      exit 0
       ;;
   esac
 done
@@ -4781,6 +5664,7 @@ exit 64
             workflow_prompt_seeded: true,
             reset_reason: None,
             runtime_contract_version: None,
+            codex_archive_state: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
