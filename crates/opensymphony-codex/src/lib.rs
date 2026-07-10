@@ -284,21 +284,31 @@ impl CodexAppServerAdapter {
         session: &mut CodexJsonRpcSession,
         thread_id: impl Into<String>,
         cwd: impl Into<String>,
-        continuation: impl Into<String>,
+        model: Option<String>,
     ) -> Result<CodexHarnessRequest, serde_json::Error> {
         Ok(CodexHarnessRequest {
             lifecycle: CodexLifecycleRequest::Resume,
-            request: session.turn_start(CodexTurnStartParams {
+            request: session.thread_resume(CodexThreadResumeParams {
                 thread_id: thread_id.into(),
-                input: vec![CodexUserInput::Text {
-                    text: continuation.into(),
-                    text_elements: Vec::new(),
-                }],
                 approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
-                model: None,
-                sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
-                client_user_message_id: None,
+                model,
+                model_provider: None,
+                sandbox: Some(CodexThreadSandboxMode::DangerFullAccess),
+                config: None,
+            })?,
+        })
+    }
+
+    pub fn archive_issue_thread_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        thread_id: impl Into<String>,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Archive,
+            request: session.thread_archive(CodexThreadArchiveParams {
+                thread_id: thread_id.into(),
             })?,
         })
     }
@@ -355,6 +365,7 @@ impl HarnessAdapter for CodexAppServerAdapter {
 pub enum CodexLifecycleRequest {
     Start,
     Resume,
+    Archive,
     Interrupt,
     Approval,
 }
@@ -610,6 +621,20 @@ impl CodexJsonRpcSession {
         Ok(self.request("thread/start", serde_json::to_value(params)?))
     }
 
+    pub fn thread_resume(
+        &mut self,
+        params: CodexThreadResumeParams,
+    ) -> Result<JsonRpcRequestEnvelope, serde_json::Error> {
+        Ok(self.request("thread/resume", serde_json::to_value(params)?))
+    }
+
+    pub fn thread_archive(
+        &mut self,
+        params: CodexThreadArchiveParams,
+    ) -> Result<JsonRpcRequestEnvelope, serde_json::Error> {
+        Ok(self.request("thread/archive", serde_json::to_value(params)?))
+    }
+
     pub fn turn_start(
         &mut self,
         params: CodexTurnStartParams,
@@ -654,6 +679,30 @@ pub struct CodexThreadStartParams {
     pub sandbox: Option<CodexThreadSandboxMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexThreadResumeParams {
+    pub thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<CodexApprovalPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<CodexThreadSandboxMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexThreadArchiveParams {
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -745,6 +745,9 @@ pub struct IssueConversationManifest {
     pub reset_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_contract_version: Option<String>,
+    /// Codex-only archive state. Missing values from older manifests mean active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_archive_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_kind: Option<IssueSessionPromptKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -809,6 +812,7 @@ impl IssueConversationManifest {
             workflow_prompt_seeded: false,
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
+            codex_archive_state: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -3091,7 +3095,7 @@ fn interrupt_acknowledgement_observed(status: &str) -> bool {
     status == "paused" || turn_has_stopped(status)
 }
 
-fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {
+pub fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {
     let attempt = run
         .attempt
         .map(|attempt| format!("Worker retry attempt: {}.", attempt.get()))
@@ -4205,6 +4209,7 @@ mod tests {
             workflow_prompt_seeded: false,
             reset_reason: None,
             runtime_contract_version: None,
+            codex_archive_state: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

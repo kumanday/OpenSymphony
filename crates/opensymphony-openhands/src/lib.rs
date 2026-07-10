@@ -42,7 +42,7 @@ pub use session::{
     IssueSessionObserver, IssueSessionPromptKind, IssueSessionResult, IssueSessionReusePolicy,
     IssueSessionRunner, IssueSessionRunnerConfig, LlmConfigFingerprint, MemoryWorkerAccess,
     RUNTIME_CONTRACT_VERSION, RehydrationOptions, RehydrationResult, WorkpadComment,
-    WorkpadCommentSource,
+    WorkpadCommentSource, build_continuation_guidance,
 };
 pub use supervisor::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,
