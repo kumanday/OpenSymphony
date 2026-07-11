@@ -630,7 +630,7 @@ export const codeGraphFixtureSnapshots: CodeGraphSnapshot[] = [
     mode: "file",
     cursor: { ...codeGraphCursor, sequence: 8 },
     nodes: [
-      codeNode("file:packages/graph/src/index.ts", "file", "index.ts", "typescript", "current", 3, "dir:packages"),
+      codeNode("file:packages/graph/src/index.ts", "file", "index.ts", "typescript", "current", 3, "dir:packages", undefined, "packages/graph/src/index.ts"),
       codeNode("symbol:graphReducer", "symbol", "graphReducer", "typescript", "current", 3, "dir:packages", "function", "packages/graph/src/index.ts", ["graph"]),
       codeNode("symbol:createHttpGraphAdapter", "symbol", "createHttpGraphAdapter", "typescript", "current", 2, "dir:packages", "function", "packages/graph/src/index.ts", ["adapters"]),
       codeNode("symbol:codeGraphReducer", "symbol", "codeGraphReducer", "typescript", "stale", 2, "dir:packages", "function", "packages/graph/src/code-graph.ts", ["code"]),

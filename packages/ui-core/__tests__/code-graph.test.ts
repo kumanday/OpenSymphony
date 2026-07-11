@@ -90,4 +90,15 @@ describe("Code Graph renderer surface", () => {
     expect(deepLink).toBeDefined();
     expect(parseCodeDeepLink(deepLink!)).toMatchObject({ mode: "neighborhood", symbolKey: "codeGraphReducer" });
   });
+
+  it("renders a file fallback and omits delta-only filters from copied links", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "FILTERS_SET", filters: { deltaStatuses: ["modified"] } });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "file:packages/graph/src/index.ts" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({ snapshot, layout: null, state, rawRecord: false });
+    expect(root.querySelector("[data-testid='code-graph-file-fallback']")).not.toBeNull();
+    const deepLink = root.querySelector<HTMLButtonElement>("[data-code-copy-deeplink]")?.dataset.codeCopyDeeplink;
+    expect(parseCodeDeepLink(deepLink!)?.filters.deltaStatuses).toEqual([]);
+  });
 });

@@ -44,10 +44,14 @@ export interface CodeGraphDiffOptions {
   limit?: number;
 }
 
+export interface CodeSymbolDetailRequestOptions {
+  includeStale?: boolean;
+}
+
 export interface CodeGraphAdapter {
   listRepos(): Promise<CodeRepoList>;
   getGraphSnapshot(repoId: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
-  getSymbolDetail(repoId: string, symbolKey: string): Promise<CodeSymbolDetail>;
+  getSymbolDetail(repoId: string, symbolKey: string, options?: CodeSymbolDetailRequestOptions): Promise<CodeSymbolDetail>;
   getFileOutline(runId: string, filePath: string, repoId?: string): Promise<CodeFileOutline>;
   getDiffOverlay(
     repoId: string,
@@ -175,13 +179,16 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         : state.mode === action.snapshot.mode
           && (!state.symbolKey || action.snapshot.nodes.some((node) => node.symbol_key === state.symbolKey))
           && (!state.path || action.snapshot.nodes.some((node) => node.path_display === state.path));
+      const responseIncludesStale = action.snapshot.filters_applied.includes("include_stale:true");
+      const responseMatchesFreshness = responseIncludesStale === state.filters.freshness.includes("stale");
       const currentMatchesView = state.snapshot?.mode === state.mode;
-      if (samePartition && state.snapshot && action.snapshot.cursor.sequence <= state.snapshot.cursor.sequence && currentMatchesView && responseMatchesTarget) {
+      if (samePartition && state.snapshot && action.snapshot.cursor.sequence <= state.snapshot.cursor.sequence && currentMatchesView && responseMatchesTarget && responseMatchesFreshness) {
         return state;
       }
       return {
         ...state,
         snapshot: action.snapshot,
+        symbolDetails: {},
         repoId: action.snapshot.repo_id,
         mode: state.mode === "diff" ? state.mode : action.snapshot.mode,
         stale: false,
@@ -209,7 +216,16 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         lastUpdatedAt: action.overlay.generated_at,
       };
     case "MODE_SET":
-      return { ...state, mode: action.mode };
+      return action.mode === "diff" || state.mode !== "diff"
+        ? { ...state, mode: action.mode }
+        : {
+            ...state,
+            mode: action.mode,
+            baseRevision: null,
+            headRevision: null,
+            diffOverlay: null,
+            filters: { ...state.filters, deltaStatuses: [] },
+          };
     case "REPO_SELECTED":
       return {
         ...state,
@@ -222,6 +238,7 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         baseRevision: null,
         headRevision: null,
         diffOverlay: null,
+        filters: { ...state.filters, deltaStatuses: [] },
         selectedNodeIds: [],
         breadcrumbs: [],
         stale: false,
@@ -334,26 +351,27 @@ export function applyCodeGraphFilters(
   overlay?: CodeDiffOverlay | null,
 ): CodeGraphSnapshot {
   const normalized = normalizeCodeGraphFilters(filters);
+  const sourceSnapshot = withCodeDiffNodes(snapshot, overlay);
   const members = new Set(
-    snapshot.communities
+    sourceSnapshot.communities
       .filter((community) => normalized.communities.includes(community.id))
       .flatMap((community) => community.node_ids),
   );
   const deltaBySymbol = deltaStatuses(overlay);
-  const visibleIds = new Set(snapshot.nodes
-    .filter((node) => matchesCodeNode(node, snapshot.repo_id, normalized, members, deltaBySymbol))
+  const visibleIds = new Set(sourceSnapshot.nodes
+    .filter((node) => matchesCodeNode(node, sourceSnapshot.repo_id, normalized, members, deltaBySymbol))
     .map((node) => node.id));
-  const edges = snapshot.edges.filter((edge) =>
+  const edges = sourceSnapshot.edges.filter((edge) =>
     visibleIds.has(edge.source_id)
     && visibleIds.has(edge.target_id)
     && (normalized.edgeKinds.length === 0 || normalized.edgeKinds.includes(edge.kind))
     && (normalized.confidences.length === 0 || normalized.confidences.includes(edge.confidence)),
   );
   return {
-    ...snapshot,
-    nodes: snapshot.nodes.filter((node) => visibleIds.has(node.id)),
+    ...sourceSnapshot,
+    nodes: sourceSnapshot.nodes.filter((node) => visibleIds.has(node.id)),
     edges,
-    communities: snapshot.communities
+    communities: sourceSnapshot.communities
       .map((community) => ({
         ...community,
         node_ids: community.node_ids.filter((nodeId) => visibleIds.has(nodeId)),
@@ -399,24 +417,25 @@ export function codeGraphSnapshotForRendering(
   snapshot: CodeGraphSnapshot,
   overlay?: CodeDiffOverlay | null,
 ): MemoryGraphSnapshot {
+  const sourceSnapshot = withCodeDiffNodes(snapshot, overlay);
   const deltaBySymbol = deltaStatuses(overlay);
   return {
-    schema_version: snapshot.schema_version,
-    bundle_id: snapshot.repo_id,
-    cursor: snapshot.cursor,
-    generated_at: snapshot.generated_at,
-    filters_applied: snapshot.filters_applied,
-    communities: snapshot.communities.map((community) => ({
+    schema_version: sourceSnapshot.schema_version,
+    bundle_id: sourceSnapshot.repo_id,
+    cursor: sourceSnapshot.cursor,
+    generated_at: sourceSnapshot.generated_at,
+    filters_applied: sourceSnapshot.filters_applied,
+    communities: sourceSnapshot.communities.map((community) => ({
       id: community.id,
       label: community.label,
       node_ids: community.node_ids,
       concept_count: community.symbol_count,
     })),
-    nodes: snapshot.nodes.map((node) => ({
+    nodes: sourceSnapshot.nodes.map((node) => ({
       id: node.id,
       kind: node.kind as unknown as MemoryGraphNodeKind,
       label: node.label,
-      bundle_id: snapshot.repo_id,
+      bundle_id: sourceSnapshot.repo_id,
       concept_id: node.symbol_key ?? undefined,
       concept_type: node.symbol_kind ?? undefined,
       path_display: node.path_display ?? undefined,
@@ -436,7 +455,7 @@ export function codeGraphSnapshotForRendering(
         community_id: node.metrics.community_id ?? undefined,
       },
     })),
-    edges: snapshot.edges.map((edge) => ({
+    edges: sourceSnapshot.edges.map((edge) => ({
       id: edge.id,
       kind: edge.kind as MemoryGraphEdgeKind,
       source_id: edge.source_id,
@@ -521,8 +540,14 @@ export function createHttpCodeGraphAdapter(
       const params = codeGraphRequestParams(options);
       return read<CodeGraphSnapshot>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/graph`, params);
     },
-    getSymbolDetail: (repoId, symbolKey) =>
-      read<CodeSymbolDetail>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/symbols/${encodeURIComponent(symbolKey)}`),
+    getSymbolDetail: (repoId, symbolKey, options) => {
+      const params = new URLSearchParams();
+      if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
+      return read<CodeSymbolDetail>(
+        `/api/v1/code/repos/${encodeURIComponent(repoId)}/symbols/${encodeURIComponent(symbolKey)}`,
+        params,
+      );
+    },
     getFileOutline: (runId, filePath, repoId) => {
       const params = new URLSearchParams({ file_path: filePath });
       if (repoId) params.set("repo_id", repoId);
@@ -606,6 +631,32 @@ function codeGraphRequestParams(options?: CodeGraphRequestOptions): URLSearchPar
   if (options?.aggregate) params.set("aggregate", options.aggregate);
   if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
   return params;
+}
+
+function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverlay | null): CodeGraphSnapshot {
+  if (!overlay || overlay.removed_symbols.length === 0) return snapshot;
+  const existingKeys = new Set(snapshot.nodes.map((node) => node.symbol_key).filter((key): key is string => Boolean(key)));
+  const removedNodes = overlay.removed_symbols
+    .filter((symbol) => !existingKeys.has(symbol.symbol_key) && symbol.before)
+    .map((symbol) => ({
+      id: `symbol:${symbol.symbol_key}`,
+      kind: "symbol" as const,
+      label: symbol.before!.name,
+      symbol_kind: symbol.before!.kind,
+      symbol_key: symbol.symbol_key,
+      symbol_id: symbol.before!.symbol_id,
+      path_display: symbol.before!.path_display,
+      language: null,
+      container_chain: symbol.before!.container_chain,
+      signature: null,
+      span: symbol.before!.span,
+      selection_span: symbol.before!.span,
+      freshness: symbol.before!.freshness,
+      diagnostic_count: 0,
+      diagnostic_severity: null,
+      metrics: { in_degree: 0, out_degree: 0, community_id: null },
+    }));
+  return removedNodes.length > 0 ? { ...snapshot, nodes: [...snapshot.nodes, ...removedNodes] } : snapshot;
 }
 
 function matchesCodeNode(

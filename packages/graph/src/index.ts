@@ -95,6 +95,7 @@ export {
   type CodeGraphRequestOptions,
   type CodeGraphState,
   type CodeNodeVisualStyle,
+  type CodeSymbolDetailRequestOptions,
   type NativeCodeGraphApi,
 } from "./code-graph.js";
 export {

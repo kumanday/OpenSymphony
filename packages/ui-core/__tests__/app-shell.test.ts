@@ -1384,6 +1384,9 @@ describe("OpenSymphonyApp mount", () => {
       await flushUntil(() => root.querySelectorAll("[data-testid='code-graph-structure-list'] li").length === 1);
       expect(root.querySelector("[data-testid='code-graph-structure-list']")?.textContent).toContain("codeGraphReducer");
       await flushUntil(() => graphRequests.some((request) => request.includeStale === true));
+      const readsBeforeFilterReset = graphRequests.length;
+      root.querySelector<HTMLButtonElement>("[data-code-filter-reset]")?.click();
+      await flushUntil(() => graphRequests.length > readsBeforeFilterReset && graphRequests.at(-1)?.includeStale === false);
 
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/missing.ts")).toBe(false);
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/diff/base-rev/head-rev")).toBe(true);
@@ -1391,6 +1394,10 @@ describe("OpenSymphonyApp mount", () => {
 
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
       await flushUntil(() => root.querySelector("[data-code-mode='atlas']")?.classList.contains("is-selected") ?? false);
+      const readsBeforeInvalidMode = graphRequests.length;
+      root.querySelector<HTMLButtonElement>("[data-code-mode='file']")?.click();
+      await Promise.resolve();
+      expect(graphRequests.length).toBe(readsBeforeInvalidMode);
       const app = handle as unknown as {
         state: { codeGraph: { snapshot: { nodes: CodeGraphNode[] } | null; mode: string; filters: { pathPrefixes: string[] } } };
         drillIntoCodeNode(node: CodeGraphNode): void;

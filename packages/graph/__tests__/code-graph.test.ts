@@ -1,6 +1,7 @@
 import {
   applyCodeGraphFilters,
   codeGraphReducer,
+  codeGraphSnapshotForRendering,
   createFixtureCodeGraphAdapter,
   createHttpCodeGraphAdapter,
   createInitialCodeGraphState,
@@ -43,7 +44,9 @@ describe("Code Graph adapters and state", () => {
   it("preserves selection while a newer code snapshot refreshes", async () => {
     const adapter = createFixtureCodeGraphAdapter();
     const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
+    const detail = await adapter.getSymbolDetail("opensymphony", "graphReducer");
     let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "SYMBOL_DETAIL_LOADED", detail });
     state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:graphReducer" });
     state = codeGraphReducer(state, { type: "GRAPH_UPDATED", repoId: "opensymphony", updatedAt: "2026-07-04T01:00:00Z" });
     expect(state.selectedNodeIds).toEqual(["symbol:graphReducer"]);
@@ -51,6 +54,39 @@ describe("Code Graph adapters and state", () => {
     state = codeGraphReducer(state, { type: "SNAPSHOT_LOADED", snapshot: { ...snapshot, cursor: { ...snapshot.cursor, sequence: 10 } } });
     expect(state.selectedNodeIds).toEqual(["symbol:graphReducer"]);
     expect(state.stale).toBe(false);
+    expect(state.symbolDetails).toEqual({});
+  });
+
+  it("keeps removed diff symbols visible and clears diff state when leaving Diff", async () => {
+    const adapter = createFixtureCodeGraphAdapter();
+    const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      removed_symbols: [{
+        symbol_key: "removedSymbol",
+        status: "removed" as const,
+        before: {
+          symbol_id: "removedSymbol:id",
+          kind: "function",
+          name: "removedSymbol",
+          path_display: "packages/graph/src/removed.ts",
+          container_chain: ["graph"],
+          span: { start_line: 1, start_col: 1, end_line: 4, end_col: 2 },
+          freshness: "current" as const,
+        },
+        after: null,
+      }],
+    };
+    const filtered = applyCodeGraphFilters(snapshot, { ...initialCodeGraphFilters, deltaStatuses: ["removed"] }, overlay);
+    expect(filtered.nodes.map((node) => node.symbol_key)).toEqual(["removedSymbol"]);
+    expect(codeGraphSnapshotForRendering(snapshot, overlay).nodes.some((node) => node.concept_id === "removedSymbol")).toBe(true);
+
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "DIFF_LOADED", overlay });
+    state = codeGraphReducer(state, { type: "FILTERS_SET", filters: { deltaStatuses: ["removed"] } });
+    state = codeGraphReducer(state, { type: "MODE_SET", mode: "atlas" });
+    expect(state.diffOverlay).toBeNull();
+    expect(state.baseRevision).toBeNull();
+    expect(state.filters.deltaStatuses).toEqual([]);
   });
 
   it("pops the final breadcrumb back to the Atlas and clears its path scope", () => {
@@ -91,9 +127,11 @@ describe("Code Graph adapters and state", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos");
     await http.getGraphSnapshot("opensymphony", { mode: "atlas", includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
+    await http.getSymbolDetail("opensymphony", "staleSymbol", { includeStale: true });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/staleSymbol?include_stale=true");
     const native = createTauriNativeCodeGraphAdapter(http);
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });
 

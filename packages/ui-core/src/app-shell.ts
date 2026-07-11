@@ -1334,12 +1334,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const snapshot = this.visibleCodeGraphSnapshot();
     const selected = snapshot?.nodes.find((node) => this.state.codeGraph.selectedNodeIds.includes(node.id));
     if (!adapter || !selected?.symbol_key) return;
-    const key = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
-    if (this.codeGraphSymbolRequest === key || this.state.codeGraph.symbolDetails[key]) return;
+    const detailKey = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
+    const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}`;
+    if (this.codeGraphSymbolRequest === key || this.state.codeGraph.symbolDetails[detailKey]) return;
     this.codeGraphSymbolRequest = key;
     try {
-      const detail = await adapter.getSymbolDetail(this.state.codeGraph.repoId ?? snapshot!.repo_id, selected.symbol_key);
-      if (!this.destroyed) {
+      const detail = await adapter.getSymbolDetail(
+        this.state.codeGraph.repoId ?? snapshot!.repo_id,
+        selected.symbol_key,
+        { includeStale: selected.freshness === "stale" || this.state.codeGraph.filters.freshness.includes("stale") },
+      );
+      if (!this.destroyed && this.codeGraphSymbolRequest === key) {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAIL_LOADED", detail });
         this.render();
       }
@@ -3523,6 +3528,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private setCodeGraphMode(mode: CodeGraphMode): void {
+    const currentBreadcrumb = this.state.codeGraph.breadcrumbs.at(-1);
+    if (mode === "file" && (!this.state.codeGraph.path || currentBreadcrumb?.kind === "directory")) return;
+    if (mode === "neighborhood" && !this.state.codeGraph.symbolKey) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "MODE_SET", mode });
     if (mode === "atlas") {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: null, path: null });
@@ -4131,9 +4139,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.listen(control, "code-filter", eventType, () => this.onCodeGraphFilterChange(control));
     });
     this.listen(this.options.root.querySelector("[data-code-filter-reset]"), "code-filter-reset", "click", () => {
+      const hadStaleFilter = this.state.codeGraph.filters.freshness.includes("stale");
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "FILTERS_RESET" });
       this.invalidateCodeGraphLayout();
       this.render();
+      if (hadStaleFilter) void this.loadCodeGraph();
     });
     this.listen(this.options.root.querySelector("[data-code-reset]"), "code-reset", "click", () => {
       this.resetCodeGraphView();

@@ -266,10 +266,27 @@ export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
         <dt>Signature</dt><dd>${escapeHtml(detail?.signature ?? node.signature ?? "—")}</dd>
         <dt>Container</dt><dd>${escapeHtml((detail?.container_chain ?? node.container_chain).join(" › ") || "—")}</dd>
       </dl>
-      ${detail ? renderCodeDetailSections(detail) : `<p data-testid="code-graph-detail-loading">Loading symbol detail…</p>`}
+      ${detail
+        ? renderCodeDetailSections(detail)
+        : node.kind === "symbol" && deltaStatus !== "removed"
+          ? `<p data-testid="code-graph-detail-loading">Loading symbol detail…</p>`
+          : renderCodeNodeFallback(node)}
       <button type="button" data-code-raw-toggle>${surface.rawRecord ? "Hide raw record" : "Show raw record"}</button>
       ${surface.rawRecord ? `<pre data-testid="code-graph-raw-record">${escapeHtml(raw)}</pre>` : ""}
     </section>
+  `;
+}
+
+function renderCodeNodeFallback(node: CodeGraphNode): string {
+  return `
+    <h4>Record</h4>
+    <dl>
+      <dt>Kind</dt><dd>${escapeHtml(node.kind)}</dd>
+      <dt>Path</dt><dd>${escapeHtml(node.path_display ?? "—")}</dd>
+      <dt>Freshness</dt><dd>${escapeHtml(node.freshness)}</dd>
+      <dt>Children</dt><dd>${node.metrics.out_degree}</dd>
+    </dl>
+    <p data-testid="code-graph-file-fallback">No symbol detail is required for this ${escapeHtml(node.kind)} record.</p>
   `;
 }
 
@@ -289,8 +306,11 @@ function renderCodeDetailSections(detail: CodeSymbolDetail): string {
 
 function codeDeepLinkForNode(state: CodeGraphState, node: CodeGraphNode): string | null {
   try {
-    if (node.symbol_key) return codeDeepLinkForSymbol(state.repoId ?? "", node.symbol_key, { mode: "neighborhood", depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
-    if (node.path_display) return codeDeepLinkForFile(state.repoId ?? "", node.path_display, { mode: state.mode === "diff" ? "file" : state.mode, depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
+    const filters = state.filters.deltaStatuses.length > 0
+      ? { ...state.filters, deltaStatuses: [] }
+      : state.filters;
+    if (node.symbol_key) return codeDeepLinkForSymbol(state.repoId ?? "", node.symbol_key, { mode: "neighborhood", depth: state.depth, filters, layoutSeed: state.layoutSeed });
+    if (node.path_display) return codeDeepLinkForFile(state.repoId ?? "", node.path_display, { mode: state.mode === "diff" ? "file" : state.mode, depth: state.depth, filters, layoutSeed: state.layoutSeed });
   } catch {
     return null;
   }
