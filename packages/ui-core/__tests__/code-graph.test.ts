@@ -10,6 +10,7 @@ import {
   codeNodeVisualStyle,
   computeGraphLayout,
   createInitialCodeGraphState,
+  parseCodeDeepLink,
 } from "@opensymphony/graph";
 import {
   buildGraphScene,
@@ -72,5 +73,21 @@ describe("Code Graph renderer surface", () => {
     const stale = scene.nodes.find((node) => node.nodeId === "symbol:codeGraphReducer")!;
     expect(stale.alpha).toBeLessThan(current.alpha);
     expect(stale.borderStyle).toBe("dashed");
+  });
+
+  it("keeps symbol deep links valid from File mode", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({
+      snapshot,
+      layout: null,
+      state,
+      symbolDetail: codeGraphFixtureSymbolDetails.find((candidate) => candidate.symbol_key === "codeGraphReducer"),
+      rawRecord: false,
+    });
+    const deepLink = root.querySelector<HTMLButtonElement>("[data-code-copy-deeplink]")?.dataset.codeCopyDeeplink;
+    expect(deepLink).toBeDefined();
+    expect(parseCodeDeepLink(deepLink!)).toMatchObject({ mode: "neighborhood", symbolKey: "codeGraphReducer" });
   });
 });

@@ -53,6 +53,33 @@ describe("Code Graph adapters and state", () => {
     expect(state.stale).toBe(false);
   });
 
+  it("pops the final breadcrumb back to the Atlas and clears its path scope", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), {
+      type: "DRILL_IN",
+      breadcrumb: { kind: "directory", id: "packages/graph", label: "graph" },
+      mode: "atlas",
+      path: "packages/graph",
+    });
+    state = codeGraphReducer(state, { type: "FILTERS_SET", filters: { pathPrefixes: ["packages/graph"] } });
+    state = codeGraphReducer(state, { type: "BREADCRUMB_POP" });
+    expect(state.mode).toBe("atlas");
+    expect(state.path).toBeNull();
+    expect(state.breadcrumbs).toEqual([]);
+    expect(state.filters.pathPrefixes).toEqual([]);
+  });
+
+  it("resets a repository switch to an aggregated Atlas request", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "MODE_SET", mode: "file" });
+    state = codeGraphReducer(state, { type: "TARGET_SET", path: "packages/graph/src/index.ts" });
+    state = codeGraphReducer(state, { type: "REPO_SELECTED", repoId: "other-repo" });
+    expect(state.mode).toBe("atlas");
+    expect(state.path).toBeNull();
+    expect(state.symbolKey).toBeNull();
+    expect(state.baseRevision).toBeNull();
+    expect(state.headRevision).toBeNull();
+    expect(state.diffOverlay).toBeNull();
+  });
+
   it("keeps HTTP and native adapters on the same DTO contract", async () => {
     const fetchMock = jest.fn(async (url: string) => ({
       ok: true,
@@ -62,9 +89,11 @@ describe("Code Graph adapters and state", () => {
     const http = createHttpCodeGraphAdapter("http://localhost:2468", fetchMock);
     await http.listRepos();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos");
+    await http.getGraphSnapshot("opensymphony", { mode: "atlas", includeStale: true });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
     const native = createTauriNativeCodeGraphAdapter(http);
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 

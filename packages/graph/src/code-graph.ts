@@ -214,10 +214,14 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
       return {
         ...state,
         repoId: action.repoId,
+        mode: "atlas",
         snapshot: action.repoId === state.snapshot?.repo_id ? state.snapshot : null,
         symbolKey: null,
         path: null,
         runId: null,
+        baseRevision: null,
+        headRevision: null,
+        diffOverlay: null,
         selectedNodeIds: [],
         breadcrumbs: [],
         stale: false,
@@ -245,8 +249,8 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         layoutStatus: "idle",
       };
     case "BREADCRUMB_POP": {
-      const index = action.index ?? Math.max(0, state.breadcrumbs.length - 2);
-      const breadcrumbs = state.breadcrumbs.slice(0, index + 1);
+      const index = action.index ?? state.breadcrumbs.length - 2;
+      const breadcrumbs = state.breadcrumbs.slice(0, Math.max(0, index + 1));
       const current = breadcrumbs[breadcrumbs.length - 1];
       return {
         ...state,
@@ -255,6 +259,7 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         path: current?.kind === "file" ? current.id : null,
         symbolKey: current?.kind === "symbol" ? current.id : null,
         selectedNodeIds: current?.kind === "symbol" ? [current.id] : [],
+        filters: breadcrumbs.length === 0 ? { ...state.filters, pathPrefixes: [] } : state.filters,
         layoutStatus: "idle",
       };
     }

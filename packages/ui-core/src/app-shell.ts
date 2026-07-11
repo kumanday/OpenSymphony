@@ -387,7 +387,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
   private codeGraphLayout: GraphLayoutResult | null = null;
   private codeGraphLoadInFlight: Promise<void> | null = null;
+  private codeGraphLoadQueued = false;
   private codeGraphLayoutRun = 0;
+  private codeGraphNavigationVersion = 0;
   private codeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private codeGraphSymbolRequest: string | null = null;
   private codeGraphRawRecord = false;
@@ -802,7 +804,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.codeGraph = createInitialCodeGraphState();
     this.codeGraphLayout = null;
     this.codeGraphLoadInFlight = null;
+    this.codeGraphLoadQueued = false;
     this.codeGraphLayoutRun += 1;
+    this.codeGraphNavigationVersion += 1;
     this.codeGraphSymbolRequest = null;
     this.codeGraphRawRecord = false;
     this.codeGraphView = createKnowledgeGraphViewState();
@@ -1055,15 +1059,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadCodeGraph(): Promise<void> {
-    if (this.codeGraphLoadInFlight) return this.codeGraphLoadInFlight;
-    const load = this.loadCodeGraphOnce().finally(() => {
+    if (this.codeGraphLoadInFlight) {
+      this.codeGraphLoadQueued = true;
+      return this.codeGraphLoadInFlight;
+    }
+    const load = this.loadCodeGraphOnce();
+    const completion = load.finally(async () => {
       this.codeGraphLoadInFlight = null;
+      if (this.codeGraphLoadQueued && !this.destroyed) {
+        this.codeGraphLoadQueued = false;
+        await this.loadCodeGraph();
+      }
     });
-    this.codeGraphLoadInFlight = load;
-    return load;
+    this.codeGraphLoadInFlight = completion;
+    return completion;
   }
 
   private async loadCodeGraphOnce(): Promise<void> {
+    const navigationVersion = this.codeGraphNavigationVersion;
     if (!this.codeGraphAdapter) {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "LAYOUT_STATUS_SET",
@@ -1076,6 +1089,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       if (!this.state.codeGraph.repos) {
         const repos = await this.codeGraphAdapter.listRepos();
+        if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion) return;
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_LOADED", repos });
       }
       const repoId = this.state.codeGraph.repoId ?? this.state.codeGraph.repos?.repos[0]?.repo_id ?? null;
@@ -1087,9 +1101,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (this.state.codeGraph.repoId !== repoId) {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPO_SELECTED", repoId });
       }
-      await this.refreshCodeGraphSnapshot(repoId);
+      const requestKey = this.codeGraphRequestKey();
+      await this.refreshCodeGraphSnapshot(repoId, requestKey, navigationVersion);
+      if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
       if (this.state.codeGraph.mode === "diff" && this.state.codeGraph.baseRevision && this.state.codeGraph.headRevision) {
-        await this.loadCodeDiffOverlay(repoId, this.state.codeGraph.baseRevision, this.state.codeGraph.headRevision);
+        await this.loadCodeDiffOverlay(repoId, this.state.codeGraph.baseRevision, this.state.codeGraph.headRevision, requestKey, navigationVersion);
       }
     } catch (error) {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
@@ -1101,12 +1117,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  private async refreshCodeGraphSnapshot(repoId: string): Promise<void> {
+  private async refreshCodeGraphSnapshot(repoId: string, requestKey: string, navigationVersion: number): Promise<void> {
     if (!this.codeGraphAdapter) return;
     const code = this.state.codeGraph;
     const previousSnapshot = currentCodeGraphSnapshot(code);
     const mode = code.mode === "diff"
-      ? code.path ? "file" : "neighborhood"
+      ? code.path ? "file" : code.symbolKey ? "neighborhood" : "atlas"
       : code.mode;
     const snapshot = await this.codeGraphAdapter.getGraphSnapshot(repoId, {
       mode,
@@ -1114,7 +1130,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       symbolKey: code.symbolKey ?? undefined,
       depth: code.depth,
       aggregate: mode === "atlas" ? "directory" : undefined,
+      includeStale: code.filters.freshness.includes("stale"),
     });
+    if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
     if (this.state.codeGraph.snapshot !== previousSnapshot && (!previousSnapshot || !sameCodeGraphTopology(previousSnapshot, snapshot))) {
       this.invalidateCodeGraphLayout();
@@ -1124,11 +1142,33 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
   }
 
-  private async loadCodeDiffOverlay(repoId: string, baseRevision: string, headRevision: string): Promise<void> {
+  private async loadCodeDiffOverlay(
+    repoId: string,
+    baseRevision: string,
+    headRevision: string,
+    requestKey: string,
+    navigationVersion: number,
+  ): Promise<void> {
     if (!this.codeGraphAdapter) return;
     const overlay = await this.codeGraphAdapter.getDiffOverlay(repoId, baseRevision, headRevision);
+    if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "DIFF_LOADED", overlay });
+    this.invalidateCodeGraphLayout();
     this.render();
+  }
+
+  private codeGraphRequestKey(): string {
+    const code = this.state.codeGraph;
+    return JSON.stringify([
+      code.repoId,
+      code.mode,
+      code.path,
+      code.symbolKey,
+      code.depth,
+      code.baseRevision,
+      code.headRevision,
+      code.filters.freshness.includes("stale"),
+    ]);
   }
 
   private visibleCodeGraphSnapshot(): ReturnType<typeof applyCodeGraphFilters> | null {
@@ -1225,6 +1265,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         mode: "neighborhood",
         symbolKey: node.symbol_key,
       });
+      this.invalidateCodeGraphNavigation();
       void this.loadCodeGraph();
     } else {
       this.drillIntoCodeNode(node);
@@ -1232,10 +1273,28 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   };
 
   private drillIntoCodeNode(node: CodeGraphNode): void {
+    if (node.kind === "directory" || node.kind === "community") {
+      const prefixes = node.kind === "community"
+        ? [node.label, node.path_display].filter((value): value is string => Boolean(value))
+        : [node.path_display ?? node.label];
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "FILTERS_SET",
+        filters: { pathPrefixes: prefixes },
+      });
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "DRILL_IN",
+        breadcrumb: { kind: "directory", id: prefixes[0], label: node.label },
+        mode: "atlas",
+        path: prefixes[0],
+        symbolKey: null,
+      });
+      this.invalidateCodeGraphNavigation();
+      void this.loadCodeGraph();
+      return;
+    }
     const path = node.path_display ?? null;
-    const kind: "directory" | "file" = node.kind === "file" ? "file" : "directory";
     const breadcrumb = {
-      kind,
+      kind: "file" as const,
       id: path ?? node.id,
       label: node.label,
     };
@@ -1246,7 +1305,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       path,
       symbolKey: null,
     });
-    this.invalidateCodeGraphLayout();
+    this.invalidateCodeGraphNavigation();
     void this.loadCodeGraph();
   }
 
@@ -1266,7 +1325,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: null, path: null });
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
     }
-    this.invalidateCodeGraphLayout();
+    this.invalidateCodeGraphNavigation();
     void this.loadCodeGraph();
   }
 
@@ -3391,6 +3450,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private onCodeGraphFilterChange(control: HTMLElement): void {
     const key = control.dataset.codeFilter as keyof CodeGraphFilters | undefined;
     if (!key) return;
+    const previousIncludeStale = this.state.codeGraph.filters.freshness.includes("stale");
+    let shouldReload = false;
     if (key === "diagnostics") {
       const value = (control as HTMLSelectElement).value;
       if (value !== "all" && value !== "with_diagnostics" && value !== "without_diagnostics") return;
@@ -3416,9 +3477,26 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         type: "FILTERS_SET",
         filters: { [key]: values } as Partial<CodeGraphFilters>,
       });
+      if (key === "repoIds") {
+        const input = control as HTMLInputElement;
+        const nextRepoId = input.checked
+          ? input.dataset.codeFilterValue
+          : values[0] ?? this.state.codeGraph.repoId;
+        if (nextRepoId && nextRepoId !== this.state.codeGraph.repoId) {
+          this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPO_SELECTED", repoId: nextRepoId });
+          shouldReload = true;
+        }
+      }
     }
+    shouldReload ||= previousIncludeStale !== this.state.codeGraph.filters.freshness.includes("stale");
     this.invalidateCodeGraphLayout();
     this.render();
+    if (shouldReload) void this.loadCodeGraph();
+  }
+
+  private invalidateCodeGraphNavigation(): void {
+    this.codeGraphNavigationVersion += 1;
+    this.invalidateCodeGraphLayout();
   }
 
   private invalidateCodeGraphLayout(): void {
@@ -3437,7 +3515,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "BREADCRUMB_POP", index: -1 });
-    this.invalidateCodeGraphLayout();
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "FILTERS_SET", filters: { pathPrefixes: [] } });
+    this.invalidateCodeGraphNavigation();
     this.codeGraphView.camera = null;
     this.codeGraphView.overrides.clear();
     void this.loadCodeGraph();
@@ -3449,7 +3528,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: null, path: null });
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
     }
-    this.invalidateCodeGraphLayout();
+    this.invalidateCodeGraphNavigation();
     void this.loadCodeGraph();
   }
 
@@ -3732,7 +3811,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       state: codeDeepLinkToGraphState(link),
     });
     this.state.codeGraph = { ...this.state.codeGraph, breadcrumbs: [] };
-    this.codeGraphLayout = null;
+    this.invalidateCodeGraphNavigation();
     await this.loadCodeGraph();
     if (this.destroyed) return false;
     const snapshot = this.visibleCodeGraphSnapshot();
@@ -3749,7 +3828,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: node.id });
     } else if (link.path) {
       const node = snapshot.nodes.find((candidate) => candidate.path_display === link.path);
-      if (node) this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: node.id });
+      if (!node) {
+        this.render();
+        return false;
+      }
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: node.id });
     }
     this.render();
     return true;

@@ -289,7 +289,7 @@ function renderCodeDetailSections(detail: CodeSymbolDetail): string {
 
 function codeDeepLinkForNode(state: CodeGraphState, node: CodeGraphNode): string | null {
   try {
-    if (node.symbol_key) return codeDeepLinkForSymbol(state.repoId ?? "", node.symbol_key, { mode: state.mode === "diff" ? "neighborhood" : state.mode, depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
+    if (node.symbol_key) return codeDeepLinkForSymbol(state.repoId ?? "", node.symbol_key, { mode: "neighborhood", depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
     if (node.path_display) return codeDeepLinkForFile(state.repoId ?? "", node.path_display, { mode: state.mode === "diff" ? "file" : state.mode, depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
   } catch {
     return null;
