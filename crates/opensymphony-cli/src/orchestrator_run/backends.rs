@@ -706,7 +706,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        if terminal {
+        if terminal && !self.terminal_cleanup_paths.contains(&workspace.path) {
             let Some(handle) = self
                 .manager
                 .list_all_workspaces()
@@ -754,12 +754,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     }
                 }
             }
-            if !self.terminal_cleanup_paths.contains(&workspace.path) {
-                self.manager
-                    .cleanup(&handle, IssueLifecycleState::Terminal)
-                    .await?;
-                self.terminal_cleanup_paths.insert(workspace.path.clone());
-            }
+            self.manager
+                .cleanup(&handle, IssueLifecycleState::Terminal)
+                .await?;
+            self.terminal_cleanup_paths.insert(workspace.path.clone());
         }
         Ok(())
     }
@@ -4234,7 +4232,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn runtime_workspace_cleanup_rearchives_a_terminal_thread_after_debug_unarchive() {
+    async fn runtime_workspace_cleanup_skips_rearchiving_until_the_issue_reopens() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
         let workflow = sample_workflow(tempdir.path(), &workspace_root);
@@ -4302,7 +4300,7 @@ mod tests {
         backend
             .cleanup_workspace(&workspace, true)
             .await
-            .expect("later terminal poll should rearchive the thread");
+            .expect("later terminal poll should remain once-only");
 
         let rearchived_manifest_raw = workspace_manager
             .read_text_artifact(
@@ -4312,12 +4310,12 @@ mod tests {
             .await
             .expect("manifest read should succeed")
             .expect("manifest should exist");
-        let rearchived_manifest: IssueConversationManifest =
+        let retained_manifest: IssueConversationManifest =
             serde_json::from_str(&rearchived_manifest_raw)
                 .expect("Codex conversation manifest should decode");
         assert_eq!(
-            rearchived_manifest.codex_archive_state.as_deref(),
-            Some("archived")
+            retained_manifest.codex_archive_state.as_deref(),
+            Some("active")
         );
     }
 

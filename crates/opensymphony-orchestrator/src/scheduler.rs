@@ -916,6 +916,7 @@ where
         };
 
         let mut records = records.into_iter();
+        let mut retry_records = Vec::new();
         while let Some(record) = records.next() {
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
@@ -937,10 +938,8 @@ where
                     .cleanup_workspace(&record.workspace, true)
                     .await
                 {
-                    self.pending_recovery = Some(std::iter::once(record).chain(records).collect());
-                    return Err(SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    });
+                    tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
+                    retry_records.push(record);
                 }
                 continue;
             }
@@ -956,7 +955,11 @@ where
             self.executions.entry(issue.id.clone()).or_insert(execution);
         }
 
-        self.recovered = true;
+        if retry_records.is_empty() {
+            self.recovered = true;
+        } else {
+            self.pending_recovery = Some(retry_records);
+        }
         Ok(())
     }
 

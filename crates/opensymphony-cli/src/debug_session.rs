@@ -600,6 +600,7 @@ async fn ensure_codex_debug_thread_active(
             thread_id: metadata.thread_id.clone(),
             detail,
         })? {
+            let _ = child.kill().await;
             metadata.manifest["codex_archive_state"] = serde_json::Value::String("active".into());
             manager
                 .write_json_artifact(
@@ -611,6 +612,7 @@ async fn ensure_codex_debug_thread_active(
                 .map_err(DebugCommandError::WorkspaceManager)?;
             return Ok(());
         }
+        let _ = child.kill().await;
         return Err(DebugCommandError::CodexUnarchiveFailed {
             thread_id: metadata.thread_id.clone(),
             detail: "thread was not found in the Codex app-server state database".into(),
