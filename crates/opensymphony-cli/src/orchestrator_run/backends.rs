@@ -4096,10 +4096,10 @@ mod tests {
             .await
             .expect("workspace should be ensured");
         workspace_manager
-            .write_text_artifact(
+            .write_json_artifact(
                 &ensured.handle,
                 &ensured.handle.conversation_manifest_path(),
-                "{\"canonical\":\"thread\"}",
+                &sample_conversation_manifest("thread"),
             )
             .await
             .expect("conversation manifest should persist");
@@ -4152,6 +4152,80 @@ mod tests {
                 .lines()
                 .collect::<Vec<_>>(),
             ["before_remove", "before_remove"]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_workspace_cleanup_preserves_invalid_manifest_for_retry() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                hooks: HookConfig {
+                    before_remove: Some(HookDefinition::shell(
+                        "echo before_remove >> .opensymphony/logs/before_remove.txt",
+                    )),
+                    ..HookConfig::default()
+                },
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                "{\"canonical\":\"thread\"}",
+            )
+            .await
+            .expect("invalid conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("invalid manifest cleanup should remain retryable");
+
+        assert!(!ensured.handle.logs_dir().join("before_remove.txt").exists());
+        assert!(ensured.handle.conversation_manifest_path().is_file());
+        assert!(!backend.terminal_cleanup_paths.contains(&workspace.path));
+
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &sample_conversation_manifest("thread"),
+            )
+            .await
+            .expect("valid conversation manifest should replace invalid fixture");
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("later terminal cleanup should retry successfully");
+
+        assert_eq!(
+            fs::read_to_string(ensured.handle.logs_dir().join("before_remove.txt"))
+                .expect("before-remove hook should run after retry")
+                .trim(),
+            "before_remove"
         );
     }
 
