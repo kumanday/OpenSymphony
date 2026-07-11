@@ -72,6 +72,8 @@ pub(super) enum CliWorkspaceError {
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
+    #[error("Codex lifecycle recovery failed: {0}")]
+    CodexLifecycle(String),
 }
 
 #[derive(Debug, Error)]
@@ -738,7 +740,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                                 %error,
                                 "preserving terminal Codex workspace for archive retry"
                             );
-                            return Ok(());
+                            return Err(CliWorkspaceError::CodexLifecycle(error));
                         }
                     }
                     Ok(_) => {}

@@ -931,12 +931,16 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
-                self.workspace
+                if let Err(error) = self
+                    .workspace
                     .cleanup_workspace(&record.workspace, true)
                     .await
-                    .map_err(|error| SchedulerError::Workspace {
+                {
+                    self.pending_recovery = Some(vec![record]);
+                    return Err(SchedulerError::Workspace {
                         detail: error.to_string(),
-                    })?;
+                    });
+                }
                 continue;
             }
 

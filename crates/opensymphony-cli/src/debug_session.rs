@@ -727,7 +727,7 @@ async fn read_debug_codex_response(
         }
         let value: serde_json::Value =
             serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        if value.get("id").and_then(serde_json::Value::as_u64) != Some(request_id) {
+        if !debug_codex_response_id_matches(&value, request_id) {
             continue;
         }
         if value.get("error").is_some() {
@@ -735,6 +735,13 @@ async fn read_debug_codex_response(
         }
         return Ok(value);
     }
+}
+
+fn debug_codex_response_id_matches(value: &serde_json::Value, request_id: u64) -> bool {
+    value.get("id").is_some_and(|id| {
+        id.as_u64() == Some(request_id)
+            || id.as_str().is_some_and(|id| id == request_id.to_string())
+    })
 }
 
 async fn validate_codex_resume_support(program: &str) -> Result<(), DebugCommandError> {
@@ -1837,6 +1844,21 @@ fn turn_has_stopped(status: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_codex_response_ids_accept_numbers_and_equivalent_strings() {
+        assert!(super::debug_codex_response_id_matches(
+            &serde_json::json!({"id": 7}),
+            7
+        ));
+        assert!(super::debug_codex_response_id_matches(
+            &serde_json::json!({"id": "7"}),
+            7
+        ));
+        assert!(!super::debug_codex_response_id_matches(
+            &serde_json::json!({"id": "other"}),
+            7
+        ));
+    }
     use std::path::PathBuf;
 
     use crate::opensymphony_openhands::{
