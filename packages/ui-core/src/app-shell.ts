@@ -387,12 +387,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private knowledgeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
   private codeGraphLayout: GraphLayoutResult | null = null;
+  private codeGraphLayoutSize: { width: number; height: number } | null = null;
   private codeGraphLoadInFlight: Promise<void> | null = null;
   private codeGraphLoadQueued = false;
   private codeGraphLayoutRun = 0;
   private codeGraphNavigationVersion = 0;
   private codeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private codeGraphSymbolRequest: string | null = null;
+  private codeGraphSymbolErrorKey: string | null = null;
+  private codeGraphSymbolError: string | null = null;
   private codeGraphRawRecord = false;
   /** Concept-detail request currently in flight, keyed `${bundleId}:${conceptId}`. */
   private knowledgeCapsuleRequest: string | null = null;
@@ -806,11 +809,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const shouldReload = this.state.graphPaneView === "code" && !this.destroyed;
     this.state.codeGraph = createInitialCodeGraphState();
     this.codeGraphLayout = null;
+    this.codeGraphLayoutSize = null;
     this.codeGraphLoadInFlight = null;
     this.codeGraphLoadQueued = false;
     this.codeGraphLayoutRun += 1;
     this.codeGraphNavigationVersion += 1;
     this.codeGraphSymbolRequest = null;
+    this.codeGraphSymbolErrorKey = null;
+    this.codeGraphSymbolError = null;
     this.codeGraphRawRecord = false;
     this.codeGraphView = createKnowledgeGraphViewState();
     if (shouldReload) void this.loadCodeGraph();
@@ -1198,6 +1204,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
     const snapshot = this.visibleCodeGraphSnapshot();
     const stageSize = measureKnowledgeGraphStage(root);
+    if (
+      snapshot
+      && this.codeGraphLayout
+      && this.state.codeGraph.layoutStatus === "ready"
+      && this.codeGraphLayoutSize
+      && stageSizeChanged(this.codeGraphLayoutSize, stageSize)
+    ) {
+      this.invalidateCodeGraphLayout();
+      this.scheduleCodeGraphLayout(stageSize);
+      return;
+    }
     if (snapshot && !this.codeGraphLayout && this.state.codeGraph.layoutStatus === "idle") {
       this.scheduleCodeGraphLayout(stageSize);
     }
@@ -1236,6 +1253,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }).then((layout) => {
       if (this.destroyed || run !== this.codeGraphLayoutRun) return;
       this.codeGraphLayout = layout;
+      this.codeGraphLayoutSize = { width: size.width, height: size.height };
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
       this.render();
     }).catch((error) => {
@@ -1271,18 +1289,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private onCodeNodeFocused = (nodeId: string): void => {
     const node = this.visibleCodeGraphSnapshot()?.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) return;
-    if (node.symbol_key) {
-      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
-        type: "DRILL_IN",
-        breadcrumb: { kind: "symbol", id: node.symbol_key, nodeId: node.id, label: node.label },
-        mode: "neighborhood",
-        symbolKey: node.symbol_key,
-      });
-      this.invalidateCodeGraphNavigation();
-      void this.loadCodeGraph();
-    } else {
-      this.drillIntoCodeNode(node);
-    }
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: node.id });
+    this.render();
   };
 
   private drillIntoCodeNode(node: CodeGraphNode): void {
@@ -1349,8 +1357,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!adapter || !selected?.symbol_key) return;
     const detailKey = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
     const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}`;
-    if (this.codeGraphSymbolRequest === key || this.state.codeGraph.symbolDetails[detailKey]) return;
+    if (this.codeGraphSymbolRequest === key
+      || this.codeGraphSymbolErrorKey === key
+      || this.state.codeGraph.symbolDetails[detailKey]) return;
     this.codeGraphSymbolRequest = key;
+    this.codeGraphSymbolErrorKey = null;
+    this.codeGraphSymbolError = null;
     try {
       const detail = await adapter.getSymbolDetail(
         this.state.codeGraph.repoId ?? snapshot!.repo_id,
@@ -1358,11 +1370,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         { includeStale: selected.freshness !== "current" || codeGraphNeedsBroadFreshness(this.state.codeGraph.filters) },
       );
       if (!this.destroyed && this.codeGraphSymbolRequest === key) {
+        this.codeGraphSymbolErrorKey = null;
+        this.codeGraphSymbolError = null;
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAIL_LOADED", detail });
         this.render();
       }
     } catch {
-      // The structure list remains useful when a detail endpoint is unavailable.
+      if (!this.destroyed && this.codeGraphSymbolRequest === key) {
+        this.codeGraphSymbolErrorKey = key;
+        this.codeGraphSymbolError = "Symbol detail unavailable";
+        this.render();
+      }
     } finally {
       if (this.codeGraphSymbolRequest === key) this.codeGraphSymbolRequest = null;
     }
@@ -2983,6 +3001,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           layout: this.codeGraphLayout,
           state: this.state.codeGraph,
           symbolDetail: this.selectedCodeSymbolDetail(),
+          detailError: this.codeGraphSymbolError,
           rawRecord: this.codeGraphRawRecord,
         });
     return `
@@ -3282,6 +3301,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         layout: this.codeGraphLayout,
         state: this.state.codeGraph,
         symbolDetail: this.selectedCodeSymbolDetail(),
+        detailError: this.codeGraphSymbolError,
         rawRecord: this.codeGraphRawRecord,
       }),
       "os-code-graph-lower-panel",
@@ -3524,6 +3544,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private invalidateCodeGraphLayout(): void {
     this.codeGraphLayout = null;
+    this.codeGraphLayoutSize = null;
     this.codeGraphLayoutRun += 1;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
   }
@@ -5248,16 +5269,20 @@ function isCodeGraphUpdatedEvent(value: unknown): value is CodeGraphUpdatedEvent
 function sameCodeGraphTopology(a: CodeGraphSnapshot, b: CodeGraphSnapshot): boolean {
   if (a.repo_id !== b.repo_id || a.mode !== b.mode) return false;
   if (a.nodes.length !== b.nodes.length || a.edges.length !== b.edges.length) return false;
-  const nodeIdsA = a.nodes.map((node) => `${node.id}:${node.kind}`).sort();
-  const nodeIdsB = b.nodes.map((node) => `${node.id}:${node.kind}`).sort();
+  const nodeIdsA = a.nodes.map((node) => `${node.id}:${node.kind}:${node.metrics.community_id ?? ""}`).sort();
+  const nodeIdsB = b.nodes.map((node) => `${node.id}:${node.kind}:${node.metrics.community_id ?? ""}`).sort();
   const edgeIdsA = a.edges
     .map((edge) => `${edge.id}:${edge.source_id}:${edge.target_id}:${edge.kind}:${edge.confidence}`)
     .sort();
   const edgeIdsB = b.edges
     .map((edge) => `${edge.id}:${edge.source_id}:${edge.target_id}:${edge.kind}:${edge.confidence}`)
     .sort();
+  const communitiesA = a.communities.map((community) => `${community.id}:${[...community.node_ids].sort().join(",")}`).sort();
+  const communitiesB = b.communities.map((community) => `${community.id}:${[...community.node_ids].sort().join(",")}`).sort();
   return nodeIdsA.every((id, index) => id === nodeIdsB[index])
-    && edgeIdsA.every((id, index) => id === edgeIdsB[index]);
+    && edgeIdsA.every((id, index) => id === edgeIdsB[index])
+    && communitiesA.length === communitiesB.length
+    && communitiesA.every((id, index) => id === communitiesB[index]);
 }
 
 function statusEvents(snapshot: DashboardSnapshot | null): DashboardSnapshot["recent_events"] {

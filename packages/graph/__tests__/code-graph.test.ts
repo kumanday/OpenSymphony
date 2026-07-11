@@ -41,6 +41,23 @@ describe("Code Graph adapters and state", () => {
     expect(filtered.edges.every((edge) => edge.confidence === "syntactic")).toBe(true);
   });
 
+  it("matches path filters only on exact or directory boundaries", async () => {
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "file" });
+    const sibling = {
+      ...snapshot.nodes.find((node) => node.kind === "symbol")!,
+      id: "symbol:graphite",
+      label: "graphite",
+      symbol_key: "graphite",
+      path_display: "packages/graphite/src/index.ts",
+    };
+    const filtered = applyCodeGraphFilters(
+      { ...snapshot, nodes: [...snapshot.nodes, sibling] },
+      { ...initialCodeGraphFilters, pathPrefixes: ["packages/graph"] },
+    );
+    expect(filtered.nodes.some((node) => node.symbol_key === "graphite")).toBe(false);
+    expect(filtered.nodes.some((node) => node.path_display === "packages/graph/src/index.ts")).toBe(true);
+  });
+
   it("preserves selection while a newer code snapshot refreshes", async () => {
     const adapter = createFixtureCodeGraphAdapter();
     const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
@@ -203,6 +220,16 @@ describe("Code Graph adapters and state", () => {
     expect(state.diffOverlay).toBeNull();
   });
 
+  it("falls back to an available repository when the selected one disappears", async () => {
+    const repos = await createFixtureCodeGraphAdapter().listRepos();
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "REPO_SELECTED", repoId: "stale-only" });
+    state = codeGraphReducer(state, {
+      type: "REPOS_LOADED",
+      repos: { ...repos, repos: [{ ...repos.repos[0], repo_id: "available" }] },
+    });
+    expect(state.repoId).toBe("available");
+  });
+
   it("keeps HTTP and native adapters on the same DTO contract", async () => {
     const fetchMock = jest.fn(async (url: string) => ({
       ok: true,
@@ -263,7 +290,9 @@ describe("Code Graph deep links", () => {
     expect(parseCodeDeepLink("opensymphony://code/repo/unknown/value")).toBeNull();
     expect(parseCodeDeepLink("opensymphony://code/repo/files/src/lib.rs?guess=1")).toBeNull();
     expect(parseCodeDeepLink("opensymphony://code/repo/diff/base")).toBeNull();
+    expect(parseCodeDeepLink("opensymphony://code/repo/symbols/run?mode=diff")).toBeNull();
     expect(() => formatCodeDeepLink({ repoId: "repo", baseRevision: "base" })).toThrow(/both base and head/);
+    expect(() => formatCodeDeepLink({ repoId: "repo", symbolKey: "run", mode: "diff" })).toThrow(/target does not match/);
   });
 
   it("rejects invalid enum-valued filter entries", () => {

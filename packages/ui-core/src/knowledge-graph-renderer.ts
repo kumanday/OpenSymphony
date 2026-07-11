@@ -84,6 +84,7 @@ export interface CodeGraphSurface {
   layout: GraphLayoutResult | null;
   state: CodeGraphState;
   symbolDetail?: CodeSymbolDetail | null;
+  detailError?: string | null;
   rawRecord?: boolean;
 }
 
@@ -269,16 +270,16 @@ export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
       </dl>
       ${detail
         ? renderCodeDetailSections(detail)
-        : node.kind === "symbol" && deltaStatus !== "removed"
+        : node.kind === "symbol" && deltaStatus !== "removed" && !surface.detailError
           ? `<p data-testid="code-graph-detail-loading">Loading symbol detail…</p>`
-          : renderCodeNodeFallback(node)}
+          : renderCodeNodeFallback(node, surface.detailError)}
       <button type="button" data-code-raw-toggle>${surface.rawRecord ? "Hide raw record" : "Show raw record"}</button>
       ${surface.rawRecord ? `<pre data-testid="code-graph-raw-record">${escapeHtml(raw)}</pre>` : ""}
     </section>
   `;
 }
 
-function renderCodeNodeFallback(node: CodeGraphNode): string {
+function renderCodeNodeFallback(node: CodeGraphNode, detailError?: string | null): string {
   return `
     <h4>Record</h4>
     <dl>
@@ -287,7 +288,7 @@ function renderCodeNodeFallback(node: CodeGraphNode): string {
       <dt>Freshness</dt><dd>${escapeHtml(node.freshness)}</dd>
       <dt>Children</dt><dd>${node.metrics.out_degree}</dd>
     </dl>
-    <p data-testid="code-graph-file-fallback">No symbol detail is required for this ${escapeHtml(node.kind)} record.</p>
+    <p data-testid="code-graph-file-fallback">${detailError ? "Symbol detail unavailable; showing the graph record." : "No symbol detail is required for this record."}</p>
   `;
 }
 

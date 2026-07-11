@@ -1384,6 +1384,9 @@ describe("OpenSymphonyApp mount", () => {
 
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts")).toBe(true);
       await flushUntil(() => root.querySelector("[data-code-mode='file']")?.classList.contains("is-selected") ?? false);
+      const focusApp = handle as unknown as { onCodeNodeFocused(nodeId: string): void; state: { codeGraph: { mode: string } } };
+      focusApp.onCodeNodeFocused("symbol:codeGraphReducer");
+      expect(focusApp.state.codeGraph.mode).toBe("file");
       const staleFilter = root.querySelector<HTMLInputElement>("[data-code-filter='freshness'][data-code-filter-value='stale']");
       expect(staleFilter).not.toBeNull();
       staleFilter!.click();
@@ -1450,6 +1453,32 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("shows a graph-record fallback when Code Graph symbol detail is unavailable", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getSymbolDetail(): Promise<never> {
+        throw new Error("symbol detail unavailable");
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/symbols/codeGraphReducer")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-file-fallback']")?.textContent?.includes("Symbol detail unavailable") ?? false);
+      expect(root.querySelector("[data-testid='code-graph-detail-loading']")).toBeNull();
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("refreshes Code Graph snapshots without losing selection or drag overrides", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1504,6 +1533,52 @@ describe("OpenSymphonyApp mount", () => {
       await flushUntil(() => snapshotReads >= 2 && repoReads > repoReadsBeforeUpdate && !app.state.codeGraph.stale && app.state.codeGraph.layoutStatus === "ready");
       expect(app.state.codeGraph.selectedNodeIds).toEqual(selectedBefore);
       expect(app.codeGraphView.overrides.get("symbol:codeGraphReducer")).toEqual({ x: 42, y: 24 });
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("recomputes Code Graph layout after the stage resizes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
+    });
+    const app = handle as unknown as {
+      graphLayoutAdapter: {
+        layout: (snapshot: unknown, options: { width: number; height: number }) => Promise<unknown>;
+        dispose(): void;
+      };
+      render(): void;
+      state: { codeGraph: { layoutStatus: string } };
+    };
+    const originalLayoutAdapter = app.graphLayoutAdapter;
+    const layoutSizes: Array<{ width: number; height: number }> = [];
+    app.graphLayoutAdapter = {
+      layout: (snapshot, options) => {
+        layoutSizes.push({ width: options.width, height: options.height });
+        return originalLayoutAdapter.layout(snapshot, options);
+      },
+      dispose: () => originalLayoutAdapter.dispose(),
+    };
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+      await flushUntil(() => app.state.codeGraph.layoutStatus === "ready" && layoutSizes.length >= 1);
+      const stage = root.querySelector<HTMLElement>("[data-kg-stage]");
+      expect(stage).not.toBeNull();
+      let stageWidth = 720;
+      Object.defineProperty(stage!, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ width: stageWidth, height: 420 }),
+      });
+      stageWidth = 1400;
+      app.render();
+      await flushUntil(() => app.state.codeGraph.layoutStatus === "ready" && layoutSizes.length >= 2);
+      expect(layoutSizes[1].width).toBeGreaterThan(layoutSizes[0].width);
     } finally {
       await handle.destroy();
     }

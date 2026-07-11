@@ -138,4 +138,20 @@ describe("Code Graph renderer surface", () => {
     });
     expect(root.querySelector("[data-code-copy-deeplink]")).toBeNull();
   });
+
+  it("shows the graph record when symbol detail loading fails", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({
+      snapshot,
+      layout: null,
+      state,
+      detailError: "Symbol detail unavailable",
+      rawRecord: false,
+    });
+    expect(root.querySelector("[data-testid='code-graph-detail-loading']")).toBeNull();
+    expect(root.querySelector("[data-testid='code-graph-file-fallback']")?.textContent)
+      .toContain("Symbol detail unavailable");
+  });
 });

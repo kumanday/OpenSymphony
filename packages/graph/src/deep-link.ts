@@ -379,6 +379,7 @@ function codeGraphModesForPath(
   path: string | null,
   baseRevision: string | null,
 ): boolean {
+  if (mode === "diff" && baseRevision === null) return false;
   if (baseRevision) return mode === "diff" && symbolKey === null && path === null;
   if (symbolKey) return mode === "neighborhood" || mode === "diff";
   if (path) return mode === "file" || mode === "diff";

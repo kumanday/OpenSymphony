@@ -177,12 +177,16 @@ export const initialCodeGraphState = createInitialCodeGraphState();
 
 export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction): CodeGraphState {
   switch (action.type) {
-    case "REPOS_LOADED":
+    case "REPOS_LOADED": {
+      const repoId = state.repoId && action.repos.repos.some((repo) => repo.repo_id === state.repoId)
+        ? state.repoId
+        : action.repos.repos[0]?.repo_id ?? null;
       return {
         ...state,
         repos: action.repos,
-        repoId: state.repoId ?? action.repos.repos[0]?.repo_id ?? null,
+        repoId,
       };
+    }
     case "REPOS_INVALIDATED":
       return { ...state, repos: null };
     case "SNAPSHOT_LOADED": {
@@ -709,11 +713,16 @@ function matchesCodeNode(
   if (filters.freshness.length > 0 && !filters.freshness.includes(node.freshness)) return false;
   if (filters.diagnostics === "with_diagnostics" && node.diagnostic_count <= 0) return false;
   if (filters.diagnostics === "without_diagnostics" && node.diagnostic_count > 0) return false;
-  if (filters.pathPrefixes.length > 0 && (!node.path_display || !filters.pathPrefixes.some((prefix) => node.path_display!.startsWith(prefix)))) return false;
+  if (filters.pathPrefixes.length > 0 && (!node.path_display || !filters.pathPrefixes.some((prefix) => codePathMatchesPrefix(node.path_display!, prefix)))) return false;
   if (filters.communities.length > 0 && !communityMembers.has(node.id)
     && (!node.metrics.community_id || !filters.communities.includes(node.metrics.community_id))) return false;
   if (filters.deltaStatuses.length > 0 && (!node.symbol_key || !filters.deltaStatuses.includes(deltaBySymbol.get(node.symbol_key) ?? "unchanged"))) return false;
   return true;
+}
+
+function codePathMatchesPrefix(path: string, prefix: string): boolean {
+  const normalizedPrefix = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+  return path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`);
 }
 
 function deltaStatuses(overlay?: CodeDiffOverlay | null): Map<string, CodeGraphDeltaStatus> {
