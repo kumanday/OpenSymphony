@@ -52,6 +52,7 @@ async fn debug_codex_resume_launches_fake_codex_from_issue_workspace() {
     assert!(log.contains("ARGS=resume 019ee323-173d-7ec0-8ad2-fa4067c5651c"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn debug_codex_app_prints_deep_link_without_launching_runtime() {
     let project = TempDir::new().expect("temp project should exist");

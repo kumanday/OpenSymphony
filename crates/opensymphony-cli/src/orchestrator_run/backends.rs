@@ -747,9 +747,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                             issue = %handle.identifier(),
                             manifest = %manifest_path.display(),
                             %error,
-                            "preserving terminal workspace with invalid conversation manifest"
+                            "continuing terminal cleanup with invalid conversation manifest"
                         );
-                        return Ok(());
                     }
                 }
             }
@@ -4158,7 +4157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_workspace_cleanup_preserves_invalid_manifest_for_retry() {
+    async fn runtime_workspace_cleanup_runs_manager_cleanup_for_invalid_manifest() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
         let workflow = sample_workflow(tempdir.path(), &workspace_root);
@@ -4204,28 +4203,24 @@ mod tests {
         backend
             .cleanup_workspace(&workspace, true)
             .await
-            .expect("invalid manifest cleanup should remain retryable");
-
-        assert!(!ensured.handle.logs_dir().join("before_remove.txt").exists());
-        assert!(ensured.handle.conversation_manifest_path().is_file());
-        assert!(!backend.terminal_cleanup_paths.contains(&workspace.path));
-
-        workspace_manager
-            .write_json_artifact(
-                &ensured.handle,
-                &ensured.handle.conversation_manifest_path(),
-                &sample_conversation_manifest("thread"),
-            )
-            .await
-            .expect("valid conversation manifest should replace invalid fixture");
-        backend
-            .cleanup_workspace(&workspace, true)
-            .await
-            .expect("later terminal cleanup should retry successfully");
+            .expect("invalid manifest cleanup should still run manager cleanup");
 
         assert_eq!(
             fs::read_to_string(ensured.handle.logs_dir().join("before_remove.txt"))
-                .expect("before-remove hook should run after retry")
+                .expect("before-remove hook should run for invalid manifest")
+                .trim(),
+            "before_remove"
+        );
+        assert!(ensured.handle.conversation_manifest_path().is_file());
+        assert!(backend.terminal_cleanup_paths.contains(&workspace.path));
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("repeated terminal cleanup should keep hooks once-only");
+
+        assert_eq!(
+            fs::read_to_string(ensured.handle.logs_dir().join("before_remove.txt"))
+                .expect("before-remove hook should remain once-only")
                 .trim(),
             "before_remove"
         );
