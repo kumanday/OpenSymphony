@@ -32,6 +32,7 @@ import {
   cachedConceptDetail,
   codeEdgeVisualStyle,
   codeGraphLayoutKindForMode,
+  codeGraphNeedsBroadFreshness,
   codeGraphReducer,
   codeGraphSnapshotForRendering,
   codeNodeVisualStyle,
@@ -1091,7 +1092,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     try {
       if (!this.state.codeGraph.repos) {
-        const repos = await this.codeGraphAdapter.listRepos();
+        const repos = await this.codeGraphAdapter.listRepos({
+          includeStale: codeGraphNeedsBroadFreshness(this.state.codeGraph.filters),
+        });
         if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion) return;
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_LOADED", repos });
       }
@@ -1133,7 +1136,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       symbolKey: code.symbolKey ?? undefined,
       depth: code.depth,
       aggregate: mode === "atlas" ? "directory" : undefined,
-      includeStale: code.filters.freshness.includes("stale"),
+      includeStale: codeGraphNeedsBroadFreshness(code.filters),
     });
     if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
@@ -1170,7 +1173,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       code.depth,
       code.baseRevision,
       code.headRevision,
-      code.filters.freshness.includes("stale"),
+      codeGraphNeedsBroadFreshness(code.filters),
     ]);
   }
 
@@ -1345,7 +1348,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       const detail = await adapter.getSymbolDetail(
         this.state.codeGraph.repoId ?? snapshot!.repo_id,
         selected.symbol_key,
-        { includeStale: selected.freshness === "stale" || this.state.codeGraph.filters.freshness.includes("stale") },
+        { includeStale: selected.freshness !== "current" || codeGraphNeedsBroadFreshness(this.state.codeGraph.filters) },
       );
       if (!this.destroyed && this.codeGraphSymbolRequest === key) {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAIL_LOADED", detail });
@@ -1464,6 +1467,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (envelope.event_kind === "code_graph_updated" && isCodeGraphUpdatedEvent(envelope.payload)) {
       handledCodeGraphUpdate = true;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
       const selectedRepoId = this.state.codeGraph.repoId;
       if (!selectedRepoId || selectedRepoId === envelope.payload.repo_id) {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
@@ -1471,11 +1475,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           repoId: envelope.payload.repo_id,
           updatedAt: envelope.payload.updated_at,
         });
-        if (this.state.graphPaneView === "code") {
-          void this.loadCodeGraph();
-        }
-        this.render();
       }
+      if (this.state.graphPaneView === "code") {
+        void this.loadCodeGraph();
+      }
+      this.render();
     }
     if (!handledMemoryGraphUpdate && !handledCodeGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
       return;
@@ -3458,7 +3462,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private onCodeGraphFilterChange(control: HTMLElement): void {
     const key = control.dataset.codeFilter as keyof CodeGraphFilters | undefined;
     if (!key) return;
-    const previousIncludeStale = this.state.codeGraph.filters.freshness.includes("stale");
+    const previousBroadFreshness = codeGraphNeedsBroadFreshness(this.state.codeGraph.filters);
     let shouldReload = false;
     if (key === "diagnostics") {
       const value = (control as HTMLSelectElement).value;
@@ -3496,7 +3500,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       }
     }
-    shouldReload ||= previousIncludeStale !== this.state.codeGraph.filters.freshness.includes("stale");
+    const nextBroadFreshness = codeGraphNeedsBroadFreshness(this.state.codeGraph.filters);
+    if (previousBroadFreshness !== nextBroadFreshness) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
+      shouldReload = true;
+    }
     this.invalidateCodeGraphLayout();
     this.render();
     if (shouldReload) void this.loadCodeGraph();
@@ -3821,10 +3829,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       type: "HISTORY_RESTORED",
       state: codeDeepLinkToGraphState(link),
     });
+    if (codeGraphNeedsBroadFreshness(link.filters)) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
+    }
     this.state.codeGraph = { ...this.state.codeGraph, breadcrumbs: [] };
     this.invalidateCodeGraphNavigation();
     await this.loadCodeGraph();
     if (this.destroyed) return false;
+    const diffOverlay = this.state.codeGraph.diffOverlay;
+    if (this.state.codeGraph.layoutStatus === "failed"
+      || (link.baseRevision !== null
+        && (!diffOverlay
+          || diffOverlay.base_revision !== link.baseRevision
+          || diffOverlay.head_revision !== link.headRevision))) {
+      this.render();
+      return false;
+    }
     const snapshot = this.visibleCodeGraphSnapshot();
     if (!snapshot || snapshot.repo_id !== link.repoId) {
       this.render();
@@ -4142,11 +4162,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.listen(control, "code-filter", eventType, () => this.onCodeGraphFilterChange(control));
     });
     this.listen(this.options.root.querySelector("[data-code-filter-reset]"), "code-filter-reset", "click", () => {
-      const hadStaleFilter = this.state.codeGraph.filters.freshness.includes("stale");
+      const hadBroadFreshness = codeGraphNeedsBroadFreshness(this.state.codeGraph.filters);
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "FILTERS_RESET" });
+      if (hadBroadFreshness) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
+      }
       this.invalidateCodeGraphLayout();
       this.render();
-      if (hadStaleFilter) void this.loadCodeGraph();
+      if (hadBroadFreshness) void this.loadCodeGraph();
     });
     this.listen(this.options.root.querySelector("[data-code-reset]"), "code-reset", "click", () => {
       this.resetCodeGraphView();

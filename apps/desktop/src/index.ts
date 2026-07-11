@@ -153,7 +153,7 @@ function createDesktopNativeGraphApi(invoke: TauriInvoke): NativeGraphApi {
 
 function createDesktopNativeCodeGraphApi(invoke: TauriInvoke): NativeCodeGraphApi {
   return {
-    listRepos: () => invoke<CodeRepoList>("code_repos", { includeStale: null }),
+    listRepos: (options) => invoke<CodeRepoList>("code_repos", { includeStale: options?.includeStale ?? null }),
     getGraphSnapshot: (repoId, options?: CodeGraphRequestOptions) =>
       invoke<CodeGraphSnapshot>("code_graph", {
         repoId,

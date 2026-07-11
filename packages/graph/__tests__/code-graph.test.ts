@@ -212,13 +212,15 @@ describe("Code Graph adapters and state", () => {
     const http = createHttpCodeGraphAdapter("http://localhost:2468", fetchMock);
     await http.listRepos();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos");
+    await http.listRepos({ includeStale: true });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos?include_stale=true");
     await http.getGraphSnapshot("opensymphony", { mode: "atlas", includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
     await http.getSymbolDetail("opensymphony", "staleSymbol", { includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/staleSymbol?include_stale=true");
     const native = createTauriNativeCodeGraphAdapter(http);
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 });
 

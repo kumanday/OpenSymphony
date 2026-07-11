@@ -1349,8 +1349,13 @@ describe("OpenSymphonyApp mount", () => {
     document.body.appendChild(root);
     const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
     const graphRequests: Array<{ mode?: string; includeStale?: boolean; path?: string; symbolKey?: string }> = [];
+    const repoRequests: Array<{ includeStale?: boolean }> = [];
     const codeGraphAdapter = {
       ...fixtureCodeGraphAdapter,
+      async listRepos(options?: Parameters<typeof fixtureCodeGraphAdapter.listRepos>[0]) {
+        repoRequests.push(options ?? {});
+        return fixtureCodeGraphAdapter.listRepos(options);
+      },
       async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
         graphRequests.push(options ?? {});
         return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
@@ -1387,6 +1392,10 @@ describe("OpenSymphonyApp mount", () => {
       const readsBeforeFilterReset = graphRequests.length;
       root.querySelector<HTMLButtonElement>("[data-code-filter-reset]")?.click();
       await flushUntil(() => graphRequests.length > readsBeforeFilterReset && graphRequests.at(-1)?.includeStale === false);
+      await flushUntil(() => repoRequests.some((request) => request.includeStale === true));
+      const readsBeforeUnknownFilter = graphRequests.length;
+      root.querySelector<HTMLInputElement>("[data-code-filter='freshness'][data-code-filter-value='unknown']")?.click();
+      await flushUntil(() => graphRequests.length > readsBeforeUnknownFilter && graphRequests.at(-1)?.includeStale === true);
 
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/missing.ts")).toBe(false);
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/diff/base-rev/head-rev")).toBe(true);
@@ -1412,6 +1421,30 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("rejects Code Graph diff links when the overlay cannot be loaded", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getDiffOverlay(): Promise<never> {
+        throw new Error("diff overlay unavailable");
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/diff/base-rev/head-rev")).toBe(false);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("refreshes Code Graph snapshots without losing selection or drag overrides", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1424,8 +1457,13 @@ describe("OpenSymphonyApp mount", () => {
     });
     const fixtureAdapter = createFixtureCodeGraphAdapter();
     let snapshotReads = 0;
+    let repoReads = 0;
     const codeGraphAdapter = {
       ...fixtureAdapter,
+      async listRepos(options?: Parameters<typeof fixtureAdapter.listRepos>[0]) {
+        repoReads += 1;
+        return fixtureAdapter.listRepos(options);
+      },
       async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureAdapter.getGraphSnapshot>[1]) {
         const snapshot = await fixtureAdapter.getGraphSnapshot(repoId, options);
         snapshotReads += 1;
@@ -1443,6 +1481,7 @@ describe("OpenSymphonyApp mount", () => {
       const app = handle as unknown as { codeGraphView: { overrides: Map<string, { x: number; y: number }> }; state: { codeGraph: { selectedNodeIds: string[]; stale: boolean } } };
       app.codeGraphView.overrides.set("symbol:codeGraphReducer", { x: 42, y: 24 });
       const selectedBefore = [...app.state.codeGraph.selectedNodeIds];
+      const repoReadsBeforeUpdate = repoReads;
       transport.emit({
         schema_version: schemaVersionV1(),
         cursor: { sequence: 90, partition: "events" },
@@ -1456,7 +1495,7 @@ describe("OpenSymphonyApp mount", () => {
           updated_at: "2026-07-11T19:10:00Z",
         },
       });
-      await flushUntil(() => snapshotReads >= 2 && !app.state.codeGraph.stale);
+      await flushUntil(() => snapshotReads >= 2 && repoReads > repoReadsBeforeUpdate && !app.state.codeGraph.stale);
       expect(app.state.codeGraph.selectedNodeIds).toEqual(selectedBefore);
       expect(app.codeGraphView.overrides.get("symbol:codeGraphReducer")).toEqual({ x: 42, y: 24 });
     } finally {

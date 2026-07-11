@@ -45,12 +45,16 @@ export interface CodeGraphDiffOptions {
   limit?: number;
 }
 
+export interface CodeRepoListRequestOptions {
+  includeStale?: boolean;
+}
+
 export interface CodeSymbolDetailRequestOptions {
   includeStale?: boolean;
 }
 
 export interface CodeGraphAdapter {
-  listRepos(): Promise<CodeRepoList>;
+  listRepos(options?: CodeRepoListRequestOptions): Promise<CodeRepoList>;
   getGraphSnapshot(repoId: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
   getSymbolDetail(repoId: string, symbolKey: string, options?: CodeSymbolDetailRequestOptions): Promise<CodeSymbolDetail>;
   getFileOutline(runId: string, filePath: string, repoId?: string): Promise<CodeFileOutline>;
@@ -99,6 +103,7 @@ export interface CodeGraphState extends CodeGraphHistoryState {
 
 export type CodeGraphAction =
   | { type: "REPOS_LOADED"; repos: CodeRepoList }
+  | { type: "REPOS_INVALIDATED" }
   | { type: "SNAPSHOT_LOADED"; snapshot: CodeGraphSnapshot }
   | { type: "SYMBOL_DETAIL_LOADED"; detail: CodeSymbolDetail }
   | { type: "DIFF_LOADED"; overlay: CodeDiffOverlay }
@@ -120,6 +125,10 @@ export type CodeGraphAction =
 
 export const codeGraphModes: readonly CodeGraphMode[] = ["atlas", "file", "neighborhood", "diff"];
 export const codeGraphDepthBounds = { min: 0, max: 2 } as const;
+
+export function codeGraphNeedsBroadFreshness(filters: Pick<CodeGraphFilters, "freshness">): boolean {
+  return filters.freshness.includes("stale") || filters.freshness.includes("unknown");
+}
 
 export function createInitialCodeGraphFilters(): CodeGraphFilters {
   return {
@@ -173,6 +182,8 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         repos: action.repos,
         repoId: state.repoId ?? action.repos.repos[0]?.repo_id ?? null,
       };
+    case "REPOS_INVALIDATED":
+      return { ...state, repos: null };
     case "SNAPSHOT_LOADED": {
       const samePartition = state.snapshot?.cursor.partition === action.snapshot.cursor.partition;
       const responseMatchesTarget = state.mode === "diff"
@@ -181,7 +192,7 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
           && (!state.symbolKey || action.snapshot.nodes.some((node) => node.symbol_key === state.symbolKey))
           && (!state.path || action.snapshot.nodes.some((node) => node.path_display === state.path));
       const responseIncludesStale = action.snapshot.filters_applied.includes("include_stale:true");
-      const responseMatchesFreshness = responseIncludesStale === state.filters.freshness.includes("stale");
+      const responseMatchesFreshness = responseIncludesStale === codeGraphNeedsBroadFreshness(state.filters);
       const currentMatchesView = state.snapshot?.mode === state.mode;
       if (samePartition && state.snapshot && action.snapshot.cursor.sequence <= state.snapshot.cursor.sequence && currentMatchesView && responseMatchesTarget && responseMatchesFreshness) {
         return state;
@@ -551,7 +562,11 @@ export function createHttpCodeGraphAdapter(
     return await response.json() as T;
   }
   return {
-    listRepos: () => read<CodeRepoList>("/api/v1/code/repos"),
+    listRepos: (options) => {
+      const params = new URLSearchParams();
+      if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
+      return read<CodeRepoList>("/api/v1/code/repos", params);
+    },
     getGraphSnapshot: (repoId, options) => {
       const params = codeGraphRequestParams(options);
       return read<CodeGraphSnapshot>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/graph`, params);
