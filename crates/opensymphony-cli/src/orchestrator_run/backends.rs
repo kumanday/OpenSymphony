@@ -704,7 +704,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        if terminal && !self.terminal_cleanup_paths.contains(&workspace.path) {
+        if terminal {
             let Some(handle) = self
                 .manager
                 .list_all_workspaces()
@@ -753,10 +753,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     }
                 }
             }
-            self.manager
-                .cleanup(&handle, IssueLifecycleState::Terminal)
-                .await?;
-            self.terminal_cleanup_paths.insert(workspace.path.clone());
+            if !self.terminal_cleanup_paths.contains(&workspace.path) {
+                self.manager
+                    .cleanup(&handle, IssueLifecycleState::Terminal)
+                    .await?;
+                self.terminal_cleanup_paths.insert(workspace.path.clone());
+            }
         }
         Ok(())
     }
@@ -4226,6 +4228,95 @@ mod tests {
                 .expect("before-remove hook should run after retry")
                 .trim(),
             "before_remove"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_workspace_cleanup_rearchives_a_terminal_thread_after_debug_unarchive() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut manifest = sample_conversation_manifest("fake-thread");
+        manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        manifest.runtime_contract_version = Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("Codex conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let log_path = tempdir.path().join("fake-codex-terminal-rearchive.log");
+        let fake_codex = tempdir.path().join("fake-codex-terminal-rearchive");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+        backend.codex_bin = fake_codex.to_string_lossy().into_owned();
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("initial terminal archive should succeed");
+
+        let unarchived_manifest_raw = workspace_manager
+            .read_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+            )
+            .await
+            .expect("manifest read should succeed")
+            .expect("manifest should exist");
+        let mut unarchived_manifest: IssueConversationManifest =
+            serde_json::from_str(&unarchived_manifest_raw)
+                .expect("Codex conversation manifest should decode");
+        unarchived_manifest.codex_archive_state = Some("active".to_string());
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &unarchived_manifest,
+            )
+            .await
+            .expect("debug unarchive state should persist");
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("later terminal poll should rearchive the thread");
+
+        let rearchived_manifest_raw = workspace_manager
+            .read_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+            )
+            .await
+            .expect("manifest read should succeed")
+            .expect("manifest should exist");
+        let rearchived_manifest: IssueConversationManifest =
+            serde_json::from_str(&rearchived_manifest_raw)
+                .expect("Codex conversation manifest should decode");
+        assert_eq!(
+            rearchived_manifest.codex_archive_state.as_deref(),
+            Some("archived")
         );
     }
 
