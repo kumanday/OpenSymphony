@@ -20,6 +20,15 @@ import {
   schemaVersionFromString,
   validateEnvelopeBatch,
 } from "@opensymphony/gateway-schema";
+import type {
+  CodeDiffOverlay,
+  CodeFileOutline,
+  CodeGraphSnapshot,
+  CodeGraphUpdatedEvent,
+  CodeIndexReport,
+  CodeRepoList,
+  CodeSymbolDetail,
+} from "@opensymphony/gateway-schema";
 
 const fixturesDir = resolve(__dirname, "fixtures");
 
@@ -174,6 +183,52 @@ describe("task graph node fixture", () => {
     expect(Array.isArray(data.children)).toBe(true);
     expect(Array.isArray(data.blocked_by)).toBe(true);
     expect(Array.isArray(data.labels)).toBe(true);
+  });
+});
+
+// -- Code graph fixtures --
+
+describe("code graph fixtures", () => {
+  test("repo list and graph snapshot validate schema version", () => {
+    const repos = loadFixture("code_repo_list.json") as CodeRepoList;
+    const graph = loadFixture("code_graph_snapshot.json") as CodeGraphSnapshot;
+
+    expect(isValidSchemaVersion(repos.schema_version)).toBe(true);
+    expect(isValidSchemaVersion(graph.schema_version)).toBe(true);
+    expect(repos.repos[0].repo_id).toBe("opensymphony");
+    expect(graph.cursor.partition).toBe("code-graph:opensymphony");
+    expect(graph.nodes.some((node) => node.kind === "symbol" && node.symbol_key === "run")).toBe(true);
+    expect(JSON.stringify(graph)).not.toContain("workspace_path");
+    expect(JSON.stringify(graph)).not.toContain("/tmp/");
+  });
+
+  test("symbol detail and run outline expose relative spans", () => {
+    const detail = loadFixture("code_symbol_detail.json") as CodeSymbolDetail;
+    const outline = loadFixture("code_file_outline.json") as CodeFileOutline;
+
+    expect(isValidSchemaVersion(detail.schema_version)).toBe(true);
+    expect(isValidSchemaVersion(outline.schema_version)).toBe(true);
+    expect(detail.path_display).toBe("src/lib.rs");
+    expect(detail.source_snippet).toBeNull();
+    expect(detail.container_chain).toEqual(["App"]);
+    expect(outline.symbols[0].symbol_key).toBe("run");
+    expect(outline.symbols[0].selection_span.start_line).toBe(outline.symbols[0].span.start_line);
+  });
+
+  test("diff, index report, and update event carry revision and cursor shape", () => {
+    const diff = loadFixture("code_diff_overlay.json") as CodeDiffOverlay;
+    const report = loadFixture("code_index_report.json") as CodeIndexReport;
+    const update = loadFixture("code_graph_updated_event.json") as CodeGraphUpdatedEvent;
+
+    expect(isValidSchemaVersion(diff.schema_version)).toBe(true);
+    expect(diff.base_revision).toBe("base-rev");
+    expect(diff.head_revision).toBe("head-rev");
+    expect(diff.added_symbols[0].status).toBe("added");
+    expect(report.status).toBe("completed");
+    expect(report.cursor.partition).toBe("code-graph:opensymphony");
+    expect(update.repo_id).toBe("opensymphony");
+    expect(update.head_revision).toBe("head-rev");
+    expect(update.cursor.partition).toBe("code-graph:opensymphony");
   });
 });
 

@@ -1,0 +1,16 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "repo_id": "opensymphony",
+  "status": "completed",
+  "head_revision": "head-rev",
+  "parsed_files": 0,
+  "persisted_documents": 0,
+  "persisted_symbols": 0,
+  "persisted_edges": 0,
+  "persisted_diagnostics": 0,
+  "stale_rows": 0,
+  "skipped_files": [],
+  "diagnostics": [],
+  "cursor": { "sequence": 2, "partition": "code-graph:opensymphony" },
+  "indexed_at": "2026-07-07T03:00:00Z"
+}

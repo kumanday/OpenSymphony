@@ -1,0 +1,40 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "repo_id": "opensymphony",
+  "symbol_key": "run",
+  "symbol_id": "run-head",
+  "kind": "function",
+  "name": "run",
+  "path_display": "src/lib.rs",
+  "language": "rust",
+  "container_chain": ["App"],
+  "signature": "fn run(&self)",
+  "span": { "start_line": 6, "start_col": 2, "end_line": 7, "end_col": 14 },
+  "selection_span": { "start_line": 6, "start_col": 2, "end_line": 6, "end_col": 14 },
+  "freshness": "current",
+  "provenance": {
+    "commit_sha": "head-rev",
+    "content_sha256": "head-content",
+    "snippet_sha256": "run-head",
+    "parser_version": "tree-sitter-rust-vfixture",
+    "query_pack_version": "rust-query-pack-vfixture",
+    "indexed_at": "2026-07-07T03:00:00Z"
+  },
+  "diagnostics": [
+    {
+      "kind": "warning",
+      "severity": "warning",
+      "message": "fixture diagnostic",
+      "span": { "start_line": 6, "start_col": 2, "end_line": 6, "end_col": 20 }
+    }
+  ],
+  "edge_summary": [
+    {
+      "kind": "reference.call",
+      "confidence": "exact",
+      "count": 1,
+      "unresolved_count": 0
+    }
+  ],
+  "source_snippet": null
+}

@@ -26,17 +26,18 @@ use crate::{
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
         ArchivePlan, CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
-        CodeIntelPersistBatch, CodeIntelSymbolInput, CommentEvidence, DocsSyncPlan, IssueEvidence,
-        IssueLinkEvidence, IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions,
-        MemoryError, MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
-        archive_blocking_warning_count, brief, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
+        CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput, CommentEvidence,
+        DocsSyncPlan, IssueEvidence, IssueLinkEvidence, IssueSelection, LintSeverity, MemoryConfig,
+        MemoryContextOptions, MemoryError, MemoryReindexReport, MemoryScopeFilter,
+        MemoryVisibility, SourceFile, archive_blocking_warning_count, brief,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, persist_code_intel_documents, persist_code_intel_skipped_files,
         plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
         refresh_memory_index_from_okf, related_by_area_with_scope, related_by_issue_with_scope,
         related_by_paths_with_scope, render_archive_plan, render_capture_dry_run,
-        search_with_scope, sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
-        write_memory_init_plan,
+        search_with_scope, sha256_bytes_hex, sha256_hex, status_with_scope, write_capture_plan,
+        write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -2685,6 +2686,7 @@ struct CodeIntelPersistencePlan {
     artifacts: Vec<CodeIntelArtifact>,
     documents: Vec<CodeIntelDocumentInput>,
     skipped_files: Vec<String>,
+    skipped_file_inputs: Vec<CodeIntelSkippedFileInput>,
     diagnostics: Vec<String>,
 }
 
@@ -2711,14 +2713,24 @@ async fn code_intel_persist_artifacts_blocking(
     tokio::task::spawn_blocking(move || {
         let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
         let plan = code_intel_documents_for_persistence(&request)?;
+        let repo_id = repo_id_for_code_intel(&request.config, &request.scope);
+        let commit_sha = git_commit_sha_for_repo(&repo_root);
+        let worktree_dirty = git_worktree_dirty(&repo_root);
         let mut report = persist_code_intel_documents(
             &request.config,
             CodeIntelPersistBatch {
-                repo_id: repo_id_for_code_intel(&request.config, &request.scope),
-                commit_sha: git_commit_sha_for_repo(&repo_root),
-                worktree_dirty: git_worktree_dirty(&repo_root),
+                repo_id: repo_id.clone(),
+                commit_sha: commit_sha.clone(),
+                worktree_dirty,
                 documents: plan.documents,
             },
+        )?;
+        persist_code_intel_skipped_files(
+            &request.config,
+            &repo_id,
+            commit_sha.as_deref(),
+            worktree_dirty,
+            &plan.skipped_file_inputs,
         )?;
         report.skipped_files = plan.skipped_files;
         report.diagnostics = plan.diagnostics;
@@ -2739,6 +2751,7 @@ fn code_intel_documents_for_persistence(
     let mut artifacts = Vec::new();
     let mut documents = Vec::new();
     let mut skipped_files = Vec::new();
+    let mut skipped_file_inputs = Vec::new();
     let mut diagnostics = Vec::new();
     let mut parsed_files = 0usize;
     let mut query_runs = 0usize;
@@ -2754,15 +2767,31 @@ fn code_intel_documents_for_persistence(
             })?
             .to_path_buf();
         let relative_display = relative.to_string_lossy().to_string();
+        if resolved.is_dir() {
+            skipped_files.push(format!("{relative_display}: directory"));
+            continue;
+        }
         let Some(language) = crate::opensymphony_code_intel::detect_language(&relative) else {
-            skipped_files.push(format!("{relative_display}: unsupported language"));
+            record_skipped_code_intel_file(
+                &mut skipped_files,
+                &mut skipped_file_inputs,
+                &relative,
+                &relative_display,
+                &resolved,
+                "unsupported language",
+            )?;
             continue;
         };
         let language_id = source_language_id(language);
         if !request.languages.is_empty() && !request.languages.contains(language_id) {
-            skipped_files.push(format!(
-                "{relative_display}: language `{language_id}` not selected"
-            ));
+            record_skipped_code_intel_file(
+                &mut skipped_files,
+                &mut skipped_file_inputs,
+                &relative,
+                &relative_display,
+                &resolved,
+                &format!("language `{language_id}` not selected"),
+            )?;
             continue;
         }
         let source = fs::read_to_string(&resolved).map_err(|source| MemoryError::ReadFile {
@@ -2772,7 +2801,14 @@ fn code_intel_documents_for_persistence(
         let summary = match parse_path(&relative, &source) {
             Ok(summary) => summary,
             Err(error) => {
-                skipped_files.push(format!("{relative_display}: parse failed"));
+                record_skipped_code_intel_file(
+                    &mut skipped_files,
+                    &mut skipped_file_inputs,
+                    &relative,
+                    &relative_display,
+                    &resolved,
+                    "parse failed",
+                )?;
                 diagnostics.push(format!("{relative_display}: {error}"));
                 continue;
             }
@@ -2780,10 +2816,14 @@ fn code_intel_documents_for_persistence(
         if !request.query_packs.is_empty()
             && !request.query_packs.contains(&summary.versions.query_pack)
         {
-            skipped_files.push(format!(
-                "{relative_display}: query pack `{}` not selected",
-                summary.versions.query_pack
-            ));
+            record_skipped_code_intel_file(
+                &mut skipped_files,
+                &mut skipped_file_inputs,
+                &relative,
+                &relative_display,
+                &resolved,
+                &format!("query pack `{}` not selected", summary.versions.query_pack),
+            )?;
             continue;
         }
         for diagnostic in &summary.diagnostics {
@@ -2823,8 +2863,30 @@ fn code_intel_documents_for_persistence(
         artifacts,
         documents,
         skipped_files,
+        skipped_file_inputs,
         diagnostics,
     })
+}
+
+fn record_skipped_code_intel_file(
+    skipped_files: &mut Vec<String>,
+    skipped_file_inputs: &mut Vec<CodeIntelSkippedFileInput>,
+    relative: &Path,
+    relative_display: &str,
+    resolved: &Path,
+    reason: &str,
+) -> Result<(), MemoryError> {
+    let bytes = fs::read(resolved).map_err(|source| MemoryError::ReadFile {
+        path: resolved.to_path_buf(),
+        source,
+    })?;
+    skipped_files.push(format!("{relative_display}: {reason}"));
+    skipped_file_inputs.push(CodeIntelSkippedFileInput {
+        path: relative.to_path_buf(),
+        reason: reason.to_string(),
+        content_sha256: sha256_bytes_hex(&bytes),
+    });
+    Ok(())
 }
 
 fn code_intel_artifacts_for_summary(
@@ -4921,6 +4983,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_ingest_code_intel_skips_requested_directories() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("valid source");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "paths": ["src", "src/lib.rs"],
+                "persist": true,
+                "limit": 20
+            }),
+        )
+        .await
+        .expect("directory path should be skipped without aborting ingest");
+
+        assert_eq!(result["persisted"], true);
+        assert_eq!(result["parsedFiles"], 1);
+        assert!(
+            result["skippedFiles"]
+                .as_array()
+                .expect("skipped files")
+                .iter()
+                .any(|file| file.as_str() == Some("src: directory"))
+        );
+        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
+            .expect("index opens");
+        assert_eq!(count_rows(&connection, "code_documents", "current"), 1);
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>("SELECT count(*) FROM code_skipped_files", [], |row| row
+                    .get(0))
+                .expect("skipped file count"),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn memory_ingest_code_intel_defaults_to_artifacts_without_persistence() {
         let repo = TempDir::new().expect("temp repo");
         std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
@@ -5901,26 +6006,27 @@ CREATE TABLE code_edges (
             .expect("persist revision");
         }
 
-        let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
-            .expect("index opens");
-        let rows = connection
-            .prepare(
-                "SELECT commit_sha, symbol_id, symbol_key FROM code_symbols ORDER BY commit_sha",
-            )
-            .expect("prepare symbols")
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .expect("query symbols")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("symbol rows");
-        assert_eq!(rows.len(), 2);
-        assert_ne!(rows[0].1, rows[1].1);
-        assert_eq!(rows[0].2, rows[1].2);
+        {
+            let connection = Connection::open(&config.index_path).expect("index opens");
+            let rows = connection
+                .prepare(
+                    "SELECT commit_sha, symbol_id, symbol_key FROM code_symbols ORDER BY commit_sha",
+                )
+                .expect("prepare symbols")
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .expect("query symbols")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("symbol rows");
+            assert_eq!(rows.len(), 2);
+            assert_ne!(rows[0].1, rows[1].1);
+            assert_eq!(rows[0].2, rows[1].2);
+        }
 
         let comparison =
             compare_code_symbols(&config, "repo", "base", "head", 10).expect("compare revisions");
@@ -5949,6 +6055,8 @@ CREATE TABLE code_edges (
             },
         )
         .expect("dirty revision persist");
+        let connection =
+            Connection::open(&config.index_path).expect("index reopens after dirty persist");
         for table in [
             "code_documents",
             "code_symbols",

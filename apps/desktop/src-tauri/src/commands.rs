@@ -870,6 +870,21 @@ async fn gateway_get_json(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     path: &str,
 ) -> CommandResult<serde_json::Value> {
+    gateway_request_json(state, reqwest::Method::GET, path).await
+}
+
+async fn gateway_post_json(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    path: &str,
+) -> CommandResult<serde_json::Value> {
+    gateway_request_json(state, reqwest::Method::POST, path).await
+}
+
+async fn gateway_request_json(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    method: reqwest::Method,
+    path: &str,
+) -> CommandResult<serde_json::Value> {
     let (base_url, auth_token, client) = {
         let conn = state.read().await;
         (
@@ -895,7 +910,7 @@ async fn gateway_get_json(
         });
     }
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let mut request = client.get(&url);
+    let mut request = client.request(method, &url);
     if let Some(token) = auth_token {
         request = request.bearer_auth(token);
     }
@@ -1107,6 +1122,149 @@ pub async fn memory_completed_tasks(
     push_query_param(&mut params, "visibility", visibility.as_deref());
     let path = path_with_query("/api/v1/memory/completed-tasks", &params);
     gateway_get_json(state, &path).await
+}
+
+/// List indexed code repos through the active gateway.
+#[command]
+pub async fn code_repos(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    include_stale: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param_value(&mut params, "include_stale", include_stale);
+    let path = path_with_query("/api/v1/code/repos", &params);
+    gateway_get_json(state, &path).await
+}
+
+/// Get a code graph snapshot through the active gateway.
+#[command]
+pub async fn code_graph(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    repo_id: String,
+    mode: Option<String>,
+    path: Option<String>,
+    symbol_key: Option<String>,
+    depth: Option<u64>,
+    aggregate: Option<String>,
+    include_stale: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "mode", mode.as_deref());
+    push_query_param(&mut params, "path", path.as_deref());
+    push_query_param(&mut params, "symbol_key", symbol_key.as_deref());
+    push_query_param_value(&mut params, "depth", depth);
+    push_query_param(&mut params, "aggregate", aggregate.as_deref());
+    push_query_param_value(&mut params, "include_stale", include_stale);
+    let path = path_with_query(
+        &format!(
+            "/api/v1/code/repos/{}/graph",
+            urlencoding::encode(&repo_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Get code symbol details through the active gateway.
+#[command]
+pub async fn code_symbol_detail(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    repo_id: String,
+    symbol_key: String,
+    include_stale: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param_value(&mut params, "include_stale", include_stale);
+    let path = path_with_query(
+        &format!(
+            "/api/v1/code/repos/{}/symbols/{}",
+            urlencoding::encode(&repo_id),
+            urlencoding::encode(&symbol_key)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Get a repository code diff overlay through the active gateway.
+#[command]
+pub async fn code_diff_overlay(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    repo_id: String,
+    base_revision: String,
+    head_revision: String,
+    limit: Option<u64>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "base_revision", Some(&base_revision));
+    push_query_param(&mut params, "head_revision", Some(&head_revision));
+    push_query_param_value(&mut params, "limit", limit);
+    let path = path_with_query(
+        &format!(
+            "/api/v1/code/repos/{}/diff-overlay",
+            urlencoding::encode(&repo_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Get a run-scoped file outline through the active gateway.
+#[command]
+pub async fn run_code_outline(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+    file_path: String,
+    repo_id: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "file_path", Some(&file_path));
+    push_query_param(&mut params, "repo_id", repo_id.as_deref());
+    let path = path_with_query(
+        &format!(
+            "/api/v1/runs/{}/code/outline",
+            urlencoding::encode(&run_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Get a run-scoped code diff overlay through the active gateway.
+#[command]
+pub async fn run_code_diff_overlay(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+    repo_id: Option<String>,
+    limit: Option<u64>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "repo_id", repo_id.as_deref());
+    push_query_param_value(&mut params, "limit", limit);
+    let path = path_with_query(
+        &format!(
+            "/api/v1/runs/{}/code/diff-overlay",
+            urlencoding::encode(&run_id)
+        ),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
+/// Request repo indexing through the active gateway.
+#[command]
+pub async fn code_index_repo(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    repo_id: String,
+) -> CommandResult<serde_json::Value> {
+    gateway_post_json(
+        state,
+        &format!(
+            "/api/v1/code/repos/{}/index",
+            urlencoding::encode(&repo_id)
+        ),
+    )
+    .await
 }
 
 /// Get task graph for a project.
@@ -1535,6 +1693,47 @@ mod tests {
         assert_eq!(
             path_with_query("/api/v1/memory/bundles", &[]),
             "/api/v1/memory/bundles"
+        );
+    }
+
+    #[test]
+    fn code_graph_query_helpers_encode_command_paths() {
+        let mut params = Vec::new();
+        push_query_param(&mut params, "mode", Some("file"));
+        push_query_param(&mut params, "path", Some("src/lib.rs"));
+        push_query_param_value(&mut params, "include_stale", Some(true));
+
+        assert_eq!(
+            path_with_query(
+                &format!(
+                    "/api/v1/code/repos/{}/graph",
+                    urlencoding::encode("local repo")
+                ),
+                &params
+            ),
+            "/api/v1/code/repos/local%20repo/graph?mode=file&path=src%2Flib.rs&include_stale=true"
+        );
+        assert_eq!(
+            format!(
+                "/api/v1/code/repos/{}/symbols/{}",
+                urlencoding::encode("local repo"),
+                urlencoding::encode("sym:key#2")
+            ),
+            "/api/v1/code/repos/local%20repo/symbols/sym%3Akey%232"
+        );
+        params.clear();
+        push_query_param(&mut params, "base_revision", Some("base rev"));
+        push_query_param(&mut params, "head_revision", Some("head/rev"));
+        push_query_param_value(&mut params, "limit", Some(12_u64));
+        assert_eq!(
+            path_with_query(
+                &format!(
+                    "/api/v1/code/repos/{}/diff-overlay",
+                    urlencoding::encode("local repo")
+                ),
+                &params
+            ),
+            "/api/v1/code/repos/local%20repo/diff-overlay?base_revision=base%20rev&head_revision=head%2Frev&limit=12"
         );
     }
 
