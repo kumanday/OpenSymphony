@@ -22,21 +22,39 @@ import type {
   ModelConfigurationProfile,
   ModelCredentialMode,
   MemoryGraphUpdatedEvent,
+  CodeGraphUpdatedEvent,
+  CodeGraphNode,
+  CodeGraphSnapshot,
+  CodeSymbolDetail,
 } from "@opensymphony/gateway-schema";
 import {
+  applyCodeGraphFilters,
   cachedConceptDetail,
+  codeEdgeVisualStyle,
+  codeGraphLayoutKindForMode,
+  codeGraphReducer,
+  codeGraphSnapshotForRendering,
+  codeNodeVisualStyle,
   isConceptDetailStale,
   createGraphLayoutAdapter,
+  createInitialCodeGraphState,
   createInitialGraphState,
+  currentCodeGraphSnapshot,
   formatMemoryDeepLink,
   graphLayoutKindForMode,
   graphReducer,
   currentGraphSnapshot,
   sameGraphTopology,
   parseMemoryDeepLink,
+  parseCodeDeepLink,
+  codeDeepLinkToGraphState,
   resolveMemoryDeepLinkNode,
   visibleGraphSnapshot,
   type GraphDataAdapter,
+  type CodeGraphAdapter,
+  type CodeGraphFilters,
+  type CodeGraphState,
+  type CodeGraphMode,
   type GraphLayoutAdapter,
   type GraphLayoutResult,
   type GraphState,
@@ -125,6 +143,11 @@ import {
 } from "./planning-workspace-ui.js";
 import {
   bindKnowledgeGraphListNavigation,
+  mountCodeGraphRenderer,
+  renderCodeGraphInspector,
+  renderCodeGraphNodeList,
+  renderCodeGraphSurface,
+  disposeCodeGraphRenderer,
   createKnowledgeGraphViewState,
   disposeKnowledgeGraphRenderer,
   type KnowledgeGraphViewState,
@@ -193,6 +216,8 @@ export interface OpenSymphonyAppOptions {
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
   graphAdapter?: GraphDataAdapter;
   onGraphGatewayUrlChanged?: (gatewayUrl: string) => GraphDataAdapter;
+  codeGraphAdapter?: CodeGraphAdapter;
+  onCodeGraphGatewayUrlChanged?: (gatewayUrl: string) => CodeGraphAdapter;
 }
 
 export interface OpenSymphonyAppHandle {
@@ -206,6 +231,7 @@ export interface OpenSymphonyAppHandle {
    * External surfaces (task graph artifacts, notifications) call this.
    */
   openMemoryDeepLink(url: string): Promise<boolean>;
+  openCodeDeepLink(url: string): Promise<boolean>;
 }
 
 type ConnectionMode = "connecting" | "connected" | "failed";
@@ -221,6 +247,7 @@ interface AppState {
   selectedNodeId: string | null;
   graphPaneView: GraphPaneView;
   knowledgeGraph: GraphState;
+  codeGraph: CodeGraphState;
   knowledgeGraphLayout: GraphLayoutResult | null;
   runDetail: RunDetail | null;
   runFiles: ChangedFileEntry[] | null;
@@ -338,6 +365,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private options: OpenSymphonyAppOptions;
   private transport: GatewayReader;
   private graphAdapter: GraphDataAdapter | null;
+  private codeGraphAdapter: CodeGraphAdapter | null;
   private state: AppState;
   private destroyed = false;
   private eventSubscription: {
@@ -357,6 +385,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private graphLayoutRun = 0;
   private knowledgeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private knowledgeGraphLayoutSize: { width: number; height: number } | null = null;
+  private codeGraphLayout: GraphLayoutResult | null = null;
+  private codeGraphLoadInFlight: Promise<void> | null = null;
+  private codeGraphLayoutRun = 0;
+  private codeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
+  private codeGraphSymbolRequest: string | null = null;
+  private codeGraphRawRecord = false;
   /** Concept-detail request currently in flight, keyed `${bundleId}:${conceptId}`. */
   private knowledgeCapsuleRequest: string | null = null;
   /** Guards in-flight completed-tasks pages (superseded by newer queries). */
@@ -390,6 +424,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options = options;
     this.transport = options.transport;
     this.graphAdapter = options.graphAdapter ?? null;
+    this.codeGraphAdapter = options.codeGraphAdapter ?? null;
     this.installBrowserGraphLayoutAdapter();
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
@@ -406,6 +441,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       selectedNodeId: null,
       graphPaneView: "task",
       knowledgeGraph: createInitialGraphState(),
+      codeGraph: createInitialCodeGraphState(),
       knowledgeGraphLayout: null,
       runDetail: null,
       runFiles: null,
@@ -464,9 +500,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   };
 
   private onDocumentKeydown = (event: KeyboardEvent): void => {
-    if (this.destroyed || event.key !== "Escape" || this.state.graphPaneView !== "knowledge") {
+    if (this.destroyed || event.key !== "Escape") {
       return;
     }
+    if (this.state.graphPaneView === "code") {
+      if (this.state.codeGraph.breadcrumbs.length > 0 || this.state.codeGraph.mode !== "atlas") {
+        this.stepBackCodeGraphView();
+      }
+      return;
+    }
+    if (this.state.graphPaneView !== "knowledge") return;
     const graph = this.state.knowledgeGraph;
     if (
       graph.mode !== "atlas"
@@ -618,7 +661,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
         this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(active.gatewayUrl) ?? this.graphAdapter;
+        this.codeGraphAdapter = this.options.onCodeGraphGatewayUrlChanged?.(active.gatewayUrl) ?? this.codeGraphAdapter;
         this.resetKnowledgeGraph();
+        this.resetCodeGraph();
       }
     } catch (error) {
       this.state.connectionMessage = `Profiles unavailable: ${errorMessage(error)}`;
@@ -751,6 +796,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     // A different bundle/gateway is different content: drop the camera and
     // any node drag overrides along with the graph state.
     this.knowledgeGraphView = createKnowledgeGraphViewState();
+  }
+
+  private resetCodeGraph(): void {
+    this.state.codeGraph = createInitialCodeGraphState();
+    this.codeGraphLayout = null;
+    this.codeGraphLoadInFlight = null;
+    this.codeGraphLayoutRun += 1;
+    this.codeGraphSymbolRequest = null;
+    this.codeGraphRawRecord = false;
+    this.codeGraphView = createKnowledgeGraphViewState();
   }
 
   /**
@@ -999,6 +1054,250 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
   }
 
+  private async loadCodeGraph(): Promise<void> {
+    if (this.codeGraphLoadInFlight) return this.codeGraphLoadInFlight;
+    const load = this.loadCodeGraphOnce().finally(() => {
+      this.codeGraphLoadInFlight = null;
+    });
+    this.codeGraphLoadInFlight = load;
+    return load;
+  }
+
+  private async loadCodeGraphOnce(): Promise<void> {
+    if (!this.codeGraphAdapter) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "LAYOUT_STATUS_SET",
+        status: "failed",
+        error: "Code Graph unavailable for the active transport",
+      });
+      this.render();
+      return;
+    }
+    try {
+      if (!this.state.codeGraph.repos) {
+        const repos = await this.codeGraphAdapter.listRepos();
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_LOADED", repos });
+      }
+      const repoId = this.state.codeGraph.repoId ?? this.state.codeGraph.repos?.repos[0]?.repo_id ?? null;
+      if (!repoId) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+        this.render();
+        return;
+      }
+      if (this.state.codeGraph.repoId !== repoId) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPO_SELECTED", repoId });
+      }
+      await this.refreshCodeGraphSnapshot(repoId);
+      if (this.state.codeGraph.mode === "diff" && this.state.codeGraph.baseRevision && this.state.codeGraph.headRevision) {
+        await this.loadCodeDiffOverlay(repoId, this.state.codeGraph.baseRevision, this.state.codeGraph.headRevision);
+      }
+    } catch (error) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "LAYOUT_STATUS_SET",
+        status: "failed",
+        error: errorMessage(error),
+      });
+      this.render();
+    }
+  }
+
+  private async refreshCodeGraphSnapshot(repoId: string): Promise<void> {
+    if (!this.codeGraphAdapter) return;
+    const code = this.state.codeGraph;
+    const previousSnapshot = currentCodeGraphSnapshot(code);
+    const mode = code.mode === "diff"
+      ? code.path ? "file" : "neighborhood"
+      : code.mode;
+    const snapshot = await this.codeGraphAdapter.getGraphSnapshot(repoId, {
+      mode,
+      path: code.path ?? undefined,
+      symbolKey: code.symbolKey ?? undefined,
+      depth: code.depth,
+      aggregate: mode === "atlas" ? "directory" : undefined,
+    });
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
+    if (this.state.codeGraph.snapshot !== previousSnapshot && (!previousSnapshot || !sameCodeGraphTopology(previousSnapshot, snapshot))) {
+      this.invalidateCodeGraphLayout();
+    } else {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+    }
+    this.render();
+  }
+
+  private async loadCodeDiffOverlay(repoId: string, baseRevision: string, headRevision: string): Promise<void> {
+    if (!this.codeGraphAdapter) return;
+    const overlay = await this.codeGraphAdapter.getDiffOverlay(repoId, baseRevision, headRevision);
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "DIFF_LOADED", overlay });
+    this.render();
+  }
+
+  private visibleCodeGraphSnapshot(): ReturnType<typeof applyCodeGraphFilters> | null {
+    const snapshot = currentCodeGraphSnapshot(this.state.codeGraph);
+    return snapshot ? applyCodeGraphFilters(snapshot, this.state.codeGraph.filters, this.state.codeGraph.diffOverlay) : null;
+  }
+
+  private bindCodeGraph(): void {
+    const root = this.options.root.querySelector<HTMLElement>("[data-testid='code-graph-renderer']");
+    if (!root) return;
+    bindKnowledgeGraphListNavigation(this.options.root, {
+      onSelect: this.onCodeNodeSelected,
+      onFocus: this.onCodeNodeFocused,
+    });
+    const snapshot = this.visibleCodeGraphSnapshot();
+    const stageSize = measureKnowledgeGraphStage(root);
+    if (snapshot && !this.codeGraphLayout && this.state.codeGraph.layoutStatus === "idle") {
+      this.scheduleCodeGraphLayout(stageSize);
+    }
+    const renderSnapshot = snapshot ? codeGraphSnapshotForRendering(snapshot, this.state.codeGraph.diffOverlay) : null;
+    mountCodeGraphRenderer(root, {
+      snapshot: renderSnapshot,
+      layout: this.codeGraphLayout,
+      selectedNodeIds: this.state.codeGraph.selectedNodeIds,
+      view: this.codeGraphView,
+      onSelect: this.onCodeNodeSelected,
+      onFocus: this.onCodeNodeFocused,
+      onSelectArea: this.onCodeAggregateSelected,
+      nodeStyle: (node) => {
+        const codeNode = snapshot?.nodes.find((candidate) => candidate.id === node.nodeId);
+        return codeNode ? codeNodeVisualStyle(codeNode) : undefined;
+      },
+      edgeStyle: (edge) => edge.confidence
+        ? codeEdgeVisualStyle({ confidence: edge.confidence as "exact" | "syntactic" | "heuristic" })
+        : undefined,
+    });
+    void this.ensureSelectedCodeDetail();
+  }
+
+  private scheduleCodeGraphLayout(size = measureKnowledgeGraphStage(this.options.root)): void {
+    const snapshot = this.visibleCodeGraphSnapshot();
+    if (!snapshot || this.state.codeGraph.layoutStatus === "loading") return;
+    const run = ++this.codeGraphLayoutRun;
+    const renderSnapshot = codeGraphSnapshotForRendering(snapshot, this.state.codeGraph.diffOverlay);
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
+    const layoutScale = Math.min(2, Math.max(1.4, Math.sqrt(Math.max(1, renderSnapshot.nodes.length) / 20)));
+    void this.graphLayoutAdapter.layout(renderSnapshot, {
+      kind: codeGraphLayoutKindForMode(this.state.codeGraph.mode),
+      focusedNodeId: this.state.codeGraph.selectedNodeIds[0] ?? null,
+      width: Math.round(Math.max(1280, size.width * layoutScale)),
+      height: Math.round(Math.max(900, size.height * layoutScale)),
+    }).then((layout) => {
+      if (this.destroyed || run !== this.codeGraphLayoutRun) return;
+      this.codeGraphLayout = layout;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+      this.render();
+    }).catch((error) => {
+      if (this.destroyed || run !== this.codeGraphLayoutRun) return;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "LAYOUT_STATUS_SET",
+        status: "failed",
+        error: errorMessage(error),
+      });
+      this.render();
+    });
+  }
+
+  private onCodeAggregateSelected = (nodeId: string): void => {
+    const nodes = this.visibleCodeGraphSnapshot()?.nodes ?? [];
+    const node = nodes.find((candidate) => candidate.id === nodeId)
+      ?? nodes.find((candidate) => candidate.kind === "community" && candidate.metrics.community_id === nodeId);
+    if (node) this.drillIntoCodeNode(node);
+  };
+
+  private onCodeNodeSelected = (nodeId: string): void => {
+    const node = this.visibleCodeGraphSnapshot()?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    if (node.kind === "directory" || node.kind === "file" || node.kind === "community") {
+      this.drillIntoCodeNode(node);
+      return;
+    }
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId });
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: node.symbol_key ?? null });
+    this.render();
+  };
+
+  private onCodeNodeFocused = (nodeId: string): void => {
+    const node = this.visibleCodeGraphSnapshot()?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    if (node.symbol_key) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "DRILL_IN",
+        breadcrumb: { kind: "symbol", id: node.symbol_key, label: node.label },
+        mode: "neighborhood",
+        symbolKey: node.symbol_key,
+      });
+      void this.loadCodeGraph();
+    } else {
+      this.drillIntoCodeNode(node);
+    }
+  };
+
+  private drillIntoCodeNode(node: CodeGraphNode): void {
+    const path = node.path_display ?? null;
+    const kind: "directory" | "file" = node.kind === "file" ? "file" : "directory";
+    const breadcrumb = {
+      kind,
+      id: path ?? node.id,
+      label: node.label,
+    };
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+      type: "DRILL_IN",
+      breadcrumb,
+      mode: "file",
+      path,
+      symbolKey: null,
+    });
+    this.invalidateCodeGraphLayout();
+    void this.loadCodeGraph();
+  }
+
+  private stepBackCodeGraphView(): void {
+    const code = this.state.codeGraph;
+    if (code.breadcrumbs.length > 0) {
+      this.state.codeGraph = codeGraphReducer(code, {
+        type: "BREADCRUMB_POP",
+        index: code.breadcrumbs.length > 1 ? code.breadcrumbs.length - 2 : undefined,
+      });
+    } else if (code.mode === "neighborhood") {
+      this.state.codeGraph = codeGraphReducer(code, { type: "MODE_SET", mode: code.path ? "file" : "atlas" });
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: null });
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    } else {
+      this.state.codeGraph = codeGraphReducer(code, { type: "MODE_SET", mode: "atlas" });
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: null, path: null });
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    }
+    this.invalidateCodeGraphLayout();
+    void this.loadCodeGraph();
+  }
+
+  private async ensureSelectedCodeDetail(): Promise<void> {
+    const adapter = this.codeGraphAdapter;
+    const snapshot = this.visibleCodeGraphSnapshot();
+    const selected = snapshot?.nodes.find((node) => this.state.codeGraph.selectedNodeIds.includes(node.id));
+    if (!adapter || !selected?.symbol_key) return;
+    const key = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
+    if (this.codeGraphSymbolRequest === key || this.state.codeGraph.symbolDetails[key]) return;
+    this.codeGraphSymbolRequest = key;
+    try {
+      const detail = await adapter.getSymbolDetail(this.state.codeGraph.repoId ?? snapshot!.repo_id, selected.symbol_key);
+      if (!this.destroyed) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAIL_LOADED", detail });
+        this.render();
+      }
+    } catch {
+      // The structure list remains useful when a detail endpoint is unavailable.
+    } finally {
+      if (this.codeGraphSymbolRequest === key) this.codeGraphSymbolRequest = null;
+    }
+  }
+
+  private selectedCodeSymbolDetail(): CodeSymbolDetail | null {
+    const snapshot = this.visibleCodeGraphSnapshot();
+    const selected = snapshot?.nodes.find((node) => this.state.codeGraph.selectedNodeIds.includes(node.id));
+    if (!selected?.symbol_key || !this.state.codeGraph.repoId) return null;
+    return this.state.codeGraph.symbolDetails[`${this.state.codeGraph.repoId}:${selected.symbol_key}`] ?? null;
+  }
+
   private startEventSubscription(): void {
     if (this.eventSubscription?.transport === this.transport || typeof this.transport.events !== "function") {
       return;
@@ -1079,6 +1378,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async onGatewayEvent(envelope: GatewayEnvelope): Promise<void> {
     let handledMemoryGraphUpdate = false;
+    let handledCodeGraphUpdate = false;
     if (envelope.event_kind === "memory_graph_updated") {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
@@ -1095,7 +1395,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       }
     }
-    if (!handledMemoryGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
+    if (envelope.event_kind === "code_graph_updated" && isCodeGraphUpdatedEvent(envelope.payload)) {
+      handledCodeGraphUpdate = true;
+      const selectedRepoId = this.state.codeGraph.repoId;
+      if (!selectedRepoId || selectedRepoId === envelope.payload.repo_id) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+          type: "GRAPH_UPDATED",
+          repoId: envelope.payload.repo_id,
+          updatedAt: envelope.payload.updated_at,
+        });
+        if (this.state.graphPaneView === "code") {
+          void this.loadCodeGraph();
+        }
+        this.render();
+      }
+    }
+    if (!handledMemoryGraphUpdate && !handledCodeGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
       return;
     }
     await this.requestLiveRefresh();
@@ -1228,6 +1543,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     if (this.state.graphPaneView === "knowledge") {
       await this.loadKnowledgeGraph();
+      if (abandoned()) return;
+    } else if (this.state.graphPaneView === "code") {
+      await this.loadCodeGraph();
       if (abandoned()) return;
     }
     this.render();
@@ -1367,6 +1685,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
     if (view === "knowledge") {
       void this.loadKnowledgeGraph();
+    } else if (view === "code") {
+      void this.loadCodeGraph();
     }
   }
 
@@ -1780,7 +2100,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       await this.transport.close().catch(() => undefined);
       this.transport = await this.options.onGatewayUrlChanged(profile.gatewayUrl);
       this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(profile.gatewayUrl) ?? this.graphAdapter;
+      this.codeGraphAdapter = this.options.onCodeGraphGatewayUrlChanged?.(profile.gatewayUrl) ?? this.codeGraphAdapter;
       this.resetKnowledgeGraph();
+      this.resetCodeGraph();
     }
     await this.refresh();
   }
@@ -1819,7 +2141,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(saved.gatewayUrl);
         this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(saved.gatewayUrl) ?? this.graphAdapter;
+        this.codeGraphAdapter = this.options.onCodeGraphGatewayUrlChanged?.(saved.gatewayUrl) ?? this.codeGraphAdapter;
         this.resetKnowledgeGraph();
+        this.resetCodeGraph();
       }
       await this.refresh();
     } catch (error) {
@@ -1885,7 +2209,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
         this.graphAdapter = this.options.onGraphGatewayUrlChanged?.(active.gatewayUrl) ?? this.graphAdapter;
+        this.codeGraphAdapter = this.options.onCodeGraphGatewayUrlChanged?.(active.gatewayUrl) ?? this.codeGraphAdapter;
         this.resetKnowledgeGraph();
+        this.resetCodeGraph();
       }
       this.render();
     } catch (error) {
@@ -2098,8 +2424,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const rendersKnowledgeGraph = this.state.graphPaneView === "knowledge"
       && this.state.activeView === "dashboard"
       && this.state.authState === "open";
+    const rendersCodeGraph = this.state.graphPaneView === "code"
+      && this.state.activeView === "dashboard"
+      && this.state.authState === "open";
     if (!rendersKnowledgeGraph) {
       disposeKnowledgeGraphRenderer(this.options.root);
+    }
+    if (!rendersCodeGraph) {
+      disposeCodeGraphRenderer(this.options.root);
     }
     // Morph the new markup into the live DOM instead of rebuilding it with
     // innerHTML: only changed nodes mutate, so focus, input state, scroll
@@ -2563,12 +2895,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const content = this.state.graphPaneView === "task"
       ? this.renderTaskGraph()
       : this.state.graphPaneView === "knowledge"
-        ? renderKnowledgeGraphSurface({
+      ? renderKnowledgeGraphSurface({
           snapshot: visibleGraphSnapshot(this.state.knowledgeGraph),
           layout: this.state.knowledgeGraphLayout,
           state: this.state.knowledgeGraph,
         })
-        : this.renderCodeGraphPlaceholder();
+        : renderCodeGraphSurface({
+          snapshot: this.visibleCodeGraphSnapshot(),
+          layout: this.codeGraphLayout,
+          state: this.state.codeGraph,
+          symbolDetail: this.selectedCodeSymbolDetail(),
+          rawRecord: this.codeGraphRawRecord,
+        });
     return `
       <section class="os-panel os-graph-hero-panel" data-testid="graph-hero" data-active-graph-surface="${escapeAttr(this.state.graphPaneView)}">
         <div class="os-graph-hero-toolbar">
@@ -2586,15 +2924,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           ${content}
         </div>
       </section>
-    `;
-  }
-
-  private renderCodeGraphPlaceholder(): string {
-    return `
-      <div class="os-code-graph-placeholder" data-testid="code-graph-placeholder">
-        <strong>Code Graph</strong>
-        <span>Surface registered. Code graph data lands in the follow-on adapter work.</span>
-      </div>
     `;
   }
 
@@ -2862,7 +3191,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private renderCodeGraphStructureColumn(): string {
     return panel(
       "Structure List",
-      `<div class="os-empty" data-testid="code-graph-structure-list">Code Graph structure data is not available yet</div>`,
+      renderCodeGraphNodeList(this.visibleCodeGraphSnapshot(), this.state.codeGraph.selectedNodeIds, this.state.codeGraph.diffOverlay),
       "os-code-graph-lower-panel",
     );
   }
@@ -2870,7 +3199,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private renderCodeGraphDetailColumn(): string {
     return panel(
       "Symbol Detail",
-      `<div class="os-empty" data-testid="code-graph-detail">Select a code symbol after the adapter supplies data</div>`,
+      renderCodeGraphInspector({
+        snapshot: this.visibleCodeGraphSnapshot(),
+        layout: this.codeGraphLayout,
+        state: this.state.codeGraph,
+        symbolDetail: this.selectedCodeSymbolDetail(),
+        rawRecord: this.codeGraphRawRecord,
+      }),
       "os-code-graph-lower-panel",
     );
   }
@@ -3051,6 +3386,71 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.knowledgeGraphView.camera = null;
     this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
     this.render();
+  }
+
+  private onCodeGraphFilterChange(control: HTMLElement): void {
+    const key = control.dataset.codeFilter as keyof CodeGraphFilters | undefined;
+    if (!key) return;
+    if (key === "diagnostics") {
+      const value = (control as HTMLSelectElement).value;
+      if (value !== "all" && value !== "with_diagnostics" && value !== "without_diagnostics") return;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "FILTERS_SET",
+        filters: { diagnostics: value },
+      });
+    } else if (key === "pathPrefixes") {
+      const values = (control as HTMLInputElement).value
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "FILTERS_SET",
+        filters: { pathPrefixes: values },
+      });
+    } else {
+      const values = [...this.options.root.querySelectorAll<HTMLInputElement>(`[data-code-filter="${key}"][data-code-filter-value]`)]
+        .filter((input) => input.checked)
+        .map((input) => input.dataset.codeFilterValue)
+        .filter((value): value is string => Boolean(value));
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "FILTERS_SET",
+        filters: { [key]: values } as Partial<CodeGraphFilters>,
+      });
+    }
+    this.invalidateCodeGraphLayout();
+    this.render();
+  }
+
+  private invalidateCodeGraphLayout(): void {
+    this.codeGraphLayout = null;
+    this.codeGraphLayoutRun += 1;
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+  }
+
+  private resetCodeGraphView(): void {
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "MODE_SET", mode: "atlas" });
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+      type: "TARGET_SET",
+      symbolKey: null,
+      path: null,
+      runId: null,
+    });
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "BREADCRUMB_POP", index: -1 });
+    this.invalidateCodeGraphLayout();
+    this.codeGraphView.camera = null;
+    this.codeGraphView.overrides.clear();
+    void this.loadCodeGraph();
+  }
+
+  private setCodeGraphMode(mode: CodeGraphMode): void {
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "MODE_SET", mode });
+    if (mode === "atlas") {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "TARGET_SET", symbolKey: null, path: null });
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SELECTION_SET", nodeIds: [] });
+    }
+    this.invalidateCodeGraphLayout();
+    void this.loadCodeGraph();
   }
 
   /**
@@ -3319,6 +3719,39 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return true;
     }
     this.resetKnowledgeGraphView();
+    return true;
+  }
+
+  async openCodeDeepLink(url: string): Promise<boolean> {
+    const link = parseCodeDeepLink(url);
+    if (!link || !this.codeGraphAdapter) return false;
+    this.state.activeView = "dashboard";
+    this.state.graphPaneView = "code";
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+      type: "HISTORY_RESTORED",
+      state: codeDeepLinkToGraphState(link),
+    });
+    this.state.codeGraph = { ...this.state.codeGraph, breadcrumbs: [] };
+    this.codeGraphLayout = null;
+    await this.loadCodeGraph();
+    if (this.destroyed) return false;
+    const snapshot = this.visibleCodeGraphSnapshot();
+    if (!snapshot || snapshot.repo_id !== link.repoId) {
+      this.render();
+      return false;
+    }
+    if (link.symbolKey) {
+      const node = snapshot.nodes.find((candidate) => candidate.symbol_key === link.symbolKey);
+      if (!node) {
+        this.render();
+        return false;
+      }
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: node.id });
+    } else if (link.path) {
+      const node = snapshot.nodes.find((candidate) => candidate.path_display === link.path);
+      if (node) this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: node.id });
+    }
+    this.render();
     return true;
   }
 
@@ -3602,10 +4035,51 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
+    this.options.root.querySelectorAll<HTMLElement>("[data-code-mode]").forEach((button) => {
+      this.listen(button, "code-mode", "click", () => {
+        const mode = button.dataset.codeMode;
+        if (mode === "atlas" || mode === "file" || mode === "neighborhood" || mode === "diff") {
+          this.setCodeGraphMode(mode);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-code-filter]").forEach((control) => {
+      const eventType = control instanceof HTMLInputElement && control.type === "text" ? "input" : "change";
+      this.listen(control, "code-filter", eventType, () => this.onCodeGraphFilterChange(control));
+    });
+    this.listen(this.options.root.querySelector("[data-code-filter-reset]"), "code-filter-reset", "click", () => {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "FILTERS_RESET" });
+      this.invalidateCodeGraphLayout();
+      this.render();
+    });
+    this.listen(this.options.root.querySelector("[data-code-reset]"), "code-reset", "click", () => {
+      this.resetCodeGraphView();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-code-crumb]").forEach((button) => {
+      this.listen(button, "code-crumb", "click", () => {
+        const index = Number.parseInt(button.dataset.codeCrumb ?? "-1", 10);
+        if (index < 0) {
+          this.resetCodeGraphView();
+        } else {
+          this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "BREADCRUMB_POP", index });
+          this.invalidateCodeGraphLayout();
+          void this.loadCodeGraph();
+        }
+      });
+    });
+    this.listen(this.options.root.querySelector("[data-code-raw-toggle]"), "code-raw-toggle", "click", () => {
+      this.codeGraphRawRecord = !this.codeGraphRawRecord;
+      this.render();
+    });
+    this.listen(this.options.root.querySelector("[data-code-copy-deeplink]"), "code-copy-deeplink", "click", (event) => {
+      const link = (event.currentTarget as HTMLElement).dataset.codeCopyDeeplink;
+      if (link) void navigator.clipboard?.writeText(link).catch(() => undefined);
+    });
     this.listen(this.options.root.querySelector("[data-kg-reset]"), "kg-reset", "click", () => {
       this.resetKnowledgeGraphView();
     });
     this.bindKnowledgeGraph();
+    this.bindCodeGraph();
     this.options.root.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach((handle) => {
       this.listen(handle, "pane-resizer", "pointerdown", (event) => {
         this.startPaneResize(handle.dataset.paneResizer, event as PointerEvent);
@@ -4635,6 +5109,30 @@ function isMemoryGraphUpdatedEvent(value: unknown): value is MemoryGraphUpdatedE
     && typeof cursor.partition === "string";
 }
 
+function isCodeGraphUpdatedEvent(value: unknown): value is CodeGraphUpdatedEvent {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<CodeGraphUpdatedEvent>;
+  return typeof candidate.repo_id === "string"
+    && typeof candidate.updated_at === "string"
+    && typeof candidate.cursor?.sequence === "number"
+    && typeof candidate.cursor.partition === "string";
+}
+
+function sameCodeGraphTopology(a: CodeGraphSnapshot, b: CodeGraphSnapshot): boolean {
+  if (a.repo_id !== b.repo_id || a.mode !== b.mode) return false;
+  if (a.nodes.length !== b.nodes.length || a.edges.length !== b.edges.length) return false;
+  const nodeIdsA = a.nodes.map((node) => `${node.id}:${node.kind}`).sort();
+  const nodeIdsB = b.nodes.map((node) => `${node.id}:${node.kind}`).sort();
+  const edgeIdsA = a.edges
+    .map((edge) => `${edge.id}:${edge.source_id}:${edge.target_id}:${edge.kind}:${edge.confidence}`)
+    .sort();
+  const edgeIdsB = b.edges
+    .map((edge) => `${edge.id}:${edge.source_id}:${edge.target_id}:${edge.kind}:${edge.confidence}`)
+    .sort();
+  return nodeIdsA.every((id, index) => id === nodeIdsB[index])
+    && edgeIdsA.every((id, index) => id === edgeIdsB[index]);
+}
+
 function statusEvents(snapshot: DashboardSnapshot | null): DashboardSnapshot["recent_events"] {
   return snapshot?.recent_events.filter((event) => !isTelemetryEventKind(event.kind)) ?? [];
 }
@@ -4646,7 +5144,7 @@ function graphSurfaceSummary(view: GraphPaneView): string {
     case "knowledge":
       return "Memory graph exploration";
     case "code":
-      return "Fixture-ready code graph slot";
+      return "Repository symbols, structure, and diff context";
   }
 }
 
@@ -6117,6 +6615,16 @@ function appShellStyles(): string {
     .os-kg-reset { flex: 0 0 auto; border-color: #39708f; color: #23566f; background: #e7f1f5; font-weight: 600; }
     .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
     .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
+    .os-code-filters { border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 8px; background: #f8fafc; }
+    .os-code-filters summary { cursor: pointer; color: #23566f; font-size: 11px; font-weight: 700; }
+    .os-code-filter-grid { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-start; padding-top: 8px; }
+    .os-code-filter-group { display: grid; gap: 3px; margin: 0; padding: 4px 7px; border: 1px solid #d8dee4; border-radius: 5px; background: #ffffff; }
+    .os-code-filter-group legend { padding: 0 3px; color: #667788; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .os-code-filter-group label, .os-code-filter-path, .os-code-filter-diagnostics { color: #405568; font-size: 11px; }
+    .os-code-filter-path, .os-code-filter-diagnostics { display: grid; gap: 3px; }
+    .os-code-filter-path input, .os-code-filter-diagnostics select { min-height: 24px; max-width: 220px; padding: 2px 5px; border: 1px solid #cbd5df; border-radius: 4px; background: #ffffff; color: #17202a; font-size: 11px; }
+    .os-code-filter-grid > button { min-height: 24px; align-self: end; }
+    .os-code-delta-badge { color: #92400e; font-size: 10px; font-weight: 700; text-transform: uppercase; }
     .os-knowledge-stage { position: relative; height: clamp(320px, 52vh, 680px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #eef1f4; }
     .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; cursor: grab; }
     .os-knowledge-canvas[data-kg-pointer="pan"], .os-knowledge-canvas[data-kg-pointer="orbit"] { cursor: grabbing; }
@@ -6168,9 +6676,6 @@ function appShellStyles(): string {
     .os-knowledge-lower-panel .os-kg-list { max-height: none; overflow: visible; }
     .os-knowledge-lower-panel .os-kg-inspector { border: none; padding: 0; background: transparent; }
     .os-knowledge-lower-panel .os-kg-capsule-body { max-height: none; overflow: visible; }
-    .os-code-graph-placeholder { min-height: clamp(260px, 36vh, 460px); display: grid; place-content: center; gap: 5px; border: 1px dashed #afbac5; border-radius: 6px; background: #f8fafc; text-align: center; }
-    .os-code-graph-placeholder strong { color: #23566f; font-size: 15px; }
-    .os-code-graph-placeholder span { color: #667788; font-size: 12px; }
     .os-surface-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
     .os-surface-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 9px; background: #ffffff; }
     .os-surface-list li.is-selected { border-color: #39708f; background: #e7f1f5; }
@@ -6436,9 +6941,8 @@ function appShellStyles(): string {
       .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-run-grid span, .os-run-meta, .os-run-meta-row span { color: #94a3b3; }
       .os-status, .os-strip-metrics, .os-strip-connection, .os-strip-model, .os-event-mini, .os-run-grid div, .os-run-meta-row, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
       .os-strip-metrics strong, .os-surface-list strong, .os-surface-detail strong { color: #d9e2ea; }
-      .os-code-graph-placeholder, .os-surface-detail { background: #111820; border-color: #344454; }
-      .os-code-graph-placeholder strong { color: #8bd0e6; }
-      .os-code-graph-placeholder span, .os-surface-list span, .os-surface-detail span { color: #94a3b3; }
+      .os-surface-detail { background: #111820; border-color: #344454; }
+      .os-surface-list span, .os-surface-detail span { color: #94a3b3; }
       .os-surface-list li { background: #171d23; border-color: #2a3440; }
       .os-surface-list li.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-knowledge-stage { background: #e7ebef; border-color: #2a3440; }

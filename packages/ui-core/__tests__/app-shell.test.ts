@@ -8,6 +8,7 @@ import { renderOpenSymphonyApp } from "../src/app-shell.js";
 import { MockGatewayTransport } from "@opensymphony/api-client";
 import {
   computeGraphLayout,
+  createFixtureCodeGraphAdapter,
   createFixtureGraphAdapter,
   createScaleGraphSnapshot,
   fixtureConceptDetail,
@@ -646,6 +647,7 @@ describe("OpenSymphonyApp mount", () => {
       title: "OpenSymphony Desktop",
       transport: buildTransport(),
       graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
     });
     await flushUntil(
       () =>
@@ -889,7 +891,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-kg-raw-toggle]")).toBeNull();
       expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-renderer']") !== null);
       expect(root.querySelector("[data-testid='workspace-pane-shell']")?.getAttribute("data-graph-surface")).toBe("code");
       expect(root.querySelector("[data-testid='code-graph-structure-list']")).not.toBeNull();
       expect(root.querySelector("[data-testid='code-graph-detail']")).not.toBeNull();
@@ -957,7 +959,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("32%");
 
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-renderer']") !== null);
       expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("50%");
 
       (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
@@ -1336,6 +1338,93 @@ describe("OpenSymphonyApp mount", () => {
       expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
       await flushUntil(() => !breadcrumb().includes("Gateway DTO Boundary Checklist"));
       expect(breadcrumb()).toContain("Gateway");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("opens Code Graph deep links, loads symbol detail, and applies surface filters", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/unknown/value")).toBe(false);
+
+      expect(await handle.openCodeDeepLink(
+        "opensymphony://code/opensymphony/symbols/codeGraphReducer?depth=2&seed=code-fixture",
+      )).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-structure-list']") !== null);
+      expect(root.querySelector("[data-testid='graph-hero']")?.getAttribute("data-active-graph-surface")).toBe("code");
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-detail'] h3")?.textContent === "codeGraphReducer");
+      expect(root.querySelector("[data-testid='code-graph-raw-record']")).toBeNull();
+
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-code-mode='file']")?.classList.contains("is-selected") ?? false);
+      const staleFilter = root.querySelector<HTMLInputElement>("[data-code-filter='freshness'][data-code-filter-value='stale']");
+      expect(staleFilter).not.toBeNull();
+      staleFilter!.click();
+      await flushUntil(() => root.querySelectorAll("[data-testid='code-graph-structure-list'] li").length === 1);
+      expect(root.querySelector("[data-testid='code-graph-structure-list']")?.textContent).toContain("codeGraphReducer");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("refreshes Code Graph snapshots without losing selection or drag overrides", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    const fixtureAdapter = createFixtureCodeGraphAdapter();
+    let snapshotReads = 0;
+    const codeGraphAdapter = {
+      ...fixtureAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureAdapter.getGraphSnapshot>[1]) {
+        const snapshot = await fixtureAdapter.getGraphSnapshot(repoId, options);
+        snapshotReads += 1;
+        return snapshotReads === 1
+          ? snapshot
+          : { ...snapshot, cursor: { ...snapshot.cursor, sequence: snapshot.cursor.sequence + snapshotReads } };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, codeGraphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/symbols/codeGraphReducer")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-structure-list']") !== null);
+      const app = handle as unknown as { codeGraphView: { overrides: Map<string, { x: number; y: number }> }; state: { codeGraph: { selectedNodeIds: string[]; stale: boolean } } };
+      app.codeGraphView.overrides.set("symbol:codeGraphReducer", { x: 42, y: 24 });
+      const selectedBefore = [...app.state.codeGraph.selectedNodeIds];
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 90, partition: "events" },
+        entity_ref: { kind: "unknown", id: "code-graph:opensymphony" },
+        event_kind: "code_graph_updated",
+        emitted_at: "2026-07-11T19:10:00Z",
+        payload: {
+          schema_version: schemaVersionV1(),
+          repo_id: "opensymphony",
+          cursor: { sequence: 10, partition: "code-graph:opensymphony" },
+          updated_at: "2026-07-11T19:10:00Z",
+        },
+      });
+      await flushUntil(() => snapshotReads >= 2 && !app.state.codeGraph.stale);
+      expect(app.state.codeGraph.selectedNodeIds).toEqual(selectedBefore);
+      expect(app.codeGraphView.overrides.get("symbol:codeGraphReducer")).toEqual({ x: 42, y: 24 });
     } finally {
       await handle.destroy();
     }

@@ -1,6 +1,18 @@
 import {
+  codeDeepLinkForFile,
+  codeDeepLinkForSymbol,
+  codeEdgeVisualStyle,
+  codeGraphNodeDeltaStatus,
+  codeGraphSnapshotForRendering,
+  codeNodeVisualStyle,
+  type GraphLayoutEdge,
   memoryDeepLinkForGraphNode,
   type GraphLayoutResult,
+  type CodeGraphNode,
+  type CodeGraphFilters,
+  type CodeGraphSnapshot,
+  type CodeGraphState,
+  type CodeSymbolDetail,
   type GraphState,
   type MemoryConceptDetail,
   type MemoryGraphNode,
@@ -27,6 +39,7 @@ import {
   type GraphScene,
   type KnowledgeGraphViewState,
   type SceneViewport,
+  type WorldNode,
 } from "./knowledge-graph-scene.js";
 
 export { createKnowledgeGraphViewState } from "./knowledge-graph-scene.js";
@@ -53,6 +66,25 @@ export interface KnowledgeGraphMountOptions {
   onFocus(nodeId: string): void;
   /** Click on an area cloud in the zoomed-out view: drill into that community. */
   onSelectArea?(areaId: string): void;
+  nodeStyle?(node: WorldNode): {
+    color?: string;
+    opacity?: number;
+    borderStyle?: "solid" | "dashed" | "dotted";
+    freshnessLabel?: string;
+  } | undefined;
+  edgeStyle?(edge: GraphLayoutEdge): {
+    color?: string;
+    opacity?: number;
+    lineStyle?: "solid" | "dashed" | "dotted";
+  } | undefined;
+}
+
+export interface CodeGraphSurface {
+  snapshot: CodeGraphSnapshot | null;
+  layout: GraphLayoutResult | null;
+  state: CodeGraphState;
+  symbolDetail?: CodeSymbolDetail | null;
+  rawRecord?: boolean;
 }
 
 export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): string {
@@ -89,6 +121,180 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
       </div>
     </div>
   `;
+}
+
+export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
+  const { snapshot, state } = surface;
+  const summary = snapshot
+    ? `${snapshot.nodes.length} nodes / ${snapshot.edges.length} edges / ${snapshot.truncation.nodes_dropped} aggregated`
+    : "No code graph snapshot";
+  const narrowed = state.mode !== "atlas" || state.selectedNodeIds.length > 0 || state.path !== null || state.symbolKey !== null;
+  return `
+    <div class="os-knowledge-graph os-code-graph" data-testid="code-graph-renderer" data-layout-status="${escapeAttr(state.layoutStatus)}">
+      <div class="os-knowledge-toolbar os-code-graph-toolbar">
+        <div>
+          <strong>Code Graph</strong>
+          <span data-testid="code-graph-metrics">${escapeHtml(summary)}</span>
+        </div>
+        <div class="os-segmented" data-testid="code-graph-mode-toggle">
+          ${(["atlas", "file", "neighborhood", "diff"] as const).map((mode) =>
+            `<button type="button" class="${state.mode === mode ? "is-selected" : ""}" data-code-mode="${mode}">${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}
+        </div>
+        ${narrowed ? `<button type="button" class="os-icon-button os-kg-reset" data-code-reset data-testid="code-graph-reset">Show full graph</button>` : ""}
+        <span class="os-kg-status" data-testid="code-graph-status">${escapeHtml(state.layoutStatus === "failed" ? state.layoutError ?? "Unavailable" : state.stale ? "Refreshing" : state.layoutStatus === "ready" ? "Ready" : "Idle")}</span>
+      </div>
+      ${renderCodeGraphFilters(surface)}
+      ${renderCodeBreadcrumb(state)}
+      <div class="os-knowledge-stage" data-kg-stage>
+        <canvas class="os-knowledge-canvas os-code-graph-canvas" data-testid="code-graph-canvas" aria-label="Code Graph canvas"></canvas>
+        <div class="os-knowledge-labels" data-kg-labels data-morph-ignore-children></div>
+        <span class="os-kg-controls-hint" aria-hidden="true">drag pan &middot; &#8997;-drag orbit &middot; scroll zoom &middot; double-click neighborhood &middot; esc to back out</span>
+      </div>
+    </div>
+  `;
+}
+
+export function renderCodeGraphFilters(surface: CodeGraphSurface): string {
+  const { snapshot, state } = surface;
+  const filters = state.filters;
+  const filterCount = Object.entries(filters).reduce((count, [key, value]) => {
+    if (key === "diagnostics") return count + (value === "all" ? 0 : 1);
+    return count + (Array.isArray(value) ? value.length : 0);
+  }, 0);
+  const repoValues = state.repos?.repos.map((repo) => repo.repo_id) ?? [];
+  const languageValues = [
+    ...((state.repos?.repos ?? []).flatMap((repo) => repo.languages)),
+    ...(snapshot?.nodes.map((node) => node.language).filter((value): value is string => Boolean(value)) ?? []),
+  ];
+  const nodeValues = snapshot?.nodes.map((node) => node.symbol_kind).filter((value): value is string => Boolean(value)) ?? [];
+  const edgeValues = snapshot?.edges.map((edge) => edge.kind) ?? [];
+  const communityValues = snapshot?.communities.map((community) => community.id) ?? [];
+  const groups: Array<[Exclude<keyof CodeGraphFilters, "diagnostics" | "pathPrefixes">, string, string[]]> = [
+    ["repoIds", "Repository", repoValues],
+    ["languages", "Language", languageValues],
+    ["symbolKinds", "Symbol kind", nodeValues],
+    ["edgeKinds", "Edge kind", edgeValues],
+    ["confidences", "Confidence", ["exact", "syntactic", "heuristic"]],
+    ["freshness", "Freshness", ["current", "stale", "unknown"]],
+    ["communities", "Community", communityValues],
+    ["deltaStatuses", "Delta status", ["added", "removed", "modified", "unchanged"]],
+  ];
+  const checkboxGroups = groups.map(([key, label, rawValues]) => {
+    const values = [...new Set(rawValues)].sort();
+    if (values.length === 0) return "";
+    const selected = new Set(filters[key] as readonly string[]);
+    return `<fieldset class="os-code-filter-group"><legend>${escapeHtml(label)}</legend>${values.map((value) => `
+      <label><input type="checkbox" data-code-filter="${key}" data-code-filter-value="${escapeAttr(value)}" ${selected.has(value) ? "checked" : ""} /> ${escapeHtml(value)}</label>
+    `).join("")}</fieldset>`;
+  }).join("");
+  return `
+    <details class="os-code-filters" data-testid="code-graph-filters">
+      <summary>Filters${filterCount > 0 ? ` (${filterCount})` : ""}</summary>
+      <div class="os-code-filter-grid">
+        ${checkboxGroups}
+        <label class="os-code-filter-path">Path prefix
+          <input type="text" data-code-filter="pathPrefixes" value="${escapeAttr(filters.pathPrefixes.join(", "))}" placeholder="packages/graph/" />
+        </label>
+        <label class="os-code-filter-diagnostics">Diagnostics
+          <select data-code-filter="diagnostics">
+            ${["all", "with_diagnostics", "without_diagnostics"].map((value) => `<option value="${value}" ${filters.diagnostics === value ? "selected" : ""}>${value.replaceAll("_", " ")}</option>`).join("")}
+          </select>
+        </label>
+        <button type="button" data-code-filter-reset>Reset filters</button>
+      </div>
+    </details>
+  `;
+}
+
+function renderCodeBreadcrumb(state: CodeGraphState): string {
+  if (state.breadcrumbs.length === 0) return "";
+  const crumbs = [`<button type="button" data-code-crumb="-1">Repo</button>`];
+  state.breadcrumbs.forEach((crumb, index) => {
+    crumbs.push(
+      index === state.breadcrumbs.length - 1
+        ? `<span aria-current="location">${escapeHtml(crumb.label)}</span>`
+        : `<button type="button" data-code-crumb="${index}">${escapeHtml(crumb.label)}</button>`,
+    );
+  });
+  return `<nav class="os-kg-breadcrumb os-code-breadcrumb" data-testid="code-graph-breadcrumb" aria-label="Code Graph drill path">${crumbs.join(`<span class="os-kg-crumb-sep" aria-hidden="true">&rsaquo;</span>`)}</nav>`;
+}
+
+export function renderCodeGraphNodeList(
+  snapshot: CodeGraphSnapshot | null,
+  selectedNodeIds: readonly string[],
+  diffOverlay: CodeGraphState["diffOverlay"] = null,
+): string {
+  if (!snapshot || snapshot.nodes.length === 0) return `<div class="os-empty" data-testid="code-graph-structure-list">No code structure matches the current filters.</div>`;
+  const selected = new Set(selectedNodeIds);
+  return `
+    <ul class="os-kg-list os-code-graph-list" data-testid="code-graph-structure-list" aria-label="Code structure list">
+      ${snapshot.nodes.map((node) => {
+        const deltaStatus = codeGraphNodeDeltaStatus(node.symbol_key, diffOverlay);
+        return `
+          <li class="${selected.has(node.id) ? "is-selected" : ""}" data-code-node-kind="${escapeAttr(node.kind)}">
+            <button type="button" data-kg-node-id="${escapeAttr(node.id)}" data-code-node-id="${escapeAttr(node.id)}" ${selected.has(node.id) ? `aria-current="true"` : ""}>${escapeHtml(node.label)}</button>
+            <span class="os-code-node-meta">${escapeHtml(node.symbol_kind ?? node.kind)} · ${escapeHtml(node.freshness)}</span>
+            ${diffOverlay && deltaStatus !== "unchanged" ? `<span class="os-code-delta-badge" data-code-delta-status="${deltaStatus}">${deltaStatus}</span>` : ""}
+            ${node.diagnostic_count > 0 ? `<span class="os-code-diagnostic-badge">${node.diagnostic_count} diagnostic${node.diagnostic_count === 1 ? "" : "s"}</span>` : ""}
+          </li>
+        `;
+      }).join("")}
+    </ul>
+  `;
+}
+
+export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
+  const snapshot = surface.snapshot;
+  const selected = new Set(surface.state.selectedNodeIds);
+  const node = snapshot?.nodes.find((candidate) => selected.has(candidate.id)) ?? null;
+  if (!node) return `<section class="os-code-inspector" data-testid="code-graph-detail"><h3>Symbol Detail</h3><p>No code record selected</p></section>`;
+  const detail = surface.symbolDetail ?? null;
+  const deltaStatus = codeGraphNodeDeltaStatus(node.symbol_key, surface.state.diffOverlay);
+  const deepLink = codeDeepLinkForNode(surface.state, node);
+  const raw = surface.rawRecord ? JSON.stringify(detail ?? node, null, 2) : "";
+  return `
+    <section class="os-code-inspector" data-testid="code-graph-detail" data-code-freshness="${escapeAttr(node.freshness)}">
+      <div class="os-kg-inspector-header">
+        <div><h3>${escapeHtml(detail?.name ?? node.label)}</h3><span>${escapeHtml(detail?.kind ?? node.kind)}</span></div>
+        ${deepLink ? `<button type="button" class="os-kg-copy-deeplink" data-code-copy-deeplink="${escapeAttr(deepLink)}">Copy deep link</button>` : ""}
+      </div>
+      <dl>
+        <dt>Path</dt><dd>${escapeHtml(detail?.path_display ?? node.path_display ?? "—")}</dd>
+        <dt>Language</dt><dd>${escapeHtml(detail?.language ?? node.language ?? "—")}</dd>
+        <dt>Freshness</dt><dd data-code-freshness-badge="${escapeAttr(node.freshness)}">${escapeHtml(node.freshness)}${node.diagnostic_count > 0 ? ` · ${node.diagnostic_count} diagnostics` : ""}</dd>
+        <dt>Delta</dt><dd data-code-delta-status="${deltaStatus}">${escapeHtml(deltaStatus)}</dd>
+        <dt>Signature</dt><dd>${escapeHtml(detail?.signature ?? node.signature ?? "—")}</dd>
+        <dt>Container</dt><dd>${escapeHtml((detail?.container_chain ?? node.container_chain).join(" › ") || "—")}</dd>
+      </dl>
+      ${detail ? renderCodeDetailSections(detail) : `<p data-testid="code-graph-detail-loading">Loading symbol detail…</p>`}
+      <button type="button" data-code-raw-toggle>${surface.rawRecord ? "Hide raw record" : "Show raw record"}</button>
+      ${surface.rawRecord ? `<pre data-testid="code-graph-raw-record">${escapeHtml(raw)}</pre>` : ""}
+    </section>
+  `;
+}
+
+function renderCodeDetailSections(detail: CodeSymbolDetail): string {
+  const diagnostics = detail.diagnostics.length > 0
+    ? `<h4>Diagnostics</h4><ul>${detail.diagnostics.map((diagnostic) => `<li>${escapeHtml(diagnostic.severity)}: ${escapeHtml(diagnostic.message)}</li>`).join("")}</ul>`
+    : `<p data-testid="code-graph-no-diagnostics">No diagnostics</p>`;
+  return `
+    <h4>Provenance</h4>
+    <dl><dt>Content</dt><dd>${escapeHtml(detail.provenance.content_sha256)}</dd><dt>Parser</dt><dd>${escapeHtml(detail.provenance.parser_version)}</dd><dt>Query pack</dt><dd>${escapeHtml(detail.provenance.query_pack_version)}</dd></dl>
+    <h4>Relationships</h4>
+    <ul>${detail.edge_summary.map((edge) => `<li data-code-confidence="${escapeAttr(edge.confidence)}">${escapeHtml(edge.kind)} · ${escapeHtml(edge.confidence)} · ${edge.count}</li>`).join("") || "<li>None</li>"}</ul>
+    ${diagnostics}
+    ${detail.source_snippet ? `<h4>Source</h4><pre>${escapeHtml(detail.source_snippet.text)}</pre>` : ""}
+  `;
+}
+
+function codeDeepLinkForNode(state: CodeGraphState, node: CodeGraphNode): string | null {
+  try {
+    if (node.symbol_key) return codeDeepLinkForSymbol(state.repoId ?? "", node.symbol_key, { mode: state.mode === "diff" ? "neighborhood" : state.mode, depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
+    if (node.path_display) return codeDeepLinkForFile(state.repoId ?? "", node.path_display, { mode: state.mode === "diff" ? "file" : state.mode, depth: state.depth, filters: state.filters, layoutSeed: state.layoutSeed });
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 /**
@@ -155,7 +361,22 @@ export function mountKnowledgeGraphRenderer(
   root: HTMLElement,
   options: KnowledgeGraphMountOptions,
 ): void {
-  const canvas = root.querySelector<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']");
+  mountGraphRenderer(root, options, "knowledge-graph-canvas");
+}
+
+export function mountCodeGraphRenderer(
+  root: HTMLElement,
+  options: KnowledgeGraphMountOptions,
+): void {
+  mountGraphRenderer(root, options, "code-graph-canvas");
+}
+
+function mountGraphRenderer(
+  root: HTMLElement,
+  options: KnowledgeGraphMountOptions,
+  canvasTestId: "knowledge-graph-canvas" | "code-graph-canvas",
+): void {
+  const canvas = root.querySelector<HTMLCanvasElement>(`[data-testid='${canvasTestId}']`);
   if (!canvas) return;
   if (!options.snapshot || !options.layout) {
     // The morphing render preserves the canvas node, so without drawable
@@ -236,7 +457,18 @@ function cameraDiffers(a: GraphCameraState, b: GraphCameraState): boolean {
 }
 
 export function disposeKnowledgeGraphRenderer(root: ParentNode): void {
-  root.querySelectorAll<HTMLCanvasElement>("[data-testid='knowledge-graph-canvas']").forEach((canvas) => {
+  disposeGraphRenderers(root, "knowledge-graph-canvas");
+}
+
+export function disposeCodeGraphRenderer(root: ParentNode): void {
+  disposeGraphRenderers(root, "code-graph-canvas");
+}
+
+function disposeGraphRenderers(
+  root: ParentNode,
+  canvasTestId: "knowledge-graph-canvas" | "code-graph-canvas",
+): void {
+  root.querySelectorAll<HTMLCanvasElement>(`[data-testid='${canvasTestId}']`).forEach((canvas) => {
     disposeKnowledgeGraphCanvas(canvas);
   });
 }
@@ -578,6 +810,8 @@ function rebuildScene(state: RendererState, viewport: SceneViewport): GraphScene
     overrides: state.options.view.overrides,
     selectedNodeIds: state.options.selectedNodeIds,
     hoveredNodeId: state.hoveredNodeId,
+    nodeStyle: state.options.nodeStyle,
+    edgeStyle: state.options.edgeStyle,
   });
   state.lastScene = scene;
   return scene;
@@ -678,6 +912,7 @@ function syncOverlay(
     label.style.opacity = node.labelAlpha.toFixed(2);
     label.classList.toggle("is-selected", node.emphasis === "selected");
     label.classList.toggle("is-hovered", node.emphasis === "hovered");
+    if (node.freshnessLabel) label.dataset.freshness = node.freshnessLabel;
     seen.add(label);
   }
 
@@ -842,27 +1077,46 @@ function syncThreeScene(three: ThreeCanvasState, scene: GraphScene): void {
     three.graph.add(mesh);
   }
 
-  const edgeGroups = new Map<string, { positions: number[]; color: string; alpha: number }>();
+  const edgeGroups = new Map<string, {
+    positions: number[];
+    color: string;
+    alpha: number;
+    lineStyle: "solid" | "dashed" | "dotted";
+  }>();
   for (const edge of scene.edges) {
     const alphaBucket = Math.round(edge.alpha * 20) / 20;
-    const color = edge.emphasized ? nodeEmphasisColor : "#7d94a8";
-    const key = `${color}:${alphaBucket}`;
-    const group = edgeGroups.get(key) ?? { positions: [], color, alpha: alphaBucket };
+    const color = edge.color;
+    const key = `${color}:${alphaBucket}:${edge.lineStyle}`;
+    const group = edgeGroups.get(key) ?? {
+      positions: [],
+      color,
+      alpha: alphaBucket,
+      lineStyle: edge.lineStyle,
+    };
     group.positions.push(edge.x1, edge.y1, 0, edge.x2, edge.y2, 0);
     edgeGroups.set(key, group);
   }
   for (const group of edgeGroups.values()) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(group.positions, 3));
-    const lines = new THREE.LineSegments(
-      geometry,
-      new THREE.LineBasicMaterial({
-        color: new THREE.Color(group.color),
-        transparent: true,
-        opacity: group.alpha,
-        depthWrite: false,
-      }),
-    );
+    const material = group.lineStyle === "solid"
+      ? new THREE.LineBasicMaterial({
+          color: new THREE.Color(group.color),
+          transparent: true,
+          opacity: group.alpha,
+          depthWrite: false,
+        })
+      : new THREE.LineDashedMaterial({
+          color: new THREE.Color(group.color),
+          transparent: true,
+          opacity: group.alpha,
+          depthWrite: false,
+          dashSize: group.lineStyle === "dashed" ? 8 : 3,
+          gapSize: group.lineStyle === "dashed" ? 5 : 4,
+          scale: 1,
+        });
+    const lines = new THREE.LineSegments(geometry, material);
+    if (group.lineStyle !== "solid") lines.computeLineDistances();
     lines.renderOrder = order++;
     three.graph.add(lines);
   }
@@ -950,8 +1204,9 @@ function drawCanvas2d(canvas: HTMLCanvasElement, scene: GraphScene): void {
   ctx.lineWidth = 1;
   for (const edge of scene.edges) {
     ctx.globalAlpha = edge.alpha;
-    ctx.strokeStyle = edge.emphasized ? nodeEmphasisColor : "#7d94a8";
+    ctx.strokeStyle = edge.color;
     ctx.lineWidth = edge.emphasized ? 1.6 : 1;
+    ctx.setLineDash?.(edge.lineStyle === "dashed" ? [8, 5] : edge.lineStyle === "dotted" ? [2, 4] : []);
     ctx.beginPath();
     ctx.moveTo(edge.x1, edge.y1);
     ctx.lineTo(edge.x2, edge.y2);
@@ -967,8 +1222,10 @@ function drawCanvas2d(canvas: HTMLCanvasElement, scene: GraphScene): void {
     ctx.fill();
     ctx.lineWidth = emphasized ? 2.4 : 1.4;
     ctx.strokeStyle = "#ffffff";
+    ctx.setLineDash?.(node.borderStyle === "dashed" ? [5, 3] : node.borderStyle === "dotted" ? [1, 3] : []);
     ctx.stroke();
   }
+  ctx.setLineDash?.([]);
   ctx.globalAlpha = 1;
 }
 

@@ -202,6 +202,40 @@ testing, `?memory=<deep-link>` on the desktop dev server (composable with
 `?fixtures`) opens a link at boot, e.g.
 `?fixtures&memory=opensymphony://memory/viz-workbench/concepts/concepts/code-intelligence-01`.
 
+### Code Graph surface
+
+Code Graph is a third shared surface in the graph toolbar. It uses the same
+scene, layout adapter, orbital camera, hulls, label LOD, hover emphasis, and
+2D fallback as Knowledge Graph; `packages/graph/src/code-graph.ts` only adapts
+the code DTOs and state. Atlas requests are directory/community aggregates,
+while File, Neighborhood, and Diff are scoped requests. The fixture adapter
+in `viz-fixture.ts`, HTTP adapter, and Tauri-native adapter all consume the
+same gateway-schema DTOs.
+
+The Code Graph filter panel covers repository, language, symbol kind, edge
+kind, confidence, freshness, diagnostics, path prefix, community, and delta
+status. Confidence is rendered through line style and opacity; freshness is
+rendered through node opacity, border style, and an inspector badge. The
+lower workspace columns provide a structure-list fallback and symbol/file
+inspector with provenance, diagnostics, relationships, and a raw-record
+toggle.
+
+Code navigation follows `Repo › module › file › symbol`: stationary aggregate
+clicks drill in, breadcrumbs and Escape pop one level, and double-click frames
+a symbol neighborhood. Code links are strict and round-trip through:
+
+```
+opensymphony://code/<repoId>/atlas
+opensymphony://code/<repoId>/files/<path>
+opensymphony://code/<repoId>/symbols/<symbolKey>
+opensymphony://code/<repoId>/diff/<baseRevision>/<headRevision>
+```
+
+`OpenSymphonyAppHandle.openCodeDeepLink(url)` restores mode, target, filters,
+depth, revisions, and layout seed. The desktop and web boot paths accept
+`?code=<deep-link>` alongside `?fixtures`; `code_graph_updated` refreshes the
+active snapshot without clearing camera, drag overrides, or selection.
+
 ### Tests that gate this area
 
 - `packages/ui-core/__tests__/knowledge-graph-scene.test.ts` — projector ↔
@@ -216,6 +250,9 @@ testing, `?memory=<deep-link>` on the desktop dev server (composable with
 - `packages/graph/__tests__/deep-link.test.ts` — deep-link round-trips and
   strict rejection, node addressing, fixture capsule determinism and link
   resolvability.
+- `packages/graph/__tests__/code-graph.test.ts` and
+  `packages/ui-core/__tests__/code-graph.test.ts` — code adapters, filters,
+  deep links, DTO-to-scene styling, inspector markup, and layout semantics.
 - `packages/ui-core/__tests__/memory-markdown.test.ts` — capsule markdown
   allowlist rendering and escaping.
 - `packages/graph/__tests__/completed-tasks.test.ts` — completed-task
