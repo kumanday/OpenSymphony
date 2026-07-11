@@ -1769,10 +1769,11 @@ where
             && let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
         {
-            self.insert_execution(issue_id, execution);
-            return Err(SchedulerError::Workspace {
-                detail: error.to_string(),
-            });
+            tracing::warn!(
+                issue = %issue_id,
+                %error,
+                "retaining released execution while terminal workspace cleanup retries"
+            );
         }
         self.insert_execution(issue_id, execution);
         Ok(())
@@ -1886,13 +1887,15 @@ where
     ) -> Result<IssueExecution, SchedulerError> {
         let cleanup_terminal = matches!(reason, ReleaseReason::TrackerTerminal);
         let execution = execution.release(observed_at, reason, outcome)?;
-        if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
-            self.workspace
-                .cleanup_workspace(&workspace, true)
-                .await
-                .map_err(|error| SchedulerError::Workspace {
-                    detail: error.to_string(),
-                })?;
+        if cleanup_terminal
+            && let Some(workspace) = execution.workspace().cloned()
+            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
+        {
+            tracing::warn!(
+                issue = %execution.issue().id,
+                %error,
+                "retaining released execution while terminal workspace cleanup retries"
+            );
         }
         Ok(execution)
     }
