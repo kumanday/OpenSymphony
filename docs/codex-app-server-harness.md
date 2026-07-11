@@ -258,7 +258,7 @@ codex app-server generate-ts --out <dir>
 OpenSymphony does not pin or vendor a Codex binary. It asks the installed Codex
 CLI to generate its current app-server JSON Schema, validates outbound
 `initialize`, `thread/start`, `thread/resume`, `turn/start`, and rollback
-`thread/archive` requests against that schema, and fails with update guidance
+`thread/list`, `thread/archive`, and `thread/unarchive` requests against that schema, and fails with update guidance
 if the installed Codex is too old or incompatible with the required automation
 fields.
 
@@ -473,13 +473,16 @@ or turn failures.
 Terminal workspace cleanup delegates to `WorkspaceManager`, so the configured
 retention decision and lifecycle hooks apply once per retained workspace in a
 runtime. The current runtime policy retains terminal workspaces and therefore
-preserves `.opensymphony/conversation.json` for future archive/debug recovery
-work. Terminal archival and debug unarchive remain the separate follow-on
-lifecycle slice.
+preserves `.opensymphony/conversation.json` for archive/debug recovery. Terminal
+reconciliation uses `thread/list` against the exact workspace CWD and state DB,
+archives an active canonical thread once, and records durable pending/complete
+archive state. Failures retain the workspace and manifest for a later tick.
 
-`opensymphony debug <issue-key>` uses the recorded thread id to run
-`codex resume <thread-id>` from the issue workspace. `opensymphony debug
-<issue-key> --app` prints the matching `codex://threads/<thread-id>` deep link.
+`opensymphony debug <issue-key>` first unarchives an archived canonical thread,
+then runs `codex resume <thread-id>` from the issue workspace. `opensymphony
+debug <issue-key> --app` performs the same recovery before printing the matching
+`codex://threads/<thread-id>` deep link. A failed recovery leaves the manifest
+in place and reports the thread id for manual repair.
 
 After `turn/start` yields an active turn id, the runtime backend retains a live
 stdio interrupt channel for the running Codex child. Scheduler interrupts such
