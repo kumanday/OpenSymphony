@@ -1769,10 +1769,11 @@ where
             && let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
         {
-            self.insert_execution(issue_id, execution);
-            return Err(SchedulerError::Workspace {
-                detail: error.to_string(),
-            });
+            tracing::warn!(
+                issue = %issue_id,
+                %error,
+                "retaining released execution while terminal workspace cleanup retries"
+            );
         }
         self.insert_execution(issue_id, execution);
         Ok(())

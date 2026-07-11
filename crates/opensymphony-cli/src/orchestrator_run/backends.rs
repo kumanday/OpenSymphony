@@ -1986,45 +1986,47 @@ async fn inspect_codex_archive_state(
     thread_id: &str,
 ) -> Result<CodexArchiveState, String> {
     let mut session = CodexLifecycleSession::start(codex_bin, workspace.workspace_path()).await?;
-    for archived in [true, false] {
-        let mut cursor = None;
-        loop {
-            let response = session
-                .request("thread/list", |adapter, session| {
-                    adapter.list_issue_threads_request(
-                        session,
-                        workspace.workspace_path().display().to_string(),
-                        archived,
-                        cursor.clone(),
-                    )
-                })
-                .await?;
-            if response["result"]["data"]
-                .as_array()
-                .is_some_and(|threads| {
-                    threads.iter().any(|thread| {
-                        thread.get("id").and_then(serde_json::Value::as_str) == Some(thread_id)
+    let result: Result<CodexArchiveState, String> = async {
+        for archived in [true, false] {
+            let mut cursor = None;
+            loop {
+                let response = session
+                    .request("thread/list", |adapter, session| {
+                        adapter.list_issue_threads_request(
+                            session,
+                            workspace.workspace_path().display().to_string(),
+                            archived,
+                            cursor.clone(),
+                        )
                     })
-                })
-            {
-                let state = if archived {
-                    CodexArchiveState::Archived
-                } else {
-                    CodexArchiveState::Active
-                };
-                session.stop().await;
-                return Ok(state);
-            }
-            cursor = response["result"]["nextCursor"]
-                .as_str()
-                .map(ToOwned::to_owned);
-            if cursor.is_none() {
-                break;
+                    .await?;
+                if response["result"]["data"]
+                    .as_array()
+                    .is_some_and(|threads| {
+                        threads.iter().any(|thread| {
+                            thread.get("id").and_then(serde_json::Value::as_str) == Some(thread_id)
+                        })
+                    })
+                {
+                    return Ok(if archived {
+                        CodexArchiveState::Archived
+                    } else {
+                        CodexArchiveState::Active
+                    });
+                }
+                cursor = response["result"]["nextCursor"]
+                    .as_str()
+                    .map(ToOwned::to_owned);
+                if cursor.is_none() {
+                    break;
+                }
             }
         }
+        Ok(CodexArchiveState::Missing)
     }
+    .await;
     session.stop().await;
-    Ok(CodexArchiveState::Missing)
+    result
 }
 
 async fn persist_codex_archive_state(

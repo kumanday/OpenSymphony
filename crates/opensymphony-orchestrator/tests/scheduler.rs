@@ -1333,11 +1333,18 @@ async fn terminal_cleanup_failure_after_worker_finish_keeps_execution_for_retry(
         ..Default::default()
     };
     let workspace = FakeWorkspace {
-        cleanup_results: VecDeque::from([Err(FakeError {
-            message: "Codex archive failed".to_string(),
-            category: None,
-            retry_after: None,
-        })]),
+        cleanup_results: VecDeque::from([
+            Err(FakeError {
+                message: "Codex archive failed".to_string(),
+                category: None,
+                retry_after: None,
+            }),
+            Err(FakeError {
+                message: "Codex archive still unavailable".to_string(),
+                category: None,
+                retry_after: None,
+            }),
+        ]),
         ..Default::default()
     };
     let worker = FakeWorker::default();
@@ -1384,10 +1391,23 @@ async fn terminal_cleanup_failure_after_worker_finish_keeps_execution_for_retry(
     scheduler
         .tick(ts(300_200))
         .await
-        .expect("terminal reconciliation should retry cleanup");
+        .expect("terminal reconciliation cleanup failure should be non-fatal");
     assert_eq!(
         scheduler.workspace().cleaned,
         vec![("COE-541".to_string(), true), ("COE-541".to_string(), true),]
+    );
+
+    scheduler
+        .tick(ts(600_300))
+        .await
+        .expect("terminal reconciliation should retry cleanup again");
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![
+            ("COE-541".to_string(), true),
+            ("COE-541".to_string(), true),
+            ("COE-541".to_string(), true),
+        ]
     );
 }
 
