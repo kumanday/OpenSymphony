@@ -1,5 +1,6 @@
 import type {
   CodeDiffOverlay,
+  CodeDiffSymbolSide,
   CodeFileOutline,
   CodeGraphConfidence,
   CodeGraphEdge,
@@ -259,8 +260,8 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
       return {
         ...state,
         mode: action.mode,
-        path: action.path ?? state.path,
-        symbolKey: action.symbolKey ?? state.symbolKey,
+        path: action.path === undefined ? state.path : action.path,
+        symbolKey: action.symbolKey === undefined ? state.symbolKey : action.symbolKey,
         selectedNodeIds: [],
         breadcrumbs: [...state.breadcrumbs, action.breadcrumb],
         layoutStatus: "idle",
@@ -269,13 +270,16 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
       const index = action.index ?? state.breadcrumbs.length - 2;
       const breadcrumbs = state.breadcrumbs.slice(0, Math.max(0, index + 1));
       const current = breadcrumbs[breadcrumbs.length - 1];
+      const symbolKey = current?.kind === "symbol"
+        ? current.id.replace(/^symbol:/, "")
+        : null;
       return {
         ...state,
         breadcrumbs,
         mode: current?.kind === "symbol" ? "neighborhood" : current?.kind === "file" ? "file" : "atlas",
         path: current?.kind === "file" ? current.id : null,
-        symbolKey: current?.kind === "symbol" ? current.id : null,
-        selectedNodeIds: current?.kind === "symbol" ? [current.id] : [],
+        symbolKey,
+        selectedNodeIds: symbolKey ? [`symbol:${symbolKey}`] : [],
         filters: breadcrumbs.length === 0 ? { ...state.filters, pathPrefixes: [] } : state.filters,
         layoutStatus: "idle",
       };
@@ -293,14 +297,26 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
     case "GRAPH_UPDATED":
       if (state.repoId !== action.repoId) return state;
       return { ...state, stale: true, lastUpdatedAt: action.updatedAt };
-    case "HISTORY_RESTORED":
+    case "HISTORY_RESTORED": {
+      const restoredMode = action.state.mode ?? state.mode;
+      const restoredBaseRevision = action.state.baseRevision === undefined
+        ? state.baseRevision
+        : action.state.baseRevision;
+      const restoredHeadRevision = action.state.headRevision === undefined
+        ? state.headRevision
+        : action.state.headRevision;
+      const keepsDiffOverlay = restoredMode === "diff"
+        && restoredBaseRevision === state.baseRevision
+        && restoredHeadRevision === state.headRevision;
       return {
         ...state,
         ...action.state,
+        diffOverlay: keepsDiffOverlay ? state.diffOverlay : null,
         depth: clamp(action.state.depth ?? state.depth, codeGraphDepthBounds.min, codeGraphDepthBounds.max),
         filters: normalizeCodeGraphFilters(action.state.filters ?? state.filters),
         selectedNodeIds: uniqueSorted(action.state.selectedNodeIds ?? state.selectedNodeIds),
       };
+    }
     case "GRAPH_RESET":
       return createInitialCodeGraphState();
     default:
@@ -634,29 +650,34 @@ function codeGraphRequestParams(options?: CodeGraphRequestOptions): URLSearchPar
 }
 
 function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverlay | null): CodeGraphSnapshot {
-  if (!overlay || overlay.removed_symbols.length === 0) return snapshot;
+  if (!overlay) return snapshot;
   const existingKeys = new Set(snapshot.nodes.map((node) => node.symbol_key).filter((key): key is string => Boolean(key)));
-  const removedNodes = overlay.removed_symbols
-    .filter((symbol) => !existingKeys.has(symbol.symbol_key) && symbol.before)
-    .map((symbol) => ({
-      id: `symbol:${symbol.symbol_key}`,
-      kind: "symbol" as const,
-      label: symbol.before!.name,
-      symbol_kind: symbol.before!.kind,
-      symbol_key: symbol.symbol_key,
-      symbol_id: symbol.before!.symbol_id,
-      path_display: symbol.before!.path_display,
-      language: null,
-      container_chain: symbol.before!.container_chain,
-      signature: null,
-      span: symbol.before!.span,
-      selection_span: symbol.before!.span,
-      freshness: symbol.before!.freshness,
-      diagnostic_count: 0,
-      diagnostic_severity: null,
-      metrics: { in_degree: 0, out_degree: 0, community_id: null },
-    }));
-  return removedNodes.length > 0 ? { ...snapshot, nodes: [...snapshot.nodes, ...removedNodes] } : snapshot;
+  const syntheticSides = new Map<string, CodeDiffSymbolSide>();
+  for (const symbol of [...overlay.added_symbols, ...overlay.modified_symbols, ...overlay.removed_symbols]) {
+    if (existingKeys.has(symbol.symbol_key) || syntheticSides.has(symbol.symbol_key)) continue;
+    const side = symbol.status === "removed" ? symbol.before : symbol.after ?? symbol.before;
+    if (side) syntheticSides.set(symbol.symbol_key, side);
+  }
+  if (syntheticSides.size === 0) return snapshot;
+  const syntheticNodes = [...syntheticSides].map(([symbolKey, side]) => ({
+    id: `symbol:${symbolKey}`,
+    kind: "symbol" as const,
+    label: side.name,
+    symbol_kind: side.kind,
+    symbol_key: symbolKey,
+    symbol_id: side.symbol_id,
+    path_display: side.path_display,
+    language: null,
+    container_chain: side.container_chain,
+    signature: null,
+    span: side.span,
+    selection_span: side.span,
+    freshness: side.freshness,
+    diagnostic_count: 0,
+    diagnostic_severity: null,
+    metrics: { in_degree: 0, out_degree: 0, community_id: null },
+  }));
+  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes] };
 }
 
 function matchesCodeNode(
@@ -673,7 +694,8 @@ function matchesCodeNode(
   if (filters.diagnostics === "with_diagnostics" && node.diagnostic_count <= 0) return false;
   if (filters.diagnostics === "without_diagnostics" && node.diagnostic_count > 0) return false;
   if (filters.pathPrefixes.length > 0 && (!node.path_display || !filters.pathPrefixes.some((prefix) => node.path_display!.startsWith(prefix)))) return false;
-  if (filters.communities.length > 0 && (!node.metrics.community_id || (!filters.communities.includes(node.metrics.community_id) && !communityMembers.has(node.id)))) return false;
+  if (filters.communities.length > 0 && !communityMembers.has(node.id)
+    && (!node.metrics.community_id || !filters.communities.includes(node.metrics.community_id))) return false;
   if (filters.deltaStatuses.length > 0 && (!node.symbol_key || !filters.deltaStatuses.includes(deltaBySymbol.get(node.symbol_key) ?? "unchanged"))) return false;
   return true;
 }

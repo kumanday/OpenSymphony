@@ -640,6 +640,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.pendingGraphLayoutAdapter?.dispose();
     this.pendingGraphLayoutAdapter = null;
     disposeKnowledgeGraphRenderer(this.options.root);
+    disposeCodeGraphRenderer(this.options.root);
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
   }
@@ -801,6 +802,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private resetCodeGraph(): void {
+    const shouldReload = this.state.graphPaneView === "code" && !this.destroyed;
     this.state.codeGraph = createInitialCodeGraphState();
     this.codeGraphLayout = null;
     this.codeGraphLoadInFlight = null;
@@ -810,6 +812,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.codeGraphSymbolRequest = null;
     this.codeGraphRawRecord = false;
     this.codeGraphView = createKnowledgeGraphViewState();
+    if (shouldReload) void this.loadCodeGraph();
   }
 
   /**

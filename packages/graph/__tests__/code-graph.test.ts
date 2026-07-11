@@ -89,6 +89,93 @@ describe("Code Graph adapters and state", () => {
     expect(state.filters.deltaStatuses).toEqual([]);
   });
 
+  it("synthesizes added and modified diff symbols and honors explicit target clears", async () => {
+    const adapter = createFixtureCodeGraphAdapter();
+    const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "atlas" });
+    const side = {
+      symbol_id: "modifiedSymbol:id",
+      kind: "function",
+      name: "modifiedSymbol",
+      path_display: "packages/graph/src/modified.ts",
+      container_chain: ["graph"],
+      span: { start_line: 1, start_col: 1, end_line: 4, end_col: 2 },
+      freshness: "current" as const,
+    };
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      added_symbols: [{
+        symbol_key: "addedSymbol",
+        status: "added" as const,
+        before: null,
+        after: { ...side, symbol_id: "addedSymbol:id", name: "addedSymbol" },
+      }],
+      removed_symbols: [],
+      modified_symbols: [{
+        symbol_key: "modifiedSymbol",
+        status: "modified" as const,
+        before: { ...side, name: "oldModifiedSymbol" },
+        after: side,
+      }],
+    };
+    const filtered = applyCodeGraphFilters(snapshot, {
+      ...initialCodeGraphFilters,
+      deltaStatuses: ["added", "modified"],
+    }, overlay);
+    expect(filtered.nodes.map((node) => node.symbol_key)).toEqual(["addedSymbol", "modifiedSymbol"]);
+
+    let state = codeGraphReducer(createInitialCodeGraphState(), {
+      type: "TARGET_SET",
+      path: "packages/graph/src/index.ts",
+      symbolKey: "oldSymbol",
+    });
+    state = codeGraphReducer(state, {
+      type: "DRILL_IN",
+      breadcrumb: { kind: "file", id: "packages/graph/src/index.ts", label: "index.ts" },
+      mode: "file",
+      path: null,
+      symbolKey: null,
+    });
+    expect(state.path).toBeNull();
+    expect(state.symbolKey).toBeNull();
+    state = codeGraphReducer(state, {
+      type: "DRILL_IN",
+      breadcrumb: { kind: "symbol", id: "newSymbol", label: "newSymbol" },
+      mode: "neighborhood",
+      symbolKey: "newSymbol",
+    });
+    state = codeGraphReducer(state, { type: "BREADCRUMB_POP", index: 1 });
+    expect(state.symbolKey).toBe("newSymbol");
+    expect(state.selectedNodeIds).toEqual(["symbol:newSymbol"]);
+  });
+
+  it("uses community node membership without requiring a metrics community id", async () => {
+    const adapter = createFixtureCodeGraphAdapter();
+    const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "file" });
+    const member = snapshot.nodes.find((node) => node.kind === "symbol")!;
+    const communitySnapshot = {
+      ...snapshot,
+      nodes: [{ ...member, metrics: { ...member.metrics, community_id: null } }],
+      edges: [],
+      communities: [{ id: "community:code", label: "Code", node_ids: [member.id], symbol_count: 1 }],
+    };
+    const filtered = applyCodeGraphFilters(communitySnapshot, {
+      ...initialCodeGraphFilters,
+      communities: ["community:code"],
+    });
+    expect(filtered.nodes.map((node) => node.id)).toEqual([member.id]);
+  });
+
+  it("clears an old diff overlay when restoring non-Diff history", () => {
+    const overlay = codeGraphFixtureDiffOverlays[0];
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "DIFF_LOADED", overlay });
+    state = codeGraphReducer(state, {
+      type: "HISTORY_RESTORED",
+      state: { mode: "atlas", baseRevision: null, headRevision: null, symbolKey: null, path: null },
+    });
+    expect(state.mode).toBe("atlas");
+    expect(state.diffOverlay).toBeNull();
+  });
+
   it("pops the final breadcrumb back to the Atlas and clears its path scope", () => {
     let state = codeGraphReducer(createInitialCodeGraphState(), {
       type: "DRILL_IN",
@@ -175,5 +262,18 @@ describe("Code Graph deep links", () => {
     expect(parseCodeDeepLink("opensymphony://code/repo/files/src/lib.rs?guess=1")).toBeNull();
     expect(parseCodeDeepLink("opensymphony://code/repo/diff/base")).toBeNull();
     expect(() => formatCodeDeepLink({ repoId: "repo", baseRevision: "base" })).toThrow(/both base and head/);
+  });
+
+  it("rejects invalid enum-valued filter entries", () => {
+    const filters = encodeURIComponent(JSON.stringify({
+      ...initialCodeGraphFilters,
+      freshness: ["expired"],
+    }));
+    expect(parseCodeDeepLink(`opensymphony://code/repo/atlas?filters=${filters}`)).toBeNull();
+    const deltaFilters = encodeURIComponent(JSON.stringify({
+      ...initialCodeGraphFilters,
+      deltaStatuses: ["renamed"],
+    }));
+    expect(parseCodeDeepLink(`opensymphony://code/repo/atlas?filters=${deltaFilters}`)).toBeNull();
   });
 });

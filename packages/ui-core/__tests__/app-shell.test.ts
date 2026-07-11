@@ -3297,6 +3297,15 @@ describe("OpenSymphonyApp mount", () => {
 
     const newUrl = "http://127.0.0.1:9001";
     let lastConnect: string | null = null;
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let codeGraphReads = 0;
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        codeGraphReads += 1;
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
     const initialTransport = new CloseCountingTransport({
       baseUri: "http://127.0.0.1:2468",
       health: capabilities,
@@ -3355,11 +3364,16 @@ describe("OpenSymphonyApp mount", () => {
       mode: "desktop",
       transport: initialTransport,
       profileController: controller,
+      codeGraphAdapter,
       onGatewayUrlChanged: async (url) => {
         lastConnect = url;
         return buildTransport();
       },
     });
+
+    expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+    const readsBeforeGatewaySwitch = codeGraphReads;
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
 
     await expandSettingsPanel(root, "connection", "[data-save-profile]");
 
@@ -3371,8 +3385,9 @@ describe("OpenSymphonyApp mount", () => {
     gatewayInput.value = newUrl;
     save.click();
 
-    await flushUntil(() => lastConnect === newUrl);
+    await flushUntil(() => lastConnect === newUrl && codeGraphReads > readsBeforeGatewaySwitch);
     expect(lastConnect).toBe(newUrl);
+    expect(codeGraphReads).toBeGreaterThan(readsBeforeGatewaySwitch);
     expect(initialTransport.closeCalls).toBe(1);
     expect(save.disabled).toBe(false);
 

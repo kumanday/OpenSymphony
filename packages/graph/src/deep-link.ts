@@ -344,6 +344,11 @@ function parseCodeQuery(rawQuery: string): {
 }
 
 function parseCodeFilters(raw: string): CodeGraphFilters | null {
+  const enumValues: Record<string, ReadonlySet<string>> = {
+    confidences: new Set(["exact", "syntactic", "heuristic"]),
+    freshness: new Set(["current", "stale", "unknown"]),
+    deltaStatuses: new Set(["added", "removed", "modified", "unchanged"]),
+  };
   try {
     const value = JSON.parse(raw) as Record<string, unknown>;
     const expected = Object.keys(createInitialCodeGraphFilters());
@@ -357,6 +362,8 @@ function parseCodeFilters(raw: string): CodeGraphFilters | null {
       } else {
         const items = value[key];
         if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) return null;
+        const allowedValues = enumValues[key];
+        if (allowedValues && items.some((item) => !allowedValues.has(item as string))) return null;
         (filters[key as keyof CodeGraphFilters] as string[]).push(...items);
       }
     }
