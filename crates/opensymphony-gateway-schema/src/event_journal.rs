@@ -178,6 +178,9 @@ pub enum EventKind {
     MemoryGraphUpdated {
         bundle_id: String,
     },
+    CodeGraphUpdated {
+        repo_id: String,
+    },
 
     // Catch-all for unknown future events
     Unknown {
@@ -229,6 +232,7 @@ impl EventKind {
             // `memory_graph_updated`; keep the underscore tag stable for
             // clients even though older gateway event families use dotted tags.
             Self::MemoryGraphUpdated { .. } => "memory_graph_updated".into(),
+            Self::CodeGraphUpdated { .. } => "code_graph_updated".into(),
             Self::Unknown { raw_kind } => raw_kind.clone(),
         }
     }

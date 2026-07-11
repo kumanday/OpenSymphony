@@ -1,0 +1,51 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "repo_id": "opensymphony",
+  "mode": "file",
+  "cursor": { "sequence": 1, "partition": "code-graph:opensymphony" },
+  "nodes": [
+    {
+      "id": "file:src/lib.rs",
+      "kind": "file",
+      "label": "lib.rs",
+      "path_display": "src/lib.rs",
+      "language": "rust",
+      "container_chain": [],
+      "freshness": "current",
+      "diagnostic_count": 0,
+      "metrics": { "in_degree": 0, "out_degree": 1 }
+    },
+    {
+      "id": "sym:run",
+      "kind": "symbol",
+      "label": "run",
+      "symbol_kind": "function",
+      "symbol_key": "run",
+      "symbol_id": "run-head",
+      "path_display": "src/lib.rs",
+      "language": "rust",
+      "container_chain": ["App"],
+      "signature": "fn run(&self)",
+      "span": { "start_line": 6, "start_col": 2, "end_line": 7, "end_col": 14 },
+      "selection_span": { "start_line": 6, "start_col": 2, "end_line": 6, "end_col": 14 },
+      "freshness": "current",
+      "diagnostic_count": 1,
+      "diagnostic_severity": "warning",
+      "metrics": { "in_degree": 1, "out_degree": 0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:contains:file:src/lib.rs->sym:run",
+      "kind": "contains",
+      "source_id": "file:src/lib.rs",
+      "target_id": "sym:run",
+      "confidence": "exact",
+      "unresolved": false
+    }
+  ],
+  "communities": [],
+  "truncation": { "nodes_dropped": 0, "edges_dropped": 0 },
+  "filters_applied": [],
+  "generated_at": "2026-07-07T03:00:00Z"
+}

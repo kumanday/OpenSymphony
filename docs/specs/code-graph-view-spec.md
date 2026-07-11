@@ -333,13 +333,19 @@ Returns the ordered symbol list for one touched file, parsed from the run worktr
 GET /api/v1/runs/{run_id}/code/diff-overlay
 ```
 
-Returns the overlay DTO (section 10.3).
+Resolves the run worktree server-side to the same overlay DTO as the repo diff route (section 10.3): base is the run merge-base and head is the run worktree head. The client never receives the workspace root.
+
+```
+GET /api/v1/code/repos/{repo_id}/diff-overlay?base_revision=...&head_revision=...
+```
+
+Returns the graph-diff DTO for any two indexed revisions of the repo. This revision-pair contract is the canonical diff overlay shape; run-scoped requests are only resolvers in front of it.
 
 ```
 POST /api/v1/code/repos/{repo_id}/index
 ```
 
-Operator-triggered batch ingest (equivalent to admin `memory.ingest_code_intel` with `persist=true`), local-trusted by default and admin-gated in hosted mode. Emits `code_graph_updated` on completion.
+Operator-triggered batch ingest (equivalent to admin `memory.ingest_code_intel` with `persist=true`), local-trusted by default and admin-gated in hosted mode. The initial gateway route may report the current read-model index state when no async indexer is configured; successful ingest/reindex emits `code_graph_updated` on completion.
 
 ### 8.5 Events
 
@@ -349,6 +355,7 @@ Operator-triggered batch ingest (equivalent to admin `memory.ingest_code_intel` 
 {
   "schema_version": {"major": 1, "minor": 0, "patch": 0},
   "repo_id": "opensymphony",
+  "head_revision": "head-rev",
   "cursor": {"sequence": 513, "partition": "code-graph:opensymphony"},
   "updated_at": "2026-07-02T00:01:00Z"
 }
@@ -365,7 +372,7 @@ code_repos            -> CodeRepoList
 code_graph            -> CodeGraphSnapshot   (repoId, mode, path?, symbolKey?, depth?, aggregate?)
 code_symbol_detail    -> CodeSymbolDetail    (repoId, symbolKey)
 run_code_outline      -> CodeFileOutline     (runId, filePath)
-run_code_diff_overlay -> CodeDiffOverlay     (runId)
+run_code_diff_overlay -> CodeDiffOverlay     (runId, repoId?)
 code_index_repo       -> CodeIndexReport     (repoId)
 ```
 
@@ -416,35 +423,33 @@ Inbound `calls` and `references` edges into modified/removed symbols — unchang
 ### 10.3 Overlay DTO
 
 ```
+GET /api/v1/code/repos/{repo_id}/diff-overlay?base_revision=...&head_revision=...
 GET /api/v1/runs/{run_id}/code/diff-overlay
 ```
 
 ```json
 {
   "schema_version": {"major": 1, "minor": 0, "patch": 0},
-  "run_id": "run-123",
   "repo_id": "opensymphony",
-  "base": {"commit_sha": "9d64a69", "source": "merge_base"},
-  "head": {"branch_name": "fix/coe-520", "worktree": true},
-  "symbols": [
-    {"symbol_key": "...", "status": "modified", "path": "packages/ui-core/src/diff.ts", "kind": "function", "name": "renderFileDiff"}
+  "base_revision": "9d64a69",
+  "head_revision": "c2f78d1",
+  "added_symbols": [
+    {
+      "symbol_key": "...",
+      "status": "added",
+      "after": {"symbol_id": "...", "kind": "function", "name": "newCommand", "path_display": "packages/ui-core/src/diff.ts", "container_chain": [], "span": {"start_line": 42, "start_col": 0, "end_line": 60, "end_col": 1}, "freshness": "current"}
+    }
   ],
-  "blast_radius": [
-    {"symbol_key": "...", "via": "calls", "confidence": "syntactic", "distance": 1, "path": "packages/ui-core/src/app-shell.ts", "name": "renderRunEvidence"}
-  ],
-  "summary": {
-    "symbols_added": 2,
-    "symbols_removed": 0,
-    "symbols_modified": 5,
-    "blast_radius_count": 9,
-    "new_diagnostics": 0
-  },
-  "unanalyzed_files": [{"path": "assets/logo.svg", "reason": "unsupported_language"}],
+  "removed_symbols": [],
+  "modified_symbols": [],
+  "blast_radius": [{"symbol_key": "...", "inbound_count": 3, "outbound_count": 1}],
+  "unanalyzed_files": ["assets/logo.svg"],
+  "truncation": {"nodes_dropped": 0, "edges_dropped": 0, "reason": null},
   "generated_at": "2026-07-02T00:00:00Z"
 }
 ```
 
-`unanalyzed_files` keeps the overlay honest about coverage: files the diff touched that produced no symbols (unsupported language, oversized, generated-excluded) are listed, never silently omitted.
+`unanalyzed_files` keeps the overlay honest about coverage: files the diff touched that produced no symbols (unsupported language, oversized, generated-excluded) are listed, never silently omitted. The repo route accepts any indexed base/head revision pair; the run route resolves the run's merge-base/head server-side and returns the same DTO.
 
 ### 10.4 Rendering
 

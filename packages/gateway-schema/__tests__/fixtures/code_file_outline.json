@@ -1,0 +1,18 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "run_id": "COE-533",
+  "repo_id": "opensymphony",
+  "path": "src/lib.rs",
+  "symbols": [
+    {
+      "symbol_key": "run",
+      "name": "run",
+      "kind": "function",
+      "path": "src/lib.rs",
+      "span": { "start_line": 6, "start_col": 2, "end_line": 7, "end_col": 14 },
+      "selection_span": { "start_line": 6, "start_col": 2, "end_line": 6, "end_col": 14 },
+      "container_chain": ["App"]
+    }
+  ],
+  "generated_at": "2026-07-07T03:00:00Z"
+}

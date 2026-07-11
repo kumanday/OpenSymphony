@@ -54,6 +54,38 @@ export type {
   MemoryTaskPullRequest,
 } from "./memory_graph.js";
 
+// code graph
+export type {
+  CodeDiagnostic,
+  CodeDiffBlastRadius,
+  CodeDiffOverlay,
+  CodeDiffSymbol,
+  CodeDiffSymbolSide,
+  CodeDiffSymbolStatus,
+  CodeEdgeSummary,
+  CodeFileOutline,
+  CodeGraphAggregate,
+  CodeGraphCommunity,
+  CodeGraphConfidence,
+  CodeGraphEdge,
+  CodeGraphFreshness,
+  CodeGraphMode,
+  CodeGraphNode,
+  CodeGraphNodeKind,
+  CodeGraphNodeMetrics,
+  CodeGraphSnapshot,
+  CodeGraphTruncation,
+  CodeGraphUpdatedEvent,
+  CodeIndexReport,
+  CodeOutlineSymbol,
+  CodeRepoList,
+  CodeRepoSummary,
+  CodeSourceSnippet,
+  CodeSpan,
+  CodeSymbolDetail,
+  CodeSymbolProvenance,
+} from "./code_graph.js";
+
 // run
 export type {
   RunStatus,

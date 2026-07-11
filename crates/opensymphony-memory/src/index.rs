@@ -286,7 +286,34 @@ fn code_symbols_read_model_ready(connection: &Connection, path: &Path) -> Result
         connection,
         path,
         "code_symbols",
-        &["symbol_key", "container_chain", "worktree_dirty"],
+        &[
+            "symbol_id",
+            "symbol_key",
+            "repo_id",
+            "commit_sha",
+            "path",
+            "language",
+            "kind",
+            "name",
+            "container_symbol_id",
+            "container_chain",
+            "signature",
+            "start_line",
+            "start_col",
+            "end_line",
+            "end_col",
+            "start_byte",
+            "end_byte",
+            "selection_start_line",
+            "selection_end_line",
+            "content_sha256",
+            "snippet_sha256",
+            "parser_version",
+            "query_pack_version",
+            "freshness",
+            "indexed_at",
+            "worktree_dirty",
+        ],
     )
 }
 
@@ -440,6 +467,20 @@ CREATE TABLE IF NOT EXISTS code_documents (
   freshness TEXT NOT NULL,
   PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
 );
+CREATE TABLE IF NOT EXISTS code_document_revisions (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_id TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, parser_version, query_pack_version)
+);
 CREATE TABLE IF NOT EXISTS code_symbols (
   symbol_id TEXT PRIMARY KEY,
   symbol_key TEXT NOT NULL,
@@ -493,6 +534,44 @@ CREATE TABLE IF NOT EXISTS code_edges (
   query_pack_version TEXT NOT NULL,
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS code_edge_revisions (
+  edge_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  edge_kind TEXT NOT NULL,
+  source_symbol_id TEXT,
+  source_symbol_key TEXT,
+  target_symbol_id TEXT,
+  target_symbol_key TEXT,
+  target_hint TEXT,
+  confidence TEXT NOT NULL,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, edge_id)
+);
+CREATE TABLE IF NOT EXISTS code_skipped_files (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, content_sha256)
 );
 CREATE TABLE IF NOT EXISTS code_diagnostics (
   diagnostic_id TEXT PRIMARY KEY,
@@ -551,6 +630,8 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_source ON code_edges(source_symbol_id)
 CREATE INDEX IF NOT EXISTS idx_code_edges_target ON code_edges(target_symbol_id);
 CREATE INDEX IF NOT EXISTS idx_code_edges_source_key ON code_edges(source_symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_edges_target_key ON code_edges(target_symbol_key);
+CREATE INDEX IF NOT EXISTS idx_code_edge_revisions_target_key ON code_edge_revisions(target_symbol_key);
+CREATE INDEX IF NOT EXISTS idx_code_skipped_files_revision ON code_skipped_files(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 "#,
     ))?;
@@ -650,8 +731,33 @@ pub fn persist_code_intel_documents(
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
-            })?;
+        })?;
         report.persisted_documents += 1;
+        if !batch.worktree_dirty
+            && let Some(commit_sha) = batch.commit_sha.as_deref()
+        {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_document_revisions (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        batch.repo_id,
+                        commit_sha,
+                        worktree_dirty,
+                        path,
+                        document.language,
+                        document.content_sha256,
+                        document.parser_id,
+                        document.parser_version,
+                        document.query_pack_version,
+                        indexed_at,
+                        MemoryFreshness::Current.as_str(),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
 
         let prepared_symbols = prepare_code_symbols(
             &batch.repo_id,
@@ -703,6 +809,8 @@ pub fn persist_code_intel_documents(
 
         for edge in &document.edges {
             let resolved = resolve_code_edge(edge, &prepared_symbols);
+            let normalized_confidence =
+                normalize_edge_confidence(&edge.confidence, resolved.target_resolved);
             let edge_id = code_row_id(&[
                 &batch.repo_id,
                 &path,
@@ -734,7 +842,7 @@ pub fn persist_code_intel_documents(
                         resolved.target_symbol_id,
                         resolved.target_symbol_key,
                         edge.target_hint,
-                        normalize_edge_confidence(&edge.confidence, resolved.target_resolved),
+                        normalized_confidence,
                         edge.start_line as i64,
                         edge.start_col as i64,
                         edge.end_line as i64,
@@ -752,6 +860,44 @@ pub fn persist_code_intel_documents(
                     path: config.index_path.clone(),
                     source,
                 })?;
+            if !batch.worktree_dirty
+                && let Some(commit_sha) = batch.commit_sha.as_deref()
+            {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_edge_revisions (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            edge_id,
+                            batch.repo_id,
+                            commit_sha,
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            edge.edge_kind,
+                            resolved.source_symbol_id,
+                            resolved.source_symbol_key,
+                            resolved.target_symbol_id,
+                            resolved.target_symbol_key,
+                            edge.target_hint,
+                            normalized_confidence,
+                            edge.start_line as i64,
+                            edge.start_col as i64,
+                            edge.end_line as i64,
+                            edge.end_col as i64,
+                            edge.start_byte as i64,
+                            edge.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            MemoryFreshness::Current.as_str(),
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             report.persisted_edges += 1;
         }
 
@@ -810,8 +956,76 @@ pub fn persist_code_intel_documents(
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
-        })?;
+    })?;
     Ok(report)
+}
+
+pub fn persist_code_intel_skipped_files(
+    config: &MemoryConfig,
+    repo_id: &str,
+    commit_sha: Option<&str>,
+    worktree_dirty: bool,
+    skipped_files: &[CodeIntelSkippedFileInput],
+) -> Result<usize, MemoryError> {
+    let Some(commit_sha) = commit_sha.filter(|_| !worktree_dirty) else {
+        return Ok(0);
+    };
+    if skipped_files.is_empty() {
+        return Ok(0);
+    }
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let indexed_at = Utc::now().to_rfc3339();
+    for skipped in skipped_files {
+        let path = skipped.path.to_string_lossy().to_string();
+        stale_code_rows_for_skipped_file(&transaction, repo_id, &path).map_err(|source| {
+            MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }
+        })?;
+        transaction
+            .execute(
+                "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
+                params![repo_id, path, commit_sha, skipped.content_sha256],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO code_skipped_files (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    repo_id,
+                    commit_sha,
+                    0_i64,
+                    path,
+                    skipped.reason,
+                    skipped.content_sha256,
+                    indexed_at,
+                    MemoryFreshness::Current.as_str(),
+                ],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    Ok(skipped_files.len())
 }
 
 struct PreparedCodeSymbol<'a> {
@@ -1015,14 +1229,21 @@ pub struct CodeSymbolRecord {
     pub name: String,
     pub container_symbol_id: Option<String>,
     pub container_chain: Vec<String>,
+    pub signature: Option<String>,
     pub start_line: usize,
     pub start_col: usize,
     pub end_line: usize,
     pub end_col: usize,
     pub start_byte: usize,
     pub end_byte: usize,
+    pub selection_start_line: usize,
+    pub selection_end_line: usize,
+    pub content_sha256: String,
     pub snippet_sha256: String,
+    pub parser_version: String,
+    pub query_pack_version: String,
     pub freshness: String,
+    pub indexed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1035,6 +1256,8 @@ pub struct CodeEdgeRecord {
     pub confidence: String,
     pub unresolved: bool,
     pub path: String,
+    pub commit_sha: Option<String>,
+    pub freshness: String,
     pub start_line: usize,
     pub start_col: usize,
     pub end_line: usize,
@@ -1049,6 +1272,8 @@ pub struct CodeNeighborhood {
     pub max_depth: usize,
     pub max_records: usize,
     pub truncated: bool,
+    pub dropped_nodes: usize,
+    pub dropped_edges: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1073,7 +1298,10 @@ pub struct CodeSymbolComparison {
     pub diffs: Vec<CodeSymbolDiff>,
     pub max_records: usize,
     pub truncated: bool,
+    pub dropped_records: usize,
 }
+
+const CODE_SYMBOL_SELECT: &str = "symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, freshness, indexed_at";
 
 pub fn code_symbol_detail(
     config: &MemoryConfig,
@@ -1103,9 +1331,9 @@ pub fn code_symbols_containing_span(
         return Ok(Vec::new());
     }
     let mut statement = connection
-        .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id",
-        )
+        .prepare(&format!(
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current' AND symbol_key != '' ORDER BY start_line, start_col, end_line DESC, end_col DESC, symbol_key, indexed_at DESC, symbol_id"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1139,6 +1367,16 @@ pub fn code_symbol_neighborhood(
     max_depth: usize,
     max_records: usize,
 ) -> Result<Option<CodeNeighborhood>, MemoryError> {
+    code_symbol_neighborhood_with_stale(config, symbol_key, max_depth, max_records, false)
+}
+
+fn code_symbol_neighborhood_with_stale(
+    config: &MemoryConfig,
+    symbol_key: &str,
+    max_depth: usize,
+    max_records: usize,
+    include_stale: bool,
+) -> Result<Option<CodeNeighborhood>, MemoryError> {
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Ok(None);
     };
@@ -1147,21 +1385,24 @@ pub fn code_symbol_neighborhood(
     {
         return Ok(None);
     }
-    let Some(center) = query_code_symbol_by_key(&connection, symbol_key, true)? else {
+    let Some(center) = query_code_symbol_by_key(&connection, symbol_key, !include_stale)? else {
         return Ok(None);
     };
     let mut symbols = BTreeMap::from([(center.symbol_key.clone(), center.clone())]);
     let mut edges = BTreeMap::<String, CodeEdgeRecord>::new();
     let mut frontier = BTreeSet::from([center.symbol_key.clone()]);
     let mut truncated = false;
+    let mut dropped_nodes = 0;
+    let mut dropped_edges = 0;
 
     for _ in 0..max_depth {
         let mut next_frontier = BTreeSet::new();
         for key in &frontier {
-            for edge in query_edges_for_symbol_key(&connection, key)? {
+            for edge in query_edges_for_symbol_key_with_stale(&connection, key, include_stale)? {
                 if edges.len() >= max_records {
                     truncated = true;
-                    break;
+                    dropped_edges += 1;
+                    continue;
                 }
                 for adjacent in [
                     edge.source_symbol_key.as_deref(),
@@ -1173,9 +1414,15 @@ pub fn code_symbol_neighborhood(
                     if !symbols.contains_key(adjacent) {
                         if symbols.len() >= max_records {
                             truncated = true;
+                            dropped_nodes += 1;
                             continue;
                         }
-                        if let Some(symbol) = query_code_symbol_by_key(&connection, adjacent, true)? {
+                        if let Some(symbol) = query_code_symbol_for_edge(
+                            &connection,
+                            adjacent,
+                            &edge,
+                            include_stale,
+                        )? {
                             next_frontier.insert(adjacent.to_string());
                             symbols.insert(adjacent.to_string(), symbol);
                         }
@@ -1183,15 +1430,13 @@ pub fn code_symbol_neighborhood(
                 }
                 if !edge_endpoints_present(&edge, &symbols) {
                     truncated = true;
+                    dropped_edges += 1;
                     continue;
                 }
                 edges.insert(edge.edge_id.clone(), edge);
             }
-            if truncated {
-                break;
-            }
         }
-        if truncated || next_frontier.is_empty() {
+        if next_frontier.is_empty() {
             break;
         }
         frontier = next_frontier;
@@ -1204,6 +1449,8 @@ pub fn code_symbol_neighborhood(
         max_depth,
         max_records,
         truncated,
+        dropped_nodes,
+        dropped_edges,
     }))
 }
 
@@ -1234,6 +1481,7 @@ pub fn compare_code_symbols(
             diffs: Vec::new(),
             max_records,
             truncated: false,
+            dropped_records: 0,
         });
     };
     if !code_symbols_read_model_ready(&connection, &config.index_path)? {
@@ -1243,6 +1491,7 @@ pub fn compare_code_symbols(
             diffs: Vec::new(),
             max_records,
             truncated: false,
+            dropped_records: 0,
         });
     }
     let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
@@ -1250,7 +1499,7 @@ pub fn compare_code_symbols(
     let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();
     keys.extend(head.keys().cloned());
     let mut diffs = Vec::new();
-    let mut truncated = false;
+    let mut dropped_records = 0;
 
     for key in keys {
         let diff = match (base.get(&key), head.get(&key)) {
@@ -1280,8 +1529,8 @@ pub fn compare_code_symbols(
         };
         if let Some(diff) = diff {
             if diffs.len() >= max_records {
-                truncated = true;
-                break;
+                dropped_records += 1;
+                continue;
             }
             diffs.push(diff);
         }
@@ -1292,7 +1541,8 @@ pub fn compare_code_symbols(
         head_revision: head_revision.to_string(),
         diffs,
         max_records,
-        truncated,
+        truncated: dropped_records > 0,
+        dropped_records,
     })
 }
 
@@ -1302,12 +1552,16 @@ fn query_code_symbol_by_key(
     current_only: bool,
 ) -> Result<Option<CodeSymbolRecord>, MemoryError> {
     let sql = if current_only {
-        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        )
     } else {
-        "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness FROM code_symbols WHERE symbol_key = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, symbol_id LIMIT 1"
+        )
     };
     let mut statement = connection
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
@@ -1333,6 +1587,46 @@ fn query_code_symbol_by_key(
     Ok(Some(symbol))
 }
 
+fn query_code_symbol_for_edge(
+    connection: &Connection,
+    symbol_key: &str,
+    edge: &CodeEdgeRecord,
+    include_stale: bool,
+) -> Result<Option<CodeSymbolRecord>, MemoryError> {
+    if !include_stale {
+        return query_code_symbol_by_key(connection, symbol_key, true);
+    }
+    if let Some(commit_sha) = edge.commit_sha.as_deref() {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND commit_sha = ? AND freshness = ? ORDER BY indexed_at DESC, symbol_id LIMIT 1"
+            ))
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+        let mut rows = statement
+            .query(params![symbol_key, commit_sha, &edge.freshness])
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+        if let Some(row) = rows.next().map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })? {
+            let mut symbol = code_symbol_from_row(row).map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?;
+            fill_container_chain(connection, &mut symbol)?;
+            return Ok(Some(symbol));
+        }
+        return Ok(None);
+    }
+    query_code_symbol_by_key(connection, symbol_key, false)
+}
+
 fn query_symbols_for_revision(
     connection: &Connection,
     repo_id: &str,
@@ -1340,7 +1634,7 @@ fn query_symbols_for_revision(
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
     let mut statement = connection
         .prepare(
-            "SELECT symbol_id, symbol_key, repo_id, commit_sha, path, language, kind, name, container_symbol_id, container_chain, start_line, start_col, end_line, end_col, start_byte, end_byte, snippet_sha256, freshness, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id",
+            &format!("SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id"),
         )
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
@@ -1348,7 +1642,7 @@ fn query_symbols_for_revision(
         })?;
     let rows = statement
         .query_map(params![repo_id, revision], |row| {
-            let dirty = row.get::<_, i64>(18)?;
+            let dirty = row.get::<_, i64>(25)?;
             if dirty != 0 {
                 Ok(None)
             } else {
@@ -1377,14 +1671,20 @@ fn query_symbols_for_revision(
     Ok(symbols)
 }
 
-fn query_edges_for_symbol_key(
+fn query_edges_for_symbol_key_with_stale(
     connection: &Connection,
     symbol_key: &str,
+    include_stale: bool,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
+    let freshness = if include_stale {
+        "1 = 1"
+    } else {
+        "freshness = 'current'"
+    };
     let mut statement = connection
-        .prepare(
-            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, start_line, start_col, end_line, end_col FROM code_edges WHERE freshness = 'current' AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id",
-        )
+        .prepare(&format!(
+            "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges WHERE {freshness} AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id"
+        ))
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
@@ -1469,14 +1769,21 @@ fn code_symbol_from_row(row: &duckdb::Row<'_>) -> Result<CodeSymbolRecord, duckd
             .filter(|part| !part.is_empty())
             .map(str::to_string)
             .collect(),
-        start_line: row.get::<_, i64>(10)? as usize,
-        start_col: row.get::<_, i64>(11)? as usize,
-        end_line: row.get::<_, i64>(12)? as usize,
-        end_col: row.get::<_, i64>(13)? as usize,
-        start_byte: row.get::<_, i64>(14)? as usize,
-        end_byte: row.get::<_, i64>(15)? as usize,
-        snippet_sha256: row.get(16)?,
-        freshness: row.get(17)?,
+        signature: row.get(10)?,
+        start_line: row.get::<_, i64>(11)? as usize,
+        start_col: row.get::<_, i64>(12)? as usize,
+        end_line: row.get::<_, i64>(13)? as usize,
+        end_col: row.get::<_, i64>(14)? as usize,
+        start_byte: row.get::<_, i64>(15)? as usize,
+        end_byte: row.get::<_, i64>(16)? as usize,
+        selection_start_line: row.get::<_, i64>(17)? as usize,
+        selection_end_line: row.get::<_, i64>(18)? as usize,
+        content_sha256: row.get(19)?,
+        snippet_sha256: row.get(20)?,
+        parser_version: row.get(21)?,
+        query_pack_version: row.get(22)?,
+        freshness: row.get(23)?,
+        indexed_at: row.get(24)?,
     })
 }
 
@@ -1491,10 +1798,12 @@ fn code_edge_from_row(row: &duckdb::Row<'_>) -> Result<CodeEdgeRecord, duckdb::E
         target_hint: row.get(4)?,
         confidence: row.get(5)?,
         path: row.get(6)?,
-        start_line: row.get::<_, i64>(7)? as usize,
-        start_col: row.get::<_, i64>(8)? as usize,
-        end_line: row.get::<_, i64>(9)? as usize,
-        end_col: row.get::<_, i64>(10)? as usize,
+        commit_sha: row.get(7)?,
+        freshness: row.get(8)?,
+        start_line: row.get::<_, i64>(9)? as usize,
+        start_col: row.get::<_, i64>(10)? as usize,
+        end_line: row.get::<_, i64>(11)? as usize,
+        end_col: row.get::<_, i64>(12)? as usize,
     })
 }
 
@@ -1521,6 +1830,10 @@ fn stale_code_rows(
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
+        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
+        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    stale_rows += connection.execute(
         "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
@@ -1529,8 +1842,41 @@ fn stale_code_rows(
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
+        "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![key.repo_id, key.path],
+    )?;
+    stale_rows += connection.execute(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
+    )?;
+    Ok(stale_rows)
+}
+
+fn stale_code_rows_for_skipped_file(
+    connection: &Connection,
+    repo_id: &str,
+    path: &str,
+) -> Result<usize, duckdb::Error> {
+    let mut stale_rows = 0;
+    stale_rows += connection.execute(
+        "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
+    )?;
+    stale_rows += connection.execute(
+        "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+        params![repo_id, path],
     )?;
     Ok(stale_rows)
 }
@@ -2222,8 +2568,12 @@ fn okf_index_freshness(concept: &OkfConcept) -> MemoryFreshness {
 }
 
 pub fn sha256_hex(contents: &str) -> String {
+    sha256_bytes_hex(contents.as_bytes())
+}
+
+pub fn sha256_bytes_hex(contents: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(contents.as_bytes());
+    hasher.update(contents);
     let digest = hasher.finalize();
     digest
         .iter()
