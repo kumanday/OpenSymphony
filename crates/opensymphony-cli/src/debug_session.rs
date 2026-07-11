@@ -143,10 +143,6 @@ enum DebugCommandError {
         issue_reference: String,
         path: PathBuf,
     },
-    #[error(
-        "installed Codex CLI `{program}` does not expose the required `codex resume <session-id>` path: {detail}. Update Codex, then retry."
-    )]
-    CodexResumeUnsupported { program: String, detail: String },
     #[error("failed to launch Codex CLI `{program}`: {source}")]
     CodexLaunch {
         program: String,
@@ -500,7 +496,6 @@ async fn run_codex_resume(
     metadata: &CodexDebugMetadata,
 ) -> Result<(), DebugCommandError> {
     let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    validate_codex_resume_support(&program).await?;
     let status = Command::new(&program)
         .arg("resume")
         .arg(&metadata.thread_id)
@@ -744,39 +739,6 @@ fn debug_codex_response_id_matches(value: &serde_json::Value, request_id: u64) -
         id.as_u64() == Some(request_id)
             || id.as_str().is_some_and(|id| id == request_id.to_string())
     })
-}
-
-async fn validate_codex_resume_support(program: &str) -> Result<(), DebugCommandError> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new(program).arg("resume").arg("--help").output(),
-    )
-    .await
-    .map_err(|_| DebugCommandError::CodexResumeUnsupported {
-        program: program.to_string(),
-        detail: "timed out running `resume --help`".into(),
-    })?
-    .map_err(|source| DebugCommandError::CodexLaunch {
-        program: program.to_string(),
-        source,
-    })?;
-    let help = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if output.status.success() && help.contains("resume") && help.contains("SESSION_ID") {
-        Ok(())
-    } else {
-        Err(DebugCommandError::CodexResumeUnsupported {
-            program: program.to_string(),
-            detail: help
-                .lines()
-                .next()
-                .unwrap_or("empty help output")
-                .to_string(),
-        })
-    }
 }
 
 fn codex_debug_metadata_from_raw_manifest(

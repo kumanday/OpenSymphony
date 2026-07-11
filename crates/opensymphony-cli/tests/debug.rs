@@ -48,7 +48,6 @@ async fn debug_codex_resume_launches_fake_codex_from_issue_workspace() {
         "PWD={}",
         ensured.handle.workspace_path().display()
     )));
-    assert!(log.contains("ARGS=resume --help"));
     assert!(log.contains("ARGS=resume 019ee323-173d-7ec0-8ad2-fa4067c5651c"));
 }
 
@@ -83,35 +82,6 @@ async fn debug_codex_app_prints_deep_link_without_launching_runtime() {
     assert_eq!(
         stdout.trim(),
         "codex://threads/019ee323-173d-7ec0-8ad2-fa4067c5651c"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn debug_codex_resume_reports_unsupported_cli() {
-    let project = TempDir::new().expect("temp project should exist");
-    let workspace_root = project.path().join("var").join("workspaces");
-    write_project_files(project.path(), &workspace_root, "http://127.0.0.1:39999");
-    let (_manager, ensured) = create_workspace(&workspace_root, "COE-481").await;
-    write_codex_manifest(&ensured.handle, "thread-unsupported");
-
-    let log_path = project.path().join("fake-codex.log");
-    let fake_codex = project.path().join("fake-codex");
-    write_fake_codex(&fake_codex, &log_path, false);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
-        .arg("debug")
-        .arg("COE-481")
-        .current_dir(project.path())
-        .env("OPENSYMPHONY_CODEX_BIN", &fake_codex)
-        .output()
-        .await
-        .expect("debug command should run");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "unsupported CLI should fail");
-    assert!(
-        stderr.contains("does not expose the required `codex resume <session-id>` path"),
-        "stderr should explain unsupported resume path: {stderr}",
     );
 }
 
