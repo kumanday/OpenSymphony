@@ -527,15 +527,6 @@ async fn ensure_codex_debug_thread_active(
     metadata: &mut CodexDebugMetadata,
 ) -> Result<(), DebugCommandError> {
     let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    metadata.manifest["codex_archive_state"] = serde_json::Value::String("unarchiving".into());
-    manager
-        .write_json_artifact(
-            workspace,
-            &workspace.conversation_manifest_path(),
-            &metadata.manifest,
-        )
-        .await
-        .map_err(DebugCommandError::WorkspaceManager)?;
     let adapter =
         CodexAppServerAdapter::local_stdio(&program, "opensymphony", env!("CARGO_PKG_VERSION"));
     let (binary, args) = adapter.launch().to_command();
@@ -625,6 +616,15 @@ async fn ensure_codex_debug_thread_active(
             detail: "thread was not found in the Codex app-server state database".into(),
         });
     }
+    metadata.manifest["codex_archive_state"] = serde_json::Value::String("unarchiving".into());
+    manager
+        .write_json_artifact(
+            workspace,
+            &workspace.conversation_manifest_path(),
+            &metadata.manifest,
+        )
+        .await
+        .map_err(DebugCommandError::WorkspaceManager)?;
     let request = adapter
         .unarchive_issue_thread_request(&mut session, metadata.thread_id.clone())
         .map_err(|source| DebugCommandError::CodexUnarchiveFailed {
@@ -678,23 +678,35 @@ async fn debug_thread_list_contains(
     thread_id: &str,
     archived: bool,
 ) -> Result<bool, String> {
-    let request = adapter
-        .list_issue_threads_request(
-            session,
-            workspace.workspace_path().display().to_string(),
-            archived,
-            None,
-        )
-        .map_err(|error| error.to_string())?;
-    write_debug_codex_request(stdin, &request.request).await?;
-    let response = read_debug_codex_response(reader, request.request.id).await?;
-    Ok(response["result"]["data"]
-        .as_array()
-        .is_some_and(|threads| {
-            threads.iter().any(|thread| {
-                thread.get("id").and_then(serde_json::Value::as_str) == Some(thread_id)
+    let mut cursor = None;
+    loop {
+        let request = adapter
+            .list_issue_threads_request(
+                session,
+                workspace.workspace_path().display().to_string(),
+                archived,
+                cursor.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+        write_debug_codex_request(stdin, &request.request).await?;
+        let response = read_debug_codex_response(reader, request.request.id).await?;
+        if response["result"]["data"]
+            .as_array()
+            .is_some_and(|threads| {
+                threads.iter().any(|thread| {
+                    thread.get("id").and_then(serde_json::Value::as_str) == Some(thread_id)
+                })
             })
-        }))
+        {
+            return Ok(true);
+        }
+        cursor = response["result"]["nextCursor"]
+            .as_str()
+            .map(ToOwned::to_owned);
+        if cursor.is_none() {
+            return Ok(false);
+        }
+    }
 }
 
 async fn read_debug_codex_response(

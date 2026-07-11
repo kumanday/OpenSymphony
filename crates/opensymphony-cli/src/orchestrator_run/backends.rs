@@ -742,12 +742,15 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                         }
                     }
                     Ok(_) => {}
-                    Err(error) => tracing::warn!(
-                        issue = %handle.identifier(),
-                        manifest = %manifest_path.display(),
-                        %error,
-                        "preserving terminal workspace with invalid conversation manifest"
-                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            issue = %handle.identifier(),
+                            manifest = %manifest_path.display(),
+                            %error,
+                            "preserving terminal workspace with invalid conversation manifest"
+                        );
+                        return Ok(());
+                    }
                 }
             }
             self.manager
