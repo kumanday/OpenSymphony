@@ -915,9 +915,8 @@ where
             return Ok(());
         };
 
-        let mut records = records.into_iter();
         let mut retry_records = Vec::new();
-        while let Some(record) = records.next() {
+        for record in records {
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
