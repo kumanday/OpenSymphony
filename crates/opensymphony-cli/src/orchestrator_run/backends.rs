@@ -1998,6 +1998,9 @@ async fn ensure_codex_thread_active(
 ) -> Result<(), String> {
     let thread_id = manifest.conversation_id.to_string();
     match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+        CodexArchiveState::Active if manifest.codex_archive_state.as_deref() == Some("active") => {
+            Ok(())
+        }
         CodexArchiveState::Active => {
             persist_codex_archive_state(manager, workspace, manifest, "active").await
         }
@@ -5590,7 +5593,11 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
       ;;
     *'"method":"thread/list"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      if printf '%s' "$line" | grep -q '"archived":true'; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      fi
       ;;
     *'"method":"thread/archive"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
@@ -5633,6 +5640,16 @@ while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
   case "$line" in
     *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/list"'*)
+      if printf '%s' "$line" | grep -q '"archived":true'; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      fi
+      ;;
+    *'"method":"thread/unarchive"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
     *'"method":"thread/resume"'*)
