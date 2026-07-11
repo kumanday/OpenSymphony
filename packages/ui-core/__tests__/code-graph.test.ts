@@ -139,6 +139,33 @@ describe("Code Graph renderer surface", () => {
     expect(root.querySelector("[data-code-copy-deeplink]")).toBeNull();
   });
 
+  it("keeps copied links in Diff mode tied to the revision pair", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay: codeGraphFixtureDiffOverlays[0] });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({ snapshot, layout: null, state, rawRecord: false });
+    const deepLink = root.querySelector<HTMLButtonElement>("[data-code-copy-deeplink]")?.dataset.codeCopyDeeplink;
+    expect(parseCodeDeepLink(deepLink!)).toMatchObject({
+      mode: "diff",
+      baseRevision: codeGraphFixtureDiffOverlays[0].base_revision,
+      headRevision: codeGraphFixtureDiffOverlays[0].head_revision,
+    });
+  });
+
+  it("shows delta filters only when a Diff overlay is active", () => {
+    let atlasState = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    atlasState = codeGraphReducer(atlasState, { type: "FILTERS_SET", filters: { deltaStatuses: ["modified"] } });
+    const atlasRoot = document.createElement("div");
+    atlasRoot.innerHTML = renderCodeGraphSurface({ snapshot, layout: null, state: atlasState });
+    expect(atlasRoot.querySelector("[data-code-filter='deltaStatuses']")).toBeNull();
+
+    const diffState = codeGraphReducer(atlasState, { type: "DIFF_LOADED", overlay: codeGraphFixtureDiffOverlays[0] });
+    const diffRoot = document.createElement("div");
+    diffRoot.innerHTML = renderCodeGraphSurface({ snapshot, layout: null, state: diffState });
+    expect(diffRoot.querySelector("[data-code-filter='deltaStatuses']")).not.toBeNull();
+  });
+
   it("shows the graph record when symbol detail loading fails", () => {
     let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
     state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });

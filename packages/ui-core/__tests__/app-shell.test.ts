@@ -1416,9 +1416,15 @@ describe("OpenSymphonyApp mount", () => {
       await Promise.resolve();
       expect(graphRequests.length).toBe(readsBeforeInvalidMode);
       const app = handle as unknown as {
-        state: { codeGraph: { snapshot: { nodes: CodeGraphNode[] } | null; mode: string; filters: { pathPrefixes: string[] } } };
+        state: { codeGraph: { snapshot: { nodes: CodeGraphNode[] } | null; mode: string; filters: { pathPrefixes: string[]; communities: string[] } } };
         drillIntoCodeNode(node: CodeGraphNode): void;
       };
+      const community = app.state.codeGraph.snapshot?.nodes.find((node) => node.kind === "community");
+      expect(community).toBeDefined();
+      app.drillIntoCodeNode(community!);
+      await flushUntil(() => app.state.codeGraph.filters.communities.length === 1);
+      expect(app.state.codeGraph.filters.pathPrefixes).toEqual([]);
+      expect(app.state.codeGraph.mode).toBe("atlas");
       const directory = app.state.codeGraph.snapshot?.nodes.find((node) => node.kind === "directory");
       expect(directory).toBeDefined();
       app.drillIntoCodeNode(directory!);
@@ -1474,6 +1480,9 @@ describe("OpenSymphonyApp mount", () => {
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/symbols/codeGraphReducer")).toBe(true);
       await flushUntil(() => root.querySelector("[data-testid='code-graph-file-fallback']")?.textContent?.includes("Symbol detail unavailable") ?? false);
       expect(root.querySelector("[data-testid='code-graph-detail-loading']")).toBeNull();
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-code-mode='file']")?.classList.contains("is-selected") ?? false);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-file-fallback']")?.textContent?.includes("No symbol detail is required") ?? false);
     } finally {
       await handle.destroy();
     }

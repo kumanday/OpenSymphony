@@ -7,7 +7,7 @@
  */
 
 import { HttpGatewayTransport } from "@opensymphony/api-client";
-import { codeDeepLinkPrefix, createGatewayCodeGraphAdapter, createGatewayGraphAdapter } from "@opensymphony/graph";
+import { codeDeepLinkFromLocationSearch, createGatewayCodeGraphAdapter, createGatewayGraphAdapter } from "@opensymphony/graph";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
 import { createWebModelProfileController } from "./model-profile-controller.js";
@@ -37,9 +37,8 @@ export function createWebCodeGraphAdapter(gatewayUrl = defaultGatewayUrl) {
 
 function openCodeDeepLinkFromLocation(app: ReturnType<typeof renderOpenSymphonyApp>): void {
   try {
-    const raw = /[?&]code=([^&]*)/.exec(globalThis.location?.search ?? "")?.[1];
-    if (!raw) return;
-    const link = raw.startsWith(codeDeepLinkPrefix) ? raw : decodeURIComponent(raw);
+    const link = codeDeepLinkFromLocationSearch(globalThis.location?.search ?? "");
+    if (!link) return;
     void app.openCodeDeepLink(link);
   } catch {
     // No usable location (tests, static builds without query strings).

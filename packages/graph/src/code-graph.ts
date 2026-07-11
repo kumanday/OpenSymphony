@@ -181,6 +181,14 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
       const repoId = state.repoId && action.repos.repos.some((repo) => repo.repo_id === state.repoId)
         ? state.repoId
         : action.repos.repos[0]?.repo_id ?? null;
+      if (repoId !== state.repoId) {
+        const reset = selectCodeGraphRepo(state, repoId);
+        return {
+          ...reset,
+          filters: { ...reset.filters, repoIds: [] },
+          repos: action.repos,
+        };
+      }
       return {
         ...state,
         repos: action.repos,
@@ -244,23 +252,7 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
             filters: { ...state.filters, deltaStatuses: [] },
           };
     case "REPO_SELECTED":
-      return {
-        ...state,
-        repoId: action.repoId,
-        mode: "atlas",
-        snapshot: action.repoId === state.snapshot?.repo_id ? state.snapshot : null,
-        symbolKey: null,
-        path: null,
-        runId: null,
-        baseRevision: null,
-        headRevision: null,
-        diffOverlay: null,
-        filters: { ...state.filters, deltaStatuses: [] },
-        selectedNodeIds: [],
-        breadcrumbs: [],
-        stale: false,
-        layoutStatus: "idle",
-      };
+      return selectCodeGraphRepo(state, action.repoId);
     case "TARGET_SET":
       return {
         ...state,
@@ -296,14 +288,23 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         path: current?.kind === "file" ? current.id : null,
         symbolKey,
         selectedNodeIds: symbolKey ? [current?.nodeId ?? `symbol:${symbolKey}`] : [],
-        filters: breadcrumbs.length === 0 ? { ...state.filters, pathPrefixes: [] } : state.filters,
+        filters: breadcrumbs.length === 0 ? { ...state.filters, pathPrefixes: [], communities: [] } : state.filters,
         layoutStatus: "idle",
       };
     }
     case "DEPTH_SET":
       return { ...state, depth: clamp(action.depth, codeGraphDepthBounds.min, codeGraphDepthBounds.max) };
     case "FILTERS_SET":
-      return { ...state, filters: normalizeCodeGraphFilters({ ...state.filters, ...action.filters }) };
+      return {
+        ...state,
+        filters: normalizeCodeGraphFilters({
+          ...state.filters,
+          ...action.filters,
+          ...((state.mode !== "diff")
+            ? { deltaStatuses: [] }
+            : {}),
+        }),
+      };
     case "FILTERS_RESET":
       return { ...state, filters: createInitialCodeGraphFilters() };
     case "LAYOUT_SEED_SET":
@@ -329,7 +330,10 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         ...action.state,
         diffOverlay: keepsDiffOverlay ? state.diffOverlay : null,
         depth: clamp(action.state.depth ?? state.depth, codeGraphDepthBounds.min, codeGraphDepthBounds.max),
-        filters: normalizeCodeGraphFilters(action.state.filters ?? state.filters),
+        filters: normalizeCodeGraphFilters({
+          ...(action.state.filters ?? state.filters),
+          ...((restoredMode !== "diff") ? { deltaStatuses: [] } : {}),
+        }),
         selectedNodeIds: uniqueSorted(action.state.selectedNodeIds ?? state.selectedNodeIds),
       };
     }
@@ -338,6 +342,27 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
     default:
       return state;
   }
+}
+
+function selectCodeGraphRepo(state: CodeGraphState, repoId: string | null): CodeGraphState {
+  return {
+    ...state,
+    repoId,
+    mode: "atlas",
+    snapshot: repoId === state.snapshot?.repo_id ? state.snapshot : null,
+    symbolKey: null,
+    path: null,
+    runId: null,
+    baseRevision: null,
+    headRevision: null,
+    diffOverlay: null,
+    filters: { ...state.filters, pathPrefixes: [], communities: [], deltaStatuses: [] },
+    selectedNodeIds: [],
+    breadcrumbs: [],
+    stale: false,
+    layoutStatus: "idle",
+    layoutError: null,
+  };
 }
 
 export function currentCodeGraphSnapshot(state: CodeGraphState): CodeGraphSnapshot | null {

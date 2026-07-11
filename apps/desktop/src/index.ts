@@ -19,7 +19,7 @@ import {
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
   memoryDeepLinkPrefix,
-  codeDeepLinkPrefix,
+  codeDeepLinkFromLocationSearch,
   type CodeFileOutline,
   type CodeGraphSnapshot,
   type CodeRepoList,
@@ -714,9 +714,8 @@ function openMemoryDeepLinkFromLocation(app: OpenSymphonyAppHandle): void {
 
 function openCodeDeepLinkFromLocation(app: OpenSymphonyAppHandle): void {
   try {
-    const raw = /[?&]code=([^&]*)/.exec(globalThis.location?.search ?? "")?.[1];
-    if (!raw) return;
-    const link = raw.startsWith(codeDeepLinkPrefix) ? raw : decodeURIComponent(raw);
+    const link = codeDeepLinkFromLocationSearch(globalThis.location?.search ?? "");
+    if (!link) return;
     void app.openCodeDeepLink(link);
   } catch {
     // No usable location (tests, packaged builds without query strings).

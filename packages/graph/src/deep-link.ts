@@ -156,6 +156,40 @@ function encodeSegments(value: string): string {
 
 export const codeDeepLinkPrefix = "opensymphony://code/";
 
+const codeBootQueryKeys = new Set(["mode", "depth", "run_id", "filters", "seed"]);
+const appBootQueryKeys = new Set(["code", "fixtures", "memory"]);
+
+/** Read an encoded or raw Code Graph link from an app location query. */
+export function codeDeepLinkFromLocationSearch(search: string): string | null {
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  const marker = /(?:^|&)code=/.exec(query);
+  if (!marker || marker.index === undefined) return null;
+  const rawValue = query.slice(marker.index + marker[0].length);
+  if (!rawValue) return null;
+  const [first, ...rest] = rawValue.split("&");
+  if (!first) return null;
+  let candidate = first;
+  if (first.startsWith(codeDeepLinkPrefix)) {
+    for (const pair of rest) {
+      const separator = pair.indexOf("=");
+      const key = separator === -1 ? pair : pair.slice(0, separator);
+      if (codeBootQueryKeys.has(key)) {
+        candidate += `&${pair}`;
+      } else if (appBootQueryKeys.has(key)) {
+        break;
+      } else {
+        return null;
+      }
+    }
+  }
+  try {
+    const link = first.startsWith(codeDeepLinkPrefix) ? candidate : decodeURIComponent(candidate);
+    return link.startsWith(codeDeepLinkPrefix) ? link : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface CodeDeepLink {
   repoId: string;
   mode: CodeGraphMode;

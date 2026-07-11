@@ -1,6 +1,7 @@
 import {
   codeDeepLinkForFile,
   codeDeepLinkForSymbol,
+  formatCodeDeepLink,
   codeEdgeVisualStyle,
   codeGraphNodeDeltaStatus,
   codeGraphSnapshotForRendering,
@@ -179,8 +180,10 @@ export function renderCodeGraphFilters(surface: CodeGraphSurface): string {
     ["confidences", "Confidence", ["exact", "syntactic", "heuristic"]],
     ["freshness", "Freshness", ["current", "stale", "unknown"]],
     ["communities", "Community", communityValues],
-    ["deltaStatuses", "Delta status", ["added", "removed", "modified", "unchanged"]],
   ];
+  if (state.mode === "diff" && state.diffOverlay) {
+    groups.push(["deltaStatuses", "Delta status", ["added", "removed", "modified", "unchanged"]]);
+  }
   const checkboxGroups = groups.map(([key, label, rawValues]) => {
     const values = [...new Set(rawValues)].sort();
     if (values.length === 0) return "";
@@ -318,6 +321,16 @@ function codeDeepLinkForNode(state: CodeGraphState, node: CodeGraphNode): string
     const filters = state.filters.deltaStatuses.length > 0
       ? { ...state.filters, deltaStatuses: [] }
       : state.filters;
+    if (state.mode === "diff" && state.baseRevision && state.headRevision) {
+      return formatCodeDeepLink({
+        repoId: state.repoId ?? "",
+        baseRevision: state.baseRevision,
+        headRevision: state.headRevision,
+        depth: state.depth,
+        filters,
+        layoutSeed: state.layoutSeed,
+      });
+    }
     if (node.symbol_key) return codeDeepLinkForSymbol(state.repoId ?? "", node.symbol_key, { mode: "neighborhood", depth: state.depth, filters, layoutSeed: state.layoutSeed });
     if (node.path_display) return codeDeepLinkForFile(state.repoId ?? "", node.path_display, { mode: state.mode === "diff" ? "file" : state.mode, depth: state.depth, filters, layoutSeed: state.layoutSeed });
   } catch {

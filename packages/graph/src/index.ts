@@ -103,6 +103,7 @@ export {
 export {
   codeDeepLinkForFile,
   codeDeepLinkForSymbol,
+  codeDeepLinkFromLocationSearch,
   codeDeepLinkPrefix,
   codeDeepLinkToGraphState,
   formatCodeDeepLink,

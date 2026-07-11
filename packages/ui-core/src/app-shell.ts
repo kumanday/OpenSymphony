@@ -1295,18 +1295,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private drillIntoCodeNode(node: CodeGraphNode): void {
     if (node.kind === "directory" || node.kind === "community") {
-      const prefixes = node.kind === "community"
-        ? [node.label, node.path_display].filter((value): value is string => Boolean(value))
-        : [node.path_display ?? node.label];
+      const communityId = node.metrics.community_id ?? node.id.replace(/^community:/, "");
+      const prefixes = node.kind === "community" ? [] : [node.path_display ?? node.label];
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "FILTERS_SET",
-        filters: { pathPrefixes: prefixes },
+        filters: node.kind === "community"
+          ? { communities: [communityId], pathPrefixes: [] }
+          : { communities: [], pathPrefixes: prefixes },
       });
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "DRILL_IN",
-        breadcrumb: { kind: "directory", id: prefixes[0], label: node.label },
+        breadcrumb: { kind: "directory", id: node.kind === "community" ? communityId : prefixes[0], nodeId: node.id, label: node.label },
         mode: "atlas",
-        path: prefixes[0],
+        path: node.kind === "community" ? null : prefixes[0],
         symbolKey: null,
       });
       this.invalidateCodeGraphNavigation();
@@ -1354,9 +1355,21 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const adapter = this.codeGraphAdapter;
     const snapshot = this.visibleCodeGraphSnapshot();
     const selected = snapshot?.nodes.find((node) => this.state.codeGraph.selectedNodeIds.includes(node.id));
-    if (!adapter || !selected?.symbol_key) return;
+    if (!adapter || !selected?.symbol_key) {
+      this.codeGraphSymbolRequest = null;
+      this.codeGraphSymbolErrorKey = null;
+      this.codeGraphSymbolError = null;
+      return;
+    }
     const detailKey = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
     const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}`;
+    if (this.codeGraphSymbolRequest !== null && this.codeGraphSymbolRequest !== key) {
+      this.codeGraphSymbolRequest = null;
+    }
+    if (this.codeGraphSymbolErrorKey !== null && this.codeGraphSymbolErrorKey !== key) {
+      this.codeGraphSymbolErrorKey = null;
+      this.codeGraphSymbolError = null;
+    }
     if (this.codeGraphSymbolRequest === key
       || this.codeGraphSymbolErrorKey === key
       || this.state.codeGraph.symbolDetails[detailKey]) return;

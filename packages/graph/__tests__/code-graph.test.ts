@@ -6,6 +6,7 @@ import {
   createHttpCodeGraphAdapter,
   createInitialCodeGraphState,
   createTauriNativeCodeGraphAdapter,
+  codeDeepLinkFromLocationSearch,
   formatCodeDeepLink,
   initialCodeGraphFilters,
   parseCodeDeepLink,
@@ -230,6 +231,37 @@ describe("Code Graph adapters and state", () => {
     expect(state.repoId).toBe("available");
   });
 
+  it("resets scoped state when repository fallback changes the selected repo", async () => {
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "file" });
+    const repos = await createFixtureCodeGraphAdapter().listRepos();
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot: { ...snapshot, repo_id: "stale-only" } });
+    state = codeGraphReducer(state, {
+      type: "DRILL_IN",
+      breadcrumb: { kind: "file", id: "packages/graph/src/index.ts", label: "index.ts" },
+      mode: "file",
+      path: "packages/graph/src/index.ts",
+    });
+    state = codeGraphReducer(state, { type: "TARGET_SET", symbolKey: "oldSymbol" });
+    state = codeGraphReducer(state, {
+      type: "FILTERS_SET",
+      filters: { repoIds: ["stale-only"], pathPrefixes: ["old/"], communities: ["old-community"] },
+    });
+    state = codeGraphReducer(state, {
+      type: "REPOS_LOADED",
+      repos: { ...(await createFixtureCodeGraphAdapter().listRepos()), repos: [{ ...repos.repos[0], repo_id: "available" }] },
+    });
+    expect(state).toMatchObject({
+      repoId: "available",
+      mode: "atlas",
+      snapshot: null,
+      symbolKey: null,
+      path: null,
+      selectedNodeIds: [],
+      breadcrumbs: [],
+      filters: { repoIds: [], pathPrefixes: [], communities: [], deltaStatuses: [] },
+    });
+  });
+
   it("keeps HTTP and native adapters on the same DTO contract", async () => {
     const fetchMock = jest.fn(async (url: string) => ({
       ok: true,
@@ -306,5 +338,19 @@ describe("Code Graph deep links", () => {
       deltaStatuses: ["renamed"],
     }));
     expect(parseCodeDeepLink(`opensymphony://code/repo/atlas?filters=${deltaFilters}`)).toBeNull();
+  });
+
+  it("recovers raw and encoded Code Graph boot links with composable app params", () => {
+    const link = formatCodeDeepLink({
+      repoId: "repo",
+      symbolKey: "module::run",
+      depth: 2,
+      runId: "run-1",
+      layoutSeed: "seed-1",
+    });
+    expect(codeDeepLinkFromLocationSearch(`?fixtures&code=${link}`)).toBe(link);
+    expect(codeDeepLinkFromLocationSearch(`?code=${encodeURIComponent(link)}&fixtures`)).toBe(link);
+    expect(codeDeepLinkFromLocationSearch(`?code=${link}&fixtures`)).toBe(link);
+    expect(codeDeepLinkFromLocationSearch(`?code=${link}&unexpected=1`)).toBeNull();
   });
 });
