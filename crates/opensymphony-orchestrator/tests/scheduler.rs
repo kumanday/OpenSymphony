@@ -375,6 +375,7 @@ struct FakeWorkspace {
     recoveries: Vec<RecoveryRecord>,
     ensured: Vec<String>,
     cleaned: Vec<(String, bool)>,
+    cleanup_results: VecDeque<Result<(), FakeError>>,
     records: HashMap<String, WorkspaceRecord>,
 }
 
@@ -411,7 +412,7 @@ impl WorkspaceBackend for FakeWorkspace {
     ) -> Result<(), Self::Error> {
         self.cleaned
             .push((workspace.workspace_key.to_string(), terminal));
-        Ok(())
+        self.cleanup_results.pop_front().unwrap_or(Ok(()))
     }
 }
 
@@ -1322,6 +1323,71 @@ async fn worker_finish_rechecks_tracker_state_before_continuation_retry() {
     assert_eq!(
         scheduler.tracker().state_requests,
         vec![vec!["lin-492".to_string()]]
+    );
+}
+
+#[tokio::test]
+async fn terminal_cleanup_failure_after_worker_finish_keeps_execution_for_retry() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-541", "COE-541", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        cleanup_results: VecDeque::from([Err(FakeError {
+            message: "Codex archive failed".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch");
+    scheduler.tracker_mut().states.insert(
+        "lin-541".to_string(),
+        tracker_state_snapshot("lin-541", "COE-541", "Done", "completed", 200),
+    );
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(200),
+                Some("worker exited cleanly".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("archive failure should not drop the released execution");
+    let issue_id = IssueId::new("lin-541").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("execution should remain tracked")
+            .status(),
+        SchedulerStatus::Released
+    );
+
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue("lin-541", "COE-541", "Done", 0)];
+    scheduler
+        .tick(ts(300_200))
+        .await
+        .expect("terminal reconciliation should retry cleanup");
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![("COE-541".to_string(), true), ("COE-541".to_string(), true),]
     );
 }
 

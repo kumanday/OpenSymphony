@@ -1845,6 +1845,78 @@ enum CodexArchiveState {
     Missing,
 }
 
+struct CodexLifecycleSession {
+    child: tokio::process::Child,
+    stdin: ChildStdin,
+    reader: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    adapter: CodexAppServerAdapter,
+    session: CodexJsonRpcSession,
+    validator: CodexAppServerSchemaValidator,
+}
+
+impl CodexLifecycleSession {
+    async fn start(codex_bin: &str, cwd: &Path) -> Result<Self, String> {
+        let adapter = CodexAppServerAdapter::local_stdio(
+            codex_bin,
+            "opensymphony",
+            env!("CARGO_PKG_VERSION"),
+        );
+        let validator = load_installed_codex_schema_validator(codex_bin).await?;
+        let (program, args) = adapter.launch().to_command();
+        let mut child = Command::new(&program)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|source| format!("failed to launch Codex lifecycle app-server: {source}"))?;
+        let mut stdin = child.stdin.take().ok_or("Codex lifecycle stdin missing")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Codex lifecycle stdout missing")?;
+        let mut reader = BufReader::new(stdout).lines();
+        let mut session = adapter.session();
+        let initialize = session.initialize();
+        write_codex_lifecycle_request(&mut stdin, &validator, &initialize, "initialize").await?;
+        read_codex_lifecycle_response(&mut reader, initialize.id).await?;
+        Ok(Self {
+            child,
+            stdin,
+            reader,
+            adapter,
+            session,
+            validator,
+        })
+    }
+
+    async fn request<F>(&mut self, operation: &str, build: F) -> Result<serde_json::Value, String>
+    where
+        F: FnOnce(
+            &CodexAppServerAdapter,
+            &mut CodexJsonRpcSession,
+        )
+            -> Result<crate::opensymphony_codex::CodexHarnessRequest, serde_json::Error>,
+    {
+        let request = build(&self.adapter, &mut self.session)
+            .map_err(|source| format!("failed to build Codex {operation} request: {source}"))?;
+        write_codex_lifecycle_request(
+            &mut self.stdin,
+            &self.validator,
+            &request.request,
+            operation,
+        )
+        .await?;
+        read_codex_lifecycle_response(&mut self.reader, request.request.id).await
+    }
+
+    async fn stop(&mut self) {
+        let _ = self.child.kill().await;
+    }
+}
+
 async fn send_codex_lifecycle_request<F>(
     codex_bin: &str,
     cwd: &Path,
@@ -1857,34 +1929,9 @@ where
         &mut CodexJsonRpcSession,
     ) -> Result<crate::opensymphony_codex::CodexHarnessRequest, serde_json::Error>,
 {
-    let adapter =
-        CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
-    let validator = load_installed_codex_schema_validator(codex_bin).await?;
-    let (program, args) = adapter.launch().to_command();
-    let mut child = Command::new(&program)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|source| format!("failed to launch Codex lifecycle app-server: {source}"))?;
-    let mut stdin = child.stdin.take().ok_or("Codex lifecycle stdin missing")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Codex lifecycle stdout missing")?;
-    let mut reader = BufReader::new(stdout).lines();
-    let mut session = adapter.session();
-    let initialize = session.initialize();
-    write_codex_lifecycle_request(&mut stdin, &validator, &initialize, "initialize").await?;
-    read_codex_lifecycle_response(&mut reader, initialize.id).await?;
-    let request = build(&adapter, &mut session)
-        .map_err(|source| format!("failed to build Codex {operation} request: {source}"))?;
-    write_codex_lifecycle_request(&mut stdin, &validator, &request.request, operation).await?;
-    let response = read_codex_lifecycle_response(&mut reader, request.request.id).await;
-    let _ = child.kill().await;
+    let mut session = CodexLifecycleSession::start(codex_bin, cwd).await?;
+    let response = session.request(operation, build).await;
+    session.stop().await;
     response
 }
 
@@ -1938,23 +1985,20 @@ async fn inspect_codex_archive_state(
     workspace: &WorkspaceHandle,
     thread_id: &str,
 ) -> Result<CodexArchiveState, String> {
+    let mut session = CodexLifecycleSession::start(codex_bin, workspace.workspace_path()).await?;
     for archived in [true, false] {
         let mut cursor = None;
         loop {
-            let response = send_codex_lifecycle_request(
-                codex_bin,
-                workspace.workspace_path(),
-                "thread/list",
-                |adapter, session| {
+            let response = session
+                .request("thread/list", |adapter, session| {
                     adapter.list_issue_threads_request(
                         session,
                         workspace.workspace_path().display().to_string(),
                         archived,
                         cursor.clone(),
                     )
-                },
-            )
-            .await?;
+                })
+                .await?;
             if response["result"]["data"]
                 .as_array()
                 .is_some_and(|threads| {
@@ -1963,11 +2007,13 @@ async fn inspect_codex_archive_state(
                     })
                 })
             {
-                return Ok(if archived {
+                let state = if archived {
                     CodexArchiveState::Archived
                 } else {
                     CodexArchiveState::Active
-                });
+                };
+                session.stop().await;
+                return Ok(state);
             }
             cursor = response["result"]["nextCursor"]
                 .as_str()
@@ -1977,6 +2023,7 @@ async fn inspect_codex_archive_state(
             }
         }
     }
+    session.stop().await;
     Ok(CodexArchiveState::Missing)
 }
 
@@ -4275,6 +4322,14 @@ mod tests {
             .cleanup_workspace(&workspace, true)
             .await
             .expect("initial terminal archive should succeed");
+        let lifecycle_processes = fs::read_to_string(&log_path)
+            .expect("fake Codex lifecycle log should exist")
+            .matches("PWD=")
+            .count();
+        assert_eq!(
+            lifecycle_processes, 2,
+            "archive-state inspection and archive should use one process each"
+        );
 
         let unarchived_manifest_raw = workspace_manager
             .read_text_artifact(
