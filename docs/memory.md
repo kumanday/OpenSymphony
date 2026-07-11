@@ -518,7 +518,7 @@ are covered by the same archive operation.
 
 ## Current model
 
-- COE-540 contributed: PR #206: feat(codex): reuse canonical issue threads (merge `e49e5ab`)
+- COE-541 contributed: PR #207: feat(codex): archive and recover canonical threads (merge `c2723c2`)
 
 ## Important invariants
 
@@ -535,10 +535,10 @@ are covered by the same archive operation.
 
 ## Recent changes
 
-- COE-540: Canonical Codex Thread Reuse And Workspace Retention
+- COE-541: Durable Codex Thread Archive And Debug Recovery
 
 ## Source refs
 
-- COE-540
+- COE-541
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
