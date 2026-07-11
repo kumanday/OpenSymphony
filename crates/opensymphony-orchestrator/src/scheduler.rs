@@ -1763,13 +1763,14 @@ where
         if execution.status() != SchedulerStatus::Released {
             execution = execution.release(observed_at, reason, None)?;
         }
-        if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
-            if let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await {
-                self.insert_execution(issue_id, execution);
-                return Err(SchedulerError::Workspace {
-                    detail: error.to_string(),
-                });
-            }
+        if cleanup_terminal
+            && let Some(workspace) = execution.workspace().cloned()
+            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
+        {
+            self.insert_execution(issue_id, execution);
+            return Err(SchedulerError::Workspace {
+                detail: error.to_string(),
+            });
         }
         self.insert_execution(issue_id, execution);
         Ok(())
