@@ -322,7 +322,9 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
       const restoredHeadRevision = action.state.headRevision === undefined
         ? state.headRevision
         : action.state.headRevision;
+      const restoredRepoId = action.state.repoId === undefined ? state.repoId : action.state.repoId;
       const keepsDiffOverlay = restoredMode === "diff"
+        && restoredRepoId === state.repoId
         && restoredBaseRevision === state.baseRevision
         && restoredHeadRevision === state.headRevision;
       return {

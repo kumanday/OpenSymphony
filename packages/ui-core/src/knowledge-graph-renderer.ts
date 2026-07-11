@@ -84,6 +84,7 @@ export interface CodeGraphSurface {
   snapshot: CodeGraphSnapshot | null;
   layout: GraphLayoutResult | null;
   state: CodeGraphState;
+  filtersOpen?: boolean;
   symbolDetail?: CodeSymbolDetail | null;
   detailError?: string | null;
   rawRecord?: boolean;
@@ -193,7 +194,7 @@ export function renderCodeGraphFilters(surface: CodeGraphSurface): string {
     `).join("")}</fieldset>`;
   }).join("");
   return `
-    <details class="os-code-filters" data-testid="code-graph-filters">
+    <details class="os-code-filters" data-testid="code-graph-filters"${surface.filtersOpen ? " open" : ""}>
       <summary>Filters${filterCount > 0 ? ` (${filterCount})` : ""}</summary>
       <div class="os-code-filter-grid">
         ${checkboxGroups}

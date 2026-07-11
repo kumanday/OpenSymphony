@@ -11,6 +11,7 @@ import {
   createFixtureCodeGraphAdapter,
   createFixtureGraphAdapter,
   createScaleGraphSnapshot,
+  codeGraphReducer,
   fixtureConceptDetail,
   fixtureGraphSnapshot,
   graphVizFixtureBundleList,
@@ -22,6 +23,8 @@ import {
   type GraphDataAdapter,
   type MemoryCompletedTask,
   type CodeGraphSnapshot,
+  type CodeRepoList,
+  type CodeGraphState,
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
@@ -1389,8 +1392,13 @@ describe("OpenSymphonyApp mount", () => {
       expect(focusApp.state.codeGraph.mode).toBe("file");
       const staleFilter = root.querySelector<HTMLInputElement>("[data-code-filter='freshness'][data-code-filter-value='stale']");
       expect(staleFilter).not.toBeNull();
+      const filterPanel = root.querySelector<HTMLDetailsElement>("[data-testid='code-graph-filters']");
+      expect(filterPanel).not.toBeNull();
+      filterPanel!.open = true;
+      filterPanel!.dispatchEvent(new Event("toggle"));
       staleFilter!.click();
       await flushUntil(() => root.querySelectorAll("[data-testid='code-graph-structure-list'] li").length === 1);
+      expect(root.querySelector<HTMLDetailsElement>("[data-testid='code-graph-filters']")?.open).toBe(true);
       expect(root.querySelector("[data-testid='code-graph-structure-list']")?.textContent).toContain("codeGraphReducer");
       await flushUntil(() => graphRequests.some((request) => request.includeStale === true));
       const readsBeforeFilterReset = graphRequests.length;
@@ -1588,6 +1596,52 @@ describe("OpenSymphonyApp mount", () => {
       app.render();
       await flushUntil(() => app.state.codeGraph.layoutStatus === "ready" && layoutSizes.length >= 2);
       expect(layoutSizes[1].width).toBeGreaterThan(layoutSizes[0].width);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("discards a repo list response fetched with obsolete freshness", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const repoResult = await fixtureCodeGraphAdapter.listRepos();
+    let releaseFirst: ((repos: CodeRepoList) => void) | null = null;
+    const firstRepos = new Promise<CodeRepoList>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const repoRequests: Array<{ includeStale?: boolean }> = [];
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async listRepos(options?: Parameters<typeof fixtureCodeGraphAdapter.listRepos>[0]) {
+        repoRequests.push(options ?? {});
+        return repoRequests.length === 1 ? firstRepos : fixtureCodeGraphAdapter.listRepos(options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+    const app = handle as unknown as {
+      loadCodeGraph(): Promise<void>;
+      state: { codeGraph: CodeGraphState };
+    };
+
+    try {
+      const firstLoad = app.loadCodeGraph();
+      await flushUntil(() => repoRequests.length === 1);
+      app.state.codeGraph = codeGraphReducer(app.state.codeGraph, {
+        type: "FILTERS_SET",
+        filters: { freshness: ["stale"] },
+      });
+      app.state.codeGraph = codeGraphReducer(app.state.codeGraph, { type: "REPOS_INVALIDATED" });
+      const queuedLoad = app.loadCodeGraph();
+      releaseFirst!(repoResult);
+      await Promise.all([firstLoad, queuedLoad]);
+      expect(repoRequests.map((request) => request.includeStale)).toEqual([false, true]);
+      expect(app.state.codeGraph.repos).toEqual(repoResult);
     } finally {
       await handle.destroy();
     }

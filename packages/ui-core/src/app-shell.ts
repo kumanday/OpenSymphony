@@ -222,6 +222,8 @@ export interface OpenSymphonyAppOptions {
 }
 
 export interface OpenSymphonyAppHandle {
+  /** Resolves after the first profile/model/gateway refresh has settled. */
+  ready(): Promise<void>;
   refresh(): Promise<void>;
   destroy(): Promise<void>;
   /**
@@ -357,9 +359,7 @@ const defaultCompletedTasksParams = { query: "", sort: "completed_desc", page: 1
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
 ): OpenSymphonyAppHandle {
-  const app = new OpenSymphonyApp(options);
-  void app.refresh();
-  return app;
+  return new OpenSymphonyApp(options);
 }
 
 class OpenSymphonyApp implements OpenSymphonyAppHandle {
@@ -396,7 +396,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private codeGraphSymbolRequest: string | null = null;
   private codeGraphSymbolErrorKey: string | null = null;
   private codeGraphSymbolError: string | null = null;
+  private codeGraphFiltersOpen = false;
   private codeGraphRawRecord = false;
+  private initialRefresh: Promise<void>;
   /** Concept-detail request currently in flight, keyed `${bundleId}:${conceptId}`. */
   private knowledgeCapsuleRequest: string | null = null;
   /** Guards in-flight completed-tasks pages (superseded by newer queries). */
@@ -499,6 +501,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     // Cross-pane task edges are measured from live card positions, so any
     // viewport resize must recompute them. Removed in destroy().
     this.options.root.ownerDocument.defaultView?.addEventListener("resize", this.onWindowResize);
+    this.initialRefresh = this.refresh();
   }
 
   private onWindowResize = (): void => {
@@ -611,6 +614,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (bundle.warnings.length > 0) {
       this.state.connectionMessage = bundle.warnings[bundle.warnings.length - 1];
     }
+  }
+
+  ready(): Promise<void> {
+    return this.initialRefresh;
   }
 
   async refresh(): Promise<void> {
@@ -817,6 +824,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.codeGraphSymbolRequest = null;
     this.codeGraphSymbolErrorKey = null;
     this.codeGraphSymbolError = null;
+    this.codeGraphFiltersOpen = false;
     this.codeGraphRawRecord = false;
     this.codeGraphView = createKnowledgeGraphViewState();
     if (shouldReload) void this.loadCodeGraph();
@@ -1099,10 +1107,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     try {
       if (!this.state.codeGraph.repos) {
+        const includeStale = codeGraphNeedsBroadFreshness(this.state.codeGraph.filters);
         const repos = await this.codeGraphAdapter.listRepos({
-          includeStale: codeGraphNeedsBroadFreshness(this.state.codeGraph.filters),
+          includeStale,
         });
-        if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion) return;
+        if (this.destroyed
+          || navigationVersion !== this.codeGraphNavigationVersion
+          || includeStale !== codeGraphNeedsBroadFreshness(this.state.codeGraph.filters)) return;
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_LOADED", repos });
       }
       const repoId = this.state.codeGraph.repoId ?? this.state.codeGraph.repos?.repos[0]?.repo_id ?? null;
@@ -3013,6 +3024,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           snapshot: this.visibleCodeGraphSnapshot(),
           layout: this.codeGraphLayout,
           state: this.state.codeGraph,
+          filtersOpen: this.codeGraphFiltersOpen,
           symbolDetail: this.selectedCodeSymbolDetail(),
           detailError: this.codeGraphSymbolError,
           rawRecord: this.codeGraphRawRecord,
@@ -3313,6 +3325,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         snapshot: this.visibleCodeGraphSnapshot(),
         layout: this.codeGraphLayout,
         state: this.state.codeGraph,
+        filtersOpen: this.codeGraphFiltersOpen,
         symbolDetail: this.selectedCodeSymbolDetail(),
         detailError: this.codeGraphSymbolError,
         rawRecord: this.codeGraphRawRecord,
@@ -4202,6 +4215,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelectorAll<HTMLElement>("[data-code-filter]").forEach((control) => {
       const eventType = control instanceof HTMLInputElement && control.type === "text" ? "input" : "change";
       this.listen(control, "code-filter", eventType, () => this.onCodeGraphFilterChange(control));
+    });
+    const codeFilterPanel = this.options.root.querySelector<HTMLDetailsElement>("[data-testid='code-graph-filters']");
+    this.listen(codeFilterPanel, "code-filter-panel", "toggle", () => {
+      this.codeGraphFiltersOpen = codeFilterPanel?.open ?? false;
     });
     this.listen(this.options.root.querySelector("[data-code-filter-reset]"), "code-filter-reset", "click", () => {
       const hadBroadFreshness = codeGraphNeedsBroadFreshness(this.state.codeGraph.filters);

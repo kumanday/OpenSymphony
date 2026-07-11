@@ -107,6 +107,22 @@ describe("Code Graph adapters and state", () => {
     expect(state.filters.deltaStatuses).toEqual([]);
   });
 
+  it("does not retain a Diff overlay when restoring another repository", () => {
+    const overlay = codeGraphFixtureDiffOverlays[0];
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "DIFF_LOADED", overlay });
+    state = codeGraphReducer(state, {
+      type: "HISTORY_RESTORED",
+      state: {
+        repoId: "other-repo",
+        mode: "diff",
+        baseRevision: overlay.base_revision,
+        headRevision: overlay.head_revision,
+      },
+    });
+    expect(state.repoId).toBe("other-repo");
+    expect(state.diffOverlay).toBeNull();
+  });
+
   it("synthesizes added and modified diff symbols and honors explicit target clears", async () => {
     const adapter = createFixtureCodeGraphAdapter();
     const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "atlas" });

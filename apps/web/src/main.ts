@@ -39,7 +39,9 @@ function openCodeDeepLinkFromLocation(app: ReturnType<typeof renderOpenSymphonyA
   try {
     const link = codeDeepLinkFromLocationSearch(globalThis.location?.search ?? "");
     if (!link) return;
-    void app.openCodeDeepLink(link);
+    void app.ready()
+      .then(() => app.openCodeDeepLink(link))
+      .catch(() => undefined);
   } catch {
     // No usable location (tests, static builds without query strings).
   }
