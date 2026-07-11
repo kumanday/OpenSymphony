@@ -132,6 +132,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
+    codex_bin: String,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -627,6 +628,7 @@ impl RuntimeWorkspaceBackend {
                 .map(|state| normalized_state_name(state))
                 .collect(),
             terminal_cleanup_paths: HashSet::new(),
+            codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
         }
     }
 }
@@ -714,6 +716,40 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             else {
                 return Ok(());
             };
+            let manifest_path = handle.conversation_manifest_path();
+            if let Some(raw_manifest) = self
+                .manager
+                .read_text_artifact(&handle, &manifest_path)
+                .await?
+            {
+                match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+                    Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
+                        if let Err(error) = archive_terminal_codex_thread(
+                            &self.manager,
+                            &handle,
+                            &mut manifest,
+                            &self.codex_bin,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                thread_id = %manifest.conversation_id,
+                                %error,
+                                "preserving terminal Codex workspace for archive retry"
+                            );
+                            return Ok(());
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        issue = %handle.identifier(),
+                        manifest = %manifest_path.display(),
+                        %error,
+                        "preserving terminal workspace with invalid conversation manifest"
+                    ),
+                }
+            }
             self.manager
                 .cleanup(&handle, IssueLifecycleState::Terminal)
                 .await?;
@@ -1365,9 +1401,22 @@ async fn try_run_codex_stdio_issue(
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
 
     let model = codex_model_from_route(route);
-    let existing_manifest = load_codex_conversation_manifest(workspace_manager, workspace, issue)
-        .await
-        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let mut existing_manifest =
+        load_codex_conversation_manifest(workspace_manager, workspace, issue)
+            .await
+            .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    if let Some(manifest) = existing_manifest.as_mut() {
+        ensure_codex_thread_active(workspace_manager, workspace, manifest, codex_bin)
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(manifest.conversation_id.as_str()),
+                    "archive recovery",
+                    error,
+                )
+            })?;
+    }
     let first_run_prompt = if existing_manifest.is_none() {
         Some(
             workflow
@@ -1783,6 +1832,220 @@ async fn load_installed_codex_schema_validator(
             schema_path.display()
         )
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexArchiveState {
+    Active,
+    Archived,
+    Missing,
+}
+
+async fn send_codex_lifecycle_request<F>(
+    codex_bin: &str,
+    cwd: &Path,
+    operation: &str,
+    build: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(
+        &CodexAppServerAdapter,
+        &mut CodexJsonRpcSession,
+    ) -> Result<crate::opensymphony_codex::CodexHarnessRequest, serde_json::Error>,
+{
+    let adapter =
+        CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
+    let validator = load_installed_codex_schema_validator(codex_bin).await?;
+    let (program, args) = adapter.launch().to_command();
+    let mut child = Command::new(&program)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| format!("failed to launch Codex lifecycle app-server: {source}"))?;
+    let mut stdin = child.stdin.take().ok_or("Codex lifecycle stdin missing")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Codex lifecycle stdout missing")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut session = adapter.session();
+    let initialize = session.initialize();
+    write_codex_lifecycle_request(&mut stdin, &validator, &initialize, "initialize").await?;
+    read_codex_lifecycle_response(&mut reader, initialize.id).await?;
+    let request = build(&adapter, &mut session)
+        .map_err(|source| format!("failed to build Codex {operation} request: {source}"))?;
+    write_codex_lifecycle_request(&mut stdin, &validator, &request.request, operation).await?;
+    let response = read_codex_lifecycle_response(&mut reader, request.request.id).await;
+    let _ = child.kill().await;
+    response
+}
+
+async fn write_codex_lifecycle_request(
+    stdin: &mut ChildStdin,
+    validator: &CodexAppServerSchemaValidator,
+    request: &JsonRpcRequestEnvelope,
+    operation: &str,
+) -> Result<(), String> {
+    validator
+        .validate_request(request)
+        .map_err(|source| source.to_string())?;
+    stdin
+        .write_all(
+            CodexJsonRpcSession::encode_line(request)
+                .map_err(|source| source.to_string())?
+                .as_bytes(),
+        )
+        .await
+        .map_err(|source| format!("failed to write Codex {operation} request: {source}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|source| format!("failed to flush Codex {operation} request: {source}"))
+}
+
+async fn read_codex_lifecycle_response(
+    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    request_id: u64,
+) -> Result<serde_json::Value, String> {
+    let deadline = tokio::time::Instant::now() + CODEX_RESPONSE_TIMEOUT;
+    loop {
+        let line = timeout_at(deadline, reader.next_line())
+            .await
+            .map_err(|_| format!("timed out waiting for Codex lifecycle response id {request_id}"))?
+            .map_err(|source| format!("failed reading Codex lifecycle stdout: {source}"))?
+            .ok_or_else(|| {
+                format!("Codex lifecycle stdout closed before response id {request_id}")
+            })?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|source| format!("invalid Codex lifecycle JSON: {source}"))?;
+        if codex_response_id_matches(&value, request_id) {
+            reject_codex_json_rpc_error(request_id, &value)?;
+            return Ok(value);
+        }
+    }
+}
+
+async fn inspect_codex_archive_state(
+    codex_bin: &str,
+    workspace: &WorkspaceHandle,
+    thread_id: &str,
+) -> Result<CodexArchiveState, String> {
+    for archived in [true, false] {
+        let mut cursor = None;
+        loop {
+            let response = send_codex_lifecycle_request(
+                codex_bin,
+                workspace.workspace_path(),
+                "thread/list",
+                |adapter, session| {
+                    adapter.list_issue_threads_request(
+                        session,
+                        workspace.workspace_path().display().to_string(),
+                        archived,
+                        cursor.clone(),
+                    )
+                },
+            )
+            .await?;
+            if response["result"]["data"]
+                .as_array()
+                .is_some_and(|threads| {
+                    threads.iter().any(|thread| {
+                        thread.get("id").and_then(serde_json::Value::as_str) == Some(thread_id)
+                    })
+                })
+            {
+                return Ok(if archived {
+                    CodexArchiveState::Archived
+                } else {
+                    CodexArchiveState::Active
+                });
+            }
+            cursor = response["result"]["nextCursor"]
+                .as_str()
+                .map(ToOwned::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+    }
+    Ok(CodexArchiveState::Missing)
+}
+
+async fn persist_codex_archive_state(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    state: &str,
+) -> Result<(), String> {
+    manifest.codex_archive_state = Some(state.to_string());
+    manifest.updated_at = chrono::Utc::now();
+    manager
+        .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn ensure_codex_thread_active(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    codex_bin: &str,
+) -> Result<(), String> {
+    let thread_id = manifest.conversation_id.to_string();
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+        CodexArchiveState::Active => {
+            persist_codex_archive_state(manager, workspace, manifest, "active").await
+        }
+        CodexArchiveState::Archived => {
+            persist_codex_archive_state(manager, workspace, manifest, "unarchiving").await?;
+            send_codex_lifecycle_request(
+                codex_bin,
+                workspace.workspace_path(),
+                "thread/unarchive",
+                |adapter, session| {
+                    adapter.unarchive_issue_thread_request(session, thread_id.clone())
+                },
+            )
+            .await?;
+            persist_codex_archive_state(manager, workspace, manifest, "active").await
+        }
+        CodexArchiveState::Missing => Err(format!(
+            "canonical Codex thread {thread_id} is missing; recover manually with `codex resume {thread_id}`"
+        )),
+    }
+}
+
+async fn archive_terminal_codex_thread(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    codex_bin: &str,
+) -> Result<(), String> {
+    let thread_id = manifest.conversation_id.to_string();
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+        CodexArchiveState::Archived => {
+            persist_codex_archive_state(manager, workspace, manifest, "archived").await
+        }
+        CodexArchiveState::Active => {
+            persist_codex_archive_state(manager, workspace, manifest, "archiving").await?;
+            send_codex_lifecycle_request(
+                codex_bin,
+                workspace.workspace_path(),
+                "thread/archive",
+                |adapter, session| adapter.archive_issue_thread_request(session, thread_id.clone()),
+            )
+            .await?;
+            persist_codex_archive_state(manager, workspace, manifest, "archived").await
+        }
+        CodexArchiveState::Missing => Err(format!(
+            "canonical Codex thread {thread_id} is missing; preserving workspace for repair"
+        )),
+    }
 }
 
 fn codex_schema_stderr_preview(stderr: &[u8]) -> Option<String> {
@@ -2497,17 +2760,6 @@ async fn load_codex_conversation_manifest(
                 "manifest {} is incompatible with the current issue workspace",
                 path.display()
             ),
-        ));
-    }
-    if !matches!(
-        manifest.codex_archive_state.as_deref(),
-        None | Some("active")
-    ) {
-        return Err(codex_lifecycle_error(
-            issue,
-            Some(thread_id),
-            "manifest validation",
-            "archive recovery is not available in the canonical-reuse slice",
         ));
     }
     Ok(Some(manifest))
@@ -5286,7 +5538,7 @@ Run the scheduler.
         }
     }
 
-    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","thread/resume","thread/archive","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
+    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","thread/resume","thread/list","thread/archive","thread/unarchive","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
 
     #[cfg(unix)]
     fn write_fake_codex_child(path: &Path, log_path: &Path) {
@@ -5337,7 +5589,13 @@ while IFS= read -r line; do
     *'"method":"thread/resume"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
       ;;
+    *'"method":"thread/list"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      ;;
     *'"method":"thread/archive"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/unarchive"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)

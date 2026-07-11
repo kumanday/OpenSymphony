@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use crate::opensymphony_codex::{CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND};
+use crate::opensymphony_codex::{
+    CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter, CodexJsonRpcSession,
+};
 use crate::opensymphony_openhands::{
     ConversationLaunchProfile, ConversationMoveOutcome, ConversationStoreKind, EventEnvelope,
     IssueConversationManifest, IssueSessionRunnerConfig, KnownEvent, LocalServerSupervisor,
@@ -34,7 +36,12 @@ use crossterm::{
 };
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::{fs, process::Command, time::timeout_at};
+use tokio::{
+    fs,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::Command,
+    time::timeout_at,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -148,6 +155,10 @@ enum DebugCommandError {
     },
     #[error("Codex resume command exited with status {status}")]
     CodexResumeFailed { status: std::process::ExitStatus },
+    #[error(
+        "failed to unarchive Codex thread `{thread_id}` before debug: {detail}. Recover with `codex resume {thread_id}` after unarchiving it in Codex."
+    )]
+    CodexUnarchiveFailed { thread_id: String, detail: String },
     #[error("conversation manifest contains invalid conversation id `{value}`: {source}")]
     InvalidConversationId {
         value: String,
@@ -365,11 +376,12 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         })?;
     let manifest_path = workspace.conversation_manifest_path();
     let raw_manifest = load_conversation_manifest_raw(&manager, &workspace).await?;
-    if let Some(codex) = codex_debug_metadata_from_raw_manifest(
+    if let Some(mut codex) = codex_debug_metadata_from_raw_manifest(
         &raw_manifest,
         &manifest_path,
         args.issue_id.as_str(),
     )? {
+        ensure_codex_debug_thread_active(&manager, &workspace, &mut codex).await?;
         if args.app {
             println!("{}", codex.deep_link());
             return Ok(());
@@ -473,6 +485,8 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
 #[derive(Debug)]
 struct CodexDebugMetadata {
     thread_id: String,
+    archive_state: String,
+    manifest: serde_json::Value,
 }
 
 impl CodexDebugMetadata {
@@ -505,6 +519,131 @@ async fn run_codex_resume(
     } else {
         Err(DebugCommandError::CodexResumeFailed { status })
     }
+}
+
+async fn ensure_codex_debug_thread_active(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    metadata: &mut CodexDebugMetadata,
+) -> Result<(), DebugCommandError> {
+    if metadata.archive_state == "active" {
+        return Ok(());
+    }
+    let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    metadata.manifest["codex_archive_state"] = serde_json::Value::String("unarchiving".into());
+    manager
+        .write_json_artifact(
+            workspace,
+            &workspace.conversation_manifest_path(),
+            &metadata.manifest,
+        )
+        .await
+        .map_err(DebugCommandError::WorkspaceManager)?;
+    let adapter =
+        CodexAppServerAdapter::local_stdio(&program, "opensymphony", env!("CARGO_PKG_VERSION"));
+    let (binary, args) = adapter.launch().to_command();
+    let mut child = Command::new(binary)
+        .args(args)
+        .current_dir(workspace.workspace_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail: source.to_string(),
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail: "app-server stdin missing".into(),
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail: "app-server stdout missing".into(),
+        })?;
+    let mut session = adapter.session();
+    let initialize = session.initialize();
+    write_debug_codex_request(&mut stdin, &initialize)
+        .await
+        .map_err(|detail| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail,
+        })?;
+    let mut reader = BufReader::new(stdout);
+    read_debug_codex_response(&mut reader, initialize.id)
+        .await
+        .map_err(|detail| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail,
+        })?;
+    let request = adapter
+        .unarchive_issue_thread_request(&mut session, metadata.thread_id.clone())
+        .map_err(|source| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail: source.to_string(),
+        })?;
+    write_debug_codex_request(&mut stdin, &request.request)
+        .await
+        .map_err(|detail| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail,
+        })?;
+    read_debug_codex_response(&mut reader, request.request.id)
+        .await
+        .map_err(|detail| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail,
+        })?;
+    let _ = child.kill().await;
+    metadata.manifest["codex_archive_state"] = serde_json::Value::String("active".into());
+    manager
+        .write_json_artifact(
+            workspace,
+            &workspace.conversation_manifest_path(),
+            &metadata.manifest,
+        )
+        .await
+        .map_err(DebugCommandError::WorkspaceManager)?;
+    metadata.archive_state = "active".into();
+    Ok(())
+}
+
+async fn write_debug_codex_request(
+    stdin: &mut tokio::process::ChildStdin,
+    request: &crate::opensymphony_codex::JsonRpcRequestEnvelope,
+) -> Result<(), String> {
+    let line = CodexJsonRpcSession::encode_line(request).map_err(|error| error.to_string())?;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|error| error.to_string())?;
+    stdin.flush().await.map_err(|error| error.to_string())
+}
+
+async fn read_debug_codex_response(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    request_id: u64,
+) -> Result<(), String> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .await
+        .map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&line).map_err(|error| error.to_string())?;
+    if value.get("id").and_then(serde_json::Value::as_u64) != Some(request_id)
+        || value.get("error").is_some()
+    {
+        return Err(format!("unexpected Codex app-server response: {value}"));
+    }
+    Ok(())
 }
 
 async fn validate_codex_resume_support(program: &str) -> Result<(), DebugCommandError> {
@@ -567,6 +706,12 @@ fn codex_debug_metadata_from_raw_manifest(
         })?;
     Ok(Some(CodexDebugMetadata {
         thread_id: thread_id.to_string(),
+        archive_state: value
+            .get("codex_archive_state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("active")
+            .to_string(),
+        manifest: value,
     }))
 }
 
