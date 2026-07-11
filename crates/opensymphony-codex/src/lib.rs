@@ -313,6 +313,44 @@ impl CodexAppServerAdapter {
         })
     }
 
+    pub fn unarchive_issue_thread_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        thread_id: impl Into<String>,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Unarchive,
+            request: session.thread_unarchive(CodexThreadUnarchiveParams {
+                thread_id: thread_id.into(),
+            })?,
+        })
+    }
+
+    pub fn list_issue_threads_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        cwd: impl Into<String>,
+        archived: bool,
+        cursor: Option<String>,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::List,
+            request: session.thread_list(CodexThreadListParams {
+                source_kinds: Some(vec![
+                    "cli".into(),
+                    "vscode".into(),
+                    "exec".into(),
+                    "appServer".into(),
+                ]),
+                archived: Some(archived),
+                cursor,
+                cwd: Some(cwd.into()),
+                limit: None,
+                use_state_db_only: true,
+            })?,
+        })
+    }
+
     pub fn interrupt_turn_request(
         &self,
         session: &mut CodexJsonRpcSession,
@@ -366,6 +404,8 @@ pub enum CodexLifecycleRequest {
     Start,
     Resume,
     Archive,
+    Unarchive,
+    List,
     Interrupt,
     Approval,
 }
@@ -635,6 +675,20 @@ impl CodexJsonRpcSession {
         Ok(self.request("thread/archive", serde_json::to_value(params)?))
     }
 
+    pub fn thread_unarchive(
+        &mut self,
+        params: CodexThreadUnarchiveParams,
+    ) -> Result<JsonRpcRequestEnvelope, serde_json::Error> {
+        Ok(self.request("thread/unarchive", serde_json::to_value(params)?))
+    }
+
+    pub fn thread_list(
+        &mut self,
+        params: CodexThreadListParams,
+    ) -> Result<JsonRpcRequestEnvelope, serde_json::Error> {
+        Ok(self.request("thread/list", serde_json::to_value(params)?))
+    }
+
     pub fn turn_start(
         &mut self,
         params: CodexTurnStartParams,
@@ -703,6 +757,28 @@ pub struct CodexThreadResumeParams {
 #[serde(rename_all = "camelCase")]
 pub struct CodexThreadArchiveParams {
     pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexThreadUnarchiveParams {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexThreadListParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kinds: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    pub use_state_db_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

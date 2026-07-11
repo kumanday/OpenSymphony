@@ -915,6 +915,7 @@ where
             return Ok(());
         };
 
+        let mut retry_records = Vec::new();
         for record in records {
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
@@ -931,12 +932,14 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
-                self.workspace
+                if let Err(error) = self
+                    .workspace
                     .cleanup_workspace(&record.workspace, true)
                     .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
+                {
+                    tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
+                    retry_records.push(record);
+                }
                 continue;
             }
 
@@ -951,7 +954,11 @@ where
             self.executions.entry(issue.id.clone()).or_insert(execution);
         }
 
-        self.recovered = true;
+        if retry_records.is_empty() {
+            self.recovered = true;
+        } else {
+            self.pending_recovery = Some(retry_records);
+        }
         Ok(())
     }
 
@@ -1758,13 +1765,14 @@ where
         if execution.status() != SchedulerStatus::Released {
             execution = execution.release(observed_at, reason, None)?;
         }
-        if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
-            self.workspace
-                .cleanup_workspace(&workspace, true)
-                .await
-                .map_err(|error| SchedulerError::Workspace {
-                    detail: error.to_string(),
-                })?;
+        if cleanup_terminal
+            && let Some(workspace) = execution.workspace().cloned()
+            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
+        {
+            self.insert_execution(issue_id, execution);
+            return Err(SchedulerError::Workspace {
+                detail: error.to_string(),
+            });
         }
         self.insert_execution(issue_id, execution);
         Ok(())
