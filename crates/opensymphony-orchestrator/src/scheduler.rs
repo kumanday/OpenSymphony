@@ -915,7 +915,8 @@ where
             return Ok(());
         };
 
-        for record in records {
+        let mut records = records.into_iter();
+        while let Some(record) = records.next() {
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
@@ -936,7 +937,7 @@ where
                     .cleanup_workspace(&record.workspace, true)
                     .await
                 {
-                    self.pending_recovery = Some(vec![record]);
+                    self.pending_recovery = Some(std::iter::once(record).chain(records).collect());
                     return Err(SchedulerError::Workspace {
                         detail: error.to_string(),
                     });
@@ -1763,12 +1764,12 @@ where
             execution = execution.release(observed_at, reason, None)?;
         }
         if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
-            self.workspace
-                .cleanup_workspace(&workspace, true)
-                .await
-                .map_err(|error| SchedulerError::Workspace {
+            if let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await {
+                self.insert_execution(issue_id, execution);
+                return Err(SchedulerError::Workspace {
                     detail: error.to_string(),
-                })?;
+                });
+            }
         }
         self.insert_execution(issue_id, execution);
         Ok(())

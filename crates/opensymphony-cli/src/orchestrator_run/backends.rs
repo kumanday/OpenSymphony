@@ -2038,7 +2038,11 @@ async fn archive_terminal_codex_thread(
     let thread_id = manifest.conversation_id.to_string();
     match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
         CodexArchiveState::Archived => {
-            persist_codex_archive_state(manager, workspace, manifest, "archived").await
+            if manifest.codex_archive_state.as_deref() == Some("archived") {
+                Ok(())
+            } else {
+                persist_codex_archive_state(manager, workspace, manifest, "archived").await
+            }
         }
         CodexArchiveState::Active => {
             persist_codex_archive_state(manager, workspace, manifest, "archiving").await?;
