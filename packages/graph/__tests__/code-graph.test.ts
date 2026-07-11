@@ -139,13 +139,13 @@ describe("Code Graph adapters and state", () => {
     expect(state.symbolKey).toBeNull();
     state = codeGraphReducer(state, {
       type: "DRILL_IN",
-      breadcrumb: { kind: "symbol", id: "newSymbol", label: "newSymbol" },
+      breadcrumb: { kind: "symbol", id: "newSymbol", nodeId: "sym:newSymbol", label: "newSymbol" },
       mode: "neighborhood",
       symbolKey: "newSymbol",
     });
     state = codeGraphReducer(state, { type: "BREADCRUMB_POP", index: 1 });
     expect(state.symbolKey).toBe("newSymbol");
-    expect(state.selectedNodeIds).toEqual(["symbol:newSymbol"]);
+    expect(state.selectedNodeIds).toEqual(["sym:newSymbol"]);
   });
 
   it("uses community node membership without requiring a metrics community id", async () => {

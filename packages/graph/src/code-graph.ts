@@ -73,6 +73,7 @@ export interface CodeGraphBreadcrumb {
   kind: "repo" | "directory" | "file" | "symbol";
   id: string;
   label: string;
+  nodeId?: string;
 }
 
 export interface CodeGraphHistoryState {
@@ -290,7 +291,7 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         mode: current?.kind === "symbol" ? "neighborhood" : current?.kind === "file" ? "file" : "atlas",
         path: current?.kind === "file" ? current.id : null,
         symbolKey,
-        selectedNodeIds: symbolKey ? [`symbol:${symbolKey}`] : [],
+        selectedNodeIds: symbolKey ? [current?.nodeId ?? `symbol:${symbolKey}`] : [],
         filters: breadcrumbs.length === 0 ? { ...state.filters, pathPrefixes: [] } : state.filters,
         layoutStatus: "idle",
       };

@@ -129,6 +129,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
     ? `${snapshot.nodes.length} nodes / ${snapshot.edges.length} edges / ${snapshot.truncation.nodes_dropped} aggregated`
     : "No code graph snapshot";
   const narrowed = state.mode !== "atlas" || state.selectedNodeIds.length > 0 || state.path !== null || state.symbolKey !== null;
+  const diffUnavailable = !state.baseRevision || !state.headRevision;
   return `
     <div class="os-knowledge-graph os-code-graph" data-testid="code-graph-renderer" data-layout-status="${escapeAttr(state.layoutStatus)}">
       <div class="os-knowledge-toolbar os-code-graph-toolbar">
@@ -138,7 +139,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
         </div>
         <div class="os-segmented" data-testid="code-graph-mode-toggle">
           ${(["atlas", "file", "neighborhood", "diff"] as const).map((mode) =>
-            `<button type="button" class="${state.mode === mode ? "is-selected" : ""}" data-code-mode="${mode}">${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}
+            `<button type="button" class="${state.mode === mode ? "is-selected" : ""}" data-code-mode="${mode}"${mode === "diff" && diffUnavailable ? " disabled" : ""}>${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}
         </div>
         ${narrowed ? `<button type="button" class="os-icon-button os-kg-reset" data-code-reset data-testid="code-graph-reset">Show full graph</button>` : ""}
         <span class="os-kg-status" data-testid="code-graph-status">${escapeHtml(state.layoutStatus === "failed" ? state.layoutError ?? "Unavailable" : state.stale ? "Refreshing" : state.layoutStatus === "ready" ? "Ready" : "Idle")}</span>
@@ -306,6 +307,13 @@ function renderCodeDetailSections(detail: CodeSymbolDetail): string {
 
 function codeDeepLinkForNode(state: CodeGraphState, node: CodeGraphNode): string | null {
   try {
+    const overlayOnly = Boolean(
+      state.mode === "diff"
+      && state.diffOverlay
+      && node.symbol_key
+      && !state.snapshot?.nodes.some((candidate) => candidate.symbol_key === node.symbol_key),
+    );
+    if (overlayOnly) return null;
     const filters = state.filters.deltaStatuses.length > 0
       ? { ...state.filters, deltaStatuses: [] }
       : state.filters;

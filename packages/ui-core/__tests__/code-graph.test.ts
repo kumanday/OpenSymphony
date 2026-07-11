@@ -101,4 +101,41 @@ describe("Code Graph renderer surface", () => {
     const deepLink = root.querySelector<HTMLButtonElement>("[data-code-copy-deeplink]")?.dataset.codeCopyDeeplink;
     expect(parseCodeDeepLink(deepLink!)?.filters.deltaStatuses).toEqual([]);
   });
+
+  it("omits copied links for diff-only synthetic symbols", () => {
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      added_symbols: [{
+        symbol_key: "addedSymbol",
+        status: "added" as const,
+        before: null,
+        after: {
+          symbol_id: "addedSymbol:id",
+          kind: "function",
+          name: "addedSymbol",
+          path_display: "packages/graph/src/added.ts",
+          container_chain: ["code"],
+          span: { start_line: 1, start_col: 1, end_line: 4, end_col: 2 },
+          freshness: "current" as const,
+        },
+      }],
+    };
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay });
+    const synthetic = {
+      ...snapshot.nodes[1],
+      id: "symbol:addedSymbol",
+      label: "addedSymbol",
+      symbol_key: "addedSymbol",
+    };
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: synthetic.id });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({
+      snapshot: { ...snapshot, nodes: [...snapshot.nodes, synthetic] },
+      layout: null,
+      state,
+      rawRecord: false,
+    });
+    expect(root.querySelector("[data-code-copy-deeplink]")).toBeNull();
+  });
 });

@@ -21,6 +21,7 @@ import {
   pageCompletedTasks,
   type GraphDataAdapter,
   type MemoryCompletedTask,
+  type CodeGraphSnapshot,
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
@@ -1403,6 +1404,10 @@ describe("OpenSymphonyApp mount", () => {
 
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
       await flushUntil(() => root.querySelector("[data-code-mode='atlas']")?.classList.contains("is-selected") ?? false);
+      const diffModeButton = root.querySelector<HTMLButtonElement>("[data-code-mode='diff']");
+      expect(diffModeButton?.disabled).toBe(true);
+      diffModeButton?.click();
+      expect(root.querySelector("[data-code-mode='atlas']")?.classList.contains("is-selected")).toBe(true);
       const readsBeforeInvalidMode = graphRequests.length;
       root.querySelector<HTMLButtonElement>("[data-code-mode='file']")?.click();
       await Promise.resolve();
@@ -1478,8 +1483,9 @@ describe("OpenSymphonyApp mount", () => {
       await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/symbols/codeGraphReducer")).toBe(true);
       await flushUntil(() => root.querySelector("[data-testid='code-graph-structure-list']") !== null);
-      const app = handle as unknown as { codeGraphView: { overrides: Map<string, { x: number; y: number }> }; state: { codeGraph: { selectedNodeIds: string[]; stale: boolean } } };
+      const app = handle as unknown as { codeGraphView: { overrides: Map<string, { x: number; y: number }> }; state: { codeGraph: { selectedNodeIds: string[]; stale: boolean; layoutStatus: string } } };
       app.codeGraphView.overrides.set("symbol:codeGraphReducer", { x: 42, y: 24 });
+      await flushUntil(() => app.state.codeGraph.layoutStatus === "ready");
       const selectedBefore = [...app.state.codeGraph.selectedNodeIds];
       const repoReadsBeforeUpdate = repoReads;
       transport.emit({
@@ -1495,7 +1501,7 @@ describe("OpenSymphonyApp mount", () => {
           updated_at: "2026-07-11T19:10:00Z",
         },
       });
-      await flushUntil(() => snapshotReads >= 2 && repoReads > repoReadsBeforeUpdate && !app.state.codeGraph.stale);
+      await flushUntil(() => snapshotReads >= 2 && repoReads > repoReadsBeforeUpdate && !app.state.codeGraph.stale && app.state.codeGraph.layoutStatus === "ready");
       expect(app.state.codeGraph.selectedNodeIds).toEqual(selectedBefore);
       expect(app.codeGraphView.overrides.get("symbol:codeGraphReducer")).toEqual({ x: 42, y: 24 });
     } finally {
@@ -1539,6 +1545,54 @@ describe("OpenSymphonyApp mount", () => {
       expect(reads).toBe(2);
       expect(app.state.codeGraph.mode).toBe("file");
       expect(app.state.codeGraph.snapshot?.mode).toBe("file");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("does not let a superseded Code Graph failure poison the current load", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let reads = 0;
+    let rejectFirstRead: ((error: Error) => void) | null = null;
+    const firstRead = new Promise<CodeGraphSnapshot>((_, reject) => {
+      rejectFirstRead = reject;
+    });
+    let resolveSecondRead: ((snapshot: CodeGraphSnapshot) => void) | null = null;
+    const secondRead = new Promise<CodeGraphSnapshot>((resolve) => {
+      resolveSecondRead = resolve;
+    });
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        reads += 1;
+        if (reads === 1) return firstRead;
+        if (reads === 2) return secondRead;
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      const firstNavigation = handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas");
+      await flushUntil(() => reads === 1);
+      const app = handle as unknown as {
+        resetCodeGraphView(): void;
+        state: { codeGraph: { layoutStatus: string; snapshot: CodeGraphSnapshot | null } };
+      };
+      app.resetCodeGraphView();
+      rejectFirstRead!(new Error("stale Code Graph failure"));
+      await flushUntil(() => reads === 2);
+      expect(app.state.codeGraph.layoutStatus).not.toBe("failed");
+      resolveSecondRead!(await fixtureCodeGraphAdapter.getGraphSnapshot("opensymphony", { mode: "atlas" }));
+      await firstNavigation;
+      await flushUntil(() => app.state.codeGraph.snapshot?.mode === "atlas");
     } finally {
       await handle.destroy();
     }

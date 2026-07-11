@@ -1081,6 +1081,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async loadCodeGraphOnce(): Promise<void> {
     const navigationVersion = this.codeGraphNavigationVersion;
+    let requestKey: string | null = null;
     if (!this.codeGraphAdapter) {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "LAYOUT_STATUS_SET",
@@ -1107,13 +1108,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (this.state.codeGraph.repoId !== repoId) {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPO_SELECTED", repoId });
       }
-      const requestKey = this.codeGraphRequestKey();
+      requestKey = this.codeGraphRequestKey();
       await this.refreshCodeGraphSnapshot(repoId, requestKey, navigationVersion);
       if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
       if (this.state.codeGraph.mode === "diff" && this.state.codeGraph.baseRevision && this.state.codeGraph.headRevision) {
         await this.loadCodeDiffOverlay(repoId, this.state.codeGraph.baseRevision, this.state.codeGraph.headRevision, requestKey, navigationVersion);
       }
     } catch (error) {
+      if (this.destroyed
+        || navigationVersion !== this.codeGraphNavigationVersion
+        || (requestKey !== null && requestKey !== this.codeGraphRequestKey())) return;
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "LAYOUT_STATUS_SET",
         status: "failed",
@@ -1127,6 +1131,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!this.codeGraphAdapter) return;
     const code = this.state.codeGraph;
     const previousSnapshot = currentCodeGraphSnapshot(code);
+    const retainedReadyLayout = this.codeGraphLayout !== null && code.layoutStatus === "ready";
     const mode = code.mode === "diff"
       ? code.path ? "file" : code.symbolKey ? "neighborhood" : "atlas"
       : code.mode;
@@ -1142,6 +1147,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
     if (this.state.codeGraph.snapshot !== previousSnapshot && (!previousSnapshot || !sameCodeGraphTopology(previousSnapshot, snapshot))) {
       this.invalidateCodeGraphLayout();
+    } else if (retainedReadyLayout) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
     } else {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
     }
@@ -1267,7 +1274,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (node.symbol_key) {
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "DRILL_IN",
-        breadcrumb: { kind: "symbol", id: node.symbol_key, label: node.label },
+        breadcrumb: { kind: "symbol", id: node.symbol_key, nodeId: node.id, label: node.label },
         mode: "neighborhood",
         symbolKey: node.symbol_key,
       });
@@ -3540,6 +3547,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private setCodeGraphMode(mode: CodeGraphMode): void {
     const currentBreadcrumb = this.state.codeGraph.breadcrumbs.at(-1);
+    if (mode === "diff" && (!this.state.codeGraph.baseRevision || !this.state.codeGraph.headRevision)) return;
     if (mode === "file" && (!this.state.codeGraph.path || currentBreadcrumb?.kind === "directory")) return;
     if (mode === "neighborhood" && !this.state.codeGraph.symbolKey) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "MODE_SET", mode });
