@@ -526,9 +526,6 @@ async fn ensure_codex_debug_thread_active(
     workspace: &WorkspaceHandle,
     metadata: &mut CodexDebugMetadata,
 ) -> Result<(), DebugCommandError> {
-    if metadata.archive_state == "active" {
-        return Ok(());
-    }
     let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
     metadata.manifest["codex_archive_state"] = serde_json::Value::String("unarchiving".into());
     manager
@@ -583,6 +580,51 @@ async fn ensure_codex_debug_thread_active(
             thread_id: metadata.thread_id.clone(),
             detail,
         })?;
+    let archived = debug_thread_list_contains(
+        &adapter,
+        &mut session,
+        &mut stdin,
+        &mut reader,
+        workspace,
+        &metadata.thread_id,
+        true,
+    )
+    .await
+    .map_err(|detail| DebugCommandError::CodexUnarchiveFailed {
+        thread_id: metadata.thread_id.clone(),
+        detail,
+    })?;
+    if !archived {
+        if debug_thread_list_contains(
+            &adapter,
+            &mut session,
+            &mut stdin,
+            &mut reader,
+            workspace,
+            &metadata.thread_id,
+            false,
+        )
+        .await
+        .map_err(|detail| DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail,
+        })? {
+            metadata.manifest["codex_archive_state"] = serde_json::Value::String("active".into());
+            manager
+                .write_json_artifact(
+                    workspace,
+                    &workspace.conversation_manifest_path(),
+                    &metadata.manifest,
+                )
+                .await
+                .map_err(DebugCommandError::WorkspaceManager)?;
+            return Ok(());
+        }
+        return Err(DebugCommandError::CodexUnarchiveFailed {
+            thread_id: metadata.thread_id.clone(),
+            detail: "thread was not found in the Codex app-server state database".into(),
+        });
+    }
     let request = adapter
         .unarchive_issue_thread_request(&mut session, metadata.thread_id.clone())
         .map_err(|source| DebugCommandError::CodexUnarchiveFailed {
@@ -627,23 +669,60 @@ async fn write_debug_codex_request(
     stdin.flush().await.map_err(|error| error.to_string())
 }
 
+async fn debug_thread_list_contains(
+    adapter: &CodexAppServerAdapter,
+    session: &mut CodexJsonRpcSession,
+    stdin: &mut tokio::process::ChildStdin,
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    workspace: &WorkspaceHandle,
+    thread_id: &str,
+    archived: bool,
+) -> Result<bool, String> {
+    let request = adapter
+        .list_issue_threads_request(
+            session,
+            workspace.workspace_path().display().to_string(),
+            archived,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    write_debug_codex_request(stdin, &request.request).await?;
+    let response = read_debug_codex_response(reader, request.request.id).await?;
+    Ok(response["result"]["data"]
+        .as_array()
+        .is_some_and(|threads| {
+            threads.iter().any(|thread| {
+                thread.get("id").and_then(serde_json::Value::as_str) == Some(thread_id)
+            })
+        }))
+}
+
 async fn read_debug_codex_response(
     reader: &mut BufReader<tokio::process::ChildStdout>,
     request_id: u64,
-) -> Result<(), String> {
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .await
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(&line).map_err(|error| error.to_string())?;
-    if value.get("id").and_then(serde_json::Value::as_u64) != Some(request_id)
-        || value.get("error").is_some()
-    {
-        return Err(format!("unexpected Codex app-server response: {value}"));
+) -> Result<serde_json::Value, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut line = String::new();
+        let read = timeout_at(deadline, reader.read_line(&mut line))
+            .await
+            .map_err(|_| format!("timed out waiting for Codex response id {request_id}"))?
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err(format!(
+                "Codex stdout closed before response id {request_id}"
+            ));
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        if value.get("id").and_then(serde_json::Value::as_u64) != Some(request_id) {
+            continue;
+        }
+        if value.get("error").is_some() {
+            return Err(format!("Codex app-server error response: {value}"));
+        }
+        return Ok(value);
     }
-    Ok(())
 }
 
 async fn validate_codex_resume_support(program: &str) -> Result<(), DebugCommandError> {
