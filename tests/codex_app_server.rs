@@ -334,6 +334,23 @@ fn codex_installed_schema_accepts_automation_payloads_when_requested() {
     validator
         .validate_request(&archive.request)
         .expect("thread/archive should match installed schema");
+    let unarchive = adapter
+        .unarchive_issue_thread_request(&mut session, "thread-1")
+        .expect("thread/unarchive should serialize");
+    validator
+        .validate_request(&unarchive.request)
+        .expect("thread/unarchive should match installed schema");
+    let list = adapter
+        .list_issue_threads_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            true,
+            Some("next-page".into()),
+        )
+        .expect("thread/list should serialize");
+    validator
+        .validate_request(&list.request)
+        .expect("thread/list should match installed schema");
     let default_thread = adapter
         .start_issue_thread_request(
             &mut session,
@@ -998,6 +1015,32 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     assert_eq!(archive.lifecycle, CodexLifecycleRequest::Archive);
     assert_eq!(archive.request.method, "thread/archive");
     assert_eq!(archive.request.params["threadId"], "thread-1");
+
+    let unarchive = adapter
+        .unarchive_issue_thread_request(&mut session, "thread-1")
+        .expect("unarchive request serializes");
+    assert_eq!(unarchive.lifecycle, CodexLifecycleRequest::Unarchive);
+    assert_eq!(unarchive.request.method, "thread/unarchive");
+    assert_eq!(unarchive.request.params["threadId"], "thread-1");
+
+    let list = adapter
+        .list_issue_threads_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            true,
+            Some("next-page".into()),
+        )
+        .expect("list request serializes");
+    assert_eq!(list.lifecycle, CodexLifecycleRequest::List);
+    assert_eq!(list.request.method, "thread/list");
+    assert_eq!(list.request.params["cwd"], "/tmp/issue-workspace");
+    assert_eq!(list.request.params["archived"], true);
+    assert_eq!(list.request.params["cursor"], "next-page");
+    assert_eq!(list.request.params["useStateDbOnly"], true);
+    assert_eq!(
+        list.request.params["sourceKinds"],
+        json!(["cli", "vscode", "exec", "appServer"])
+    );
 
     let interrupt = adapter.interrupt_turn_request(&mut session, "thread-1", "turn-1");
     assert_eq!(interrupt.lifecycle, CodexLifecycleRequest::Interrupt);

@@ -351,7 +351,7 @@ The local Codex app-server harness path launches
 available when clients read `/api/v1/capabilities`. Before starting a run,
 OpenSymphony generates the JSON Schema from the installed Codex CLI and
 validates its full-automation `thread/start`, `thread/resume`, rollback
-`thread/archive`, and `turn/start` payloads. A new issue starts a thread; a
+`thread/list`, `thread/archive`, `thread/unarchive`, and `turn/start` payloads. A new issue starts a thread; a
 workspace with its canonical manifest resumes it. If the first manifest write
 fails after a start, OpenSymphony archives that newly created thread and does
 not start a turn. If the installed schema rejects any lifecycle payload, update
@@ -525,11 +525,11 @@ another OpenHands server is already bound to the configured port with a
 different store, stop it and retry the debug command.
 
 For issues last run through the local Codex app-server harness,
-`opensymphony debug COE-123` reads the recorded Codex thread id from the issue
-workspace manifest and runs `codex resume <thread-id>` from that exact issue
-workspace. Set `OPENSYMPHONY_CODEX_BIN` to override the Codex binary. Use
-`opensymphony debug COE-123 --app` to print `codex://threads/<thread-id>`
-without starting OpenHands or launching the Codex CLI.
+`opensymphony debug COE-123` reads the recorded Codex thread id, unarchives it
+when terminal reconciliation archived it, and then runs `codex resume
+<thread-id>` from that exact issue workspace. Set `OPENSYMPHONY_CODEX_BIN` to
+override the Codex binary. Use `opensymphony debug COE-123 --app` to unarchive
+and print `codex://threads/<thread-id>` without launching interactive Codex.
 
 See [Project Memory](memory.md) for the full command surface, import YAML
 schema, and troubleshooting notes.

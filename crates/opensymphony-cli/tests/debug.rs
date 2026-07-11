@@ -48,10 +48,10 @@ async fn debug_codex_resume_launches_fake_codex_from_issue_workspace() {
         "PWD={}",
         ensured.handle.workspace_path().display()
     )));
-    assert!(log.contains("ARGS=resume --help"));
     assert!(log.contains("ARGS=resume 019ee323-173d-7ec0-8ad2-fa4067c5651c"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn debug_codex_app_prints_deep_link_without_launching_runtime() {
     let project = TempDir::new().expect("temp project should exist");
@@ -60,15 +60,16 @@ async fn debug_codex_app_prints_deep_link_without_launching_runtime() {
     let (_manager, ensured) = create_workspace(&workspace_root, "COE-480").await;
     write_codex_manifest(&ensured.handle, "019ee323-173d-7ec0-8ad2-fa4067c5651c");
 
+    let log_path = project.path().join("fake-codex.log");
+    let fake_codex = project.path().join("fake-codex");
+    write_fake_codex(&fake_codex, &log_path, true);
+
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .arg("debug")
         .arg("COE-480")
         .arg("--app")
         .current_dir(project.path())
-        .env(
-            "OPENSYMPHONY_CODEX_BIN",
-            project.path().join("missing-codex"),
-        )
+        .env("OPENSYMPHONY_CODEX_BIN", &fake_codex)
         .output()
         .await
         .expect("debug command should run");
@@ -81,35 +82,6 @@ async fn debug_codex_app_prints_deep_link_without_launching_runtime() {
     assert_eq!(
         stdout.trim(),
         "codex://threads/019ee323-173d-7ec0-8ad2-fa4067c5651c"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn debug_codex_resume_reports_unsupported_cli() {
-    let project = TempDir::new().expect("temp project should exist");
-    let workspace_root = project.path().join("var").join("workspaces");
-    write_project_files(project.path(), &workspace_root, "http://127.0.0.1:39999");
-    let (_manager, ensured) = create_workspace(&workspace_root, "COE-481").await;
-    write_codex_manifest(&ensured.handle, "thread-unsupported");
-
-    let log_path = project.path().join("fake-codex.log");
-    let fake_codex = project.path().join("fake-codex");
-    write_fake_codex(&fake_codex, &log_path, false);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
-        .arg("debug")
-        .arg("COE-481")
-        .current_dir(project.path())
-        .env("OPENSYMPHONY_CODEX_BIN", &fake_codex)
-        .output()
-        .await
-        .expect("debug command should run");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "unsupported CLI should fail");
-    assert!(
-        stderr.contains("does not expose the required `codex resume <session-id>` path"),
-        "stderr should explain unsupported resume path: {stderr}",
     );
 }
 
@@ -403,6 +375,22 @@ printf 'PWD=%s\n' "$PWD" >> "{log}"
 printf 'ARGS=%s\n' "$*" >> "{log}"
 if [ "${{1:-}}" = "resume" ] && [ "${{2:-}}" = "--help" ]; then
   printf '%s\n' "{help}"
+  exit 0
+fi
+if [ "${{2:-}}" = "app-server" ]; then
+  while IFS= read -r line; do
+    id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+    case "$line" in
+      *'"method":"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+      *'"method":"thread/list"'*)
+        if printf '%s' "$line" | grep -q '"archived":true'; then
+          printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+        else
+          printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"019ee323-173d-7ec0-8ad2-fa4067c5651c"}},{{"id":"thread-unsupported"}}],"nextCursor":null}}}}\n' "$id"
+        fi ;;
+      *'"method":"thread/unarchive"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+    esac
+  done
   exit 0
 fi
 if [ "${{1:-}}" = "resume" ]; then
