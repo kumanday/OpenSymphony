@@ -595,6 +595,29 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_diagnostic_revisions (
+  diagnostic_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  message TEXT NOT NULL,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, diagnostic_id)
+);
 CREATE TABLE IF NOT EXISTS code_index_snapshots (
   repo_id TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
@@ -657,6 +680,7 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_target_key ON code_edges(target_symbol
 CREATE INDEX IF NOT EXISTS idx_code_edge_revisions_target_key ON code_edge_revisions(target_symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_skipped_files_revision ON code_skipped_files(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
+CREATE INDEX IF NOT EXISTS idx_code_diagnostic_revisions_path ON code_diagnostic_revisions(repo_id, commit_sha, path);
 "#,
     ))?;
     for table in [
@@ -928,7 +952,6 @@ pub fn persist_code_intel_documents(
         for diagnostic in &document.diagnostics {
             let diagnostic_id = code_row_id(&[
                 &batch.repo_id,
-                batch.commit_sha.as_deref().unwrap_or(""),
                 &path,
                 &document.content_sha256,
                 &document.parser_version,
@@ -946,7 +969,7 @@ pub fn persist_code_intel_documents(
                 .execute(
                     "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
-                        diagnostic_id,
+                        &diagnostic_id,
                         batch.repo_id,
                         batch.commit_sha.clone(),
                         worktree_dirty,
@@ -972,6 +995,40 @@ pub fn persist_code_intel_documents(
                     path: config.index_path.clone(),
                     source,
                 })?;
+            if !batch.worktree_dirty
+                && let Some(commit_sha) = batch.commit_sha.as_deref()
+            {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_diagnostic_revisions (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            &diagnostic_id,
+                            batch.repo_id,
+                            commit_sha,
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            diagnostic.kind,
+                            diagnostic.severity,
+                            diagnostic.message,
+                            diagnostic.start_line as i64,
+                            diagnostic.start_col as i64,
+                            diagnostic.end_line as i64,
+                            diagnostic.end_col as i64,
+                            diagnostic.start_byte as i64,
+                            diagnostic.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            MemoryFreshness::Current.as_str(),
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             report.persisted_diagnostics += 1;
         }
     }
