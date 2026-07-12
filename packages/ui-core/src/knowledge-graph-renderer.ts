@@ -1200,6 +1200,58 @@ function syncThreeScene(three: ThreeCanvasState, scene: GraphScene): void {
     mesh.renderOrder = order++;
     three.graph.add(mesh);
   }
+
+  const borderGroups = new Map<string, {
+    positions: number[];
+    alpha: number;
+    borderStyle: "solid" | "dashed" | "dotted";
+  }>();
+  for (const node of scene.nodes) {
+    const emphasized = node.emphasis === "hovered" || node.emphasis === "selected";
+    const radius = (emphasized ? node.screenRadius * 1.3 : node.screenRadius) * 1.02;
+    const alpha = Math.round(node.alpha * 10) / 10;
+    const borderStyle = node.borderStyle;
+    const key = `${borderStyle}:${alpha}`;
+    const group = borderGroups.get(key) ?? { positions: [], alpha, borderStyle };
+    const segments = 22;
+    for (let index = 0; index < segments; index += 1) {
+      const start = (index / segments) * Math.PI * 2;
+      const end = ((index + 1) / segments) * Math.PI * 2;
+      group.positions.push(
+        node.x + Math.cos(start) * radius,
+        node.y + Math.sin(start) * radius,
+        1,
+        node.x + Math.cos(end) * radius,
+        node.y + Math.sin(end) * radius,
+        1,
+      );
+    }
+    borderGroups.set(key, group);
+  }
+  for (const group of borderGroups.values()) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(group.positions, 3));
+    const material = group.borderStyle === "solid"
+      ? new THREE.LineBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: group.alpha,
+          depthWrite: false,
+        })
+      : new THREE.LineDashedMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: group.alpha,
+          depthWrite: false,
+          dashSize: group.borderStyle === "dashed" ? 5 : 1.5,
+          gapSize: group.borderStyle === "dashed" ? 3 : 3,
+          scale: 1,
+        });
+    const lines = new THREE.LineSegments(geometry, material);
+    if (group.borderStyle !== "solid") lines.computeLineDistances();
+    lines.renderOrder = order++;
+    three.graph.add(lines);
+  }
 }
 
 function disposeObject3D(object: THREE.Object3D): void {

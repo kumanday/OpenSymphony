@@ -105,6 +105,7 @@ export interface CodeGraphState extends CodeGraphHistoryState {
 export type CodeGraphAction =
   | { type: "REPOS_LOADED"; repos: CodeRepoList }
   | { type: "REPOS_INVALIDATED" }
+  | { type: "LOAD_FAILED"; error: string }
   | { type: "SNAPSHOT_LOADED"; snapshot: CodeGraphSnapshot }
   | { type: "SYMBOL_DETAIL_LOADED"; detail: CodeSymbolDetail }
   | { type: "DIFF_LOADED"; overlay: CodeDiffOverlay }
@@ -125,7 +126,7 @@ export type CodeGraphAction =
   | { type: "GRAPH_RESET" };
 
 export const codeGraphModes: readonly CodeGraphMode[] = ["atlas", "file", "neighborhood", "diff"];
-export const codeGraphDepthBounds = { min: 0, max: 2 } as const;
+export const codeGraphDepthBounds = { min: 1, max: 2 } as const;
 
 export function codeGraphNeedsBroadFreshness(filters: Pick<CodeGraphFilters, "freshness">): boolean {
   return filters.freshness.includes("stale") || filters.freshness.includes("unknown");
@@ -197,6 +198,18 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
     }
     case "REPOS_INVALIDATED":
       return { ...state, repos: null };
+    case "LOAD_FAILED":
+      return {
+        ...state,
+        snapshot: null,
+        symbolDetails: {},
+        diffOverlay: null,
+        selectedNodeIds: [],
+        stale: false,
+        lastUpdatedAt: null,
+        layoutStatus: "failed",
+        layoutError: action.error,
+      };
     case "SNAPSHOT_LOADED": {
       const samePartition = state.snapshot?.cursor.partition === action.snapshot.cursor.partition;
       const responseMatchesTarget = state.mode === "diff"
@@ -690,7 +703,7 @@ function codeGraphRequestParams(options?: CodeGraphRequestOptions): URLSearchPar
   if (options?.mode) params.set("mode", options.mode);
   if (options?.path) params.set("path", options.path);
   if (options?.symbolKey) params.set("symbol_key", options.symbolKey);
-  if (options?.depth !== undefined) params.set("depth", String(clamp(options.depth, 0, 2)));
+  if (options?.depth !== undefined) params.set("depth", String(clamp(options.depth, codeGraphDepthBounds.min, codeGraphDepthBounds.max)));
   if (options?.aggregate) params.set("aggregate", options.aggregate);
   if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
   return params;

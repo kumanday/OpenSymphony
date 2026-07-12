@@ -377,7 +377,7 @@ function parseCodeQuery(rawQuery: string): {
   if (mode === null) return null;
   const rawDepth = values.get("depth");
   const depth = rawDepth === null ? 1 : Number(rawDepth);
-  if (!Number.isInteger(depth) || depth < 0 || depth > 2) return null;
+  if (!Number.isInteger(depth) || depth < 1 || depth > 2) return null;
   const runId = values.get("run_id");
   if (runId === "") return null;
   const layoutSeed = values.get("seed");
@@ -436,7 +436,7 @@ function isCodeGraphMode(value: string): value is CodeGraphMode {
 }
 
 function normalizeCodeDepth(value: number): number {
-  if (!Number.isInteger(value) || value < 0 || value > 2) throw new Error("Code deep-link depth must be an integer from 0 to 2");
+  if (!Number.isInteger(value) || value < 1 || value > 2) throw new Error("Code deep-link depth must be an integer from 1 to 2");
   return value;
 }
 

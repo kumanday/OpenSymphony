@@ -1097,12 +1097,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const navigationVersion = this.codeGraphNavigationVersion;
     let requestKey: string | null = null;
     if (!this.codeGraphAdapter) {
-      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
-        type: "LAYOUT_STATUS_SET",
-        status: "failed",
-        error: "Code Graph unavailable for the active transport",
-      });
-      this.render();
+      this.failCodeGraphLoad("Code Graph unavailable for the active transport");
       return;
     }
     try {
@@ -1135,12 +1130,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (this.destroyed
         || navigationVersion !== this.codeGraphNavigationVersion
         || (requestKey !== null && requestKey !== this.codeGraphRequestKey())) return;
-      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
-        type: "LAYOUT_STATUS_SET",
-        status: "failed",
-        error: errorMessage(error),
-      });
-      this.render();
+      this.failCodeGraphLoad(errorMessage(error));
     }
   }
 
@@ -3578,6 +3568,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.codeGraphLayoutSize = null;
     this.codeGraphLayoutRun += 1;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "idle" });
+  }
+
+  private failCodeGraphLoad(error: string): void {
+    this.invalidateCodeGraphLayout();
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LOAD_FAILED", error });
+    this.render();
   }
 
   private resetCodeGraphView(): void {

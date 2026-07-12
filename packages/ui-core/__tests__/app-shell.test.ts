@@ -1743,6 +1743,42 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("clears stale Code Graph data after the current load fails", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let reads = 0;
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        reads += 1;
+        if (reads > 1) throw new Error("gateway unavailable");
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+    const app = handle as unknown as {
+      loadCodeGraph(): Promise<void>;
+      state: { codeGraph: CodeGraphState };
+    };
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+      await flushUntil(() => app.state.codeGraph.snapshot !== null && app.state.codeGraph.layoutStatus === "ready");
+      await app.loadCodeGraph();
+      expect(app.state.codeGraph.layoutStatus).toBe("failed");
+      expect(app.state.codeGraph.snapshot).toBeNull();
+      expect(app.state.codeGraph.diffOverlay).toBeNull();
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("refreshes the Knowledge Graph on memory_graph_updated events", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

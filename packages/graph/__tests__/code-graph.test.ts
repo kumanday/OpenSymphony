@@ -366,8 +366,10 @@ describe("Code Graph deep links", () => {
     expect(parseCodeDeepLink("opensymphony://code/repo/files/src/lib.rs?guess=1")).toBeNull();
     expect(parseCodeDeepLink("opensymphony://code/repo/diff/base")).toBeNull();
     expect(parseCodeDeepLink("opensymphony://code/repo/symbols/run?mode=diff")).toBeNull();
+    expect(parseCodeDeepLink("opensymphony://code/repo/symbols/run?depth=0")).toBeNull();
     expect(() => formatCodeDeepLink({ repoId: "repo", baseRevision: "base" })).toThrow(/both base and head/);
     expect(() => formatCodeDeepLink({ repoId: "repo", symbolKey: "run", mode: "diff" })).toThrow(/target does not match/);
+    expect(() => formatCodeDeepLink({ repoId: "repo", symbolKey: "run", depth: 0 })).toThrow(/1 to 2/);
   });
 
   it("rejects invalid enum-valued filter entries", () => {
