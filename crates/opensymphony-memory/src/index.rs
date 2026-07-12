@@ -768,30 +768,54 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             })?;
         }
 
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        let current_document_exists = if freshness == "staged" {
+            transaction
+                .query_row(
+                    "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' LIMIT 1",
                     params![
                         batch.repo_id,
-                    batch.commit_sha.clone(),
+                        path,
+                        document.content_sha256,
+                        document.parser_version,
+                        document.query_pack_version,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .is_some()
+        } else {
+            false
+        };
+        if !current_document_exists {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        batch.repo_id,
+                        batch.commit_sha.clone(),
                         worktree_dirty,
-                    path,
-                    document.language,
-                    document.content_sha256,
-                    document.parser_id,
-                    document.parser_version,
-                    document.query_pack_version,
-                    document.byte_len as i64,
-                    document.line_count as i64,
-                    indexed_at,
-                    freshness,
-                ],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-        })?;
-        report.persisted_documents += 1;
+                        path,
+                        document.language,
+                        document.content_sha256,
+                        document.parser_id,
+                        document.parser_version,
+                        document.query_pack_version,
+                        document.byte_len as i64,
+                        document.line_count as i64,
+                        indexed_at,
+                        freshness,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            report.persisted_documents += 1;
+        }
         if !batch.worktree_dirty
             && let Some(commit_sha) = batch.commit_sha.as_deref()
         {
@@ -3128,10 +3152,44 @@ mod index_tests {
         let repo = tempfile::TempDir::new().expect("repository tempdir");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
 
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("base-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/reused.rs", "same-hash")],
+            },
+        )
+        .expect("current document should persist");
         persist_code_intel_documents_with_freshness(
             &config,
             CodeIntelPersistBatch {
                 repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("next-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/reused.rs", "same-hash")],
+            },
+            "staged",
+            false,
+        )
+        .expect("staged reuse should persist revision rows");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (commit_sha, freshness): (String, String) = connection
+            .query_row(
+                "SELECT commit_sha, freshness FROM code_documents WHERE repo_id = ? AND path = ?",
+                params!["fixture-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current document should remain queryable");
+        assert_eq!(commit_sha, "base-commit");
+        assert_eq!(freshness, "current");
+        drop(connection);
+
+        persist_code_intel_documents_with_freshness(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "staged-repo".to_string(),
                 commit_sha: Some("staged-commit".to_string()),
                 worktree_dirty: false,
                 documents: vec![test_code_document("src/staged.rs", "staged-hash")],
@@ -3140,12 +3198,11 @@ mod index_tests {
             false,
         )
         .expect("staged document should persist");
-        assert!(
-            code_graph_repos(&config, true)
-                .expect("staged rows should be hidden")
-                .repos
-                .is_empty()
-        );
+        assert!(!code_graph_repos(&config, true)
+            .expect("staged rows should be hidden")
+            .repos
+            .iter()
+            .any(|repo| repo.repo_id == "staged-repo"));
 
         persist_code_intel_skipped_files(
             &config,
