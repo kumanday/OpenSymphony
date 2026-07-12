@@ -1254,11 +1254,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!snapshot || this.state.codeGraph.layoutStatus === "loading") return;
     const run = ++this.codeGraphLayoutRun;
     const renderSnapshot = codeGraphSnapshotForRendering(snapshot, this.state.codeGraph.diffOverlay);
+    const targetNode = this.state.codeGraph.symbolKey
+      ? snapshot.nodes.find((node) => node.symbol_key === this.state.codeGraph.symbolKey)
+      : this.state.codeGraph.path
+        ? snapshot.nodes.find((node) => node.path_display === this.state.codeGraph.path)
+        : undefined;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "loading" });
     const layoutScale = Math.min(2, Math.max(1.4, Math.sqrt(Math.max(1, renderSnapshot.nodes.length) / 20)));
     void this.graphLayoutAdapter.layout(renderSnapshot, {
       kind: codeGraphLayoutKindForMode(this.state.codeGraph.mode),
-      focusedNodeId: this.state.codeGraph.selectedNodeIds[0] ?? null,
+      focusedNodeId: targetNode?.id ?? this.state.codeGraph.selectedNodeIds[0] ?? null,
       width: Math.round(Math.max(1280, size.width * layoutScale)),
       height: Math.round(Math.max(900, size.height * layoutScale)),
     }).then((layout) => {
@@ -1288,7 +1293,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private onCodeNodeSelected = (nodeId: string): void => {
     const node = this.visibleCodeGraphSnapshot()?.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) return;
-    if (node.kind === "directory" || node.kind === "file" || node.kind === "community") {
+    if (node.kind === "directory" || node.kind === "community" || (node.kind === "file" && this.state.codeGraph.mode !== "file")) {
       this.drillIntoCodeNode(node);
       return;
     }

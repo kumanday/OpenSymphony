@@ -148,6 +148,7 @@ describe("Code Graph renderer surface", () => {
     const deepLink = root.querySelector<HTMLButtonElement>("[data-code-copy-deeplink]")?.dataset.codeCopyDeeplink;
     expect(parseCodeDeepLink(deepLink!)).toMatchObject({
       mode: "diff",
+      symbolKey: "codeGraphReducer",
       baseRevision: codeGraphFixtureDiffOverlays[0].base_revision,
       headRevision: codeGraphFixtureDiffOverlays[0].head_revision,
     });

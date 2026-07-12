@@ -325,6 +325,8 @@ function codeDeepLinkForNode(state: CodeGraphState, node: CodeGraphNode): string
     if (state.mode === "diff" && state.baseRevision && state.headRevision) {
       return formatCodeDeepLink({
         repoId: state.repoId ?? "",
+        symbolKey: node.symbol_key,
+        path: node.symbol_key ? null : node.path_display,
         baseRevision: state.baseRevision,
         headRevision: state.headRevision,
         depth: state.depth,

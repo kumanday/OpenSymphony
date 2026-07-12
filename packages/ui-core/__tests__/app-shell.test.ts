@@ -1387,6 +1387,13 @@ describe("OpenSymphonyApp mount", () => {
 
       expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts")).toBe(true);
       await flushUntil(() => root.querySelector("[data-code-mode='file']")?.classList.contains("is-selected") ?? false);
+      const fileApp = handle as unknown as { state: { codeGraph: { mode: string; selectedNodeIds: string[]; breadcrumbs: unknown[] } } };
+      const fileRow = root.querySelector<HTMLButtonElement>("[data-code-node-id='file:packages/graph/src/index.ts']");
+      expect(fileRow).not.toBeNull();
+      fileRow!.click();
+      await flushUntil(() => fileApp.state.codeGraph.selectedNodeIds.includes("file:packages/graph/src/index.ts"));
+      expect(fileApp.state.codeGraph.mode).toBe("file");
+      expect(fileApp.state.codeGraph.breadcrumbs).toHaveLength(0);
       const focusApp = handle as unknown as { onCodeNodeFocused(nodeId: string): void; state: { codeGraph: { mode: string } } };
       focusApp.onCodeNodeFocused("symbol:codeGraphReducer");
       expect(focusApp.state.codeGraph.mode).toBe("file");

@@ -7,6 +7,7 @@ import {
   createInitialCodeGraphState,
   createTauriNativeCodeGraphAdapter,
   codeDeepLinkFromLocationSearch,
+  codeDeepLinkToGraphState,
   formatCodeDeepLink,
   initialCodeGraphFilters,
   parseCodeDeepLink,
@@ -331,6 +332,32 @@ describe("Code Graph deep links", () => {
     expect(parseCodeDeepLink(file)).toMatchObject({ mode: "file", path: "src/lib.rs" });
     const diff = formatCodeDeepLink({ repoId: "opensymphony", baseRevision: "base/rev", headRevision: "head-rev" });
     expect(parseCodeDeepLink(diff)).toMatchObject({ mode: "diff", baseRevision: "base/rev", headRevision: "head-rev" });
+    const symbolDiff = formatCodeDeepLink({
+      repoId: "opensymphony",
+      symbolKey: "crate::run",
+      baseRevision: "base/rev",
+      headRevision: "head-rev",
+    });
+    expect(parseCodeDeepLink(symbolDiff)).toMatchObject({
+      mode: "diff",
+      symbolKey: "crate::run",
+      baseRevision: "base/rev",
+      headRevision: "head-rev",
+    });
+    expect(formatCodeDeepLink(parseCodeDeepLink(symbolDiff)!)).toBe(symbolDiff);
+    const fileDiff = formatCodeDeepLink({
+      repoId: "opensymphony",
+      path: "src/lib.rs",
+      baseRevision: "base/rev",
+      headRevision: "head-rev",
+    });
+    expect(parseCodeDeepLink(fileDiff)).toMatchObject({ mode: "diff", path: "src/lib.rs" });
+    expect(parseCodeDeepLink("opensymphony://code/repo/diff/base/head/unknown/value")).toBeNull();
+  });
+
+  it("seeds restored symbol links with the backend symbol id shape", () => {
+    const link = parseCodeDeepLink("opensymphony://code/repo/symbols/crate%3A%3Arun")!;
+    expect(codeDeepLinkToGraphState(link).selectedNodeIds).toEqual(["sym:crate::run"]);
   });
 
   it("rejects unknown shapes and query keys", () => {

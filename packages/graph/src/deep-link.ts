@@ -236,12 +236,16 @@ export function formatCodeDeepLink(link: {
     throw new Error("Code deep-link target does not match its mode");
   }
   const depth = normalizeCodeDepth(link.depth ?? 1);
-  const route = symbolKey
-    ? `symbols/${encodeSegments(symbolKey)}`
-    : path
-      ? `files/${encodeSegments(path)}`
-      : baseRevision
-        ? `diff/${encodeURIComponent(baseRevision)}/${encodeURIComponent(headRevision!)}`
+  const route = baseRevision
+    ? `diff/${encodeURIComponent(baseRevision)}/${encodeURIComponent(headRevision!)}${symbolKey
+      ? `/symbols/${encodeSegments(symbolKey)}`
+      : path
+        ? `/files/${encodeSegments(path)}`
+        : ""}`
+    : symbolKey
+      ? `symbols/${encodeSegments(symbolKey)}`
+      : path
+        ? `files/${encodeSegments(path)}`
         : "atlas";
   const params = new URLSearchParams();
   if (mode !== inferredMode) params.set("mode", mode);
@@ -282,8 +286,15 @@ export function parseCodeDeepLink(url: string): CodeDeepLink | null {
   } else if (collection === "files" && tail.length > 0) {
     path = tail.join("/");
     inferredMode = "file";
-  } else if (collection === "diff" && tail.length === 2) {
+  } else if (collection === "diff" && tail.length >= 2) {
     [baseRevision, headRevision] = tail;
+    if (tail.length > 2 && tail[2] === "symbols" && tail.length > 3) {
+      symbolKey = tail.slice(3).join("/");
+    } else if (tail.length > 2 && tail[2] === "files" && tail.length > 3) {
+      path = tail.slice(3).join("/");
+    } else if (tail.length !== 2) {
+      return null;
+    }
     inferredMode = "diff";
   } else {
     return null;
@@ -327,7 +338,7 @@ export function codeDeepLinkToGraphState(link: CodeDeepLink): {
     runId: link.runId,
     depth: link.depth,
     filters: normalizeCodeGraphFilters(link.filters),
-    selectedNodeIds: link.symbolKey ? [`symbol:${link.symbolKey}`, link.symbolKey] : [],
+    selectedNodeIds: link.symbolKey ? [`sym:${link.symbolKey}`] : [],
     layoutSeed: link.layoutSeed,
     baseRevision: link.baseRevision,
     headRevision: link.headRevision,
@@ -414,7 +425,7 @@ function codeGraphModesForPath(
   baseRevision: string | null,
 ): boolean {
   if (mode === "diff" && baseRevision === null) return false;
-  if (baseRevision) return mode === "diff" && symbolKey === null && path === null;
+  if (baseRevision) return mode === "diff" && !(symbolKey && path);
   if (symbolKey) return mode === "neighborhood" || mode === "diff";
   if (path) return mode === "file" || mode === "diff";
   return mode === "atlas";
