@@ -325,6 +325,7 @@ interface AuditTrailEntry {
 
 /** Evidence for one run, fetched concurrently and applied atomically. */
 interface RunDetailBundle {
+  runId: string;
   runFiles: ChangedFileEntry[];
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
@@ -583,20 +584,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           warnings.push(`Diff unavailable: ${errorMessage(error)}`);
         }
       }
-      let runCodeOutline: CodeFileOutline | null = null;
-      if (selectedDiffPath && this.codeGraphAdapter?.getFileOutline) {
-        const cacheKey = runOutlineCacheKey(runId, selectedDiffPath, runDiff);
-        runCodeOutline = this.runOutlineCache.get(cacheKey) ?? null;
-        if (!runCodeOutline) {
-          try {
-            runCodeOutline = await this.codeGraphAdapter.getFileOutline(runId, selectedDiffPath);
-            this.runOutlineCache.set(cacheKey, runCodeOutline);
-          } catch {
-            runCodeOutline = null;
-          }
-        }
-      }
-      return { runFiles, selectedDiffPath, runDiff, runCodeOutline };
+      return { runFiles, selectedDiffPath, runDiff };
     })();
     const events = (async () => {
       try {
@@ -630,20 +618,25 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     })();
 
     const [
-      { runFiles, selectedDiffPath, runDiff, runCodeOutline },
+      { runFiles, selectedDiffPath, runDiff },
       runEvents,
       runValidation,
       runApprovals,
     ] = await Promise.all([filesAndDiff, events, validation, approvals]);
-    return { runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline, runEvents, runValidation, runApprovals, warnings };
+    return { runId, runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline: null, runEvents, runValidation, runApprovals, warnings };
   }
 
   private applyRunDetailBundle(bundle: RunDetailBundle): void {
+    const sameRun = this.state.runDetail?.run_id === bundle.runId;
+    const sameDiff = sameRun
+      && this.state.selectedDiffPath === bundle.selectedDiffPath
+      && runOutlineCacheKey(bundle.runId, bundle.selectedDiffPath ?? "", this.state.runDiff)
+        === runOutlineCacheKey(bundle.runId, bundle.selectedDiffPath ?? "", bundle.runDiff);
     this.state.runFiles = bundle.runFiles;
     this.state.selectedDiffPath = bundle.selectedDiffPath;
     this.state.runDiff = bundle.runDiff;
-    this.state.runCodeOverlay = bundle.runCodeOverlay;
-    this.state.runCodeOutline = bundle.runCodeOutline;
+    this.state.runCodeOverlay = bundle.runCodeOverlay ?? (sameRun ? this.state.runCodeOverlay : null);
+    this.state.runCodeOutline = bundle.runCodeOutline ?? (sameDiff ? this.state.runCodeOutline : null);
     this.state.runEvents = bundle.runEvents;
     this.state.runValidation = bundle.runValidation;
     this.state.runApprovals = bundle.runApprovals;
@@ -1213,7 +1206,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     navigationVersion: number,
   ): Promise<void> {
     if (!this.codeGraphAdapter) return;
-    const overlay = this.state.codeGraph.runId && this.codeGraphAdapter.getRunDiffOverlay
+    const overlay = this.state.codeGraph.runId
+      && !baseRevision
+      && this.codeGraphAdapter.getRunDiffOverlay
       ? await this.codeGraphAdapter.getRunDiffOverlay(this.state.codeGraph.runId, repoId)
       : await this.codeGraphAdapter.getDiffOverlay(repoId, baseRevision, headRevision);
     if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
@@ -1701,6 +1696,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = selectedRun.runDetail;
       this.state.runOverlays.set(selectedRun.runDetail.run_id, selectedRun.runDetail);
       this.applyRunDetailBundle(selectedRun.bundle);
+      void this.loadRunCodeOutline(selectedRun.runDetail.run_id, selectedRun.bundle.selectedDiffPath, selectedRun.bundle.runDiff);
       void this.loadRunCodeOverlay(selectedRun.runDetail.run_id);
     }
     if (completedSetChanged) {
@@ -1774,12 +1770,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (this.destroyed || openSeq !== this.runOpenSeq) {
         return;
       }
+      this.state.runCodeOverlay = null;
+      this.state.runCodeOutline = null;
       this.state.runDetail = runDetail;
       this.state.runOverlays.set(runId, runDetail);
       this.state.evidenceView = "diff";
       this.state.expandedActivityEvents = new Set();
       this.state.collapsedActivityEvents = new Set();
       this.applyRunDetailBundle(bundle);
+      void this.loadRunCodeOutline(runId, bundle.selectedDiffPath, bundle.runDiff);
       void this.loadRunCodeOverlay(runId);
     } catch (error) {
       if (this.destroyed || openSeq !== this.runOpenSeq) {
@@ -1878,6 +1877,37 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.render();
     } catch {
       // Code Graph is optional; Run Detail remains usable without its overlay.
+    }
+  }
+
+  private async loadRunCodeOutline(
+    runId: string,
+    path: string | null,
+    diff: FileDiffPage | null,
+  ): Promise<void> {
+    const getOutline = this.codeGraphAdapter?.getFileOutline;
+    if (!path || !diff || !getOutline) return;
+    const cacheKey = runOutlineCacheKey(runId, path, diff);
+    const apply = (outline: CodeFileOutline): void => {
+      if (this.destroyed
+        || this.state.runDetail?.run_id !== runId
+        || this.state.selectedDiffPath !== path
+        || !this.state.runDiff
+        || runOutlineCacheKey(runId, path, this.state.runDiff) !== cacheKey) return;
+      this.state.runCodeOutline = outline;
+      this.render();
+    };
+    const cached = this.runOutlineCache.get(cacheKey);
+    if (cached) {
+      apply(cached);
+      return;
+    }
+    try {
+      const outline = await getOutline(runId, path);
+      this.runOutlineCache.set(cacheKey, outline);
+      apply(outline);
+    } catch {
+      // Code intelligence is optional; the plain diff remains available.
     }
   }
 

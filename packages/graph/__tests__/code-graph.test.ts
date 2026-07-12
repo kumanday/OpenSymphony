@@ -183,6 +183,21 @@ describe("Code Graph adapters and state", () => {
     expect(state.selectedNodeIds).toEqual(["sym:newSymbol"]);
   });
 
+  it("materializes blast-radius-only symbols for graph styling", async () => {
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "atlas" });
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      added_symbols: [],
+      removed_symbols: [],
+      modified_symbols: [],
+      blast_radius: [{ symbol_key: "unchangedCaller", inbound_count: 3 }],
+    };
+    const rendered = codeGraphSnapshotForRendering(snapshot, overlay);
+    expect(rendered.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ concept_id: "unchangedCaller", concept_type: "blast_radius" }),
+    ]));
+  });
+
   it("uses community node membership without requiring a metrics community id", async () => {
     const adapter = createFixtureCodeGraphAdapter();
     const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "file" });

@@ -737,7 +737,6 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
     const side = symbol.status === "removed" ? symbol.before : symbol.after ?? symbol.before;
     if (side) syntheticSides.set(symbol.symbol_key, side);
   }
-  if (syntheticSides.size === 0) return snapshot;
   const syntheticNodes = [...syntheticSides].map(([symbolKey, side]) => ({
     id: `symbol:${symbolKey}`,
     kind: "symbol" as const,
@@ -756,7 +755,28 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
     diagnostic_severity: null,
     metrics: { in_degree: 0, out_degree: 0, community_id: null },
   }));
-  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes] };
+  const radiusNodes = overlay.blast_radius
+    .filter((entry) => !existingKeys.has(entry.symbol_key) && !syntheticSides.has(entry.symbol_key))
+    .map((entry) => ({
+      id: `symbol:${entry.symbol_key}`,
+      kind: "symbol" as const,
+      label: entry.symbol_key,
+      symbol_kind: "blast_radius",
+      symbol_key: entry.symbol_key,
+      symbol_id: null,
+      path_display: null,
+      language: null,
+      container_chain: [],
+      signature: null,
+      span: null,
+      selection_span: null,
+      freshness: "unknown" as const,
+      diagnostic_count: 0,
+      diagnostic_severity: null,
+      metrics: { in_degree: entry.inbound_count, out_degree: 0, community_id: null },
+    }));
+  if (syntheticNodes.length === 0 && radiusNodes.length === 0) return snapshot;
+  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes] };
 }
 
 function matchesCodeNode(
