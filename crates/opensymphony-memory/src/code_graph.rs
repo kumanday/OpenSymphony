@@ -1355,8 +1355,9 @@ fn code_index_edge_input(
     let end = capture
         .text
         .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= max_capture_bytes)
+        .map(|(index, character)| (index, index + character.len_utf8()))
+        .take_while(|(_, end)| *end <= max_capture_bytes)
+        .map(|(_, end)| end)
         .last()
         .unwrap_or(0);
     Some(CodeIntelEdgeInput {
@@ -3065,6 +3066,7 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 mod code_graph_tests {
+    use crate::opensymphony_code_intel::{CaptureRecord, SourceSpan};
     use crate::opensymphony_memory::{KnowledgeScope, KnowledgeScopeKind, MemoryConfig};
     use chrono::Utc;
     use std::{fs, process::Command, sync::Arc};
@@ -3191,6 +3193,29 @@ mod code_graph_tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn code_index_edge_input_keeps_the_final_hint_character() {
+        let capture = CaptureRecord {
+            query_name: "rust.references".to_string(),
+            capture_name: "reference.call".to_string(),
+            text: "helper".to_string(),
+            span: SourceSpan {
+                start_byte: 0,
+                end_byte: 6,
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 7,
+            },
+            rendered_span: "1:1-1:7".to_string(),
+        };
+        assert_eq!(
+            super::code_index_edge_input(&capture, 6)
+                .and_then(|edge| edge.target_hint),
+            Some("helper".to_string())
+        );
     }
 
     #[test]
