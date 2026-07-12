@@ -50,8 +50,14 @@ export function renderFileDiff(
   outline?: CodeFileOutline | null,
   codeDeepLink?: (symbolKey: string, path?: string) => string | null,
 ): string {
+  const fileDeepLink = codeDeepLink?.("", diff.file_path) ?? null;
+  const header = `<div class="os-diff-header" data-testid="diff-header">
+    <span class="os-diff-path">${escapeHtml(diff.file_path)}</span>
+    <span class="os-diff-stats">${renderLineStats(diff.total_lines_added, diff.total_lines_removed)}</span>
+    ${fileDeepLink ? `<button type="button" class="os-diff-file-graph" data-diff-file-graph="${escapeAttr(diff.file_path)}" aria-label="Open ${escapeAttr(diff.file_path)} in Code Graph">Open file in Code Graph</button>` : ""}
+  </div>`;
   if (diff.hunks.length === 0) {
-    return `<div class="os-file-diff os-empty" data-testid="file-diff" data-file-path="${escapeAttr(diff.file_path)}">No diff available</div>`;
+    return `<div class="os-file-diff os-empty" data-testid="file-diff" data-file-path="${escapeAttr(diff.file_path)}">${header}<div>No diff available</div></div>`;
   }
   const regions = outline ? resolveDiffSymbolRegions(diff, outline) : [];
   const regionByLine = new Map(regions.map((region) => [region.firstChangedLine, region]));
@@ -59,12 +65,6 @@ export function renderFileDiff(
   for (const region of regions) {
     for (const line of region.changedLines) symbolLines.set(line, region);
   }
-  const fileDeepLink = codeDeepLink?.("", diff.file_path) ?? null;
-  const header = `<div class="os-diff-header" data-testid="diff-header">
-    <span class="os-diff-path">${escapeHtml(diff.file_path)}</span>
-    <span class="os-diff-stats">${renderLineStats(diff.total_lines_added, diff.total_lines_removed)}</span>
-    ${fileDeepLink ? `<button type="button" class="os-diff-file-graph" data-diff-file-graph="${escapeAttr(diff.file_path)}" aria-label="Open ${escapeAttr(diff.file_path)} in Code Graph">Open file in Code Graph</button>` : ""}
-  </div>`;
   const hunks = diff.hunks
     .map((hunk) => {
       let [oldLine, newLine] = hunkLineStarts(hunk);

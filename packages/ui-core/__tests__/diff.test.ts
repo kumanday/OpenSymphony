@@ -80,6 +80,14 @@ describe("diff symbol navigation", () => {
     expect(renderFileDiff(diff, outline, (_symbolKey, path) => `opensymphony://code/file/${path}`)).toContain("os-diff-file-graph");
   });
 
+  it("keeps file navigation available for empty diffs", () => {
+    const emptyDiff: FileDiffPage = { ...diff, hunks: [], total_lines_added: 0, total_lines_removed: 0 };
+    const html = renderFileDiff(emptyDiff, null, (_symbolKey, path) => `opensymphony://code/file/${path}`);
+    expect(html).toContain("data-testid=\"diff-header\"");
+    expect(html).toContain("data-diff-file-graph=\"src/lib.ts\"");
+    expect(html).toContain("No diff available");
+  });
+
   it("lists blast-radius-only symbols in the accessible delta", () => {
     const overlay = {
       schema_version: { major: 1, minor: 0, patch: 0 },
