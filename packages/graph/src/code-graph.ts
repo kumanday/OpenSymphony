@@ -54,6 +54,11 @@ export interface CodeSymbolDetailRequestOptions {
   visibility?: "public" | "all_accessible";
 }
 
+export interface CodeGraphAdapterPolicy {
+  defaultVisibility?: "public" | "all_accessible";
+  maxVisibility?: "public" | "all_accessible";
+}
+
 export interface CodeGraphAdapter {
   listRepos(options?: CodeRepoListRequestOptions): Promise<CodeRepoList>;
   getGraphSnapshot(repoId: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
@@ -602,6 +607,7 @@ export function codeGraphNodeDeltaStatus(
 export function createHttpCodeGraphAdapter(
   baseUri: string,
   fetchFn: typeof fetch = globalThis.fetch,
+  policy: CodeGraphAdapterPolicy = {},
 ): CodeGraphAdapter {
   const base = baseUri.replace(/\/+$/, "");
   async function read<T>(path: string, params = new URLSearchParams()): Promise<T> {
@@ -623,7 +629,8 @@ export function createHttpCodeGraphAdapter(
     getSymbolDetail: (repoId, symbolKey, options) => {
       const params = new URLSearchParams();
       if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
-      if (options?.visibility !== undefined) params.set("visibility", options.visibility);
+      const visibility = effectiveCodeVisibility(options?.visibility, policy);
+      if (visibility !== undefined) params.set("visibility", visibility);
       return read<CodeSymbolDetail>(
         `/api/v1/code/repos/${encodeURIComponent(repoId)}/symbols/${encodeURIComponent(symbolKey)}`,
         params,
@@ -640,6 +647,16 @@ export function createHttpCodeGraphAdapter(
       return read<CodeDiffOverlay>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/diff-overlay`, params);
     },
   };
+}
+
+function effectiveCodeVisibility(
+  requested: CodeSymbolDetailRequestOptions["visibility"] | undefined,
+  policy: CodeGraphAdapterPolicy,
+): CodeSymbolDetailRequestOptions["visibility"] | undefined {
+  if (policy.maxVisibility === "public" && requested === "all_accessible") {
+    throw new Error('Code graph visibility "all_accessible" exceeds adapter policy "public"');
+  }
+  return requested ?? policy.defaultVisibility ?? policy.maxVisibility;
 }
 
 export const createGatewayCodeGraphAdapter = createHttpCodeGraphAdapter;

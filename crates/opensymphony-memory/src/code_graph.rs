@@ -230,7 +230,7 @@ fn code_graph_related_memory(
     let mut related_memory_concepts = Vec::new();
     for issue in issues {
         let source_match = issue.source_refs.iter().any(|source| {
-            let repo_matches = source.repo_id.as_deref().is_none_or(|id| id == repo_id);
+            let repo_matches = source.repo_id.as_deref() == Some(repo_id);
             repo_matches && (source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str())
                 || (source.kind == "path" && source.id == symbol.path)
                 || (source.kind == "code-symbol" && code_symbol_source_ref_matches(source, symbol)))

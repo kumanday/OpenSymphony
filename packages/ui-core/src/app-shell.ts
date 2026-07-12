@@ -1498,6 +1498,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAILS_INVALIDATED" });
+        this.codeGraphSymbolRequest = null;
+        this.codeGraphSymbolErrorKey = null;
+        this.codeGraphSymbolError = null;
         const selectedBundleId = this.state.knowledgeGraph.selectedBundleId;
         if (!selectedBundleId || selectedBundleId === envelope.payload.bundle_id) {
           this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });

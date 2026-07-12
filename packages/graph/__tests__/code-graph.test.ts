@@ -306,9 +306,17 @@ describe("Code Graph adapters and state", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
     await http.getSymbolDetail("opensymphony", "staleSymbol", { includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/staleSymbol?include_stale=true");
+    const publicHttp = createHttpCodeGraphAdapter("http://localhost:2468", fetchMock, {
+      defaultVisibility: "public",
+      maxVisibility: "public",
+    });
+    await publicHttp.getSymbolDetail("opensymphony", "publicSymbol");
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/publicSymbol?visibility=public");
+    expect(() => publicHttp.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
+      .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     const native = createTauriNativeCodeGraphAdapter(http);
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 });
 
