@@ -1172,9 +1172,11 @@ pub async fn code_symbol_detail(
     repo_id: String,
     symbol_key: String,
     include_stale: Option<bool>,
+    visibility: Option<String>,
 ) -> CommandResult<serde_json::Value> {
     let mut params = Vec::new();
     push_query_param_value(&mut params, "include_stale", include_stale);
+    push_query_param(&mut params, "visibility", visibility.as_deref());
     let path = path_with_query(
         &format!(
             "/api/v1/code/repos/{}/symbols/{}",

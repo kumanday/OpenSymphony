@@ -394,6 +394,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private codeGraphNavigationVersion = 0;
   private codeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private codeGraphSymbolRequest: string | null = null;
+  /** Invalidates in-flight detail responses when memory-derived chips change. */
+  private codeGraphMemoryDetailsEpoch = 0;
   private codeGraphSymbolErrorKey: string | null = null;
   private codeGraphSymbolError: string | null = null;
   private codeGraphFiltersOpen = false;
@@ -1369,7 +1371,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const detailKey = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
-    const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}`;
+    const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}:${this.codeGraphMemoryDetailsEpoch}`;
     if (this.codeGraphSymbolRequest !== null && this.codeGraphSymbolRequest !== key) {
       this.codeGraphSymbolRequest = null;
     }
@@ -1498,6 +1500,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAILS_INVALIDATED" });
+        this.codeGraphMemoryDetailsEpoch += 1;
         this.codeGraphSymbolRequest = null;
         this.codeGraphSymbolErrorKey = null;
         this.codeGraphSymbolError = null;

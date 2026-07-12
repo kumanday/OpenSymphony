@@ -315,8 +315,16 @@ describe("Code Graph adapters and state", () => {
     expect(() => publicHttp.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
       .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     const native = createTauriNativeCodeGraphAdapter(http);
+    const publicNative = createTauriNativeCodeGraphAdapter(http, {
+      defaultVisibility: "public",
+      maxVisibility: "public",
+    });
+    await publicNative.getSymbolDetail("opensymphony", "publicSymbol");
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/publicSymbol?visibility=public");
+    expect(() => publicNative.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
+      .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 });
 

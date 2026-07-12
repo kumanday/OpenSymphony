@@ -661,8 +661,17 @@ function effectiveCodeVisibility(
 
 export const createGatewayCodeGraphAdapter = createHttpCodeGraphAdapter;
 
-export function createTauriNativeCodeGraphAdapter(api: NativeCodeGraphApi): CodeGraphAdapter {
-  return api;
+export function createTauriNativeCodeGraphAdapter(
+  api: NativeCodeGraphApi,
+  policy: CodeGraphAdapterPolicy = {},
+): CodeGraphAdapter {
+  return {
+    ...api,
+    getSymbolDetail: (repoId, symbolKey, options) => api.getSymbolDetail(repoId, symbolKey, {
+      ...options,
+      visibility: effectiveCodeVisibility(options?.visibility, policy),
+    }),
+  };
 }
 
 export interface CodeGraphFixtures {

@@ -11,6 +11,7 @@ use crate::opensymphony_gateway_schema::{
         CodeSymbolProvenance,
     },
 };
+use url::Url;
 
 static CODE_GRAPH_SEQUENCE_FLOOR: AtomicU64 = AtomicU64::new(0);
 const CODE_GRAPH_MAX_RECORDS: usize = 500;
@@ -229,20 +230,42 @@ fn code_graph_related_memory(
     let mut related_issues = Vec::new();
     let mut related_memory_concepts = Vec::new();
     for issue in issues {
+        let repository_scope_matches = issue
+            .scope_refs
+            .iter()
+            .find(|scope| matches!(scope.kind, KnowledgeScopeKind::Repository))
+            .is_none_or(|scope| scope.id == repo_id);
         let source_match = issue.source_refs.iter().any(|source| {
-            let repo_matches = source.repo_id.as_deref() == Some(repo_id);
-            repo_matches && (source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str())
-                || (source.kind == "path" && source.id == symbol.path)
-                || (source.kind == "code-symbol" && code_symbol_source_ref_matches(source, symbol)))
+            let source_repo_matches = source
+                .repo_id
+                .as_deref()
+                .is_none_or(|source_repo| source_repo == repo_id);
+            let symbol_match = source.repo_id.as_deref() == Some(repo_id)
+                && source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str());
+            let legacy_path_match = source.symbol_key.is_none()
+                && ((source.kind == "path" && source.id == symbol.path)
+                    || (source.kind == "code-symbol"
+                        && code_symbol_source_ref_matches(source, symbol)));
+            repository_scope_matches
+                && source_repo_matches
+                && (symbol_match || legacy_path_match)
         });
-        let scope_match = issue.scope_refs.iter().any(|scope| {
+        let scope_match = repository_scope_matches && issue.scope_refs.iter().any(|scope| {
             matches!(scope.kind, KnowledgeScopeKind::CodePath)
                 && (scope.id == symbol.path
                     || symbol.path.starts_with(&format!("{}/", scope.id)))
         });
-        let citation_match = issue.citations.iter().any(|citation| {
-            citation.target.contains(&symbol.symbol_key) || citation.target.contains(&symbol.path)
-        });
+        let citation_match = issue
+            .citations
+            .iter()
+            .any(|citation| {
+                code_citation_matches_symbol(
+                    &citation.target,
+                    repo_id,
+                    &symbol.symbol_key,
+                    &symbol.path,
+                )
+            });
         if !(source_match || scope_match || citation_match) {
             continue;
         }
@@ -267,6 +290,46 @@ fn code_graph_related_memory(
     related_issues.sort_by(|left, right| left.issue_key.cmp(&right.issue_key));
     related_memory_concepts.sort_by(|left, right| left.concept_id.cmp(&right.concept_id));
     Ok((related_issues, related_memory_concepts))
+}
+
+fn code_citation_matches_symbol(
+    target: &str,
+    repo_id: &str,
+    symbol_key: &str,
+    path: &str,
+) -> bool {
+    let Ok(url) = Url::parse(target) else {
+        return false;
+    };
+    if url.scheme() != "opensymphony" || url.host_str() != Some("code") {
+        return false;
+    }
+    let Some(segments) = url.path_segments() else {
+        return false;
+    };
+    let Some(actual_segments) = segments
+        .map(decode_code_path_segment)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+
+    [
+        ("symbols", symbol_key),
+        ("files", path),
+    ]
+    .into_iter()
+    .any(|(collection, value)| {
+        let mut expected = vec![repo_id.to_string(), collection.to_string()];
+        expected.extend(value.split('/').map(str::to_string));
+        actual_segments == expected
+    })
+}
+
+fn decode_code_path_segment(segment: &str) -> Option<String> {
+    url::form_urlencoded::parse(format!("value={segment}").as_bytes())
+        .next()
+        .map(|(_, value)| value.into_owned())
 }
 
 fn code_symbol_source_ref_matches(source: &MemorySourceRef, symbol: &CodeSymbolRecord) -> bool {
@@ -1995,12 +2058,40 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 mod code_graph_tests {
-    use super::code_symbol_span_matches;
+    use super::{code_citation_matches_symbol, code_symbol_span_matches};
 
     #[test]
     fn legacy_code_symbol_refs_match_only_their_exact_span() {
         assert!(code_symbol_span_matches("10:1-12:2", 10, 1, 12, 2));
         assert!(!code_symbol_span_matches("10:1-12:2", 20, 1, 22, 2));
         assert!(!code_symbol_span_matches("10:1-12:2", 10, 1, 12, 3));
+    }
+
+    #[test]
+    fn code_citations_require_a_matching_code_deep_link_target() {
+        assert!(code_citation_matches_symbol(
+            "opensymphony://code/team%2Frepo/symbols/crate%3A%3Arun?depth=2",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+        assert!(code_citation_matches_symbol(
+            "opensymphony://code/team%2Frepo/files/src/lib.rs",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+        assert!(!code_citation_matches_symbol(
+            "https://example.test/team/repo/src/lib.rs",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+        assert!(!code_citation_matches_symbol(
+            "opensymphony://code/other-repo/symbols/crate%3A%3Arun",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
     }
 }
