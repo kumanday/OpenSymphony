@@ -7,7 +7,7 @@
  */
 
 import { HttpGatewayTransport } from "@opensymphony/api-client";
-import { createGatewayGraphAdapter } from "@opensymphony/graph";
+import { codeDeepLinkFromLocationSearch, createGatewayCodeGraphAdapter, createGatewayGraphAdapter } from "@opensymphony/graph";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
 import { createWebModelProfileController } from "./model-profile-controller.js";
@@ -31,13 +31,30 @@ export function createWebGraphAdapter(gatewayUrl = defaultGatewayUrl) {
   });
 }
 
+export function createWebCodeGraphAdapter(gatewayUrl = defaultGatewayUrl) {
+  return createGatewayCodeGraphAdapter(gatewayUrl, globalThis.fetch);
+}
+
+function openCodeDeepLinkFromLocation(app: ReturnType<typeof renderOpenSymphonyApp>): void {
+  try {
+    const link = codeDeepLinkFromLocationSearch(globalThis.location?.search ?? "");
+    if (!link) return;
+    void app.ready()
+      .then(() => app.openCodeDeepLink(link))
+      .catch(() => undefined);
+  } catch {
+    // No usable location (tests, static builds without query strings).
+  }
+}
+
 if (root) {
-  renderOpenSymphonyApp({
+  const app = renderOpenSymphonyApp({
     root,
     mode: "web",
     title: "OpenSymphony Web",
     transport: createWebTransport(),
     graphAdapter: createWebGraphAdapter(),
+    codeGraphAdapter: createWebCodeGraphAdapter(),
     profileController: createWebProfileController({ defaultGatewayUrl }),
     modelProfileController: createWebModelProfileController(),
     onGatewayUrlChanged: async (gatewayUrl) =>
@@ -46,7 +63,9 @@ if (root) {
         transport: "loopback_http",
       }),
     onGraphGatewayUrlChanged: createWebGraphAdapter,
+    onCodeGraphGatewayUrlChanged: createWebCodeGraphAdapter,
   });
+  openCodeDeepLinkFromLocation(app);
 }
 
 export { config as webConfig };

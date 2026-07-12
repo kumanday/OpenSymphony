@@ -1,4 +1,9 @@
 import type {
+  CodeDiffOverlay,
+  CodeFileOutline,
+  CodeGraphSnapshot,
+  CodeRepoList,
+  CodeSymbolDetail,
   MemoryBundleList,
   MemoryCommunityList,
   MemoryCompletedTask,
@@ -566,5 +571,216 @@ export function graphVizFixtureConceptDetail(conceptId: string): MemoryConceptDe
     links: linkTargets,
     citations,
     source_refs: sourceRefs,
+  };
+}
+
+// Code Graph shares this visualization workbench instead of introducing a
+// second demo data source. Atlas is deliberately aggregate-only; the file and
+// neighborhood snapshots are the scoped follow-up requests an Atlas drill-in
+// would make against the real gateway.
+const codeGraphSchemaVersion = { major: 1, minor: 0, patch: 0 };
+const codeGraphCursor = { sequence: 7, partition: "code-graph:opensymphony" };
+
+export const codeGraphFixtureRepos: CodeRepoList = {
+  schema_version: codeGraphSchemaVersion,
+  repos: [{
+    repo_id: "opensymphony",
+    display_root: "OpenSymphony",
+    languages: ["rust", "typescript"],
+    document_count: 42,
+    symbol_count: 18,
+    edge_count: 24,
+    freshness: "current",
+    indexed_at: "2026-07-04T00:00:00Z",
+    head_revision: "head-rev",
+    worktree_dirty: false,
+  }],
+};
+
+const codeCommunity = {
+  id: "dir:packages",
+  label: "packages",
+  node_ids: ["community:packages", "directory:packages/graph", "directory:packages/ui-core"],
+  symbol_count: 0,
+};
+
+export const codeGraphFixtureSnapshots: CodeGraphSnapshot[] = [
+  {
+    schema_version: codeGraphSchemaVersion,
+    repo_id: "opensymphony",
+    mode: "atlas",
+    cursor: codeGraphCursor,
+    nodes: [
+      codeNode("community:packages", "community", "packages", "typescript", "current", 0, "dir:packages"),
+      codeNode("directory:packages/graph", "directory", "packages/graph", null, "current", 1, "dir:packages"),
+      codeNode("directory:packages/ui-core", "directory", "packages/ui-core", null, "stale", 1, "dir:packages"),
+    ],
+    edges: [
+      codeEdge("atlas:community-graph", "contains", "community:packages", "directory:packages/graph", "exact"),
+      codeEdge("atlas:community-ui", "contains", "community:packages", "directory:packages/ui-core", "syntactic"),
+    ],
+    communities: [codeCommunity],
+    truncation: { nodes_dropped: 13, edges_dropped: 18, reason: "directory aggregation" },
+    filters_applied: ["aggregate:directory"],
+    generated_at: "2026-07-04T00:00:00Z",
+  },
+  {
+    schema_version: codeGraphSchemaVersion,
+    repo_id: "opensymphony",
+    mode: "file",
+    cursor: { ...codeGraphCursor, sequence: 8 },
+    nodes: [
+      codeNode("file:packages/graph/src/index.ts", "file", "index.ts", "typescript", "current", 3, "dir:packages", undefined, "packages/graph/src/index.ts"),
+      codeNode("symbol:graphReducer", "symbol", "graphReducer", "typescript", "current", 3, "dir:packages", "function", "packages/graph/src/index.ts", ["graph"]),
+      codeNode("symbol:createHttpGraphAdapter", "symbol", "createHttpGraphAdapter", "typescript", "current", 2, "dir:packages", "function", "packages/graph/src/index.ts", ["adapters"]),
+      codeNode("symbol:codeGraphReducer", "symbol", "codeGraphReducer", "typescript", "stale", 2, "dir:packages", "function", "packages/graph/src/code-graph.ts", ["code"]),
+    ],
+    edges: [
+      codeEdge("file:contains-reducer", "contains", "file:packages/graph/src/index.ts", "symbol:graphReducer", "exact"),
+      codeEdge("file:contains-adapter", "contains", "file:packages/graph/src/index.ts", "symbol:createHttpGraphAdapter", "exact"),
+      codeEdge("file:imports-code", "references", "symbol:graphReducer", "symbol:codeGraphReducer", "syntactic"),
+    ],
+    communities: [codeCommunity],
+    truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+    filters_applied: ["mode:file"],
+    generated_at: "2026-07-04T00:00:00Z",
+  },
+  {
+    schema_version: codeGraphSchemaVersion,
+    repo_id: "opensymphony",
+    mode: "neighborhood",
+    cursor: { ...codeGraphCursor, sequence: 9 },
+    nodes: [
+      codeNode("symbol:graphReducer", "symbol", "graphReducer", "typescript", "current", 3, "dir:packages", "function", "packages/graph/src/index.ts", ["graph"]),
+      codeNode("symbol:codeGraphReducer", "symbol", "codeGraphReducer", "typescript", "current", 2, "dir:packages", "function", "packages/graph/src/code-graph.ts", ["code"]),
+      codeNode("symbol:renderCodeGraphSurface", "symbol", "renderCodeGraphSurface", "typescript", "current", 1, "dir:packages", "function", "packages/ui-core/src/knowledge-graph-renderer.ts", ["renderer"]),
+    ],
+    edges: [
+      codeEdge("neighborhood:reducer", "references", "symbol:graphReducer", "symbol:codeGraphReducer", "syntactic"),
+      codeEdge("neighborhood:renderer", "calls", "symbol:codeGraphReducer", "symbol:renderCodeGraphSurface", "heuristic"),
+    ],
+    communities: [codeCommunity],
+    truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+    filters_applied: ["mode:neighborhood", "depth:1"],
+    generated_at: "2026-07-04T00:00:00Z",
+  },
+];
+
+export const codeGraphFixtureSymbolDetails: CodeSymbolDetail[] = [
+  codeDetail("graphReducer", "packages/graph/src/index.ts", "typescript", ["graph"]),
+  codeDetail("codeGraphReducer", "packages/graph/src/code-graph.ts", "typescript", ["code"]),
+  codeDetail("renderCodeGraphSurface", "packages/ui-core/src/knowledge-graph-renderer.ts", "typescript", ["renderer"]),
+];
+
+export const codeGraphFixtureOutlines: CodeFileOutline[] = [{
+  schema_version: codeGraphSchemaVersion,
+  run_id: "run-code-fixture",
+  repo_id: "opensymphony",
+  path: "packages/graph/src/index.ts",
+  symbols: codeGraphFixtureSymbolDetails.slice(0, 1).map((detail) => ({
+    symbol_key: detail.symbol_key,
+    name: detail.name,
+    kind: detail.kind,
+    path: detail.path_display,
+    span: detail.span,
+    selection_span: detail.selection_span,
+    container_chain: detail.container_chain,
+  })),
+  generated_at: "2026-07-04T00:00:00Z",
+}];
+
+export const codeGraphFixtureDiffOverlays: CodeDiffOverlay[] = [{
+  schema_version: codeGraphSchemaVersion,
+  repo_id: "opensymphony",
+  base_revision: "base-rev",
+  head_revision: "head-rev",
+  added_symbols: [],
+  removed_symbols: [],
+  modified_symbols: [{
+    symbol_key: "codeGraphReducer",
+    status: "modified",
+    before: codeDiffSide("codeGraphReducer", "packages/graph/src/code-graph.ts", "stale"),
+    after: codeDiffSide("codeGraphReducer", "packages/graph/src/code-graph.ts", "current"),
+  }],
+  blast_radius: [{ symbol_key: "graphReducer", inbound_count: 2, outbound_count: 1 }],
+  unanalyzed_files: [],
+  truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+  generated_at: "2026-07-04T00:00:00Z",
+}];
+
+function codeNode(
+  id: string,
+  kind: CodeGraphSnapshot["nodes"][number]["kind"],
+  label: string,
+  language: string | null,
+  freshness: CodeGraphSnapshot["nodes"][number]["freshness"],
+  degree: number,
+  communityId: string,
+  symbolKind?: string,
+  pathDisplay?: string,
+  containerChain: string[] = [],
+): CodeGraphSnapshot["nodes"][number] {
+  return {
+    id,
+    kind,
+    label,
+    symbol_kind: symbolKind ?? null,
+    symbol_key: kind === "symbol" ? id.replace("symbol:", "") : null,
+    symbol_id: kind === "symbol" ? `${id}:id` : null,
+    path_display: pathDisplay ?? (kind === "directory" ? label : null),
+    language,
+    container_chain: containerChain,
+    signature: kind === "symbol" ? `${symbolKind ?? "symbol"} ${label}()` : null,
+    span: kind === "symbol" ? { start_line: 10, start_col: 1, end_line: 30, end_col: 2 } : null,
+    selection_span: kind === "symbol" ? { start_line: 10, start_col: 1, end_line: 10, end_col: 20 } : null,
+    freshness,
+    diagnostic_count: freshness === "stale" ? 1 : 0,
+    diagnostic_severity: freshness === "stale" ? "warning" : null,
+    metrics: { in_degree: degree, out_degree: degree, community_id: communityId },
+  };
+}
+
+function codeEdge(id: string, kind: string, sourceId: string, targetId: string, confidence: CodeGraphSnapshot["edges"][number]["confidence"]): CodeGraphSnapshot["edges"][number] {
+  return { id, kind, source_id: sourceId, target_id: targetId, confidence, unresolved: false, target_hint: null };
+}
+
+function codeDetail(symbolKey: string, path: string, language: string, containerChain: string[]): CodeSymbolDetail {
+  return {
+    schema_version: codeGraphSchemaVersion,
+    repo_id: "opensymphony",
+    symbol_key: symbolKey,
+    symbol_id: `${symbolKey}:id`,
+    kind: "function",
+    name: symbolKey,
+    path_display: path,
+    language,
+    container_chain: containerChain,
+    signature: `function ${symbolKey}(): CodeGraphState`,
+    span: { start_line: 10, start_col: 1, end_line: 30, end_col: 2 },
+    selection_span: { start_line: 10, start_col: 1, end_line: 10, end_col: 20 },
+    freshness: "current",
+    provenance: {
+      commit_sha: "head-rev",
+      content_sha256: `${symbolKey}-content`,
+      snippet_sha256: `${symbolKey}-snippet`,
+      parser_version: "tree-sitter-typescript",
+      query_pack_version: "typescript-query-pack-v1",
+      indexed_at: "2026-07-04T00:00:00Z",
+    },
+    diagnostics: [],
+    edge_summary: [{ kind: "references", confidence: "syntactic", count: 1, unresolved_count: 0 }],
+    source_snippet: null,
+  };
+}
+
+function codeDiffSide(symbolKey: string, path: string, freshness: "current" | "stale"): CodeDiffOverlay["modified_symbols"][number]["before"] {
+  return {
+    symbol_id: `${symbolKey}:id`,
+    kind: "function",
+    name: symbolKey,
+    path_display: path,
+    container_chain: ["code"],
+    span: { start_line: 10, start_col: 1, end_line: 30, end_col: 2 },
+    freshness,
   };
 }

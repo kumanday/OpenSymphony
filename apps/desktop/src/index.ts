@@ -8,7 +8,10 @@ import {
 } from "@opensymphony/api-client";
 import {
   createFixtureGraphAdapter,
+  createFixtureCodeGraphAdapter,
+  createGatewayCodeGraphAdapter,
   createGatewayGraphAdapter,
+  createTauriNativeCodeGraphAdapter,
   createTauriNativeGraphAdapter,
   graphVizFixtureBundleList,
   graphVizFixtureCommunityList,
@@ -16,6 +19,15 @@ import {
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
   memoryDeepLinkPrefix,
+  codeDeepLinkFromLocationSearch,
+  type CodeFileOutline,
+  type CodeGraphSnapshot,
+  type CodeRepoList,
+  type CodeSymbolDetail,
+  type CodeDiffOverlay,
+  type CodeGraphRequestOptions,
+  type CodeGraphDiffOptions,
+  type NativeCodeGraphApi,
   type MemoryBundleList,
   type MemoryCommunityList,
   type MemoryCompletedTaskPage,
@@ -51,8 +63,18 @@ export function createDesktopGraphAdapter(gatewayUrl = DEFAULT_GATEWAY_URL) {
   return createGatewayGraphAdapter(gatewayUrl);
 }
 
+export function createDesktopCodeGraphAdapter(gatewayUrl = DEFAULT_GATEWAY_URL) {
+  const invoke = getTauriInvoke();
+  if (invoke) return createDesktopNativeCodeGraphAdapter(createDesktopNativeCodeGraphApi(invoke));
+  return createGatewayCodeGraphAdapter(gatewayUrl);
+}
+
 export function createDesktopNativeGraphAdapter(api: NativeGraphApi) {
   return createTauriNativeGraphAdapter(api);
+}
+
+export function createDesktopNativeCodeGraphAdapter(api: NativeCodeGraphApi) {
+  return createTauriNativeCodeGraphAdapter(api);
 }
 
 interface TauriGlobal {
@@ -125,6 +147,33 @@ function createDesktopNativeGraphApi(invoke: TauriInvoke): NativeGraphApi {
         limit: options?.limit ?? null,
         offset: options?.offset ?? null,
         visibility: options?.visibility ?? null,
+      }),
+  };
+}
+
+function createDesktopNativeCodeGraphApi(invoke: TauriInvoke): NativeCodeGraphApi {
+  return {
+    listRepos: (options) => invoke<CodeRepoList>("code_repos", { includeStale: options?.includeStale ?? null }),
+    getGraphSnapshot: (repoId, options?: CodeGraphRequestOptions) =>
+      invoke<CodeGraphSnapshot>("code_graph", {
+        repoId,
+        mode: options?.mode ?? null,
+        path: options?.path ?? null,
+        symbolKey: options?.symbolKey ?? null,
+        depth: options?.depth ?? null,
+        aggregate: options?.aggregate ?? null,
+        includeStale: options?.includeStale ?? null,
+      }),
+    getSymbolDetail: (repoId, symbolKey, options) =>
+      invoke<CodeSymbolDetail>("code_symbol_detail", { repoId, symbolKey, includeStale: options?.includeStale ?? null }),
+    getFileOutline: (runId, filePath, repoId) =>
+      invoke<CodeFileOutline>("run_code_outline", { runId, filePath, repoId: repoId ?? null, limit: null }),
+    getDiffOverlay: (repoId, baseRevision, headRevision, options?: CodeGraphDiffOptions) =>
+      invoke<CodeDiffOverlay>("code_diff_overlay", {
+        repoId,
+        baseRevision,
+        headRevision,
+        limit: options?.limit ?? null,
       }),
   };
 }
@@ -663,6 +712,18 @@ function openMemoryDeepLinkFromLocation(app: OpenSymphonyAppHandle): void {
   }
 }
 
+function openCodeDeepLinkFromLocation(app: OpenSymphonyAppHandle): void {
+  try {
+    const link = codeDeepLinkFromLocationSearch(globalThis.location?.search ?? "");
+    if (!link) return;
+    void app.ready()
+      .then(() => app.openCodeDeepLink(link))
+      .catch(() => undefined);
+  } catch {
+    // No usable location (tests, packaged builds without query strings).
+  }
+}
+
 const root = document.getElementById("root");
 if (root && fixtureWorkbenchRequested()) {
   const app = renderOpenSymphonyApp({
@@ -677,9 +738,11 @@ if (root && fixtureWorkbenchRequested()) {
       conceptDetail: (_bundleId, conceptId) => graphVizFixtureConceptDetail(conceptId),
       completedTasks: graphVizFixtureCompletedTasks,
     }),
+    codeGraphAdapter: createFixtureCodeGraphAdapter(),
     modelProfileController: createDesktopModelProfileController(),
   });
   openMemoryDeepLinkFromLocation(app);
+  openCodeDeepLinkFromLocation(app);
 } else if (root) {
   const transport = createDesktopTransport();
   void transport.attach();
@@ -689,6 +752,7 @@ if (root && fixtureWorkbenchRequested()) {
     title: "OpenSymphony Desktop",
     transport,
     graphAdapter: createDesktopGraphAdapter(DEFAULT_GATEWAY_URL),
+    codeGraphAdapter: createDesktopCodeGraphAdapter(DEFAULT_GATEWAY_URL),
     profileController: createDesktopProfileController(),
     initialProfiles: [
       {
@@ -704,6 +768,8 @@ if (root && fixtureWorkbenchRequested()) {
     modelProfileController: createDesktopModelProfileController(),
     onGatewayUrlChanged: createTransportForGateway,
     onGraphGatewayUrlChanged: createDesktopGraphAdapter,
+    onCodeGraphGatewayUrlChanged: createDesktopCodeGraphAdapter,
   });
   openMemoryDeepLinkFromLocation(app);
+  openCodeDeepLinkFromLocation(app);
 }
