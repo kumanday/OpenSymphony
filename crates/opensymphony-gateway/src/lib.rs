@@ -47,9 +47,10 @@ use crate::opensymphony_memory::{
     MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
     MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
     code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
-    code_graph_updated_event, code_index_target, index_code_repository, memory_completed_task_rows,
-    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
-    memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
+    code_graph_updated_event, code_index_repository_is_git, code_index_target,
+    index_code_repository, memory_completed_task_rows, memory_concept_detail, memory_graph_bundles,
+    memory_graph_communities_with_options, memory_graph_search as search_memory_graph,
+    memory_graph_snapshot_with_options,
 };
 
 pub mod action_handler;
@@ -1684,7 +1685,7 @@ async fn index_code_repo(
     let Some((target_branch, head_revision)) =
         code_index_target(&config).map_err(code_graph_error)?
     else {
-        if config.repo_root.join(".git").exists() {
+        if code_index_repository_is_git(&config) {
             let report = index_code_repository(&config, &repo_id).map_err(code_graph_error)?;
             append_code_index_status_event(&state.journal, &repo_id, &report)
                 .await

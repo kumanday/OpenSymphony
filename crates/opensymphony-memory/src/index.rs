@@ -1809,6 +1809,9 @@ fn query_symbols_for_revision(
         let Some(mut symbol) = row else {
             continue;
         };
+        if symbol.commit_sha.as_deref() != Some(revision) {
+            symbol.commit_sha = Some(revision.to_string());
+        }
         if !symbols.contains_key(&symbol.symbol_key) {
             fill_container_chain(connection, &mut symbol)?;
             symbols.insert(symbol.symbol_key.clone(), symbol);

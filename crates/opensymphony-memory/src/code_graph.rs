@@ -610,6 +610,15 @@ pub fn code_index_target(
     Ok(Some((branch, commit)))
 }
 
+pub fn code_index_repository_is_git(config: &MemoryConfig) -> bool {
+    Command::new("git")
+        .args(["-C"])
+        .arg(&config.repo_root)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 pub fn index_code_repository(
     config: &MemoryConfig,
     repo_id: &str,
@@ -2380,17 +2389,31 @@ fn query_retained_inbound_impact_count(
     symbol: &CodeSymbolRecord,
     changed_symbol_keys: &BTreeSet<String>,
 ) -> Result<usize, MemoryError> {
-    let edge_table = if let Some(commit_sha) = symbol.commit_sha.as_deref()
+    let membership_edges = if let Some(commit_sha) = symbol.commit_sha.as_deref() {
+        code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+            && code_snapshot_status(connection, config, &symbol.repo_id, commit_sha)?
+                == Some("completed".to_string())
+            && code_edge_revisions_read_model_ready(connection, &config.index_path)?
+    } else {
+        false
+    };
+    let edge_table = if !membership_edges
+        && let Some(commit_sha) = symbol.commit_sha.as_deref()
         && code_edge_revision_rows_available(connection, config, &symbol.repo_id, commit_sha)?
     {
         "code_edge_revisions"
     } else {
         "code_edges"
     };
-    let mut statement = connection
-        .prepare(&format!(
+    let query = if membership_edges {
+        "SELECT DISTINCT e.edge_id, e.source_symbol_key FROM code_edge_revisions AS e WHERE e.repo_id = ? AND e.target_symbol_key = ? AND NOT e.worktree_dirty AND (lower(e.edge_kind) LIKE '%call%' OR lower(e.edge_kind) LIKE '%reference%') AND (e.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed))"
+    } else {
+        &format!(
             "SELECT DISTINCT edge_id, source_symbol_key FROM {edge_table} WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL))"
-        ))
+        )
+    };
+    let mut statement = connection
+        .prepare(query)
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
