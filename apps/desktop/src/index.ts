@@ -165,7 +165,12 @@ function createDesktopNativeCodeGraphApi(invoke: TauriInvoke): NativeCodeGraphAp
         includeStale: options?.includeStale ?? null,
       }),
     getSymbolDetail: (repoId, symbolKey, options) =>
-      invoke<CodeSymbolDetail>("code_symbol_detail", { repoId, symbolKey, includeStale: options?.includeStale ?? null }),
+      invoke<CodeSymbolDetail>("code_symbol_detail", {
+        repoId,
+        symbolKey,
+        includeStale: options?.includeStale ?? null,
+        visibility: options?.visibility ?? null,
+      }),
     getFileOutline: (runId, filePath, repoId) =>
       invoke<CodeFileOutline>("run_code_outline", { runId, filePath, repoId: repoId ?? null, limit: null }),
     getDiffOverlay: (repoId, baseRevision, headRevision, options?: CodeGraphDiffOptions) =>

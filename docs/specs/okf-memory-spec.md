@@ -138,6 +138,10 @@ opensymphony:
     - kind: github_pr
       id: "456"
       url: https://github.com/example/repo/pull/456
+    - kind: code-symbol
+      id: crates/example/src/lib.rs:10:1-12:2
+      repo_id: opensymphony
+      symbol_key: stable-symbol-key
   docs_sync:
     status: pending
 ```

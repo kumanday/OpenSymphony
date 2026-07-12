@@ -51,6 +51,12 @@ export interface CodeRepoListRequestOptions {
 
 export interface CodeSymbolDetailRequestOptions {
   includeStale?: boolean;
+  visibility?: "public" | "all_accessible";
+}
+
+export interface CodeGraphAdapterPolicy {
+  defaultVisibility?: "public" | "all_accessible";
+  maxVisibility?: "public" | "all_accessible";
 }
 
 export interface CodeGraphAdapter {
@@ -109,6 +115,7 @@ export type CodeGraphAction =
   | { type: "LOAD_FAILED"; error: string }
   | { type: "SNAPSHOT_LOADED"; snapshot: CodeGraphSnapshot }
   | { type: "SYMBOL_DETAIL_LOADED"; detail: CodeSymbolDetail }
+  | { type: "SYMBOL_DETAILS_INVALIDATED" }
   | { type: "DIFF_LOADED"; overlay: CodeDiffOverlay }
   | { type: "MODE_SET"; mode: CodeGraphMode }
   | { type: "REPO_SELECTED"; repoId: string | null }
@@ -244,6 +251,8 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
           [`${action.detail.repo_id}:${action.detail.symbol_key}`]: action.detail,
         },
       };
+    case "SYMBOL_DETAILS_INVALIDATED":
+      return { ...state, symbolDetails: {} };
     case "DIFF_LOADED":
       return {
         ...state,
@@ -611,6 +620,7 @@ export function codeGraphNodeDeltaStatus(
 export function createHttpCodeGraphAdapter(
   baseUri: string,
   fetchFn: typeof fetch = globalThis.fetch,
+  policy: CodeGraphAdapterPolicy = {},
 ): CodeGraphAdapter {
   const base = baseUri.replace(/\/+$/, "");
   async function read<T>(path: string, params = new URLSearchParams()): Promise<T> {
@@ -632,6 +642,8 @@ export function createHttpCodeGraphAdapter(
     getSymbolDetail: (repoId, symbolKey, options) => {
       const params = new URLSearchParams();
       if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
+      const visibility = effectiveCodeVisibility(options?.visibility, policy);
+      if (visibility !== undefined) params.set("visibility", visibility);
       return read<CodeSymbolDetail>(
         `/api/v1/code/repos/${encodeURIComponent(repoId)}/symbols/${encodeURIComponent(symbolKey)}`,
         params,
@@ -656,10 +668,29 @@ export function createHttpCodeGraphAdapter(
   };
 }
 
+function effectiveCodeVisibility(
+  requested: CodeSymbolDetailRequestOptions["visibility"] | undefined,
+  policy: CodeGraphAdapterPolicy,
+): CodeSymbolDetailRequestOptions["visibility"] | undefined {
+  if (policy.maxVisibility === "public" && requested === "all_accessible") {
+    throw new Error('Code graph visibility "all_accessible" exceeds adapter policy "public"');
+  }
+  return requested ?? policy.defaultVisibility ?? policy.maxVisibility;
+}
+
 export const createGatewayCodeGraphAdapter = createHttpCodeGraphAdapter;
 
-export function createTauriNativeCodeGraphAdapter(api: NativeCodeGraphApi): CodeGraphAdapter {
-  return api;
+export function createTauriNativeCodeGraphAdapter(
+  api: NativeCodeGraphApi,
+  policy: CodeGraphAdapterPolicy = {},
+): CodeGraphAdapter {
+  return {
+    ...api,
+    getSymbolDetail: (repoId, symbolKey, options) => api.getSymbolDetail(repoId, symbolKey, {
+      ...options,
+      visibility: effectiveCodeVisibility(options?.visibility, policy),
+    }),
+  };
 }
 
 export interface CodeGraphFixtures {

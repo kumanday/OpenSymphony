@@ -1,11 +1,13 @@
 import {
   codeDeepLinkForFile,
   codeDeepLinkForSymbol,
+  codeDeepLinkPrefix,
   formatCodeDeepLink,
   codeEdgeVisualStyle,
   codeGraphNodeDeltaStatus,
   codeGraphSnapshotForRendering,
   codeNodeVisualStyle,
+  formatMemoryDeepLink,
   type GraphLayoutEdge,
   memoryDeepLinkForGraphNode,
   type GraphLayoutResult,
@@ -277,6 +279,7 @@ export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
         : node.kind === "symbol" && deltaStatus !== "removed" && !surface.detailError
           ? `<p data-testid="code-graph-detail-loading">Loading symbol detail…</p>`
           : renderCodeNodeFallback(node, surface.detailError)}
+      ${detail ? renderCodeCrossGraphChips(detail) : ""}
       <button type="button" data-code-raw-toggle>${surface.rawRecord ? "Hide raw record" : "Show raw record"}</button>
       ${surface.rawRecord ? `<pre data-testid="code-graph-raw-record">${escapeHtml(raw)}</pre>` : ""}
     </section>
@@ -307,6 +310,28 @@ function renderCodeDetailSections(detail: CodeSymbolDetail): string {
     <ul>${detail.edge_summary.map((edge) => `<li data-code-confidence="${escapeAttr(edge.confidence)}">${escapeHtml(edge.kind)} · ${escapeHtml(edge.confidence)} · ${edge.count}</li>`).join("") || "<li>None</li>"}</ul>
     ${diagnostics}
     ${detail.source_snippet ? `<h4>Source</h4><pre>${escapeHtml(detail.source_snippet.text)}</pre>` : ""}
+  `;
+}
+
+function renderCodeCrossGraphChips(detail: CodeSymbolDetail): string {
+  const issues = detail.related_issues ?? [];
+  const concepts = detail.related_memory_concepts ?? [];
+  const issueChips = issues.map((issue) => issue.freshness === "current"
+    ? `<button type="button" class="os-cross-graph-chip" data-task-issue-key="${escapeAttr(issue.issue_key)}" data-testid="code-graph-issue-chip">${escapeHtml(issue.issue_key)}: ${escapeHtml(issue.title)}</button>`
+    : `<span class="os-cross-graph-chip is-stale" data-testid="code-graph-issue-chip">${escapeHtml(issue.issue_key)}: ${escapeHtml(issue.title)} (stale)</span>`).join("");
+  const memoryChips = concepts.map((concept) => {
+    const link = formatMemoryDeepLink({ bundleId: concept.bundle_id, conceptId: concept.concept_id });
+    return concept.freshness === "current"
+      ? `<button type="button" class="os-cross-graph-chip" data-memory-deeplink="${escapeAttr(link)}" data-testid="code-graph-memory-chip">${escapeHtml(concept.title)}</button>`
+      : `<span class="os-cross-graph-chip is-stale" data-testid="code-graph-memory-chip">${escapeHtml(concept.title)} (stale)</span>`;
+  }).join("");
+  return `
+    <section class="os-cross-graph-links" data-testid="code-graph-cross-links">
+      <h4>Related work</h4>
+      ${issueChips || `<p>No related work items found.</p>`}
+      <h4>Related memory</h4>
+      ${memoryChips || `<p>No related memory concepts found.</p>`}
+    </section>
   `;
 }
 
@@ -1444,7 +1469,9 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
       <h4>Citations</h4>
       <ul class="os-kg-capsule-links" data-testid="knowledge-graph-capsule-citations">
         ${detail.citations.map((citation) => `
-          <li>${/^https?:\/\//.test(citation.target)
+          <li>${citation.target.startsWith(codeDeepLinkPrefix)
+            ? `<button type="button" class="os-kg-capsule-link" data-code-deeplink="${escapeAttr(citation.target)}">${escapeHtml(citation.label ?? citation.target)}</button>`
+            : /^https?:\/\//.test(citation.target)
             // Real OKF citations often carry a URL target with a short
             // label; those are external evidence, not graph nodes.
             ? `<a href="${escapeAttr(citation.target)}" target="_blank" rel="noreferrer">${escapeHtml(citation.label ?? citation.id)}</a>`
@@ -1457,11 +1484,16 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
     ? `
       <h4>Sources</h4>
       <ul class="os-kg-capsule-sources">
-        ${detail.source_refs.map((ref) => `
-          <li>${ref.url && /^https?:\/\//.test(ref.url)
+        ${detail.source_refs.map((ref) => {
+          const codeLink = codeDeepLinkForSourceRef(ref, detail);
+          return `
+          <li>${codeLink
+            ? `<button type="button" class="os-kg-capsule-link" data-code-deeplink="${escapeAttr(codeLink)}">${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}</button>`
+            : ref.url && /^https?:\/\//.test(ref.url)
             ? `<a href="${escapeAttr(ref.url)}" target="_blank" rel="noreferrer">${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}</a>`
             : `${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}`}</li>
-        `).join("")}
+        `;
+        }).join("")}
       </ul>
     `
     : "";
@@ -1474,6 +1506,45 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
       ${sources}
     </div>
   `;
+}
+
+function codeDeepLinkForSourceRef(
+  ref: NonNullable<MemoryConceptDetail["source_refs"]>[number],
+  detail: MemoryConceptDetail,
+): string | null {
+  const repoId = ref.repo_id ?? codeRepoIdFromConceptScopes(detail);
+  if (!repoId) return null;
+  try {
+    return ref.symbol_key
+      ? codeDeepLinkForSymbol(repoId, ref.symbol_key)
+      : ref.kind === "path"
+        ? codeDeepLinkForFile(repoId, ref.id)
+        : ref.kind === "code-symbol"
+          ? codeDeepLinkForFile(repoId, legacyCodePathFromSourceRef(ref))
+        : null;
+  } catch {
+    return null;
+  }
+}
+
+function codeRepoIdFromConceptScopes(detail: MemoryConceptDetail): string | null {
+  const scopeRefs = detail.frontmatter_view.opensymphony.scope_refs;
+  if (!Array.isArray(scopeRefs)) return null;
+  const repositoryIds = scopeRefs
+    .filter((scope): scope is { kind: unknown; id: string } => (
+      typeof scope === "object"
+      && scope !== null
+      && (scope as { kind?: unknown }).kind === "repository"
+      && typeof (scope as { id?: unknown }).id === "string"
+    ))
+    .map((scope) => scope.id);
+  return repositoryIds.length === 1 ? repositoryIds[0] : null;
+}
+
+function legacyCodePathFromSourceRef(
+  ref: NonNullable<MemoryConceptDetail["source_refs"]>[number],
+): string {
+  return /^(.*):\d+:\d+-\d+:\d+$/.exec(ref.id)?.[1] ?? ref.id;
 }
 
 function isChipValue(value: unknown): boolean {

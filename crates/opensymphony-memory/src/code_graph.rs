@@ -4,12 +4,14 @@ use crate::opensymphony_gateway_schema::{
         CodeDiagnostic, CodeDiffBlastRadius, CodeDiffOverlay, CodeDiffSymbol,
         CodeDiffSymbolSide, CodeDiffSymbolStatus as DtoDiffStatus, CodeEdgeSummary,
         CodeFileOutline, CodeGraphAggregate, CodeGraphCommunity, CodeGraphConfidence,
-        CodeGraphEdge, CodeGraphFreshness, CodeGraphMode, CodeGraphNode, CodeGraphNodeKind,
-        CodeGraphNodeMetrics, CodeGraphSnapshot, CodeGraphTruncation, CodeGraphUpdatedEvent,
-        CodeIndexReport, CodeIndexStatus, CodeOutlineSymbol, CodeRepoList, CodeRepoSummary,
-        CodeSpan, CodeSymbolDetail, CodeSymbolProvenance,
+        CodeGraphEdge, CodeGraphFreshness, CodeGraphIssueChip, CodeGraphMemoryChip,
+        CodeGraphMode, CodeGraphNode, CodeGraphNodeKind, CodeGraphNodeMetrics, CodeGraphSnapshot,
+        CodeGraphTruncation, CodeGraphUpdatedEvent, CodeIndexReport, CodeIndexStatus,
+        CodeOutlineSymbol, CodeRepoList, CodeRepoSummary, CodeSpan, CodeSymbolDetail,
+        CodeSymbolProvenance,
     },
 };
+use url::Url;
 
 static CODE_GRAPH_SEQUENCE_FLOOR: AtomicU64 = AtomicU64::new(0);
 const CODE_GRAPH_MAX_RECORDS: usize = 500;
@@ -164,6 +166,7 @@ pub fn code_graph_symbol_detail(
     repo_id: &str,
     symbol_key: &str,
     include_stale: bool,
+    access: MemoryGraphAccess,
 ) -> Result<CodeSymbolDetail, CodeGraphProjectionError> {
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Err(CodeGraphProjectionError::SymbolNotFound(symbol_key.to_string()));
@@ -179,6 +182,8 @@ pub fn code_graph_symbol_detail(
     }
     let diagnostics = query_symbol_diagnostics(&connection, config, &symbol, include_stale)?;
     let edge_summary = query_symbol_edge_summary(&connection, &symbol, include_stale)?;
+    let (related_issues, related_memory_concepts) =
+        code_graph_related_memory(config, repo_id, &symbol, access)?;
 
     Ok(CodeSymbolDetail {
         schema_version: SchemaVersion::v1(),
@@ -205,7 +210,168 @@ pub fn code_graph_symbol_detail(
         diagnostics,
         edge_summary,
         source_snippet: None,
+        related_issues,
+        related_memory_concepts,
     })
+}
+
+fn code_graph_related_memory(
+    config: &MemoryConfig,
+    repo_id: &str,
+    symbol: &CodeSymbolRecord,
+    access: MemoryGraphAccess,
+) -> Result<(Vec<CodeGraphIssueChip>, Vec<CodeGraphMemoryChip>), CodeGraphProjectionError> {
+    // ponytail: scan the accessible issue catalog per selected symbol; add a
+    // source-ref index when cross-graph chip latency needs to scale further.
+    let issues = accessible_issues(config, access).map_err(|error| match error {
+        MemoryGraphProjectionError::Memory(error) => error,
+        other => MemoryError::InvalidInput(other.to_string()),
+    })?;
+    let mut related_issues = Vec::new();
+    let mut related_memory_concepts = Vec::new();
+    for issue in issues {
+        let repository_scope_matches = repository_scope_matches(&issue.scope_refs, repo_id);
+        let source_match = issue.source_refs.iter().any(|source| {
+            let source_repo_matches = source
+                .repo_id
+                .as_deref()
+                .is_none_or(|source_repo| source_repo == repo_id);
+            let symbol_match = source.repo_id.as_deref() == Some(repo_id)
+                && source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str());
+            let legacy_path_match = source.symbol_key.is_none()
+                && ((source.kind == "path" && source.id == symbol.path)
+                    || (source.kind == "code-symbol"
+                        && code_symbol_source_ref_matches(source, symbol)));
+            repository_scope_matches
+                && source_repo_matches
+                && (symbol_match || legacy_path_match)
+        });
+        let scope_match = repository_scope_matches && issue.scope_refs.iter().any(|scope| {
+            matches!(scope.kind, KnowledgeScopeKind::CodePath)
+                && (scope.id == symbol.path
+                    || symbol.path.starts_with(&format!("{}/", scope.id)))
+        });
+        let citation_match = issue
+            .citations
+            .iter()
+            .any(|citation| {
+                code_citation_matches_symbol(
+                    &citation.target,
+                    repo_id,
+                    &symbol.symbol_key,
+                    &symbol.path,
+                )
+            });
+        if !(source_match || scope_match || citation_match) {
+            continue;
+        }
+        let freshness = freshness_from_str(issue.freshness.as_str());
+        if (issue.concept_type == "issue-capsule" || has_work_item_scope(&issue.scope_refs))
+            && !related_issues
+                .iter()
+                .any(|chip: &CodeGraphIssueChip| chip.issue_key == issue.issue_key)
+        {
+            related_issues.push(CodeGraphIssueChip {
+                issue_key: issue.issue_key.clone(),
+                title: redact_for_dto(config, &issue.title),
+                state: issue.state.clone().map(|state| redact_for_dto(config, &state)),
+                url: None,
+                freshness,
+            });
+        }
+        related_memory_concepts.push(CodeGraphMemoryChip {
+            bundle_id: DEFAULT_MEMORY_GRAPH_BUNDLE_ID.to_string(),
+            concept_id: issue.concept_id.clone(),
+            title: redact_for_dto(config, &issue.title),
+            visibility: issue.visibility.as_str().to_string(),
+            freshness,
+        });
+    }
+    related_issues.sort_by(|left, right| left.issue_key.cmp(&right.issue_key));
+    related_memory_concepts.sort_by(|left, right| left.concept_id.cmp(&right.concept_id));
+    Ok((related_issues, related_memory_concepts))
+}
+
+fn repository_scope_matches(scope_refs: &[KnowledgeScope], repo_id: &str) -> bool {
+    let has_repository_scope = scope_refs
+        .iter()
+        .any(|scope| matches!(scope.kind, KnowledgeScopeKind::Repository));
+    !has_repository_scope
+        || scope_refs.iter().any(|scope| {
+            matches!(scope.kind, KnowledgeScopeKind::Repository) && scope.id == repo_id
+        })
+}
+
+fn has_work_item_scope(scope_refs: &[KnowledgeScope]) -> bool {
+    scope_refs
+        .iter()
+        .any(|scope| matches!(scope.kind, KnowledgeScopeKind::WorkItem))
+}
+
+fn code_citation_matches_symbol(
+    target: &str,
+    repo_id: &str,
+    symbol_key: &str,
+    path: &str,
+) -> bool {
+    let Ok(url) = Url::parse(target) else {
+        return false;
+    };
+    if url.scheme() != "opensymphony" || url.host_str() != Some("code") {
+        return false;
+    }
+    let Some(segments) = url.path_segments() else {
+        return false;
+    };
+    let Some(actual_segments) = segments
+        .map(decode_code_path_segment)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+
+    [
+        ("symbols", symbol_key),
+        ("files", path),
+    ]
+    .into_iter()
+    .any(|(collection, value)| {
+        let mut expected = vec![repo_id.to_string(), collection.to_string()];
+        expected.extend(value.split('/').map(str::to_string));
+        actual_segments == expected
+    })
+}
+
+fn decode_code_path_segment(segment: &str) -> Option<String> {
+    url::form_urlencoded::parse(format!("value={segment}").as_bytes())
+        .next()
+        .map(|(_, value)| value.into_owned())
+}
+
+fn code_symbol_source_ref_matches(source: &MemorySourceRef, symbol: &CodeSymbolRecord) -> bool {
+    let Some(span) = source.id.strip_prefix(&format!("{}:", symbol.path)) else {
+        return false;
+    };
+    code_symbol_span_matches(
+        span,
+        symbol.start_line,
+        symbol.start_col,
+        symbol.end_line,
+        symbol.end_col,
+    )
+}
+
+fn code_symbol_span_matches(
+    span: &str,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> bool {
+    span == format!(
+        "{}:{}-{}:{}",
+        start_line, start_col, end_line, end_col
+    )
 }
 
 pub fn code_graph_diff_overlay(
@@ -1903,5 +2069,74 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
             Ok(_) => return next,
             Err(current) => previous = current,
         }
+    }
+}
+
+#[cfg(test)]
+mod code_graph_tests {
+    use crate::opensymphony_memory::{KnowledgeScope, KnowledgeScopeKind};
+
+    use super::{
+        code_citation_matches_symbol, code_symbol_span_matches, has_work_item_scope,
+        repository_scope_matches,
+    };
+
+    #[test]
+    fn legacy_code_symbol_refs_match_only_their_exact_span() {
+        assert!(code_symbol_span_matches("10:1-12:2", 10, 1, 12, 2));
+        assert!(!code_symbol_span_matches("10:1-12:2", 20, 1, 22, 2));
+        assert!(!code_symbol_span_matches("10:1-12:2", 10, 1, 12, 3));
+    }
+
+    #[test]
+    fn code_citations_require_a_matching_code_deep_link_target() {
+        assert!(code_citation_matches_symbol(
+            "opensymphony://code/team%2Frepo/symbols/crate%3A%3Arun?depth=2",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+        assert!(code_citation_matches_symbol(
+            "opensymphony://code/team%2Frepo/files/src/lib.rs",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+        assert!(!code_citation_matches_symbol(
+            "https://example.test/team/repo/src/lib.rs",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+        assert!(!code_citation_matches_symbol(
+            "opensymphony://code/other-repo/symbols/crate%3A%3Arun",
+            "team/repo",
+            "crate::run",
+            "src/lib.rs",
+        ));
+    }
+
+    #[test]
+    fn repository_scopes_match_any_repository_and_work_item_scopes_are_chip_eligible() {
+        let scopes = vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "other-repo".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "team/repo".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::WorkItem,
+                id: "COE-536".to_string(),
+                label: None,
+            },
+        ];
+        assert!(repository_scope_matches(&scopes, "team/repo"));
+        assert!(!repository_scope_matches(&scopes, "missing-repo"));
+        assert!(has_work_item_scope(&scopes));
     }
 }

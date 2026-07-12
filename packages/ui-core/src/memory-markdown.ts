@@ -1,4 +1,5 @@
 import { escapeHtml } from "./html.js";
+import { parseCodeDeepLink } from "@opensymphony/graph";
 
 /**
  * Minimal, dependency-free markdown renderer for memory capsule bodies.
@@ -89,6 +90,9 @@ function renderInline(text: string): string {
     return stash(`<button type="button" class="os-kg-capsule-link" data-kg-link-target="${target}">${label}</button>`);
   });
   html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label: string, href: string) => {
+    if (parseCodeDeepLink(unescapeHtml(href))) {
+      return stash(`<button type="button" class="os-kg-capsule-link" data-code-deeplink="${href}">${label}</button>`);
+    }
     if (!/^https?:\/\//.test(href)) return match;
     return stash(`<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`);
   });
@@ -101,4 +105,13 @@ function renderInline(text: string): string {
     html = html.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => generated[Number(index)]);
   }
   return html;
+}
+
+function unescapeHtml(text: string): string {
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }

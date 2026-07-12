@@ -76,6 +76,18 @@ describe("Code Graph adapters and state", () => {
     expect(state.symbolDetails).toEqual({});
   });
 
+  it("invalidates memory-derived symbol details without clearing selection", async () => {
+    const adapter = createFixtureCodeGraphAdapter();
+    const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
+    const detail = await adapter.getSymbolDetail("opensymphony", "graphReducer");
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "SYMBOL_DETAIL_LOADED", detail });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:graphReducer" });
+    state = codeGraphReducer(state, { type: "SYMBOL_DETAILS_INVALIDATED" });
+    expect(state.symbolDetails).toEqual({});
+    expect(state.selectedNodeIds).toEqual(["symbol:graphReducer"]);
+  });
+
   it("keeps removed diff symbols visible and clears diff state when leaving Diff", async () => {
     const adapter = createFixtureCodeGraphAdapter();
     const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
@@ -313,9 +325,25 @@ describe("Code Graph adapters and state", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
     await http.getSymbolDetail("opensymphony", "staleSymbol", { includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/staleSymbol?include_stale=true");
+    const publicHttp = createHttpCodeGraphAdapter("http://localhost:2468", fetchMock, {
+      defaultVisibility: "public",
+      maxVisibility: "public",
+    });
+    await publicHttp.getSymbolDetail("opensymphony", "publicSymbol");
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/publicSymbol?visibility=public");
+    expect(() => publicHttp.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
+      .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     const native = createTauriNativeCodeGraphAdapter(http);
+    const publicNative = createTauriNativeCodeGraphAdapter(http, {
+      defaultVisibility: "public",
+      maxVisibility: "public",
+    });
+    await publicNative.getSymbolDetail("opensymphony", "publicSymbol");
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/publicSymbol?visibility=public");
+    expect(() => publicNative.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
+      .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 });
 

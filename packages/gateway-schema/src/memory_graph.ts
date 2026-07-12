@@ -194,6 +194,8 @@ export interface MemoryGraphSourceRef {
   kind: string;
   id: string;
   url?: string;
+  repo_id?: string;
+  symbol_key?: string;
 }
 
 export interface MemoryGraphNodeMetrics {

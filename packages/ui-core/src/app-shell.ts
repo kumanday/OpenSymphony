@@ -412,6 +412,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private codeGraphNavigationVersion = 0;
   private codeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
   private codeGraphSymbolRequest: string | null = null;
+  /** Invalidates in-flight detail responses when memory-derived chips change. */
+  private codeGraphMemoryDetailsEpoch = 0;
   private codeGraphSymbolErrorKey: string | null = null;
   private codeGraphSymbolError: string | null = null;
   private codeGraphFiltersOpen = false;
@@ -1289,6 +1291,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         : undefined,
     });
     void this.ensureSelectedCodeDetail();
+    this.bindCrossGraphNavigation(this.options.root);
   }
 
   private scheduleCodeGraphLayout(size = measureKnowledgeGraphStage(this.options.root)): void {
@@ -1420,7 +1423,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const detailKey = `${snapshot?.repo_id ?? this.state.codeGraph.repoId}:${selected.symbol_key}`;
-    const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}`;
+    const key = `${detailKey}:${snapshot?.cursor.partition}:${snapshot?.cursor.sequence}:${this.codeGraphMemoryDetailsEpoch}`;
     if (this.codeGraphSymbolRequest !== null && this.codeGraphSymbolRequest !== key) {
       this.codeGraphSymbolRequest = null;
     }
@@ -1548,6 +1551,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (envelope.event_kind === "memory_graph_updated") {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAILS_INVALIDATED" });
+        this.codeGraphMemoryDetailsEpoch += 1;
+        this.codeGraphSymbolRequest = null;
+        this.codeGraphSymbolErrorKey = null;
+        this.codeGraphSymbolError = null;
         const selectedBundleId = this.state.knowledgeGraph.selectedBundleId;
         if (!selectedBundleId || selectedBundleId === envelope.payload.bundle_id) {
           this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });
@@ -1936,6 +1944,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       void this.loadKnowledgeGraph();
     } else if (view === "code") {
       void this.loadCodeGraph();
+    }
+  }
+
+  private openTaskIssue(issueKey: string): void {
+    this.interactionEpoch += 1;
+    this.runOpenSeq += 1;
+    this.diffSelectSeq += 1;
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.identifier === issueKey);
+    this.state.graphPaneView = "task";
+    if (!node) {
+      this.state.connectionMessage = `Task target ${issueKey} is unavailable`;
+      this.render();
+      return;
+    }
+    this.state.selectedNodeId = node.node_id;
+    this.render();
+    if (this.options.mode === "desktop" && node.state_category !== "backlog") {
+      void this.openRun(node);
     }
   }
 
@@ -3948,6 +3974,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    * breadcrumbs, capsule links, capsule retry, and the deep-link copy button.
    */
   private bindKnowledgeGraphNavigation(root: HTMLElement): void {
+    this.bindCrossGraphNavigation(root);
     root.querySelectorAll<HTMLElement>("[data-kg-crumb]").forEach((button) => {
       button.onclick = () => {
         if (button.dataset.kgCrumb === "atlas") {
@@ -3983,6 +4010,27 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }, 1_200);
       };
     }
+  }
+
+  private bindCrossGraphNavigation(root: HTMLElement): void {
+    root.querySelectorAll<HTMLElement>("[data-code-deeplink]").forEach((button) => {
+      button.onclick = () => {
+        const link = button.dataset.codeDeeplink;
+        if (link) void this.openCodeDeepLink(link);
+      };
+    });
+    root.querySelectorAll<HTMLElement>("[data-memory-deeplink]").forEach((button) => {
+      button.onclick = () => {
+        const link = button.dataset.memoryDeeplink;
+        if (link) void this.openMemoryDeepLink(link);
+      };
+    });
+    root.querySelectorAll<HTMLElement>("[data-task-issue-key]").forEach((button) => {
+      button.onclick = () => {
+        const issueKey = button.dataset.taskIssueKey;
+        if (issueKey) this.openTaskIssue(issueKey);
+      };
+    });
   }
 
   async openMemoryDeepLink(url: string): Promise<boolean> {
@@ -7023,6 +7071,9 @@ function appShellStyles(): string {
     .os-kg-capsule h4 { margin: 4px 0 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #667788; }
     .os-kg-capsule-chips { display: flex; flex-wrap: wrap; gap: 4px; }
     .os-kg-chip { border: 1px solid #d8dee4; border-radius: 999px; background: #f4f7f9; color: #405568; font-size: 11px; padding: 1px 8px; }
+    .os-cross-graph-links { margin-top: 12px; }
+    .os-cross-graph-chip { border: 1px solid #b8c8d4; border-radius: 999px; background: #f4f7f9; color: #23566f; font-size: 11px; padding: 2px 8px; cursor: pointer; margin: 0 4px 4px 0; }
+    .os-cross-graph-chip.is-stale { color: #667788; cursor: default; }
     .os-kg-capsule-body { max-height: 220px; overflow: auto; font-size: 12px; line-height: 1.5; color: #2b3947; }
     .os-kg-capsule-body h4, .os-kg-capsule-body h5, .os-kg-capsule-body h6 { margin: 8px 0 2px; font-size: 12px; text-transform: none; letter-spacing: 0; color: #1d2833; }
     .os-kg-capsule-body p { margin: 4px 0; }
@@ -7331,6 +7382,8 @@ function appShellStyles(): string {
       .os-kg-capsule { border-top-color: #2a3440; }
       .os-kg-capsule h4 { color: #94a3b3; }
       .os-kg-chip { background: #111820; border-color: #2a3440; color: #b8c6d2; }
+      .os-cross-graph-chip { background: #111820; border-color: #2a3440; color: #8bd0e6; }
+      .os-cross-graph-chip.is-stale { color: #94a3b3; }
       .os-kg-capsule-body { color: #c4d0da; }
       .os-kg-capsule-body h4, .os-kg-capsule-body h5, .os-kg-capsule-body h6 { color: #f2f7fb; }
       .os-kg-capsule-body code { background: #1c2630; }

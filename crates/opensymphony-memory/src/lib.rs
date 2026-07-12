@@ -184,6 +184,10 @@ pub struct MemorySourceRef {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +323,8 @@ impl From<CodeIntelSourceRef> for MemorySourceRef {
             kind: source_ref.kind,
             id: source_ref.id,
             url: source_ref.url,
+            repo_id: source_ref.repo_id,
+            symbol_key: source_ref.symbol_key,
         }
     }
 }
@@ -329,6 +335,8 @@ impl From<MemorySourceRef> for CodeIntelSourceRef {
             kind: source_ref.kind,
             id: source_ref.id,
             url: source_ref.url,
+            repo_id: source_ref.repo_id,
+            symbol_key: source_ref.symbol_key,
         }
     }
 }
@@ -1115,6 +1123,8 @@ mod tests {
                     kind: "path".to_string(),
                     id: "crates/opensymphony-memory/src/lib.rs".to_string(),
                     url: None,
+                    repo_id: Some("opensymphony".to_string()),
+                    symbol_key: Some("memory-source-ref".to_string()),
                 }],
                 path: Some(PathBuf::from("crates/opensymphony-memory/src/lib.rs")),
                 commit_sha: Some("abc123".to_string()),
@@ -1151,6 +1161,8 @@ mod tests {
                 kind: "path".to_string(),
                 id: "crates/opensymphony-memory/src/lib.rs".to_string(),
                 url: None,
+                repo_id: Some("opensymphony".to_string()),
+                symbol_key: Some("memory-source-ref".to_string()),
             }]
         );
     }
