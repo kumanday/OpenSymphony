@@ -130,9 +130,24 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
 
 export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
   const { snapshot, state } = surface;
+  const formatCount = (value: number) => value.toLocaleString("en-US");
+  const snapshotTruncation = snapshot?.truncation;
+  const diffTruncation = state.mode === "diff" ? state.diffOverlay?.truncation : null;
+  const truncation = {
+    nodes_dropped: (snapshotTruncation?.nodes_dropped ?? 0) + (diffTruncation?.nodes_dropped ?? 0),
+    edges_dropped: (snapshotTruncation?.edges_dropped ?? 0) + (diffTruncation?.edges_dropped ?? 0),
+    reason: [snapshotTruncation?.reason, diffTruncation?.reason].filter((reason): reason is string => Boolean(reason)).join("; ") || null,
+  };
+  const hasTruncation = truncation.nodes_dropped > 0 || truncation.edges_dropped > 0;
+  const truncationSummary = hasTruncation
+    ? ` Truncated ${formatCount(truncation.nodes_dropped)} nodes and ${formatCount(truncation.edges_dropped)} edges${truncation.reason ? `: ${truncation.reason}` : "."}`
+    : " No records were truncated.";
   const summary = snapshot
-    ? `${snapshot.nodes.length} nodes / ${snapshot.edges.length} edges / ${snapshot.truncation.nodes_dropped} aggregated`
+    ? `${formatCount(snapshot.nodes.length)} nodes / ${formatCount(snapshot.edges.length)} edges${hasTruncation ? ` / ${formatCount(truncation.nodes_dropped)} nodes + ${formatCount(truncation.edges_dropped)} edges truncated${truncation.reason ? `: ${truncation.reason}` : ""}` : ""}`
     : "No code graph snapshot";
+  const accessibleSummary = snapshot
+    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${state.stale ? "Refreshing." : ""}`
+    : "Code Graph has no loaded snapshot.";
   const narrowed = state.mode !== "atlas" || state.selectedNodeIds.length > 0 || state.path !== null || state.symbolKey !== null;
   const diffUnavailable = !state.baseRevision || !state.headRevision;
   return `
@@ -151,8 +166,9 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
       </div>
       ${renderCodeGraphFilters(surface)}
       ${renderCodeBreadcrumb(state)}
+      <p id="code-graph-screen-reader-summary" class="os-sr-only" data-testid="code-graph-screen-reader-summary" role="status" aria-live="polite">${escapeHtml(accessibleSummary)}</p>
       <div class="os-knowledge-stage" data-kg-stage>
-        <canvas class="os-knowledge-canvas os-code-graph-canvas" data-testid="code-graph-canvas" aria-label="Code Graph canvas"></canvas>
+        <canvas class="os-knowledge-canvas os-code-graph-canvas" data-testid="code-graph-canvas" role="img" aria-label="Code Graph canvas" aria-describedby="code-graph-screen-reader-summary"></canvas>
         <div class="os-knowledge-labels" data-kg-labels data-morph-ignore-children></div>
         <span class="os-kg-controls-hint" aria-hidden="true">drag pan &middot; &#8997;-drag orbit &middot; scroll zoom &middot; double-click neighborhood &middot; esc to back out</span>
       </div>

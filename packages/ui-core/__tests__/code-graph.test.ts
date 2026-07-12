@@ -8,6 +8,7 @@ import {
   codeGraphReducer,
   codeGraphSnapshotForRendering,
   codeNodeVisualStyle,
+  createCodeGraphReferenceAtlasFixture,
   computeGraphLayout,
   createInitialCodeGraphState,
   parseCodeDeepLink,
@@ -46,6 +47,20 @@ describe("Code Graph renderer surface", () => {
     expect(root.querySelector("[data-testid='code-graph-raw-record']")?.textContent).toContain("codeGraphReducer");
     expect(root.querySelector("[data-code-confidence='syntactic']")).not.toBeNull();
     expect(root.querySelector("[data-code-delta-status='modified']")).not.toBeNull();
+  });
+
+  it("announces truncation, mode, and repo without relying on canvas or color", () => {
+    const reference = createCodeGraphReferenceAtlasFixture();
+    const state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot: reference });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot: reference, layout: null, state });
+    const summary = root.querySelector("[data-testid='code-graph-screen-reader-summary']");
+    expect(summary?.textContent).toContain("reference-scale");
+    expect(summary?.textContent).toContain("49,000 nodes");
+    expect(summary?.textContent).toContain("199,001 edges");
+    expect(summary?.textContent).toContain("directory aggregation");
+    expect(summary?.id).toBe("code-graph-screen-reader-summary");
+    expect(root.querySelector("canvas")?.getAttribute("aria-describedby")).toBe("code-graph-screen-reader-summary");
   });
 
   it("encodes confidence as line style and freshness as opacity/border", () => {
@@ -185,6 +200,21 @@ describe("Code Graph renderer surface", () => {
     const diffRoot = document.createElement("div");
     diffRoot.innerHTML = renderCodeGraphSurface({ snapshot, layout: null, state: diffState });
     expect(diffRoot.querySelector("[data-code-filter='deltaStatuses']")).not.toBeNull();
+  });
+
+  it("announces diff truncation and its reason in the toolbar", () => {
+    const diffOverlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      truncation: { nodes_dropped: 3, edges_dropped: 5, reason: "diff symbols capped" },
+    };
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay: diffOverlay });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot, layout: null, state });
+
+    expect(root.querySelector("[data-testid='code-graph-metrics']")?.textContent).toContain("3 nodes + 5 edges truncated: diff symbols capped");
+    expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("3 nodes and 5 edges");
+    expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("diff symbols capped");
   });
 
   it("shows the graph record when symbol detail loading fails", () => {

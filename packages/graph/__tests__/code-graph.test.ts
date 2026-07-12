@@ -12,6 +12,11 @@ import {
   initialCodeGraphFilters,
   parseCodeDeepLink,
   codeGraphFixtureDiffOverlays,
+  codeGraphFixtureDiffBaseSnapshot,
+  codeGraphFixtureDiffHeadSnapshot,
+  codeGraphScaleTiers,
+  createCodeGraphReferenceAtlasFixture,
+  createCodeGraphScaleFixture,
 } from "@opensymphony/graph";
 
 describe("Code Graph adapters and state", () => {
@@ -344,6 +349,46 @@ describe("Code Graph adapters and state", () => {
       .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     await native.listRepos();
     expect(fetchMock).toHaveBeenCalledTimes(7);
+  });
+
+  it("keeps edge-heavy scale tiers and aggregated Atlas within their budgets", () => {
+    for (const tier of codeGraphScaleTiers) {
+      const fixture = createCodeGraphScaleFixture(tier.nodes);
+      expect(fixture.nodes).toHaveLength(tier.nodes);
+      expect(fixture.edges).toHaveLength(tier.edges);
+      expect(fixture.edges.length / fixture.nodes.length).toBe(4);
+    }
+    const atlas = createCodeGraphReferenceAtlasFixture();
+    expect(atlas.mode).toBe("atlas");
+    expect(atlas.nodes.length).toBeLessThanOrEqual(2_000);
+    expect(atlas.truncation).toEqual({ nodes_dropped: 49_000, edges_dropped: 199_001, reason: "directory aggregation" });
+    expect(atlas.nodes.length + atlas.edges.length).toBeLessThanOrEqual(2_000);
+    expect(atlas.nodes.every((node) => node.kind !== "symbol")).toBe(true);
+    const renderedIds = new Set(atlas.nodes.map((node) => node.id));
+    expect(atlas.edges.every((edge) => renderedIds.has(edge.source_id) && renderedIds.has(edge.target_id))).toBe(true);
+  });
+
+  it("keeps HTTP and native adapters byte-equivalent for fixture DTOs", async () => {
+    const fixture = createFixtureCodeGraphAdapter({
+      snapshots: [codeGraphFixtureDiffHeadSnapshot],
+      diffOverlays: codeGraphFixtureDiffOverlays,
+    });
+    const native = createTauriNativeCodeGraphAdapter(fixture);
+    await expect(native.getGraphSnapshot("opensymphony", { mode: "neighborhood" }))
+      .resolves.toEqual(await fixture.getGraphSnapshot("opensymphony", { mode: "neighborhood" }));
+    await expect(native.getDiffOverlay("opensymphony", "base-rev", "head-rev"))
+      .resolves.toEqual(await fixture.getDiffOverlay("opensymphony", "base-rev", "head-rev"));
+  });
+
+  it("keeps base/head diff fixtures aligned for ghosts and blast radius", () => {
+    const overlay = codeGraphFixtureDiffOverlays[0];
+    expect(codeGraphFixtureDiffBaseSnapshot.nodes.some((node) => node.symbol_key === "legacySymbol")).toBe(true);
+    expect(codeGraphFixtureDiffHeadSnapshot.nodes.some((node) => node.symbol_key === "newSymbol")).toBe(true);
+    expect(overlay.removed_symbols[0]?.status).toBe("removed");
+    expect(overlay.added_symbols[0]?.status).toBe("added");
+    expect(overlay.blast_radius).toEqual(expect.arrayContaining([
+      expect.objectContaining({ symbol_key: "graphReducer", inbound_count: 2, outbound_count: 1 }),
+    ]));
   });
 });
 

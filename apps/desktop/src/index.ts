@@ -52,6 +52,7 @@ import {
 } from "@opensymphony/ui-core";
 
 const DEFAULT_GATEWAY_URL = "http://127.0.0.1:2468";
+const DESKTOP_CODE_GRAPH_POLICY = { defaultVisibility: "public", maxVisibility: "public" } as const;
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -65,16 +66,16 @@ export function createDesktopGraphAdapter(gatewayUrl = DEFAULT_GATEWAY_URL) {
 
 export function createDesktopCodeGraphAdapter(gatewayUrl = DEFAULT_GATEWAY_URL) {
   const invoke = getTauriInvoke();
-  if (invoke) return createDesktopNativeCodeGraphAdapter(createDesktopNativeCodeGraphApi(invoke));
-  return createGatewayCodeGraphAdapter(gatewayUrl);
+  if (invoke) return createDesktopNativeCodeGraphAdapter(createDesktopNativeCodeGraphApi(invoke), DESKTOP_CODE_GRAPH_POLICY);
+  return createGatewayCodeGraphAdapter(gatewayUrl, globalThis.fetch, DESKTOP_CODE_GRAPH_POLICY);
 }
 
 export function createDesktopNativeGraphAdapter(api: NativeGraphApi) {
   return createTauriNativeGraphAdapter(api);
 }
 
-export function createDesktopNativeCodeGraphAdapter(api: NativeCodeGraphApi) {
-  return createTauriNativeCodeGraphAdapter(api);
+export function createDesktopNativeCodeGraphAdapter(api: NativeCodeGraphApi, policy = DESKTOP_CODE_GRAPH_POLICY) {
+  return createTauriNativeCodeGraphAdapter(api, policy);
 }
 
 interface TauriGlobal {

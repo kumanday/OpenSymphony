@@ -900,6 +900,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-testid='workspace-pane-shell']")?.getAttribute("data-graph-surface")).toBe("code");
       expect(root.querySelector("[data-testid='code-graph-structure-list']")).not.toBeNull();
       expect(root.querySelector("[data-testid='code-graph-detail']")).not.toBeNull();
+      expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("Code Graph");
     } finally {
       consoleError.mockRestore();
       getContext.mockRestore();
@@ -3693,6 +3694,57 @@ describe("OpenSymphonyApp mount", () => {
     expect(codeGraphReads).toBeGreaterThan(readsBeforeGatewaySwitch);
     expect(initialTransport.closeCalls).toBe(1);
     expect(save.disabled).toBe(false);
+
+    await handle.destroy();
+  });
+
+  it("keeps fixture transports and graph adapters across profile reloads", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profile: ConnectionProfile = {
+      id: "fixture-profile",
+      label: "Saved gateway",
+      kind: "external_gateway",
+      active: true,
+      gatewayUrl: "http://different-gateway.local",
+      transport: "loopback_http",
+      managed: false,
+    };
+    const profileController: ProfileController = {
+      async listProfiles() {
+        return [profile];
+      },
+      async storeProfile() {
+        return profile;
+      },
+      async setActiveProfile() {
+        return profile;
+      },
+      async removeProfile() {
+        return [profile];
+      },
+    };
+    const onGatewayUrlChanged = jest.fn(async () => buildTransport());
+    const onGraphGatewayUrlChanged = jest.fn(() => createFixtureGraphAdapter());
+    const onCodeGraphGatewayUrlChanged = jest.fn(() => createFixtureCodeGraphAdapter());
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
+      profileController,
+      fixtureMode: true,
+      onGatewayUrlChanged,
+      onGraphGatewayUrlChanged,
+      onCodeGraphGatewayUrlChanged,
+    });
+
+    await handle.ready();
+    expect(onGatewayUrlChanged).not.toHaveBeenCalled();
+    expect(onGraphGatewayUrlChanged).not.toHaveBeenCalled();
+    expect(onCodeGraphGatewayUrlChanged).not.toHaveBeenCalled();
+    expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
 
     await handle.destroy();
   });
