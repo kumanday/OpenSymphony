@@ -1684,6 +1684,19 @@ async fn index_code_repo(
     let Some((target_branch, head_revision)) =
         code_index_target(&config).map_err(code_graph_error)?
     else {
+        if config.repo_root.join(".git").exists() {
+            let report = index_code_repository(&config, &repo_id).map_err(code_graph_error)?;
+            append_code_index_status_event(&state.journal, &repo_id, &report)
+                .await
+                .map_err(|_| {
+                    code_graph_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "event_journal_error",
+                        "failed to append code index unavailable event",
+                    )
+                })?;
+            return Ok(Json(report));
+        }
         let report = code_graph_index_report(&config, &repo_id).map_err(code_graph_error)?;
         if matches!(
             report.status,

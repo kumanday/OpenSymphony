@@ -1,6 +1,6 @@
 use crate::opensymphony_code_intel::{
-    AstDiagnosticKind, CaptureRecord, SymbolKind, detect_language, parse_path,
-    skipped_directory_name,
+    AstDiagnosticKind, CaptureRecord, SymbolKind, current_parser_versions, detect_language,
+    parse_path, skipped_directory_name,
 };
 use crate::opensymphony_gateway_schema::{
     code_graph::{
@@ -14,6 +14,7 @@ use crate::opensymphony_gateway_schema::{
         CodeSymbolProvenance,
     },
 };
+use duckdb::OptionalExt;
 use url::Url;
 use std::sync::{Mutex, OnceLock};
 
@@ -118,6 +119,91 @@ pub fn code_graph_repos(
         if is_newer {
             entry.indexed_at = parsed_indexed_at;
             entry.head_revision = commit_sha;
+        }
+    }
+
+    if table_has_columns(
+        &connection,
+        &config.index_path,
+        "code_index_snapshots",
+        &["repo_id", "commit_sha", "status", "indexed_at"],
+    )? && code_snapshot_membership_read_model_ready(&connection, &config.index_path)?
+    {
+        let mut snapshots = connection
+            .prepare(
+                r#"
+                    SELECT repo_id, commit_sha, indexed_at
+                    FROM (
+                        SELECT repo_id, commit_sha, indexed_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY repo_id
+                                ORDER BY indexed_at DESC, commit_sha DESC
+                            ) AS row_rank
+                        FROM code_index_snapshots
+                        WHERE status = 'completed'
+                    ) latest
+                    WHERE row_rank = 1
+                "#,
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        let snapshots = snapshots
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        for (repo_id, commit_sha, indexed_at) in snapshots {
+            let entry = repos.entry(repo_id.clone()).or_insert_with(|| {
+                CodeRepoAccumulator {
+                    repo_id: repo_id.clone(),
+                    ..CodeRepoAccumulator::default()
+                }
+            });
+            entry.has_current = true;
+            entry.head_revision = Some(commit_sha.clone());
+            entry.indexed_at = parse_code_datetime(&indexed_at);
+
+            let mut membership = connection
+                .prepare(
+                    "SELECT path, language FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? ORDER BY path",
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            let membership = membership
+                .query_map(params![&repo_id, &commit_sha], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            if let Some(entry) = repos.get_mut(&repo_id) {
+                for (path, language) in membership {
+                    entry.paths.insert(path);
+                    entry.languages.insert(language);
+                }
+            }
         }
     }
 
@@ -539,6 +625,8 @@ pub fn index_code_repository(
     let indexed_at = Utc::now();
     let Some((target_branch, commit_sha)) = code_index_target(config)? else {
         let mut report = code_graph_index_report(config, repo_id)?;
+        report.status = CodeIndexStatus::Unavailable;
+        report.head_revision = None;
         report.diagnostics.push(format!(
             "target branch is unavailable for configured repository {}",
             config.repo_root.display()
@@ -594,6 +682,7 @@ pub fn index_code_repository(
     let mut remaining_matches = config.code_intel.ast.max_matches_per_request;
     let mut stale_rows = 0;
     let mut deleted_files = 0;
+    let mut deleted_paths = Vec::new();
 
     for (path, mode, blob_id) in paths {
         let skipped_directory = path.components().any(|component| {
@@ -635,9 +724,9 @@ pub fn index_code_repository(
             continue;
         }
         let relative_display = path.to_string_lossy().to_string();
+        let blob_size = git_blob_size(&config.repo_root, &commit_sha, &path)?;
         let Some(language) = detect_language(&path) else {
-            let bytes = git_blob(&config.repo_root, &commit_sha, &path)?;
-            let content_sha256 = sha256_bytes_hex(&bytes);
+            let content_sha256 = format!("git-blob:{blob_id}");
             skipped_files.push(format!("{relative_display}: unsupported language"));
             memberships.push(CodeSnapshotMembershipInput {
                 path: path.clone(),
@@ -667,9 +756,10 @@ pub fn index_code_repository(
             continue;
         };
         let language_id = language.id().to_string();
-        if remaining_files == 0 {
+        if blob_size > config.code_intel.ast.max_file_bytes {
+            let reason = format!("max file size {} bytes", config.code_intel.ast.max_file_bytes);
             let content_sha256 = format!("git-blob:{blob_id}");
-            skipped_files.push(format!("{relative_display}: max files per request"));
+            skipped_files.push(format!("{relative_display}: {reason}"));
             memberships.push(CodeSnapshotMembershipInput {
                 path: path.clone(),
                 language: language_id.clone(),
@@ -677,33 +767,37 @@ pub fn index_code_repository(
                 parser_version: String::new(),
                 query_pack_version: String::new(),
                 analyzed: false,
-                skip_reason: Some("max files per request".to_string()),
+                skip_reason: Some(reason.clone()),
             });
             current_files.insert(
-                relative_display,
+                relative_display.clone(),
                 CodeSnapshotFile {
-                    language: language_id,
+                    language: language_id.clone(),
                     content_sha256: content_sha256.clone(),
                     parser_version: String::new(),
                     query_pack_version: String::new(),
                     analyzed: false,
-                    skip_reason: Some("max files per request".to_string()),
+                    skip_reason: Some(reason.clone()),
                 },
             );
             skipped_inputs.push(CodeIntelSkippedFileInput {
                 path,
-                reason: "max files per request".to_string(),
+                reason,
                 content_sha256,
             });
             continue;
         }
-        remaining_files -= 1;
 
         let bytes = git_blob(&config.repo_root, &commit_sha, &path)?;
         let content_sha256 = sha256_bytes_hex(&bytes);
+        let versions = current_parser_versions(language);
+        let current_parser_version = format!("{}:{}", versions.grammar, versions.tree_sitter);
         if let Some(previous_file) = previous_files.get(&relative_display)
             && previous_file.content_sha256 == content_sha256
             && previous_file.language == language_id
+            && previous_file.analyzed
+            && previous_file.parser_version == current_parser_version
+            && previous_file.query_pack_version == versions.query_pack
         {
             current_files.insert(relative_display.clone(), previous_file.clone());
             memberships.push(CodeSnapshotMembershipInput {
@@ -729,11 +823,8 @@ pub fn index_code_repository(
             }
             continue;
         }
-        if bytes.len() as u64 > config.code_intel.ast.max_file_bytes {
-            let reason = format!(
-                "max file size {} bytes",
-                config.code_intel.ast.max_file_bytes
-            );
+        if remaining_files == 0 {
+            let reason = "max files per request".to_string();
             skipped_files.push(format!("{relative_display}: {reason}"));
             let file = CodeSnapshotFile {
                 language: language_id.clone(),
@@ -760,6 +851,7 @@ pub fn index_code_repository(
             });
             continue;
         }
+        remaining_files -= 1;
         let source = match String::from_utf8(bytes) {
             Ok(source) => source,
             Err(error) => {
@@ -867,7 +959,7 @@ pub fn index_code_repository(
     for path in previous_files.keys() {
         if !current_files.contains_key(path) {
             deleted_files += 1;
-            stale_rows += stale_current_code_path(config, repo_id, path)?;
+            deleted_paths.push(path.clone());
             diagnostics.push(format!("{path}: deleted from target branch"));
         }
     }
@@ -877,28 +969,61 @@ pub fn index_code_repository(
         repo_id,
         &commit_sha,
         documents,
+        "staged",
+        false,
     )?;
     for batch in skipped_inputs.chunks(32) {
-        persist_code_intel_skipped_files(config, repo_id, Some(&commit_sha), false, batch)?;
+        persist_code_intel_skipped_files_with_freshness(
+            config,
+            repo_id,
+            Some(&commit_sha),
+            false,
+            batch,
+            "staged",
+            false,
+        )?;
     }
     persist_code_snapshot_membership(config, repo_id, &commit_sha, &memberships)?;
+    let mut promotion_paths = Vec::new();
+    for file in &memberships {
+        let reused = previous_files.get(&file.path.to_string_lossy().to_string()).is_some_and(
+            |previous| {
+                previous.language == file.language
+                    && previous.content_sha256 == file.content_sha256
+                    && previous.parser_version == file.parser_version
+                    && previous.query_pack_version == file.query_pack_version
+                    && previous.analyzed == file.analyzed
+                    && previous.skip_reason == file.skip_reason
+            },
+        );
+        if !reused {
+            promotion_paths.push(file.path.to_string_lossy().to_string());
+        }
+    }
+    for path in deleted_paths {
+        promotion_paths.push(path);
+    }
+    let completed_state = CodeSnapshotState {
+        repo_id,
+        commit_sha: &commit_sha,
+        target_branch: &target_branch,
+        status: "completed",
+        total_files: memberships.len(),
+        parsed_files,
+        skipped_files: skipped_files.len(),
+        deleted_files,
+        indexed_at,
+    };
+    stale_rows += promote_staged_code_snapshot(
+        config,
+        repo_id,
+        &commit_sha,
+        &promotion_paths,
+        completed_state,
+    )?;
     let analyzed_documents = memberships.iter().filter(|file| file.analyzed).count();
     let current_counts = code_index_counts(config, repo_id)?;
     stale_rows += persisted.stale_rows;
-    persist_code_snapshot_state(
-        config,
-        CodeSnapshotState {
-            repo_id,
-            commit_sha: &commit_sha,
-            target_branch: &target_branch,
-            status: "completed",
-            total_files: memberships.len(),
-            parsed_files,
-            skipped_files: skipped_files.len(),
-            deleted_files,
-            indexed_at,
-        },
-    )?;
     Ok(CodeIndexReport {
         schema_version: SchemaVersion::v1(),
         repo_id: repo_id.to_string(),
@@ -1040,6 +1165,39 @@ fn git_blob(
         )));
     }
     Ok(output.stdout)
+}
+
+fn git_blob_size(
+    root: &Path,
+    commit: &str,
+    path: &Path,
+) -> Result<u64, CodeGraphProjectionError> {
+    let object = format!("{}:{}", commit, path.to_string_lossy());
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["cat-file", "-s"])
+        .arg(object)
+        .output()
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
+            path: root.to_path_buf(),
+            source,
+        }))?;
+    if !output.status.success() {
+        return Err(CodeGraphProjectionError::InvalidRequest(format!(
+            "failed to inspect target-branch file {}",
+            path.display()
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| {
+            CodeGraphProjectionError::InvalidRequest(format!(
+                "invalid target-branch blob size for {}",
+                path.display()
+            ))
+        })
 }
 
 fn latest_code_snapshot(
@@ -1193,46 +1351,12 @@ fn persist_code_snapshot_membership(
     Ok(())
 }
 
-fn persist_code_index_documents_in_batches(
+fn promote_staged_code_snapshot(
     config: &MemoryConfig,
     repo_id: &str,
     commit_sha: &str,
-    documents: Vec<CodeIntelDocumentInput>,
-) -> Result<CodeIntelPersistReport, CodeGraphProjectionError> {
-    let mut total = CodeIntelPersistReport {
-        parsed_files: 0,
-        persisted_documents: 0,
-        persisted_symbols: 0,
-        persisted_edges: 0,
-        persisted_diagnostics: 0,
-        stale_rows: 0,
-        skipped_files: Vec::new(),
-        diagnostics: Vec::new(),
-    };
-    for batch in documents.chunks(32) {
-        let report = persist_code_intel_documents(
-            config,
-            CodeIntelPersistBatch {
-                repo_id: repo_id.to_string(),
-                commit_sha: Some(commit_sha.to_string()),
-                worktree_dirty: false,
-                documents: batch.to_vec(),
-            },
-        )?;
-        total.parsed_files += report.parsed_files;
-        total.persisted_documents += report.persisted_documents;
-        total.persisted_symbols += report.persisted_symbols;
-        total.persisted_edges += report.persisted_edges;
-        total.persisted_diagnostics += report.persisted_diagnostics;
-        total.stale_rows += report.stale_rows;
-    }
-    Ok(total)
-}
-
-fn stale_current_code_path(
-    config: &MemoryConfig,
-    repo_id: &str,
-    path: &str,
+    changed_paths: &[String],
+    completed_state: CodeSnapshotState<'_>,
 ) -> Result<usize, CodeGraphProjectionError> {
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| CodeGraphProjectionError::Memory(
@@ -1247,25 +1371,115 @@ fn stale_current_code_path(
             source,
         })
     })?;
-    let mut count = 0;
-    for table in ["code_documents", "code_symbols", "code_edges", "code_diagnostics"] {
-        count += transaction
+    let mut stale_rows = 0;
+    for path in changed_paths {
+        for table in [
+            "code_documents",
+            "code_symbols",
+            "code_edges",
+            "code_diagnostics",
+            "code_skipped_files",
+        ] {
+            stale_rows += transaction
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'"
+                    ),
+                    params![repo_id, path],
+                )
+                .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                }))?;
+        }
+    }
+    for table in [
+        "code_documents",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_skipped_files",
+    ] {
+        transaction
             .execute(
-                &format!("UPDATE {table} SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'"),
-                params![repo_id, path],
+                &format!(
+                    "UPDATE {table} SET freshness = 'current' WHERE repo_id = ? AND commit_sha = ? AND freshness = 'staged'"
+                ),
+                params![repo_id, commit_sha],
             )
             .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             }))?;
     }
+    transaction
+        .execute(
+            "UPDATE code_index_snapshots SET status = ?, total_files = ?, parsed_files = ?, skipped_files = ?, deleted_files = ?, indexed_at = ? WHERE repo_id = ? AND commit_sha = ?",
+            params![
+                completed_state.status,
+                completed_state.total_files as i64,
+                completed_state.parsed_files as i64,
+                completed_state.skipped_files as i64,
+                completed_state.deleted_files as i64,
+                completed_state.indexed_at.to_rfc3339(),
+                completed_state.repo_id,
+                completed_state.commit_sha,
+            ],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
     transaction.commit().map_err(|source| {
         CodeGraphProjectionError::Memory(MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
         })
     })?;
-    Ok(count)
+    Ok(stale_rows)
+}
+
+fn persist_code_index_documents_in_batches(
+    config: &MemoryConfig,
+    repo_id: &str,
+    commit_sha: &str,
+    documents: Vec<CodeIntelDocumentInput>,
+    freshness: &str,
+    stale_existing: bool,
+) -> Result<CodeIntelPersistReport, CodeGraphProjectionError> {
+    let mut total = CodeIntelPersistReport {
+        parsed_files: 0,
+        persisted_documents: 0,
+        persisted_symbols: 0,
+        persisted_edges: 0,
+        persisted_diagnostics: 0,
+        stale_rows: 0,
+        skipped_files: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    for batch in documents.chunks(32) {
+        let report = persist_code_intel_documents_with_freshness(
+            config,
+            CodeIntelPersistBatch {
+                repo_id: repo_id.to_string(),
+                commit_sha: Some(commit_sha.to_string()),
+                worktree_dirty: false,
+                documents: batch.to_vec(),
+            },
+            freshness,
+            stale_existing,
+        )?;
+        total.parsed_files += report.parsed_files;
+        total.persisted_documents += report.persisted_documents;
+        total.persisted_symbols += report.persisted_symbols;
+        total.persisted_edges += report.persisted_edges;
+        total.persisted_diagnostics += report.persisted_diagnostics;
+        total.stale_rows += report.stale_rows;
+    }
+    Ok(total)
 }
 
 fn code_index_document(
@@ -1303,8 +1517,8 @@ fn code_index_document(
     let edges = summary
         .captures
         .iter()
-        .take(*remaining_matches)
         .filter_map(|capture| code_index_edge_input(capture, max_capture_bytes))
+        .take(*remaining_matches)
         .collect::<Vec<_>>();
     *remaining_matches = remaining_matches.saturating_sub(edges.len());
     CodeIntelDocumentInput {
@@ -2042,6 +2256,9 @@ fn code_revision_indexed(
     repo_id: &str,
     revision: &str,
 ) -> Result<bool, MemoryError> {
+    if let Some(status) = code_snapshot_status(connection, config, repo_id, revision)? {
+        return Ok(status == "completed");
+    }
     for (table, ready) in [
         (
             "code_document_revisions",
@@ -2568,6 +2785,11 @@ fn query_revision_documents(
     revision: &str,
 ) -> Result<BTreeMap<String, RevisionDocumentKey>, MemoryError> {
     if code_snapshot_membership_read_model_ready(connection, &config.index_path)? {
+        if let Some(status) = code_snapshot_status(connection, config, repo_id, revision)?
+            && status != "completed"
+        {
+            return Ok(BTreeMap::new());
+        }
         let mut statement = connection
             .prepare("SELECT path, content_sha256, parser_version, query_pack_version, analyzed FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? ORDER BY path")
             .map_err(|source| MemoryError::DuckDb {
@@ -2595,7 +2817,7 @@ fn query_revision_documents(
                 path: config.index_path.clone(),
                 source,
             })?;
-        if !rows.is_empty() {
+        if code_snapshot_status(connection, config, repo_id, revision)?.is_some() {
             return Ok(rows);
         }
     }
@@ -2912,6 +3134,33 @@ fn code_snapshot_membership_read_model_ready(
     )
 }
 
+fn code_snapshot_status(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+) -> Result<Option<String>, MemoryError> {
+    if !table_has_columns(
+        connection,
+        &config.index_path,
+        "code_index_snapshots",
+        &["repo_id", "commit_sha", "status"],
+    )? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT status FROM code_index_snapshots WHERE repo_id = ? AND commit_sha = ? LIMIT 1",
+            params![repo_id, revision],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })
+}
+
 fn code_diagnostics_read_model_ready(
     connection: &Connection,
     path: &Path,
@@ -3159,6 +3408,11 @@ mod code_graph_tests {
             },
         )
         .expect("record interrupted index");
+        let during_interrupted = code_graph_repos(&config, false).expect("current graph remains readable");
+        assert_eq!(
+            during_interrupted.repos[0].head_revision.as_deref(),
+            Some(baseline.as_str())
+        );
 
         let second = index_code_repository(&config, "fixture-repo").expect("incremental index");
         assert_eq!(second.head_revision.as_deref(), Some(changed.as_str()));
@@ -3178,6 +3432,7 @@ mod code_graph_tests {
         let repos = code_graph_repos(&config, false).expect("current repo list");
         assert_eq!(repos.repos.len(), 1);
         assert_eq!(repos.repos[0].repo_id, "fixture-repo");
+        assert_eq!(repos.repos[0].head_revision.as_deref(), Some(identical.as_str()));
 
         fs::write(repo.path().join("src/new.rs"), "pub fn new_symbol() {}\n")
             .expect("new source");

@@ -63,7 +63,6 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 path: config.index_path.clone(),
                 source,
             })?;
-
         transaction
             .execute(
                 "DELETE FROM issue_areas WHERE issue_key = ?",
@@ -717,6 +716,15 @@ pub fn persist_code_intel_documents(
     config: &MemoryConfig,
     batch: CodeIntelPersistBatch,
 ) -> Result<CodeIntelPersistReport, MemoryError> {
+    persist_code_intel_documents_with_freshness(config, batch, "current", true)
+}
+
+pub(crate) fn persist_code_intel_documents_with_freshness(
+    config: &MemoryConfig,
+    batch: CodeIntelPersistBatch,
+    freshness: &str,
+    stale_existing: bool,
+) -> Result<CodeIntelPersistReport, MemoryError> {
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
@@ -742,20 +750,22 @@ pub fn persist_code_intel_documents(
     let worktree_dirty = if batch.worktree_dirty { 1_i64 } else { 0_i64 };
     for document in batch.documents {
         let path = document.path.to_string_lossy().to_string();
-        report.stale_rows += stale_code_rows(
-            &transaction,
-            &CodeFreshnessKey {
-                repo_id: &batch.repo_id,
-                path: &path,
-                content_sha256: &document.content_sha256,
-                parser_version: &document.parser_version,
-                query_pack_version: &document.query_pack_version,
-            },
-        )
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-        })?;
+        if stale_existing {
+            report.stale_rows += stale_code_rows(
+                &transaction,
+                &CodeFreshnessKey {
+                    repo_id: &batch.repo_id,
+                    path: &path,
+                    content_sha256: &document.content_sha256,
+                    parser_version: &document.parser_version,
+                    query_pack_version: &document.query_pack_version,
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        }
 
         transaction
             .execute(
@@ -773,7 +783,7 @@ pub fn persist_code_intel_documents(
                     document.byte_len as i64,
                     document.line_count as i64,
                     indexed_at,
-                    MemoryFreshness::Current.as_str(),
+                    freshness,
                 ],
             )
             .map_err(|source| MemoryError::DuckDb {
@@ -798,7 +808,7 @@ pub fn persist_code_intel_documents(
                         document.parser_version,
                         document.query_pack_version,
                         indexed_at,
-                        MemoryFreshness::Current.as_str(),
+                        freshness,
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -845,7 +855,7 @@ pub fn persist_code_intel_documents(
                         document.parser_version,
                         document.query_pack_version,
                         indexed_at,
-                        MemoryFreshness::Current.as_str(),
+                        freshness,
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -901,7 +911,7 @@ pub fn persist_code_intel_documents(
                         document.parser_version,
                         document.query_pack_version,
                         indexed_at,
-                        MemoryFreshness::Current.as_str(),
+                        freshness,
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -938,7 +948,7 @@ pub fn persist_code_intel_documents(
                             document.parser_version,
                             document.query_pack_version,
                             indexed_at,
-                            MemoryFreshness::Current.as_str(),
+                            freshness,
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -988,7 +998,7 @@ pub fn persist_code_intel_documents(
                         document.parser_version,
                         document.query_pack_version,
                         indexed_at,
-                        MemoryFreshness::Current.as_str(),
+                        freshness,
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -1021,7 +1031,7 @@ pub fn persist_code_intel_documents(
                             document.parser_version,
                             document.query_pack_version,
                             indexed_at,
-                            MemoryFreshness::Current.as_str(),
+                            freshness,
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -1049,6 +1059,26 @@ pub fn persist_code_intel_skipped_files(
     worktree_dirty: bool,
     skipped_files: &[CodeIntelSkippedFileInput],
 ) -> Result<usize, MemoryError> {
+    persist_code_intel_skipped_files_with_freshness(
+        config,
+        repo_id,
+        commit_sha,
+        worktree_dirty,
+        skipped_files,
+        "current",
+        true,
+    )
+}
+
+pub(crate) fn persist_code_intel_skipped_files_with_freshness(
+    config: &MemoryConfig,
+    repo_id: &str,
+    commit_sha: Option<&str>,
+    worktree_dirty: bool,
+    skipped_files: &[CodeIntelSkippedFileInput],
+    freshness: &str,
+    stale_existing: bool,
+) -> Result<usize, MemoryError> {
     let Some(commit_sha) = commit_sha.filter(|_| !worktree_dirty) else {
         return Ok(0);
     };
@@ -1069,21 +1099,23 @@ pub fn persist_code_intel_skipped_files(
     let indexed_at = Utc::now().to_rfc3339();
     for skipped in skipped_files {
         let path = skipped.path.to_string_lossy().to_string();
-        stale_code_rows_for_skipped_file(&transaction, repo_id, &path).map_err(|source| {
-            MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            }
-        })?;
-        transaction
-            .execute(
-                "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
-                params![repo_id, path, commit_sha, skipped.content_sha256],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
+        if stale_existing {
+            stale_code_rows_for_skipped_file(&transaction, repo_id, &path).map_err(|source| {
+                MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                }
             })?;
+            transaction
+                .execute(
+                    "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
+                    params![repo_id, path, commit_sha, skipped.content_sha256],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
         transaction
             .execute(
                 "INSERT OR REPLACE INTO code_skipped_files (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1095,7 +1127,7 @@ pub fn persist_code_intel_skipped_files(
                     skipped.reason,
                     skipped.content_sha256,
                     indexed_at,
-                    MemoryFreshness::Current.as_str(),
+                    freshness,
                 ],
             )
             .map_err(|source| MemoryError::DuckDb {
@@ -1715,6 +1747,11 @@ fn query_symbols_for_revision(
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
+    if let Some(status) = code_snapshot_status(connection, config, repo_id, revision)?
+        && status != "completed"
+    {
+        return Ok(BTreeMap::new());
+    }
     let membership_ready =
         code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
     let query = if membership_ready {
