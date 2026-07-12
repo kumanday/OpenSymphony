@@ -230,11 +230,7 @@ fn code_graph_related_memory(
     let mut related_issues = Vec::new();
     let mut related_memory_concepts = Vec::new();
     for issue in issues {
-        let repository_scope_matches = issue
-            .scope_refs
-            .iter()
-            .find(|scope| matches!(scope.kind, KnowledgeScopeKind::Repository))
-            .is_none_or(|scope| scope.id == repo_id);
+        let repository_scope_matches = repository_scope_matches(&issue.scope_refs, repo_id);
         let source_match = issue.source_refs.iter().any(|source| {
             let source_repo_matches = source
                 .repo_id
@@ -270,7 +266,11 @@ fn code_graph_related_memory(
             continue;
         }
         let freshness = freshness_from_str(issue.freshness.as_str());
-        if issue.concept_type == "issue-capsule" {
+        if (issue.concept_type == "issue-capsule" || has_work_item_scope(&issue.scope_refs))
+            && !related_issues
+                .iter()
+                .any(|chip: &CodeGraphIssueChip| chip.issue_key == issue.issue_key)
+        {
             related_issues.push(CodeGraphIssueChip {
                 issue_key: issue.issue_key.clone(),
                 title: redact_for_dto(config, &issue.title),
@@ -290,6 +290,22 @@ fn code_graph_related_memory(
     related_issues.sort_by(|left, right| left.issue_key.cmp(&right.issue_key));
     related_memory_concepts.sort_by(|left, right| left.concept_id.cmp(&right.concept_id));
     Ok((related_issues, related_memory_concepts))
+}
+
+fn repository_scope_matches(scope_refs: &[KnowledgeScope], repo_id: &str) -> bool {
+    let has_repository_scope = scope_refs
+        .iter()
+        .any(|scope| matches!(scope.kind, KnowledgeScopeKind::Repository));
+    !has_repository_scope
+        || scope_refs.iter().any(|scope| {
+            matches!(scope.kind, KnowledgeScopeKind::Repository) && scope.id == repo_id
+        })
+}
+
+fn has_work_item_scope(scope_refs: &[KnowledgeScope]) -> bool {
+    scope_refs
+        .iter()
+        .any(|scope| matches!(scope.kind, KnowledgeScopeKind::WorkItem))
 }
 
 fn code_citation_matches_symbol(
@@ -2058,7 +2074,12 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 mod code_graph_tests {
-    use super::{code_citation_matches_symbol, code_symbol_span_matches};
+    use crate::opensymphony_memory::{KnowledgeScope, KnowledgeScopeKind};
+
+    use super::{
+        code_citation_matches_symbol, code_symbol_span_matches, has_work_item_scope,
+        repository_scope_matches,
+    };
 
     #[test]
     fn legacy_code_symbol_refs_match_only_their_exact_span() {
@@ -2093,5 +2114,29 @@ mod code_graph_tests {
             "crate::run",
             "src/lib.rs",
         ));
+    }
+
+    #[test]
+    fn repository_scopes_match_any_repository_and_work_item_scopes_are_chip_eligible() {
+        let scopes = vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "other-repo".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "team/repo".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::WorkItem,
+                id: "COE-536".to_string(),
+                label: None,
+            },
+        ];
+        assert!(repository_scope_matches(&scopes, "team/repo"));
+        assert!(!repository_scope_matches(&scopes, "missing-repo"));
+        assert!(has_work_item_scope(&scopes));
     }
 }

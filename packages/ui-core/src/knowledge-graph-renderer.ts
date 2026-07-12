@@ -1,6 +1,7 @@
 import {
   codeDeepLinkForFile,
   codeDeepLinkForSymbol,
+  codeDeepLinkPrefix,
   formatCodeDeepLink,
   codeEdgeVisualStyle,
   codeGraphNodeDeltaStatus,
@@ -1468,7 +1469,9 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
       <h4>Citations</h4>
       <ul class="os-kg-capsule-links" data-testid="knowledge-graph-capsule-citations">
         ${detail.citations.map((citation) => `
-          <li>${/^https?:\/\//.test(citation.target)
+          <li>${citation.target.startsWith(codeDeepLinkPrefix)
+            ? `<button type="button" class="os-kg-capsule-link" data-code-deeplink="${escapeAttr(citation.target)}">${escapeHtml(citation.label ?? citation.target)}</button>`
+            : /^https?:\/\//.test(citation.target)
             // Real OKF citations often carry a URL target with a short
             // label; those are external evidence, not graph nodes.
             ? `<a href="${escapeAttr(citation.target)}" target="_blank" rel="noreferrer">${escapeHtml(citation.label ?? citation.id)}</a>`
@@ -1481,13 +1484,16 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
     ? `
       <h4>Sources</h4>
       <ul class="os-kg-capsule-sources">
-        ${detail.source_refs.map((ref) => `
-          <li>${codeDeepLinkForSourceRef(ref)
-            ? `<button type="button" class="os-kg-capsule-link" data-code-deeplink="${escapeAttr(codeDeepLinkForSourceRef(ref)!)}">${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}</button>`
+        ${detail.source_refs.map((ref) => {
+          const codeLink = codeDeepLinkForSourceRef(ref, detail);
+          return `
+          <li>${codeLink
+            ? `<button type="button" class="os-kg-capsule-link" data-code-deeplink="${escapeAttr(codeLink)}">${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}</button>`
             : ref.url && /^https?:\/\//.test(ref.url)
             ? `<a href="${escapeAttr(ref.url)}" target="_blank" rel="noreferrer">${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}</a>`
             : `${escapeHtml(ref.kind)}: ${escapeHtml(ref.id)}`}</li>
-        `).join("")}
+        `;
+        }).join("")}
       </ul>
     `
     : "";
@@ -1502,17 +1508,43 @@ function renderCapsule(node: MemoryGraphNode, surface: KnowledgeGraphSurface): s
   `;
 }
 
-function codeDeepLinkForSourceRef(ref: NonNullable<MemoryConceptDetail["source_refs"]>[number]): string | null {
-  if (!ref.repo_id) return null;
+function codeDeepLinkForSourceRef(
+  ref: NonNullable<MemoryConceptDetail["source_refs"]>[number],
+  detail: MemoryConceptDetail,
+): string | null {
+  const repoId = ref.repo_id ?? codeRepoIdFromConceptScopes(detail);
+  if (!repoId) return null;
   try {
     return ref.symbol_key
-      ? codeDeepLinkForSymbol(ref.repo_id, ref.symbol_key)
+      ? codeDeepLinkForSymbol(repoId, ref.symbol_key)
       : ref.kind === "path"
-        ? codeDeepLinkForFile(ref.repo_id, ref.id)
+        ? codeDeepLinkForFile(repoId, ref.id)
+        : ref.kind === "code-symbol"
+          ? codeDeepLinkForFile(repoId, legacyCodePathFromSourceRef(ref))
         : null;
   } catch {
     return null;
   }
+}
+
+function codeRepoIdFromConceptScopes(detail: MemoryConceptDetail): string | null {
+  const scopeRefs = detail.frontmatter_view.opensymphony.scope_refs;
+  if (!Array.isArray(scopeRefs)) return null;
+  const repositoryIds = scopeRefs
+    .filter((scope): scope is { kind: unknown; id: string } => (
+      typeof scope === "object"
+      && scope !== null
+      && (scope as { kind?: unknown }).kind === "repository"
+      && typeof (scope as { id?: unknown }).id === "string"
+    ))
+    .map((scope) => scope.id);
+  return repositoryIds.length === 1 ? repositoryIds[0] : null;
+}
+
+function legacyCodePathFromSourceRef(
+  ref: NonNullable<MemoryConceptDetail["source_refs"]>[number],
+): string {
+  return /^(.*):\d+:\d+-\d+:\d+$/.exec(ref.id)?.[1] ?? ref.id;
 }
 
 function isChipValue(value: unknown): boolean {
