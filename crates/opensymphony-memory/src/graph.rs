@@ -399,6 +399,8 @@ pub fn memory_concept_detail(
                 kind: source.kind.clone(),
                 id: source.id.clone(),
                 url: source.url.as_ref().map(|url| redact_for_dto(config, url)),
+                repo_id: source.repo_id.clone(),
+                symbol_key: source.symbol_key.clone(),
             })
             .collect(),
     })

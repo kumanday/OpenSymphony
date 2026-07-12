@@ -221,10 +221,10 @@ Rename/move detection across `symbol_key` boundaries (renamed symbol, moved file
 Reuse the Knowledge Graph's existing edge kinds; invent nothing new:
 
 - `scoped_to`: code node → work-graph node (issue/milestone/project), from `opensymphony.scope_refs` on ingested code-context memory records.
-- `source_supported_by` / `cites`: memory concept → code symbol/path, from `source_refs` carrying repo, path, and symbol identity (AST spec section 10.4). Source refs gain the `symbol_key` alongside `symbol_id` once 7.3 lands.
+- `source_supported_by` / `cites`: memory concept → code symbol/path, from `source_refs` carrying repo, path, and symbol identity (AST spec section 10.4). Newly written code source refs carry the optional `repo_id` and stable `symbol_key` alongside their path/span identity; older refs remain valid without backfill.
 - Run/diff linkage: run → touched files → contained symbols is derivable from the diff endpoints plus `contains`; no new edge kind.
 
-Delivery: cross-graph relationships appear as **inspector chips on both sides**, resolved lazily through the existing memory endpoints — issue and memory-concept chips in the Code Graph inspector; code-symbol chips in the Knowledge Graph inspector for concepts whose source refs cite code. They are not merged into a single graph DTO. The payoff query: select a symbol → see the issues that touched it and the memory capsules that explain it.
+Delivery: cross-graph relationships appear as **inspector chips on both sides**, resolved lazily through the existing memory endpoints — issue and memory-concept chips in the Code Graph inspector; code-symbol chips in the Knowledge Graph inspector for concepts whose source refs cite code. Chip activation goes through the shared code/memory deep-link handles, and a valid `opensymphony://code/...` markdown link follows the same code handle. They are not merged into a single graph DTO. The payoff query: select a symbol → see the issues that touched it and the memory capsules that explain it.
 
 ## 8. Data Contracts
 

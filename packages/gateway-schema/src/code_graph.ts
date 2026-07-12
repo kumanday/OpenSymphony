@@ -111,6 +111,24 @@ export interface CodeSymbolDetail {
   diagnostics: CodeDiagnostic[];
   edge_summary: CodeEdgeSummary[];
   source_snippet?: CodeSourceSnippet | null;
+  related_issues?: CodeGraphIssueChip[];
+  related_memory_concepts?: CodeGraphMemoryChip[];
+}
+
+export interface CodeGraphIssueChip {
+  issue_key: string;
+  title: string;
+  state?: string;
+  url?: string;
+  freshness: CodeGraphFreshness;
+}
+
+export interface CodeGraphMemoryChip {
+  bundle_id: string;
+  concept_id: string;
+  title: string;
+  visibility: string;
+  freshness: CodeGraphFreshness;
 }
 
 export interface CodeSymbolProvenance {

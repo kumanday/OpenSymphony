@@ -1743,6 +1743,8 @@ fn legacy_frontmatter_to_opensymphony_metadata(
             kind: "linear_issue".to_string(),
             id: issue,
             url: string_extra(frontmatter, "linear_url"),
+            repo_id: None,
+            symbol_key: None,
         });
     }
     for source_ref in legacy_source_refs(frontmatter) {
@@ -1916,6 +1918,8 @@ fn legacy_source_refs_from_extra(
                         kind: "github_pr".to_string(),
                         id: number,
                         url,
+                        repo_id: None,
+                        symbol_key: None,
                     },
                 );
             }
@@ -1929,6 +1933,8 @@ fn legacy_source_refs_from_extra(
                         kind: "github_merge_sha".to_string(),
                         id: sha,
                         url: None,
+                        repo_id: None,
+                        symbol_key: None,
                     },
                 );
             }
@@ -1943,6 +1949,8 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
             kind: "github_pr".to_string(),
             id: id.to_string(),
             url: None,
+            repo_id: None,
+            symbol_key: None,
         };
     }
     if let Some(id) = token.strip_prefix("github:merge:") {
@@ -1950,6 +1958,8 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
             kind: "github_merge_sha".to_string(),
             id: id.to_string(),
             url: None,
+            repo_id: None,
+            symbol_key: None,
         };
     }
     if let Some(id) = token.strip_prefix("linear:") {
@@ -1957,12 +1967,16 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
             kind: kind.to_string(),
             id: id.to_string(),
             url: None,
+            repo_id: None,
+            symbol_key: None,
         };
     }
     MemorySourceRef {
         kind: kind.to_string(),
         id: token.to_string(),
         url: None,
+        repo_id: None,
+        symbol_key: None,
     }
 }
 

@@ -2048,6 +2048,35 @@ describe("OpenSymphonyApp mount", () => {
     expect(buttons.map((button) => button.dataset.kgLinkTarget)).toEqual(["issues/COE-465"]);
   });
 
+  it("renders code citations and legacy code source refs as Code Graph links", () => {
+    const concept = fixtureGraphSnapshot.nodes.find((node) => node.kind === "concept")!;
+    const html = renderKnowledgeGraphInspector({
+      snapshot: fixtureGraphSnapshot,
+      layout: null,
+      state: { ...initialGraphState, selectedNodeIds: [concept.id] },
+      conceptDetail: {
+        ...fixtureConceptDetail,
+        frontmatter_view: {
+          ...fixtureConceptDetail.frontmatter_view,
+          opensymphony: {
+            ...fixtureConceptDetail.frontmatter_view.opensymphony,
+            scope_refs: [{ kind: "repository", id: "opensymphony" }],
+          },
+        },
+        citations: [{ id: "code", target: "opensymphony://code/opensymphony/symbols/crate%3A%3Arun", label: "run" }],
+        source_refs: [{ kind: "code-symbol", id: "packages/graph/src/index.ts:10:1-12:2" }],
+      },
+    });
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const citationLink = root.querySelector<HTMLElement>("[data-testid='knowledge-graph-capsule-citations'] [data-code-deeplink]");
+    expect(citationLink?.getAttribute("data-code-deeplink"))
+      .toBe("opensymphony://code/opensymphony/symbols/crate%3A%3Arun");
+    expect(root.querySelector(".os-kg-capsule-sources [data-code-deeplink]")?.getAttribute("data-code-deeplink"))
+      .toBe("opensymphony://code/opensymphony/files/packages/graph/src/index.ts");
+    expect(root.querySelectorAll("[data-testid='knowledge-graph-capsule-citations'] [data-kg-link-target]")).toHaveLength(0);
+  });
+
   it("renders capsule citations as navigable graph links", () => {
     const concept = graphVizFixtureSnapshot.nodes.find(
       (node) => node.kind === "concept" && (graphVizFixtureConceptDetail(node.concept_id!)?.citations.length ?? 0) > 0,

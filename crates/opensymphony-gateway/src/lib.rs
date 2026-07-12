@@ -1577,6 +1577,7 @@ struct CodeGraphQuery {
 #[derive(Debug, Default, serde::Deserialize)]
 struct CodeSymbolQuery {
     include_stale: Option<bool>,
+    visibility: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1644,11 +1645,13 @@ async fn get_code_symbol_detail(
     Query(params): Query<CodeSymbolQuery>,
 ) -> Result<Json<CodeSymbolDetail>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_code_memory(&state)?;
+    let access = memory_graph_access(params.visibility.as_deref())?;
     code_graph_symbol_detail(
         config,
         &repo_id,
         &symbol_key,
         params.include_stale.unwrap_or(false),
+        access,
     )
     .map(Json)
     .map_err(code_graph_error)

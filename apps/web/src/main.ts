@@ -32,7 +32,10 @@ export function createWebGraphAdapter(gatewayUrl = defaultGatewayUrl) {
 }
 
 export function createWebCodeGraphAdapter(gatewayUrl = defaultGatewayUrl) {
-  return createGatewayCodeGraphAdapter(gatewayUrl, globalThis.fetch);
+  return createGatewayCodeGraphAdapter(gatewayUrl, globalThis.fetch, {
+    defaultVisibility: "public",
+    maxVisibility: "public",
+  });
 }
 
 function openCodeDeepLinkFromLocation(app: ReturnType<typeof renderOpenSymphonyApp>): void {

@@ -49,6 +49,19 @@ describe("renderMemoryMarkdown", () => {
     expect(attr).toContain("&gt;");
   });
 
+  it("renders valid code deep links as navigation buttons", () => {
+    const html = renderMemoryMarkdown("[Open symbol](opensymphony://code/repo/symbols/foo)");
+    expect(html).toContain('data-code-deeplink="opensymphony://code/repo/symbols/foo"');
+    expect(html).toContain('class="os-kg-capsule-link"');
+    expect(html).not.toContain('href="opensymphony://');
+  });
+
+  it("preserves query parameters in code deep-link buttons", () => {
+    const html = renderMemoryMarkdown("[Open symbol](opensymphony://code/repo/atlas?depth=2&seed=x)");
+    expect(html).toContain('data-code-deeplink="opensymphony://code/repo/atlas?depth=2&amp;seed=x"');
+    expect(html).not.toContain("&amp;amp;");
+  });
+
   it("never reprocesses generated HTML with later inline passes", () => {
     // A wiki target containing markdown-link syntax must land verbatim in
     // the attribute, not be rewritten into a nested anchor.
