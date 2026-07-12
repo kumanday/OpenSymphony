@@ -29,7 +29,7 @@ describe("Knowledge Graph renderer", () => {
       }
       for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
         const page = await browser.newPage({ viewport });
-        await page.goto(`${server.url}/app/`, { waitUntil: "domcontentloaded" });
+        await page.goto(`${server.url}/app/?fixtures`, { waitUntil: "domcontentloaded" });
         await page.getByRole("button", { name: "Knowledge Graph" }).click();
         await page.waitForFunction(() => {
           const canvas = document.querySelector("[data-testid='knowledge-graph-canvas']");
@@ -66,6 +66,12 @@ describe("Knowledge Graph renderer", () => {
         expect(stats.height).toBeGreaterThan(0);
         expect(stats.total).toBeGreaterThan(100);
         expect(stats.changed).toBeGreaterThan(20);
+        await page.getByRole("button", { name: "Code Graph" }).click();
+        await page.waitForFunction(() => {
+          const canvas = document.querySelector("[data-testid='code-graph-canvas']");
+          return canvas instanceof HTMLCanvasElement && canvas.dataset.nonblank === "true";
+        });
+        expect(await page.locator("[data-testid='code-graph-screen-reader-summary']").textContent()).toContain("Code Graph");
         await page.close();
       }
     } finally {

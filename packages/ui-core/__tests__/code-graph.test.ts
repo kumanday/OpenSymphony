@@ -8,6 +8,7 @@ import {
   codeGraphReducer,
   codeGraphSnapshotForRendering,
   codeNodeVisualStyle,
+  createCodeGraphReferenceAtlasFixture,
   computeGraphLayout,
   createInitialCodeGraphState,
   parseCodeDeepLink,
@@ -46,6 +47,19 @@ describe("Code Graph renderer surface", () => {
     expect(root.querySelector("[data-testid='code-graph-raw-record']")?.textContent).toContain("codeGraphReducer");
     expect(root.querySelector("[data-code-confidence='syntactic']")).not.toBeNull();
     expect(root.querySelector("[data-code-delta-status='modified']")).not.toBeNull();
+  });
+
+  it("announces truncation, mode, and repo without relying on canvas or color", () => {
+    const reference = createCodeGraphReferenceAtlasFixture();
+    const state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot: reference });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot: reference, layout: null, state });
+    const summary = root.querySelector("[data-testid='code-graph-screen-reader-summary']");
+    expect(summary?.textContent).toContain("reference-scale");
+    expect(summary?.textContent).toContain("48,000 nodes");
+    expect(summary?.textContent).toContain("198,001 edges");
+    expect(summary?.textContent).toContain("directory aggregation");
+    expect(root.querySelector("canvas")?.getAttribute("aria-describedby")).toBe("code-graph-screen-reader-summary");
   });
 
   it("encodes confidence as line style and freshness as opacity/border", () => {

@@ -236,6 +236,22 @@ depth, revisions, and layout seed. The desktop and web boot paths accept
 `?code=<deep-link>` alongside `?fixtures`; `code_graph_updated` refreshes the
 active snapshot without clearing camera, drag overrides, or selection.
 
+Code Graph hardening uses the same fixture workbench for web and desktop. The
+scale tiers are edge-heavy (500/2K, 5K/20K, and 20K/80K nodes/edges), while the
+reference Atlas fixture represents 50K symbols and 200K edges through at most
+2,000 directory-aggregated render elements. Atlas never renders raw symbols;
+expansion is a scoped follow-up request. When a bound trims a response, the
+toolbar and screen-reader summary expose both dropped counts and the reason.
+
+The structure list is always available as the keyboard and screen-reader
+fallback for Atlas, File, Neighborhood, and Diff. Freshness, confidence,
+diagnostics, and diff status have text, badges, opacity, borders, or line
+styles in addition to color. Reduced motion settles the shared camera
+immediately. Desktop native commands use the same camelCase request names and
+gateway-schema DTOs as HTTP, including the hosted default-deny snippet policy;
+paths exposed to clients remain workspace-relative and stale/unsupported
+records stay visible only when explicitly requested.
+
 ### Tests that gate this area
 
 - `packages/ui-core/__tests__/knowledge-graph-scene.test.ts` — projector ↔
@@ -253,6 +269,8 @@ active snapshot without clearing camera, drag overrides, or selection.
 - `packages/graph/__tests__/code-graph.test.ts` and
   `packages/ui-core/__tests__/code-graph.test.ts` — code adapters, filters,
   deep links, DTO-to-scene styling, inspector markup, and layout semantics.
+- `packages/graph/__tests__/deep-link.test.ts` — code deep-link round-trips and
+  strict rejection beside the memory deep-link suite.
 - `packages/ui-core/__tests__/memory-markdown.test.ts` — capsule markdown
   allowlist rendering and escaping.
 - `packages/graph/__tests__/completed-tasks.test.ts` — completed-task

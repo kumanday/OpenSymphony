@@ -303,6 +303,7 @@ export function parseCodeDeepLink(url: string): CodeDeepLink | null {
   if (!query) return null;
   const mode = query.mode ?? inferredMode;
   if (!codeGraphModesForPath(mode, symbolKey, path, baseRevision)) return null;
+  if ([repoId, symbolKey, path, baseRevision, headRevision].some((value) => value !== null && !isSafeCodeTarget(value))) return null;
   return {
     repoId,
     mode,
@@ -315,6 +316,12 @@ export function parseCodeDeepLink(url: string): CodeDeepLink | null {
     baseRevision,
     headRevision,
   };
+}
+
+function isSafeCodeTarget(value: string): boolean {
+  return value.length > 0
+    && !value.startsWith("/")
+    && !value.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
 }
 
 export function codeDeepLinkToGraphState(link: CodeDeepLink): {

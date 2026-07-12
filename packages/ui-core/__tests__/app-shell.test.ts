@@ -900,6 +900,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-testid='workspace-pane-shell']")?.getAttribute("data-graph-surface")).toBe("code");
       expect(root.querySelector("[data-testid='code-graph-structure-list']")).not.toBeNull();
       expect(root.querySelector("[data-testid='code-graph-detail']")).not.toBeNull();
+      expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("Code Graph");
     } finally {
       consoleError.mockRestore();
       getContext.mockRestore();

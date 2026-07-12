@@ -1,6 +1,8 @@
 import {
   applyGraphFilters,
   cachedConceptDetail,
+  codeDeepLinkToGraphState,
+  formatCodeDeepLink,
   isConceptDetailStale,
   createFixtureGraphAdapter,
   createInitialGraphState,
@@ -13,6 +15,7 @@ import {
   memoryDeepLinkToGraphState,
   parseMemoryDeepLink,
   resolveMemoryDeepLinkNode,
+  parseCodeDeepLink,
 } from "@opensymphony/graph";
 
 describe("memory deep links", () => {
@@ -159,6 +162,28 @@ describe("memory deep links", () => {
     });
     expect(conceptState.mode).toBe("atlas");
     expect(conceptState.filters?.communities).toEqual([]);
+  });
+});
+
+describe("code deep links", () => {
+  it("round-trips a diff target and restores its selected symbol", () => {
+    const link = formatCodeDeepLink({
+      repoId: "team/repo",
+      symbolKey: "crate::module::run",
+      baseRevision: "base/rev",
+      headRevision: "head/rev",
+      depth: 2,
+    });
+    const parsed = parseCodeDeepLink(link);
+    expect(parsed).toMatchObject({ mode: "diff", symbolKey: "crate::module::run", depth: 2 });
+    expect(codeDeepLinkToGraphState(parsed!).selectedNodeIds).toEqual(["sym:crate::module::run"]);
+    expect(formatCodeDeepLink(parsed!)).toBe(link);
+  });
+
+  it("strictly rejects malformed code links and unsupported query keys", () => {
+    expect(parseCodeDeepLink("opensymphony://code/repo/files/../secret")).toBeNull();
+    expect(parseCodeDeepLink("opensymphony://code/repo/diff/base")).toBeNull();
+    expect(parseCodeDeepLink("opensymphony://code/repo/atlas?unexpected=1")).toBeNull();
   });
 });
 

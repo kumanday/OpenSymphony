@@ -7,7 +7,12 @@
  */
 
 import { HttpGatewayTransport } from "@opensymphony/api-client";
-import { codeDeepLinkFromLocationSearch, createGatewayCodeGraphAdapter, createGatewayGraphAdapter } from "@opensymphony/graph";
+import {
+  codeDeepLinkFromLocationSearch,
+  createFixtureCodeGraphAdapter,
+  createGatewayCodeGraphAdapter,
+  createGatewayGraphAdapter,
+} from "@opensymphony/graph";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
 import { createWebModelProfileController } from "./model-profile-controller.js";
@@ -38,6 +43,10 @@ export function createWebCodeGraphAdapter(gatewayUrl = defaultGatewayUrl) {
   });
 }
 
+function fixtureWorkbenchRequested(): boolean {
+  return new URLSearchParams(globalThis.location?.search ?? "").has("fixtures");
+}
+
 function openCodeDeepLinkFromLocation(app: ReturnType<typeof renderOpenSymphonyApp>): void {
   try {
     const link = codeDeepLinkFromLocationSearch(globalThis.location?.search ?? "");
@@ -57,7 +66,7 @@ if (root) {
     title: "OpenSymphony Web",
     transport: createWebTransport(),
     graphAdapter: createWebGraphAdapter(),
-    codeGraphAdapter: createWebCodeGraphAdapter(),
+    codeGraphAdapter: fixtureWorkbenchRequested() ? createFixtureCodeGraphAdapter() : createWebCodeGraphAdapter(),
     profileController: createWebProfileController({ defaultGatewayUrl }),
     modelProfileController: createWebModelProfileController(),
     onGatewayUrlChanged: async (gatewayUrl) =>

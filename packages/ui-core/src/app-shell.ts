@@ -7033,6 +7033,7 @@ function appShellStyles(): string {
     .os-code-filter-path input, .os-code-filter-diagnostics select { min-height: 24px; max-width: 220px; padding: 2px 5px; border: 1px solid #cbd5df; border-radius: 4px; background: #ffffff; color: #17202a; font-size: 11px; }
     .os-code-filter-grid > button { min-height: 24px; align-self: end; }
     .os-code-delta-badge { color: #92400e; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .os-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .os-knowledge-stage { position: relative; height: clamp(320px, 52vh, 680px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #eef1f4; }
     .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; cursor: grab; }
     .os-knowledge-canvas[data-kg-pointer="pan"], .os-knowledge-canvas[data-kg-pointer="orbit"] { cursor: grabbing; }
