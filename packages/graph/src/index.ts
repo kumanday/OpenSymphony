@@ -25,6 +25,12 @@ import {
 } from "./fixture.js";
 
 export type {
+  CodeDiffOverlay,
+  CodeFileOutline,
+  CodeGraphNode,
+  CodeGraphSnapshot,
+  CodeRepoList,
+  CodeSymbolDetail,
   MemoryBundleList,
   MemoryCommunityList,
   MemoryCompletedTask,
@@ -49,14 +55,66 @@ export {
   graphVizFixtureCompletedTasks,
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
+  codeGraphFixtureDiffOverlays,
+  codeGraphFixtureOutlines,
+  codeGraphFixtureRepos,
+  codeGraphFixtureSnapshots,
+  codeGraphFixtureSymbolDetails,
 } from "./viz-fixture.js";
 export {
+  applyCodeGraphFilters,
+  codeEdgeVisualStyle,
+  codeGraphFilterTokens,
+  codeGraphLayoutKindForMode,
+  codeGraphNeedsBroadFreshness,
+  codeGraphNodeDeltaStatus,
+  codeGraphSnapshotForRendering,
+  codeGraphStateToHistory,
+  codeGraphReducer,
+  codeNodeVisualStyle,
+  createFixtureCodeGraphAdapter,
+  createCodeGraphFixtureAdapter,
+  createGatewayCodeGraphAdapter,
+  createHttpCodeGraphAdapter,
+  createInitialCodeGraphFilters,
+  createInitialCodeGraphState,
+  createTauriNativeCodeGraphAdapter,
+  currentCodeGraphSnapshot,
+  initialCodeGraphFilters,
+  initialCodeGraphState,
+  normalizeCodeGraphFilters,
+  type CodeEdgeVisualStyle,
+  type CodeGraphAction,
+  type CodeGraphAdapter,
+  type CodeGraphBreadcrumb,
+  type CodeGraphDeltaStatus,
+  type CodeGraphDiffOptions,
+  type CodeGraphFilters,
+  type CodeGraphFixtures,
+  type CodeGraphHistoryState,
+  type CodeGraphMode,
+  type CodeGraphRequestOptions,
+  type CodeRepoListRequestOptions,
+  type CodeGraphState,
+  type CodeNodeVisualStyle,
+  type CodeSymbolDetailRequestOptions,
+  type NativeCodeGraphApi,
+} from "./code-graph.js";
+export {
+  codeDeepLinkForFile,
+  codeDeepLinkForSymbol,
+  codeDeepLinkFromLocationSearch,
+  codeDeepLinkPrefix,
+  codeDeepLinkToGraphState,
+  formatCodeDeepLink,
   formatMemoryDeepLink,
   memoryDeepLinkForGraphNode,
   memoryDeepLinkPrefix,
   memoryDeepLinkToGraphState,
+  parseCodeDeepLink,
   parseMemoryDeepLink,
   resolveMemoryDeepLinkNode,
+  type CodeDeepLink,
   type MemoryDeepLink,
 } from "./deep-link.js";
 
@@ -200,14 +258,19 @@ export interface GraphLayoutNode {
   z: number;
   radius: number;
   label: string;
-  kind: MemoryGraphNodeKind;
+  kind: string;
   communityId?: string;
+  freshness?: string;
+  diagnosticCount?: number;
+  symbolKind?: string;
 }
 
 export interface GraphLayoutEdge {
   edgeId: string;
   sourceId: string;
   targetId: string;
+  kind?: string;
+  confidence?: string;
 }
 
 export interface GraphLayoutResult {
@@ -815,7 +878,13 @@ export function computeGraphLayout(
     width,
     height,
     nodes,
-    edges: edges.map((edge) => ({ edgeId: edge.id, sourceId: edge.source_id, targetId: edge.target_id })),
+    edges: edges.map((edge) => ({
+      edgeId: edge.id,
+      sourceId: edge.source_id,
+      targetId: edge.target_id,
+      kind: edge.kind,
+      confidence: typeof edge.metadata?.confidence === "string" ? edge.metadata.confidence : undefined,
+    })),
     generatedAt: new Date().toISOString(),
   };
 }
@@ -1191,10 +1260,13 @@ function layoutNode(node: MemoryGraphNode, x: number, y: number, z: number): Gra
     x,
     y,
     z,
-    radius: node.kind === "concept" ? 9 : 7,
+    radius: node.kind === "concept" || (node.kind as string) === "symbol" ? 9 : 7,
     label: node.label,
     kind: node.kind,
     communityId: node.metrics?.community_id,
+    freshness: node.freshness,
+    diagnosticCount: node.warning_count,
+    symbolKind: node.concept_type,
   };
 }
 

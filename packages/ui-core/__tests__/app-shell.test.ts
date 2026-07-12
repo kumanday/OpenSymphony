@@ -8,8 +8,10 @@ import { renderOpenSymphonyApp } from "../src/app-shell.js";
 import { MockGatewayTransport } from "@opensymphony/api-client";
 import {
   computeGraphLayout,
+  createFixtureCodeGraphAdapter,
   createFixtureGraphAdapter,
   createScaleGraphSnapshot,
+  codeGraphReducer,
   fixtureConceptDetail,
   fixtureGraphSnapshot,
   graphVizFixtureBundleList,
@@ -20,6 +22,9 @@ import {
   pageCompletedTasks,
   type GraphDataAdapter,
   type MemoryCompletedTask,
+  type CodeGraphSnapshot,
+  type CodeRepoList,
+  type CodeGraphState,
 } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import {
@@ -40,6 +45,7 @@ import type {
   ProfileController,
 } from "../src/app-shell.js";
 import type {
+  CodeGraphNode,
   ConnectionProfile,
   ChangedFileEntry,
   DashboardSnapshot,
@@ -646,6 +652,7 @@ describe("OpenSymphonyApp mount", () => {
       title: "OpenSymphony Desktop",
       transport: buildTransport(),
       graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
     });
     await flushUntil(
       () =>
@@ -889,7 +896,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-kg-raw-toggle]")).toBeNull();
       expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-renderer']") !== null);
       expect(root.querySelector("[data-testid='workspace-pane-shell']")?.getAttribute("data-graph-surface")).toBe("code");
       expect(root.querySelector("[data-testid='code-graph-structure-list']")).not.toBeNull();
       expect(root.querySelector("[data-testid='code-graph-detail']")).not.toBeNull();
@@ -957,7 +964,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("32%");
 
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector("[data-testid='code-graph-placeholder']") !== null);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-renderer']") !== null);
       expect(lowerColumns().style.getPropertyValue("--os-left-column")).toBe("50%");
 
       (root.querySelector("[data-graph-view='task']") as HTMLButtonElement).click();
@@ -1336,6 +1343,437 @@ describe("OpenSymphonyApp mount", () => {
       expect(await handle.openMemoryDeepLink("opensymphony://memory/viz-workbench/communities/area%3Agateway")).toBe(true);
       await flushUntil(() => !breadcrumb().includes("Gateway DTO Boundary Checklist"));
       expect(breadcrumb()).toContain("Gateway");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("opens Code Graph deep links, loads symbol detail, and applies surface filters", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const graphRequests: Array<{ mode?: string; includeStale?: boolean; path?: string; symbolKey?: string }> = [];
+    const repoRequests: Array<{ includeStale?: boolean }> = [];
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async listRepos(options?: Parameters<typeof fixtureCodeGraphAdapter.listRepos>[0]) {
+        repoRequests.push(options ?? {});
+        return fixtureCodeGraphAdapter.listRepos(options);
+      },
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        graphRequests.push(options ?? {});
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter,
+    });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/unknown/value")).toBe(false);
+
+      expect(await handle.openCodeDeepLink(
+        "opensymphony://code/opensymphony/symbols/codeGraphReducer?depth=2&seed=code-fixture",
+      )).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-structure-list']") !== null);
+      expect(root.querySelector("[data-testid='graph-hero']")?.getAttribute("data-active-graph-surface")).toBe("code");
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-detail'] h3")?.textContent === "codeGraphReducer");
+      expect(root.querySelector("[data-testid='code-graph-raw-record']")).toBeNull();
+
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-code-mode='file']")?.classList.contains("is-selected") ?? false);
+      const fileApp = handle as unknown as { state: { codeGraph: { mode: string; selectedNodeIds: string[]; breadcrumbs: unknown[] } } };
+      const fileRow = root.querySelector<HTMLButtonElement>("[data-code-node-id='file:packages/graph/src/index.ts']");
+      expect(fileRow).not.toBeNull();
+      fileRow!.click();
+      await flushUntil(() => fileApp.state.codeGraph.selectedNodeIds.includes("file:packages/graph/src/index.ts"));
+      expect(fileApp.state.codeGraph.mode).toBe("file");
+      expect(fileApp.state.codeGraph.breadcrumbs).toHaveLength(0);
+      const focusApp = handle as unknown as { onCodeNodeFocused(nodeId: string): void; state: { codeGraph: { mode: string } } };
+      focusApp.onCodeNodeFocused("symbol:codeGraphReducer");
+      expect(focusApp.state.codeGraph.mode).toBe("file");
+      const staleFilter = root.querySelector<HTMLInputElement>("[data-code-filter='freshness'][data-code-filter-value='stale']");
+      expect(staleFilter).not.toBeNull();
+      const filterPanel = root.querySelector<HTMLDetailsElement>("[data-testid='code-graph-filters']");
+      expect(filterPanel).not.toBeNull();
+      filterPanel!.open = true;
+      filterPanel!.dispatchEvent(new Event("toggle"));
+      staleFilter!.click();
+      await flushUntil(() => root.querySelectorAll("[data-testid='code-graph-structure-list'] li").length === 1);
+      expect(root.querySelector<HTMLDetailsElement>("[data-testid='code-graph-filters']")?.open).toBe(true);
+      expect(root.querySelector("[data-testid='code-graph-structure-list']")?.textContent).toContain("codeGraphReducer");
+      await flushUntil(() => graphRequests.some((request) => request.includeStale === true));
+      const readsBeforeFilterReset = graphRequests.length;
+      root.querySelector<HTMLButtonElement>("[data-code-filter-reset]")?.click();
+      await flushUntil(() => graphRequests.length > readsBeforeFilterReset && graphRequests.at(-1)?.includeStale === false);
+      await flushUntil(() => repoRequests.some((request) => request.includeStale === true));
+      const readsBeforeUnknownFilter = graphRequests.length;
+      root.querySelector<HTMLInputElement>("[data-code-filter='freshness'][data-code-filter-value='unknown']")?.click();
+      await flushUntil(() => graphRequests.length > readsBeforeUnknownFilter && graphRequests.at(-1)?.includeStale === true);
+
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/missing.ts")).toBe(false);
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/diff/base-rev/head-rev")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-code-mode='diff']")?.classList.contains("is-selected") ?? false);
+
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-code-mode='atlas']")?.classList.contains("is-selected") ?? false);
+      const diffModeButton = root.querySelector<HTMLButtonElement>("[data-code-mode='diff']");
+      expect(diffModeButton?.disabled).toBe(true);
+      diffModeButton?.click();
+      expect(root.querySelector("[data-code-mode='atlas']")?.classList.contains("is-selected")).toBe(true);
+      const readsBeforeInvalidMode = graphRequests.length;
+      root.querySelector<HTMLButtonElement>("[data-code-mode='file']")?.click();
+      await Promise.resolve();
+      expect(graphRequests.length).toBe(readsBeforeInvalidMode);
+      const app = handle as unknown as {
+        state: { codeGraph: { snapshot: { nodes: CodeGraphNode[] } | null; mode: string; filters: { pathPrefixes: string[]; communities: string[] } } };
+        drillIntoCodeNode(node: CodeGraphNode): void;
+      };
+      const community = app.state.codeGraph.snapshot?.nodes.find((node) => node.kind === "community");
+      expect(community).toBeDefined();
+      app.drillIntoCodeNode(community!);
+      await flushUntil(() => app.state.codeGraph.filters.communities.length === 1);
+      expect(app.state.codeGraph.filters.pathPrefixes).toEqual([]);
+      expect(app.state.codeGraph.mode).toBe("atlas");
+      const directory = app.state.codeGraph.snapshot?.nodes.find((node) => node.kind === "directory");
+      expect(directory).toBeDefined();
+      app.drillIntoCodeNode(directory!);
+      await flushUntil(() => app.state.codeGraph.filters.pathPrefixes.includes("packages/graph"));
+      expect(app.state.codeGraph.mode).toBe("atlas");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("rejects Code Graph diff links when the overlay cannot be loaded", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getDiffOverlay(): Promise<never> {
+        throw new Error("diff overlay unavailable");
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/diff/base-rev/head-rev")).toBe(false);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("shows a graph-record fallback when Code Graph symbol detail is unavailable", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getSymbolDetail(): Promise<never> {
+        throw new Error("symbol detail unavailable");
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/symbols/codeGraphReducer")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-file-fallback']")?.textContent?.includes("Symbol detail unavailable") ?? false);
+      expect(root.querySelector("[data-testid='code-graph-detail-loading']")).toBeNull();
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-code-mode='file']")?.classList.contains("is-selected") ?? false);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-file-fallback']")?.textContent?.includes("No symbol detail is required") ?? false);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("refreshes Code Graph snapshots without losing selection or drag overrides", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    const fixtureAdapter = createFixtureCodeGraphAdapter();
+    let snapshotReads = 0;
+    let repoReads = 0;
+    const codeGraphAdapter = {
+      ...fixtureAdapter,
+      async listRepos(options?: Parameters<typeof fixtureAdapter.listRepos>[0]) {
+        repoReads += 1;
+        return fixtureAdapter.listRepos(options);
+      },
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureAdapter.getGraphSnapshot>[1]) {
+        const snapshot = await fixtureAdapter.getGraphSnapshot(repoId, options);
+        snapshotReads += 1;
+        return snapshotReads === 1
+          ? snapshot
+          : { ...snapshot, cursor: { ...snapshot.cursor, sequence: snapshot.cursor.sequence + snapshotReads } };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, codeGraphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-node-id='desktop-alpha']") !== null);
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/symbols/codeGraphReducer")).toBe(true);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-structure-list']") !== null);
+      const app = handle as unknown as { codeGraphView: { overrides: Map<string, { x: number; y: number }> }; state: { codeGraph: { selectedNodeIds: string[]; stale: boolean; layoutStatus: string } } };
+      app.codeGraphView.overrides.set("symbol:codeGraphReducer", { x: 42, y: 24 });
+      await flushUntil(() => app.state.codeGraph.layoutStatus === "ready");
+      const selectedBefore = [...app.state.codeGraph.selectedNodeIds];
+      const repoReadsBeforeUpdate = repoReads;
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 90, partition: "events" },
+        entity_ref: { kind: "unknown", id: "code-graph:opensymphony" },
+        event_kind: "code_graph_updated",
+        emitted_at: "2026-07-11T19:10:00Z",
+        payload: {
+          schema_version: schemaVersionV1(),
+          repo_id: "opensymphony",
+          cursor: { sequence: 10, partition: "code-graph:opensymphony" },
+          updated_at: "2026-07-11T19:10:00Z",
+        },
+      });
+      await flushUntil(() => snapshotReads >= 2 && repoReads > repoReadsBeforeUpdate && !app.state.codeGraph.stale && app.state.codeGraph.layoutStatus === "ready");
+      expect(app.state.codeGraph.selectedNodeIds).toEqual(selectedBefore);
+      expect(app.codeGraphView.overrides.get("symbol:codeGraphReducer")).toEqual({ x: 42, y: 24 });
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("recomputes Code Graph layout after the stage resizes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
+    });
+    const app = handle as unknown as {
+      graphLayoutAdapter: {
+        layout: (snapshot: unknown, options: { width: number; height: number }) => Promise<unknown>;
+        dispose(): void;
+      };
+      render(): void;
+      state: { codeGraph: { layoutStatus: string } };
+    };
+    const originalLayoutAdapter = app.graphLayoutAdapter;
+    const layoutSizes: Array<{ width: number; height: number }> = [];
+    app.graphLayoutAdapter = {
+      layout: (snapshot, options) => {
+        layoutSizes.push({ width: options.width, height: options.height });
+        return originalLayoutAdapter.layout(snapshot, options);
+      },
+      dispose: () => originalLayoutAdapter.dispose(),
+    };
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+      await flushUntil(() => app.state.codeGraph.layoutStatus === "ready" && layoutSizes.length >= 1);
+      const stage = root.querySelector<HTMLElement>("[data-kg-stage]");
+      expect(stage).not.toBeNull();
+      let stageWidth = 720;
+      Object.defineProperty(stage!, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ width: stageWidth, height: 420 }),
+      });
+      stageWidth = 1400;
+      app.render();
+      await flushUntil(() => app.state.codeGraph.layoutStatus === "ready" && layoutSizes.length >= 2);
+      expect(layoutSizes[1].width).toBeGreaterThan(layoutSizes[0].width);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("discards a repo list response fetched with obsolete freshness", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    const repoResult = await fixtureCodeGraphAdapter.listRepos();
+    let releaseFirst: ((repos: CodeRepoList) => void) | null = null;
+    const firstRepos = new Promise<CodeRepoList>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const repoRequests: Array<{ includeStale?: boolean }> = [];
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async listRepos(options?: Parameters<typeof fixtureCodeGraphAdapter.listRepos>[0]) {
+        repoRequests.push(options ?? {});
+        return repoRequests.length === 1 ? firstRepos : fixtureCodeGraphAdapter.listRepos(options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+    const app = handle as unknown as {
+      loadCodeGraph(): Promise<void>;
+      state: { codeGraph: CodeGraphState };
+    };
+
+    try {
+      const firstLoad = app.loadCodeGraph();
+      await flushUntil(() => repoRequests.length === 1);
+      app.state.codeGraph = codeGraphReducer(app.state.codeGraph, {
+        type: "FILTERS_SET",
+        filters: { freshness: ["stale"] },
+      });
+      app.state.codeGraph = codeGraphReducer(app.state.codeGraph, { type: "REPOS_INVALIDATED" });
+      const queuedLoad = app.loadCodeGraph();
+      releaseFirst!(repoResult);
+      await Promise.all([firstLoad, queuedLoad]);
+      expect(repoRequests.map((request) => request.includeStale)).toEqual([false, true]);
+      expect(app.state.codeGraph.repos).toEqual(repoResult);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("queues Code Graph navigation while a snapshot request is in flight", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let reads = 0;
+    let releaseFirstRead: (() => void) | null = null;
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        reads += 1;
+        const snapshot = await fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+        if (reads === 1) await firstRead;
+        return snapshot;
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      const atlasNavigation = handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas");
+      await flushUntil(() => reads === 1);
+      const fileNavigation = handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts");
+      releaseFirstRead!();
+      await expect(fileNavigation).resolves.toBe(true);
+      await atlasNavigation;
+      const app = handle as unknown as { state: { codeGraph: { mode: string; snapshot: { mode: string } | null } } };
+      expect(reads).toBe(2);
+      expect(app.state.codeGraph.mode).toBe("file");
+      expect(app.state.codeGraph.snapshot?.mode).toBe("file");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("does not let a superseded Code Graph failure poison the current load", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let reads = 0;
+    let rejectFirstRead: ((error: Error) => void) | null = null;
+    const firstRead = new Promise<CodeGraphSnapshot>((_, reject) => {
+      rejectFirstRead = reject;
+    });
+    let resolveSecondRead: ((snapshot: CodeGraphSnapshot) => void) | null = null;
+    const secondRead = new Promise<CodeGraphSnapshot>((resolve) => {
+      resolveSecondRead = resolve;
+    });
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        reads += 1;
+        if (reads === 1) return firstRead;
+        if (reads === 2) return secondRead;
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+
+    try {
+      const firstNavigation = handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas");
+      await flushUntil(() => reads === 1);
+      const app = handle as unknown as {
+        resetCodeGraphView(): void;
+        state: { codeGraph: { layoutStatus: string; snapshot: CodeGraphSnapshot | null } };
+      };
+      app.resetCodeGraphView();
+      rejectFirstRead!(new Error("stale Code Graph failure"));
+      await flushUntil(() => reads === 2);
+      expect(app.state.codeGraph.layoutStatus).not.toBe("failed");
+      resolveSecondRead!(await fixtureCodeGraphAdapter.getGraphSnapshot("opensymphony", { mode: "atlas" }));
+      await firstNavigation;
+      await flushUntil(() => app.state.codeGraph.snapshot?.mode === "atlas");
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("clears stale Code Graph data after the current load fails", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let reads = 0;
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        reads += 1;
+        if (reads > 1) throw new Error("gateway unavailable");
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      codeGraphAdapter,
+    });
+    const app = handle as unknown as {
+      loadCodeGraph(): Promise<void>;
+      state: { codeGraph: CodeGraphState };
+    };
+
+    try {
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+      await flushUntil(() => app.state.codeGraph.snapshot !== null && app.state.codeGraph.layoutStatus === "ready");
+      await app.loadCodeGraph();
+      expect(app.state.codeGraph.layoutStatus).toBe("failed");
+      expect(app.state.codeGraph.snapshot).toBeNull();
+      expect(app.state.codeGraph.diffOverlay).toBeNull();
     } finally {
       await handle.destroy();
     }
@@ -3133,6 +3571,15 @@ describe("OpenSymphonyApp mount", () => {
 
     const newUrl = "http://127.0.0.1:9001";
     let lastConnect: string | null = null;
+    const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
+    let codeGraphReads = 0;
+    const codeGraphAdapter = {
+      ...fixtureCodeGraphAdapter,
+      async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        codeGraphReads += 1;
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+    };
     const initialTransport = new CloseCountingTransport({
       baseUri: "http://127.0.0.1:2468",
       health: capabilities,
@@ -3191,11 +3638,16 @@ describe("OpenSymphonyApp mount", () => {
       mode: "desktop",
       transport: initialTransport,
       profileController: controller,
+      codeGraphAdapter,
       onGatewayUrlChanged: async (url) => {
         lastConnect = url;
         return buildTransport();
       },
     });
+
+    expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+    const readsBeforeGatewaySwitch = codeGraphReads;
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
 
     await expandSettingsPanel(root, "connection", "[data-save-profile]");
 
@@ -3207,8 +3659,9 @@ describe("OpenSymphonyApp mount", () => {
     gatewayInput.value = newUrl;
     save.click();
 
-    await flushUntil(() => lastConnect === newUrl);
+    await flushUntil(() => lastConnect === newUrl && codeGraphReads > readsBeforeGatewaySwitch);
     expect(lastConnect).toBe(newUrl);
+    expect(codeGraphReads).toBeGreaterThan(readsBeforeGatewaySwitch);
     expect(initialTransport.closeCalls).toBe(1);
     expect(save.disabled).toBe(false);
 

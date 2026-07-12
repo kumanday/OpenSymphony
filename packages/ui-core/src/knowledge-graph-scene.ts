@@ -1,4 +1,5 @@
 import type {
+  GraphLayoutEdge,
   GraphLayoutResult,
   MemoryGraphSnapshot,
 } from "@opensymphony/graph";
@@ -338,6 +339,9 @@ export interface WorldNode extends WorldPoint {
   kind: string;
   communityId?: string;
   degree: number;
+  freshness?: string;
+  diagnosticCount?: number;
+  symbolKind?: string;
 }
 
 /** Map a layout node into centered, y-up world space with community depth. */
@@ -364,6 +368,9 @@ export function worldNodesFor(
       kind: node.kind,
       communityId: node.communityId,
       degree: degrees.get(node.nodeId) ?? 0,
+      freshness: node.freshness,
+      diagnosticCount: node.diagnosticCount,
+      symbolKind: node.symbolKind,
     };
   });
 }
@@ -571,6 +578,8 @@ export interface SceneNode {
   depth: number;
   color: string;
   alpha: number;
+  borderStyle: "solid" | "dashed" | "dotted";
+  freshnessLabel?: string;
   labelText: string;
   labelAlpha: number;
   emphasis: "hovered" | "selected" | "neighbor" | "none" | "dimmed";
@@ -584,6 +593,8 @@ export interface SceneEdge {
   x2: number;
   y2: number;
   alpha: number;
+  color: string;
+  lineStyle: "solid" | "dashed" | "dotted";
   emphasized: boolean;
   depth: number;
 }
@@ -618,6 +629,17 @@ export interface SceneBuildInput {
   selectedNodeIds: readonly string[];
   hoveredNodeId: string | null;
   maxLabels?: number;
+  nodeStyle?: (node: WorldNode) => {
+    color?: string;
+    opacity?: number;
+    borderStyle?: "solid" | "dashed" | "dotted";
+    freshnessLabel?: string;
+  } | undefined;
+  edgeStyle?: (edge: GraphLayoutEdge) => {
+    color?: string;
+    opacity?: number;
+    lineStyle?: "solid" | "dashed" | "dotted";
+  } | undefined;
 }
 
 export function buildGraphScene(input: SceneBuildInput): GraphScene {
@@ -664,7 +686,8 @@ export function buildGraphScene(input: SceneBuildInput): GraphScene {
             ? "dimmed"
             : "none";
     const fog = depthFog(point.depth, input.camera.distance);
-    const alpha = emphasis === "dimmed" ? 0.18 : fog;
+    const style = input.nodeStyle?.(node);
+    const alpha = (emphasis === "dimmed" ? 0.18 : fog) * (style?.opacity ?? 1);
     // Degree feeds size so well-connected concepts read as landmarks at a
     // glance, mirroring Obsidian's graph view.
     const worldRadius = node.radius + Math.min(10, node.degree * 1.1);
@@ -685,8 +708,10 @@ export function buildGraphScene(input: SceneBuildInput): GraphScene {
       y: point.y,
       screenRadius,
       depth: point.depth,
-      color: nodeColor(node.kind),
+      color: style?.color ?? nodeColor(node.kind),
       alpha,
+      borderStyle: style?.borderStyle ?? "solid",
+      freshnessLabel: style?.freshnessLabel,
       labelText: node.label,
       labelAlpha,
       emphasis,
@@ -703,6 +728,7 @@ export function buildGraphScene(input: SceneBuildInput): GraphScene {
     const emphasized = hoverActive
       && (edge.sourceId === input.hoveredNodeId || edge.targetId === input.hoveredNodeId);
     const depth = (source.point.depth + target.point.depth) / 2;
+    const style = input.edgeStyle?.(edge);
     const alpha = emphasized
       ? 0.92
       : hoverActive
@@ -714,7 +740,9 @@ export function buildGraphScene(input: SceneBuildInput): GraphScene {
       y1: source.point.y,
       x2: target.point.x,
       y2: target.point.y,
-      alpha,
+      alpha: alpha * (style?.opacity ?? 1),
+      color: style?.color ?? (emphasized ? nodeEmphasisColor : "#7d94a8"),
+      lineStyle: style?.lineStyle ?? "solid",
       emphasized,
       depth,
     });
@@ -821,6 +849,12 @@ export function nodeColor(kind: string): string {
       return "#0f766e";
     case "community":
       return "#475569";
+    case "directory":
+      return "#475569";
+    case "file":
+      return "#2563eb";
+    case "symbol":
+      return "#0f766e";
     default:
       return "#64748b";
   }
