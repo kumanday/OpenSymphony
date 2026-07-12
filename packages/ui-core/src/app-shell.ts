@@ -223,6 +223,8 @@ export interface OpenSymphonyAppOptions {
   modelProfileController?: ModelProfileController;
   initialProfiles?: ConnectionProfile[];
   initialModelProfiles?: ModelConfigurationProfile[];
+  /** Keep all gateway-backed surfaces on deterministic fixture data. */
+  fixtureMode?: boolean;
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
   graphAdapter?: GraphDataAdapter;
   onGraphGatewayUrlChanged?: (gatewayUrl: string) => GraphDataAdapter;
@@ -699,7 +701,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.activeProfileId = active?.id ?? null;
       this.state.gatewayDraft = active?.gatewayUrl ?? this.state.gatewayDraft;
       if (
-        active
+        !this.options.fixtureMode
+        && active
         && this.options.onGatewayUrlChanged
         && active.gatewayUrl !== this.transport.baseUri
       ) {
@@ -2371,7 +2374,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.state.connectionMessage = `Profile selection failed: ${errorMessage(error)}`;
       });
     }
-    if (this.options.onGatewayUrlChanged) {
+    if (this.options.onGatewayUrlChanged && !this.options.fixtureMode) {
       this.stopEventSubscription();
       await this.transport.close().catch(() => undefined);
       this.transport = await this.options.onGatewayUrlChanged(profile.gatewayUrl);
@@ -2412,7 +2415,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         gatewayUrl,
       });
       await controller.setActiveProfile(saved.id);
-      if (this.options.onGatewayUrlChanged) {
+      if (this.options.onGatewayUrlChanged && !this.options.fixtureMode) {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(saved.gatewayUrl);
@@ -2480,7 +2483,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.profiles = profiles;
       this.state.activeProfileId = active?.id ?? null;
       this.state.gatewayDraft = active?.gatewayUrl ?? this.transport.baseUri;
-      if (active && this.options.onGatewayUrlChanged) {
+      if (active && this.options.onGatewayUrlChanged && !this.options.fixtureMode) {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
@@ -7033,6 +7036,7 @@ function appShellStyles(): string {
     .os-code-filter-path input, .os-code-filter-diagnostics select { min-height: 24px; max-width: 220px; padding: 2px 5px; border: 1px solid #cbd5df; border-radius: 4px; background: #ffffff; color: #17202a; font-size: 11px; }
     .os-code-filter-grid > button { min-height: 24px; align-self: end; }
     .os-code-delta-badge { color: #92400e; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .os-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .os-knowledge-stage { position: relative; height: clamp(320px, 52vh, 680px); min-width: 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 6px; background: #eef1f4; }
     .os-knowledge-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; cursor: grab; }
     .os-knowledge-canvas[data-kg-pointer="pan"], .os-knowledge-canvas[data-kg-pointer="orbit"] { cursor: grabbing; }

@@ -1125,7 +1125,7 @@ pub async fn memory_completed_tasks(
 }
 
 /// List indexed code repos through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn code_repos(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     include_stale: Option<bool>,
@@ -1137,7 +1137,7 @@ pub async fn code_repos(
 }
 
 /// Get a code graph snapshot through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn code_graph(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     repo_id: String,
@@ -1166,7 +1166,7 @@ pub async fn code_graph(
 }
 
 /// Get code symbol details through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn code_symbol_detail(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     repo_id: String,
@@ -1189,7 +1189,7 @@ pub async fn code_symbol_detail(
 }
 
 /// Get a repository code diff overlay through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn code_diff_overlay(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     repo_id: String,
@@ -1212,7 +1212,7 @@ pub async fn code_diff_overlay(
 }
 
 /// Get a run-scoped file outline through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn run_code_outline(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
@@ -1233,7 +1233,7 @@ pub async fn run_code_outline(
 }
 
 /// Get a run-scoped code diff overlay through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn run_code_diff_overlay(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
@@ -1254,7 +1254,7 @@ pub async fn run_code_diff_overlay(
 }
 
 /// Request repo indexing through the active gateway.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn code_index_repo(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     repo_id: String,

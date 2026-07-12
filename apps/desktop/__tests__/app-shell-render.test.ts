@@ -27,6 +27,7 @@ import { createModelProfile } from "@opensymphony/gateway-schema";
 import { createFixtureGraphAdapter } from "@opensymphony/graph";
 import {
   createDesktopGraphAdapter,
+  createDesktopCodeGraphAdapter,
   createDesktopModelProfileController,
   createDesktopProfileController,
   createDesktopTransport,
@@ -41,6 +42,27 @@ describe("desktop app shell render", () => {
   afterEach(() => {
     delete (globalThis as unknown as { __TAURI__?: unknown }).__TAURI__;
     document.body.innerHTML = "";
+  });
+
+  it("defaults desktop code symbol details to public visibility", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          return {};
+        },
+      },
+    };
+    const adapter = createDesktopCodeGraphAdapter();
+
+    await adapter.getSymbolDetail("repo", "symbol");
+    expect(calls[0]).toEqual({
+      command: "code_symbol_detail",
+      args: { repoId: "repo", symbolKey: "symbol", includeStale: null, visibility: "public" },
+    });
+    expect(() => adapter.getSymbolDetail("repo", "symbol", { visibility: "all_accessible" }))
+      .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
   });
 
   it("mounts the shared OpenSymphony app shell with the expected viewport markup", async () => {

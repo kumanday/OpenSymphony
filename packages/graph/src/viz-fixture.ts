@@ -694,8 +694,18 @@ export const codeGraphFixtureDiffOverlays: CodeDiffOverlay[] = [{
   repo_id: "opensymphony",
   base_revision: "base-rev",
   head_revision: "head-rev",
-  added_symbols: [],
-  removed_symbols: [],
+  added_symbols: [{
+    symbol_key: "newSymbol",
+    status: "added",
+    before: null,
+    after: codeDiffSide("newSymbol", "packages/graph/src/new.ts", "current"),
+  }],
+  removed_symbols: [{
+    symbol_key: "legacySymbol",
+    status: "removed",
+    before: codeDiffSide("legacySymbol", "packages/graph/src/legacy.ts", "stale"),
+    after: null,
+  }],
   modified_symbols: [{
     symbol_key: "codeGraphReducer",
     status: "modified",
@@ -707,6 +717,114 @@ export const codeGraphFixtureDiffOverlays: CodeDiffOverlay[] = [{
   truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
   generated_at: "2026-07-04T00:00:00Z",
 }];
+
+/**
+ * Fixture tiers mirror the Code Graph spec's edge-heavy renderer budgets.
+ * Generate them on demand so the normal desktop fixture stays small.
+ */
+export const codeGraphScaleTiers = [
+  { name: "neighborhood-500", nodes: 500, edges: 2_000 },
+  { name: "neighborhood-5k", nodes: 5_000, edges: 20_000 },
+  { name: "neighborhood-20k", nodes: 20_000, edges: 80_000 },
+] as const;
+
+export function createCodeGraphScaleFixture(
+  nodeCount: number,
+  edgesPerNode = 4,
+): CodeGraphSnapshot {
+  const nodes = Array.from({ length: nodeCount }, (_, index) =>
+    codeNode(
+      `symbol:scale-${index}`,
+      "symbol",
+      `scale-${index}`,
+      "rust",
+      "current",
+      edgesPerNode,
+      "dir:scale",
+      "function",
+      `src/scale_${Math.floor(index / 100)}.rs`,
+      ["scale"],
+    ),
+  );
+  const edges = Array.from({ length: nodeCount * edgesPerNode }, (_, index) => {
+    const source = Math.floor(index / edgesPerNode);
+    const target = (source + (index % edgesPerNode) + 1) % nodeCount;
+    return codeEdge(
+      `scale:${source}:${target}:${index % edgesPerNode}`,
+      "calls",
+      `symbol:scale-${source}`,
+      `symbol:scale-${target}`,
+      index % 3 === 0 ? "exact" : index % 3 === 1 ? "syntactic" : "heuristic",
+    );
+  });
+  return {
+    schema_version: codeGraphSchemaVersion,
+    repo_id: "scale-fixture",
+    mode: "neighborhood",
+    cursor: { ...codeGraphCursor, sequence: nodeCount },
+    nodes,
+    edges,
+    communities: [{ id: "dir:scale", label: "scale", node_ids: nodes.map((node) => node.id), symbol_count: nodeCount }],
+    truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+    filters_applied: ["fixture:edge-heavy"],
+    generated_at: generated_at,
+  };
+}
+
+/** Aggregated Atlas reference scale: 50K symbols/200K edges, <=2K total nodes and edges. */
+export function createCodeGraphReferenceAtlasFixture(): CodeGraphSnapshot {
+  const renderedElementCap = 2_000;
+  const nodeCount = renderedElementCap / 2;
+  const nodes = Array.from({ length: nodeCount }, (_, index) =>
+    codeNode(
+      `directory:reference-${index}`,
+      "directory",
+      `src/reference-${index}`,
+      null,
+      "current",
+      1,
+      "community:reference",
+      undefined,
+      `src/reference-${index}`,
+    ),
+  );
+  const edges = nodes.slice(1).map((node, index) =>
+    codeEdge(`reference:${index}`, "contains", nodes[index]!.id, node.id, "exact"),
+  );
+  return {
+    schema_version: codeGraphSchemaVersion,
+    repo_id: "reference-scale",
+    mode: "atlas",
+    cursor: { ...codeGraphCursor, sequence: 50_000 },
+    nodes,
+    edges,
+    communities: [{ id: "community:reference", label: "Reference repository", node_ids: nodes.map((node) => node.id), symbol_count: 50_000 }],
+    truncation: { nodes_dropped: 49_000, edges_dropped: 199_001, reason: "directory aggregation" },
+    filters_applied: ["aggregate:directory", "fixture:reference-scale"],
+    generated_at: generated_at,
+  };
+}
+
+const diffNeighborhood = codeGraphFixtureSnapshots.find((snapshot) => snapshot.mode === "neighborhood")!;
+export const codeGraphFixtureDiffBaseSnapshot: CodeGraphSnapshot = {
+  ...diffNeighborhood,
+  cursor: { ...diffNeighborhood.cursor, sequence: 10 },
+  nodes: [
+    ...diffNeighborhood.nodes,
+    codeNode("symbol:legacySymbol", "symbol", "legacySymbol", "typescript", "stale", 1, "dir:packages", "function", "packages/graph/src/legacy.ts", ["legacy"]),
+  ],
+  filters_applied: ["mode:neighborhood", "fixture:diff-base"],
+};
+
+export const codeGraphFixtureDiffHeadSnapshot: CodeGraphSnapshot = {
+  ...diffNeighborhood,
+  cursor: { ...diffNeighborhood.cursor, sequence: 11 },
+  nodes: [
+    ...diffNeighborhood.nodes,
+    codeNode("symbol:newSymbol", "symbol", "newSymbol", "typescript", "current", 1, "dir:packages", "function", "packages/graph/src/new.ts", ["new"]),
+  ],
+  filters_applied: ["mode:neighborhood", "fixture:diff-head"],
+};
 
 function codeNode(
   id: string,

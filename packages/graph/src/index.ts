@@ -56,10 +56,15 @@ export {
   graphVizFixtureConceptDetail,
   graphVizFixtureSnapshot,
   codeGraphFixtureDiffOverlays,
+  codeGraphFixtureDiffBaseSnapshot,
+  codeGraphFixtureDiffHeadSnapshot,
   codeGraphFixtureOutlines,
   codeGraphFixtureRepos,
+  codeGraphScaleTiers,
   codeGraphFixtureSnapshots,
   codeGraphFixtureSymbolDetails,
+  createCodeGraphReferenceAtlasFixture,
+  createCodeGraphScaleFixture,
 } from "./viz-fixture.js";
 export {
   applyCodeGraphFilters,
