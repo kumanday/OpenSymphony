@@ -180,6 +180,17 @@ describe("code deep links", () => {
     expect(formatCodeDeepLink(parsed!)).toBe(link);
   });
 
+  it("does not treat path-qualified repository ids as file targets", () => {
+    const link = formatCodeDeepLink({
+      repoId: "/workspace/team/repo",
+      path: "src/lib.rs",
+    });
+    expect(parseCodeDeepLink(link)).toMatchObject({
+      repoId: "/workspace/team/repo",
+      path: "src/lib.rs",
+    });
+  });
+
   it("strictly rejects malformed code links and unsupported query keys", () => {
     expect(parseCodeDeepLink("opensymphony://code/repo/files/../secret")).toBeNull();
     expect(parseCodeDeepLink("opensymphony://code/repo/diff/base")).toBeNull();

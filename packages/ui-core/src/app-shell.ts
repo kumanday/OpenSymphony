@@ -223,6 +223,8 @@ export interface OpenSymphonyAppOptions {
   modelProfileController?: ModelProfileController;
   initialProfiles?: ConnectionProfile[];
   initialModelProfiles?: ModelConfigurationProfile[];
+  /** Keep all gateway-backed surfaces on deterministic fixture data. */
+  fixtureMode?: boolean;
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
   graphAdapter?: GraphDataAdapter;
   onGraphGatewayUrlChanged?: (gatewayUrl: string) => GraphDataAdapter;
@@ -699,7 +701,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.activeProfileId = active?.id ?? null;
       this.state.gatewayDraft = active?.gatewayUrl ?? this.state.gatewayDraft;
       if (
-        active
+        !this.options.fixtureMode
+        && active
         && this.options.onGatewayUrlChanged
         && active.gatewayUrl !== this.transport.baseUri
       ) {
@@ -2371,7 +2374,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.state.connectionMessage = `Profile selection failed: ${errorMessage(error)}`;
       });
     }
-    if (this.options.onGatewayUrlChanged) {
+    if (this.options.onGatewayUrlChanged && !this.options.fixtureMode) {
       this.stopEventSubscription();
       await this.transport.close().catch(() => undefined);
       this.transport = await this.options.onGatewayUrlChanged(profile.gatewayUrl);
@@ -2412,7 +2415,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         gatewayUrl,
       });
       await controller.setActiveProfile(saved.id);
-      if (this.options.onGatewayUrlChanged) {
+      if (this.options.onGatewayUrlChanged && !this.options.fixtureMode) {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(saved.gatewayUrl);
@@ -2480,7 +2483,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.profiles = profiles;
       this.state.activeProfileId = active?.id ?? null;
       this.state.gatewayDraft = active?.gatewayUrl ?? this.transport.baseUri;
-      if (active && this.options.onGatewayUrlChanged) {
+      if (active && this.options.onGatewayUrlChanged && !this.options.fixtureMode) {
         this.stopEventSubscription();
         await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);

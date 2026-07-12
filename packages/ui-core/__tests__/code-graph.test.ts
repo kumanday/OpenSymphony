@@ -56,8 +56,8 @@ describe("Code Graph renderer surface", () => {
     root.innerHTML = renderCodeGraphSurface({ snapshot: reference, layout: null, state });
     const summary = root.querySelector("[data-testid='code-graph-screen-reader-summary']");
     expect(summary?.textContent).toContain("reference-scale");
-    expect(summary?.textContent).toContain("48,000 nodes");
-    expect(summary?.textContent).toContain("198,001 edges");
+    expect(summary?.textContent).toContain("49,000 nodes");
+    expect(summary?.textContent).toContain("199,001 edges");
     expect(summary?.textContent).toContain("directory aggregation");
     expect(summary?.id).toBe("code-graph-screen-reader-summary");
     expect(root.querySelector("canvas")?.getAttribute("aria-describedby")).toBe("code-graph-screen-reader-summary");

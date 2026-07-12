@@ -303,7 +303,7 @@ export function parseCodeDeepLink(url: string): CodeDeepLink | null {
   if (!query) return null;
   const mode = query.mode ?? inferredMode;
   if (!codeGraphModesForPath(mode, symbolKey, path, baseRevision)) return null;
-  if ([repoId, symbolKey, path, baseRevision, headRevision].some((value) => value !== null && !isSafeCodeTarget(value))) return null;
+  if ([symbolKey, path, baseRevision, headRevision].some((value) => value !== null && !isSafeCodeTarget(value))) return null;
   return {
     repoId,
     mode,

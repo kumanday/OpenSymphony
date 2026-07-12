@@ -239,7 +239,8 @@ active snapshot without clearing camera, drag overrides, or selection.
 Code Graph hardening uses the same fixture workbench for web and desktop. The
 scale tiers are edge-heavy (500/2K, 5K/20K, and 20K/80K nodes/edges), while the
 reference Atlas fixture represents 50K symbols and 200K edges through at most
-2,000 directory-aggregated render elements. Atlas never renders raw symbols;
+2,000 total node-and-edge render elements (1,000 directory nodes and their
+contained edges). Atlas never renders raw symbols;
 expansion is a scoped follow-up request. When a bound trims a response, the
 toolbar and screen-reader summary expose both dropped counts and the reason.
 

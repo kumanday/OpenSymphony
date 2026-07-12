@@ -6,12 +6,18 @@
  * desktop/Tauri APIs out of the browser bundle.
  */
 
-import { HttpGatewayTransport } from "@opensymphony/api-client";
+import { createGraphVizDemoTransport, HttpGatewayTransport } from "@opensymphony/api-client";
 import {
   codeDeepLinkFromLocationSearch,
+  createFixtureGraphAdapter,
   createFixtureCodeGraphAdapter,
   createGatewayCodeGraphAdapter,
   createGatewayGraphAdapter,
+  graphVizFixtureBundleList,
+  graphVizFixtureCommunityList,
+  graphVizFixtureCompletedTasks,
+  graphVizFixtureConceptDetail,
+  graphVizFixtureSnapshot,
 } from "@opensymphony/graph";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
@@ -21,6 +27,7 @@ import { createWebProfileController, defaultWebGatewayUrl } from "./profile-cont
 const config = createWebAppConfig();
 const root = document.getElementById("root");
 const defaultGatewayUrl = config.gatewayUrl || defaultWebGatewayUrl();
+const fixtureMode = fixtureWorkbenchRequested();
 
 export function createWebTransport(gatewayUrl = defaultGatewayUrl) {
   return new HttpGatewayTransport({
@@ -64,9 +71,16 @@ if (root) {
     root,
     mode: "web",
     title: "OpenSymphony Web",
-    transport: createWebTransport(),
-    graphAdapter: createWebGraphAdapter(),
-    codeGraphAdapter: fixtureWorkbenchRequested() ? createFixtureCodeGraphAdapter() : createWebCodeGraphAdapter(),
+    transport: fixtureMode ? createGraphVizDemoTransport() : createWebTransport(),
+    graphAdapter: fixtureMode ? createFixtureGraphAdapter({
+      bundles: graphVizFixtureBundleList,
+      snapshot: graphVizFixtureSnapshot,
+      communities: graphVizFixtureCommunityList,
+      conceptDetail: (_bundleId, conceptId) => graphVizFixtureConceptDetail(conceptId),
+      completedTasks: graphVizFixtureCompletedTasks,
+    }) : createWebGraphAdapter(),
+    codeGraphAdapter: fixtureMode ? createFixtureCodeGraphAdapter() : createWebCodeGraphAdapter(),
+    fixtureMode,
     profileController: createWebProfileController({ defaultGatewayUrl }),
     modelProfileController: createWebModelProfileController(),
     onGatewayUrlChanged: async (gatewayUrl) =>
@@ -74,8 +88,8 @@ if (root) {
         baseUri: gatewayUrl,
         transport: "loopback_http",
       }),
-    onGraphGatewayUrlChanged: createWebGraphAdapter,
-    onCodeGraphGatewayUrlChanged: createWebCodeGraphAdapter,
+    onGraphGatewayUrlChanged: fixtureMode ? undefined : createWebGraphAdapter,
+    onCodeGraphGatewayUrlChanged: fixtureMode ? undefined : createWebCodeGraphAdapter,
   });
   openCodeDeepLinkFromLocation(app);
 }

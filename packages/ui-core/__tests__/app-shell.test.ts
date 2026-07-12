@@ -3698,6 +3698,57 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("keeps fixture transports and graph adapters across profile reloads", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profile: ConnectionProfile = {
+      id: "fixture-profile",
+      label: "Saved gateway",
+      kind: "external_gateway",
+      active: true,
+      gatewayUrl: "http://different-gateway.local",
+      transport: "loopback_http",
+      managed: false,
+    };
+    const profileController: ProfileController = {
+      async listProfiles() {
+        return [profile];
+      },
+      async storeProfile() {
+        return profile;
+      },
+      async setActiveProfile() {
+        return profile;
+      },
+      async removeProfile() {
+        return [profile];
+      },
+    };
+    const onGatewayUrlChanged = jest.fn(async () => buildTransport());
+    const onGraphGatewayUrlChanged = jest.fn(() => createFixtureGraphAdapter());
+    const onCodeGraphGatewayUrlChanged = jest.fn(() => createFixtureCodeGraphAdapter());
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(),
+      graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
+      profileController,
+      fixtureMode: true,
+      onGatewayUrlChanged,
+      onGraphGatewayUrlChanged,
+      onCodeGraphGatewayUrlChanged,
+    });
+
+    await handle.ready();
+    expect(onGatewayUrlChanged).not.toHaveBeenCalled();
+    expect(onGraphGatewayUrlChanged).not.toHaveBeenCalled();
+    expect(onCodeGraphGatewayUrlChanged).not.toHaveBeenCalled();
+    expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/atlas")).toBe(true);
+
+    await handle.destroy();
+  });
+
   it("creates and deletes connection profiles from the panel", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

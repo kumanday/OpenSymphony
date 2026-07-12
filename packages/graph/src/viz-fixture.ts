@@ -771,9 +771,10 @@ export function createCodeGraphScaleFixture(
   };
 }
 
-/** Aggregated Atlas reference scale: 50K symbols/200K edges, <=2K rendered elements. */
+/** Aggregated Atlas reference scale: 50K symbols/200K edges, <=2K total nodes and edges. */
 export function createCodeGraphReferenceAtlasFixture(): CodeGraphSnapshot {
-  const nodeCount = 2_000;
+  const renderedElementCap = 2_000;
+  const nodeCount = renderedElementCap / 2;
   const nodes = Array.from({ length: nodeCount }, (_, index) =>
     codeNode(
       `directory:reference-${index}`,
@@ -798,7 +799,7 @@ export function createCodeGraphReferenceAtlasFixture(): CodeGraphSnapshot {
     nodes,
     edges,
     communities: [{ id: "community:reference", label: "Reference repository", node_ids: nodes.map((node) => node.id), symbol_count: 50_000 }],
-    truncation: { nodes_dropped: 48_000, edges_dropped: 198_001, reason: "directory aggregation" },
+    truncation: { nodes_dropped: 49_000, edges_dropped: 199_001, reason: "directory aggregation" },
     filters_applied: ["aggregate:directory", "fixture:reference-scale"],
     generated_at: generated_at,
   };

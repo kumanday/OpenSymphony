@@ -361,7 +361,8 @@ describe("Code Graph adapters and state", () => {
     const atlas = createCodeGraphReferenceAtlasFixture();
     expect(atlas.mode).toBe("atlas");
     expect(atlas.nodes.length).toBeLessThanOrEqual(2_000);
-    expect(atlas.truncation).toEqual({ nodes_dropped: 48_000, edges_dropped: 198_001, reason: "directory aggregation" });
+    expect(atlas.truncation).toEqual({ nodes_dropped: 49_000, edges_dropped: 199_001, reason: "directory aggregation" });
+    expect(atlas.nodes.length + atlas.edges.length).toBeLessThanOrEqual(2_000);
     expect(atlas.nodes.every((node) => node.kind !== "symbol")).toBe(true);
     const renderedIds = new Set(atlas.nodes.map((node) => node.id));
     expect(atlas.edges.every((edge) => renderedIds.has(edge.source_id) && renderedIds.has(edge.target_id))).toBe(true);
