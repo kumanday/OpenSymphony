@@ -851,43 +851,61 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
         );
         for prepared in &prepared_symbols {
             let symbol = prepared.symbol;
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        prepared.symbol_id,
-                        prepared.symbol_key,
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        symbol.kind,
-                        symbol.name,
-                        prepared.container_symbol_id,
-                        symbol.container_chain.join("\u{1f}"),
-                        symbol.signature,
-                        symbol.start_line as i64,
-                        symbol.start_col as i64,
-                        symbol.end_line as i64,
-                        symbol.end_col as i64,
-                        symbol.start_byte as i64,
-                        symbol.end_byte as i64,
-                        symbol.selection_start_line as i64,
-                        symbol.selection_end_line as i64,
-                        document.content_sha256,
-                        symbol.snippet_sha256,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        freshness,
-                    ],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
-            report.persisted_symbols += 1;
+            let current_symbol_exists = if freshness == "staged" {
+                transaction
+                    .query_row(
+                        "SELECT 1 FROM code_symbols WHERE symbol_id = ? AND freshness = 'current' LIMIT 1",
+                        params![prepared.symbol_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?
+                    .is_some()
+            } else {
+                false
+            };
+            if !current_symbol_exists {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            prepared.symbol_id,
+                            prepared.symbol_key,
+                            batch.repo_id,
+                            batch.commit_sha.clone(),
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            symbol.kind,
+                            symbol.name,
+                            prepared.container_symbol_id,
+                            symbol.container_chain.join("\u{1f}"),
+                            symbol.signature,
+                            symbol.start_line as i64,
+                            symbol.start_col as i64,
+                            symbol.end_line as i64,
+                            symbol.end_col as i64,
+                            symbol.start_byte as i64,
+                            symbol.end_byte as i64,
+                            symbol.selection_start_line as i64,
+                            symbol.selection_end_line as i64,
+                            document.content_sha256,
+                            symbol.snippet_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                report.persisted_symbols += 1;
+            }
         }
 
         for edge in &document.edges {

@@ -664,6 +664,7 @@ pub fn index_code_repository_at(
     ))?;
     drop(connection);
 
+    discard_staged_code_index_rows(config, repo_id)?;
     let paths = git_tree_paths(&config.repo_root, &commit_sha)?;
     let repo_prefix = git_repo_prefix(&config.repo_root)?;
     let previous = latest_code_snapshot(config, repo_id, &target_branch)?;
@@ -818,7 +819,11 @@ pub fn index_code_repository_at(
                 || (!previous_file.analyzed
                     && previous_file.parser_version.is_empty()
                     && previous_file.query_pack_version.is_empty()
-                    && previous_file.skip_reason.as_deref() != Some("max files per request")))
+                    && previous_file.skip_reason.as_deref() != Some("max files per request")
+                    && !previous_file
+                        .skip_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("max file size "))))
         {
             current_files.insert(relative_display.clone(), previous_file.clone());
             memberships.push(CodeSnapshotMembershipInput {
@@ -1379,6 +1384,52 @@ fn persist_code_snapshot_state(
             path: config.index_path.clone(),
             source,
         }))?;
+    Ok(())
+}
+
+fn discard_staged_code_index_rows(
+    config: &MemoryConfig,
+    repo_id: &str,
+) -> Result<(), CodeGraphProjectionError> {
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| CodeGraphProjectionError::Memory(
+        MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        },
+    ))?;
+    let transaction = connection.transaction().map_err(|source| {
+        CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })
+    })?;
+    for table in [
+        "code_documents",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_skipped_files",
+    ] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE repo_id = ? AND freshness = 'staged'"),
+                params![repo_id],
+            )
+            .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }))?;
+    }
+    transaction.commit().map_err(|source| {
+        CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })
+    })?;
     Ok(())
 }
 
@@ -3561,7 +3612,7 @@ mod code_graph_tests {
                 repo_id: "fixture-repo".to_string(),
                 commit_sha: Some("legacy-code-intel".to_string()),
                 worktree_dirty: false,
-                documents: vec![legacy_document],
+                documents: vec![legacy_document.clone()],
             },
         )
         .expect("legacy code-intel document should persist");
@@ -3601,9 +3652,72 @@ mod code_graph_tests {
         assert_eq!(current_edge_commit, baseline);
         drop(connection);
 
+        let before_staged_symbols = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist")
+            .query_row(
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("current symbol count should be readable");
+        super::persist_code_index_documents_in_batches(
+            &config,
+            "fixture-repo",
+            &baseline,
+            vec![legacy_document.clone()],
+            "staged",
+            false,
+        )
+        .expect("same-commit symbols should stage");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let after_staged_symbols: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("current symbols should survive staging");
+        assert_eq!(after_staged_symbols, before_staged_symbols);
+        drop(connection);
+
+        let mut stale_document = legacy_document.clone();
+        stale_document.path = PathBuf::from("stale.rs");
+        super::persist_code_index_documents_in_batches(
+            &config,
+            "fixture-repo",
+            &baseline,
+            vec![stale_document],
+            "staged",
+            false,
+        )
+        .expect("interrupted rows should stage");
+
         let refreshed = index_code_repository(&config, "fixture-repo")
             .expect("same revision should be revalidated");
         assert!(refreshed.parsed_files > 0);
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let stale_current: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["fixture-repo", "stale.rs"],
+                |row| row.get(0),
+            )
+            .expect("stale staged document query should work");
+        let stale_staged: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'staged'",
+                duckdb::params!["fixture-repo", "stale.rs"],
+                |row| row.get(0),
+            )
+            .expect("staged cleanup query should work");
+        assert_eq!(stale_current, 0);
+        assert_eq!(stale_staged, 0);
+        drop(connection);
         super::persist_code_snapshot_state(
             &config,
             super::CodeSnapshotState {
@@ -3826,6 +3940,37 @@ mod code_graph_tests {
             .skipped_files
             .iter()
             .any(|path| path.contains("max files per request")));
+    }
+
+    #[test]
+    fn target_index_reparses_files_previously_skipped_by_byte_limit() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("workflow marker");
+        fs::write(repo.path().join("large.rs"), "pub fn large() {}\n")
+            .expect("source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "byte limited tree"]);
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.code_intel.ast.max_file_bytes = 1;
+        let first = index_code_repository(&config, "byte-limited-repo").expect("limited index");
+        assert_eq!(first.parsed_files, 0);
+
+        git(repo.path(), &["commit", "--allow-empty", "-m", "raise byte limit"]);
+        config.code_intel.ast.max_file_bytes = 1024;
+        let second = index_code_repository(&config, "byte-limited-repo")
+            .expect("expanded index");
+        assert!(second.parsed_files > first.parsed_files);
+        assert!(!second
+            .skipped_files
+            .iter()
+            .any(|path| path.contains("max file size")));
     }
 
     #[test]
