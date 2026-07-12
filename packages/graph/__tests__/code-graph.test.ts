@@ -190,11 +190,15 @@ describe("Code Graph adapters and state", () => {
       added_symbols: [],
       removed_symbols: [],
       modified_symbols: [],
-      blast_radius: [{ symbol_key: "unchangedCaller", inbound_count: 3 }],
+      blast_radius: [{ symbol_key: "unchangedCaller", inbound_count: 3, outbound_count: 4 }],
     };
     const rendered = codeGraphSnapshotForRendering(snapshot, overlay);
     expect(rendered.nodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ concept_id: "unchangedCaller", concept_type: "blast_radius" }),
+      expect.objectContaining({
+        concept_id: "unchangedCaller",
+        concept_type: "blast_radius",
+        metrics: expect.objectContaining({ indegree: 3, outdegree: 4 }),
+      }),
     ]));
   });
 

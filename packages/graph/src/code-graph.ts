@@ -773,7 +773,7 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
       freshness: "unknown" as const,
       diagnostic_count: 0,
       diagnostic_severity: null,
-      metrics: { in_degree: entry.inbound_count, out_degree: 0, community_id: null },
+      metrics: { in_degree: entry.inbound_count, out_degree: entry.outbound_count, community_id: null },
     }));
   if (syntheticNodes.length === 0 && radiusNodes.length === 0) return snapshot;
   return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes] };

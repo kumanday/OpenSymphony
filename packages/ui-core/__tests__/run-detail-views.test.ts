@@ -275,6 +275,33 @@ describe("Run detail views", () => {
     handle.destroy();
   });
 
+  it("keeps a pending run overlay alive while selecting another file", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    let releaseOverlay!: (overlay: typeof codeGraphFixtureDiffOverlays[number]) => void;
+    const pendingOverlay = new Promise<typeof codeGraphFixtureDiffOverlays[number]>((resolve) => {
+      releaseOverlay = resolve;
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(runDetail),
+      codeGraphAdapter: {
+        ...createFixtureCodeGraphAdapter(),
+        getRunDiffOverlay: async () => pendingOverlay,
+      },
+    });
+
+    await openRun(root);
+    root.querySelector<HTMLElement>("[data-path='src/new.ts']")!.click();
+    await flushAsync();
+    expect(root.querySelector("[data-testid='run-code-summary']")).toBeNull();
+
+    releaseOverlay(codeGraphFixtureDiffOverlays[0]);
+    await flushUntil(() => root.querySelector("[data-testid='run-code-summary']") !== null);
+    await handle.destroy();
+  });
+
   it("renders changed files, diff, validation, approvals, and TUI-parity metadata", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

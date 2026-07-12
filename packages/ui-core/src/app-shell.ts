@@ -1207,10 +1207,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     navigationVersion: number,
   ): Promise<void> {
     if (!this.codeGraphAdapter) return;
-    const dirtyRun = this.state.codeGraph.runId
-      && (!baseRevision || !headRevision || headRevision.startsWith("HEAD+") || headRevision.endsWith("+worktree"));
-    const overlay = dirtyRun
-      && this.state.codeGraph.runId
+    const overlay = this.state.codeGraph.runId
       && this.codeGraphAdapter.getRunDiffOverlay
       ? await this.codeGraphAdapter.getRunDiffOverlay(this.state.codeGraph.runId, repoId)
       : await this.codeGraphAdapter.getDiffOverlay(repoId, baseRevision, headRevision);
