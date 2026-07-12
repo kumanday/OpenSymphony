@@ -131,12 +131,19 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
 export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
   const { snapshot, state } = surface;
   const formatCount = (value: number) => value.toLocaleString("en-US");
-  const truncation = snapshot?.truncation;
-  const truncationSummary = truncation && (truncation.nodes_dropped > 0 || truncation.edges_dropped > 0)
+  const snapshotTruncation = snapshot?.truncation;
+  const diffTruncation = state.mode === "diff" ? state.diffOverlay?.truncation : null;
+  const truncation = {
+    nodes_dropped: (snapshotTruncation?.nodes_dropped ?? 0) + (diffTruncation?.nodes_dropped ?? 0),
+    edges_dropped: (snapshotTruncation?.edges_dropped ?? 0) + (diffTruncation?.edges_dropped ?? 0),
+    reason: [snapshotTruncation?.reason, diffTruncation?.reason].filter((reason): reason is string => Boolean(reason)).join("; ") || null,
+  };
+  const hasTruncation = truncation.nodes_dropped > 0 || truncation.edges_dropped > 0;
+  const truncationSummary = hasTruncation
     ? ` Truncated ${formatCount(truncation.nodes_dropped)} nodes and ${formatCount(truncation.edges_dropped)} edges${truncation.reason ? `: ${truncation.reason}` : "."}`
     : " No records were truncated.";
   const summary = snapshot
-    ? `${formatCount(snapshot.nodes.length)} nodes / ${formatCount(snapshot.edges.length)} edges${truncation && (truncation.nodes_dropped > 0 || truncation.edges_dropped > 0) ? ` / ${formatCount(truncation.nodes_dropped)} nodes + ${formatCount(truncation.edges_dropped)} edges truncated` : ""}`
+    ? `${formatCount(snapshot.nodes.length)} nodes / ${formatCount(snapshot.edges.length)} edges${hasTruncation ? ` / ${formatCount(truncation.nodes_dropped)} nodes + ${formatCount(truncation.edges_dropped)} edges truncated${truncation.reason ? `: ${truncation.reason}` : ""}` : ""}`
     : "No code graph snapshot";
   const accessibleSummary = snapshot
     ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${state.stale ? "Refreshing." : ""}`
