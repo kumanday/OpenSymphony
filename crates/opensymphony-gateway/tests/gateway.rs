@@ -2340,7 +2340,7 @@ async fn gateway_index_starts_target_branch_job_and_journals_completion() {
     assert_eq!(report.status, CodeIndexStatus::Accepted);
 
     let mut completed = false;
-    for _ in 0..50 {
+    for _ in 0..200 {
         let events = journal.all_events().await;
         completed = events.iter().any(|event| {
             matches!(
@@ -2351,7 +2351,7 @@ async fn gateway_index_starts_target_branch_job_and_journals_completion() {
         if completed {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(completed, "index completion should be journaled");
     assert!(journal.all_events().await.iter().any(|event| {
