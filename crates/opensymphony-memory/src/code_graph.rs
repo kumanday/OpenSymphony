@@ -1137,7 +1137,7 @@ fn git_tree_paths(
         let output = Command::new("git")
             .args(["-C"])
             .arg(root)
-            .args(["ls-tree", "-z", "--full-tree"])
+            .args(["ls-tree", "-z"])
             .arg(commit)
             .args(["--", &pathspec])
             .output()
@@ -1321,6 +1321,23 @@ fn persist_code_snapshot_state(
             source,
         },
     ))?;
+    if state.status == "running"
+        && connection
+            .query_row(
+                "SELECT status FROM code_index_snapshots WHERE repo_id = ? AND commit_sha = ?",
+                params![state.repo_id, state.commit_sha],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }))?
+            .as_deref()
+            == Some("completed")
+    {
+        return Ok(());
+    }
     connection
         .execute(
             "INSERT OR REPLACE INTO code_index_snapshots (repo_id, commit_sha, target_branch, status, total_files, parsed_files, skipped_files, deleted_files, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1469,8 +1486,9 @@ fn promote_staged_code_snapshot(
     }
     transaction
         .execute(
-            "UPDATE code_index_snapshots SET status = ?, total_files = ?, parsed_files = ?, skipped_files = ?, deleted_files = ?, indexed_at = ? WHERE repo_id = ? AND commit_sha = ?",
+            "UPDATE code_index_snapshots SET target_branch = ?, status = ?, total_files = ?, parsed_files = ?, skipped_files = ?, deleted_files = ?, indexed_at = ? WHERE repo_id = ? AND commit_sha = ?",
             params![
+                completed_state.target_branch,
                 completed_state.status,
                 completed_state.total_files as i64,
                 completed_state.parsed_files as i64,
@@ -3546,6 +3564,33 @@ mod code_graph_tests {
         let refreshed = index_code_repository(&config, "fixture-repo")
             .expect("same revision should be revalidated");
         assert!(refreshed.parsed_files > 0);
+        super::persist_code_snapshot_state(
+            &config,
+            super::CodeSnapshotState {
+                repo_id: "fixture-repo",
+                commit_sha: &baseline,
+                target_branch: "develop",
+                status: "running",
+                total_files: 0,
+                parsed_files: 0,
+                skipped_files: 0,
+                deleted_files: 0,
+                indexed_at: Utc::now(),
+            },
+        )
+        .expect("same-revision reindex should keep completed snapshot");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let snapshot_status: String = connection
+            .query_row(
+                "SELECT status FROM code_index_snapshots WHERE repo_id = ? AND commit_sha = ?",
+                duckdb::params!["fixture-repo", baseline],
+                |row| row.get(0),
+            )
+            .expect("snapshot should exist");
+        assert_eq!(snapshot_status, "completed");
+        drop(connection);
 
         fs::write(
             repo.path().join("src/lib.rs"),
@@ -3651,6 +3696,31 @@ mod code_graph_tests {
             path != Path::new("node_modules")
                 && path.starts_with(Path::new("node_modules"))
         }));
+    }
+
+    #[test]
+    fn target_tree_listing_is_scoped_to_configured_repository_root() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::create_dir_all(repo.path().join("configured/src")).expect("configured source");
+        fs::write(repo.path().join("outside.rs"), "pub fn outside() {}\n")
+            .expect("outside source");
+        fs::write(repo.path().join("configured/src/lib.rs"), "pub fn inside() {}\n")
+            .expect("inside source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "scoped tree"]);
+        let commit = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let paths = super::git_tree_paths(&repo.path().join("configured"), &commit)
+            .expect("tree should stay scoped");
+        assert!(paths
+            .iter()
+            .any(|(path, _, _)| path == Path::new("src/lib.rs")));
+        assert!(!paths
+            .iter()
+            .any(|(path, _, _)| path == Path::new("outside.rs")));
     }
 
     #[test]
