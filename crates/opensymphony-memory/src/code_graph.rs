@@ -666,12 +666,9 @@ pub fn index_code_repository_at(
 
     let paths = git_tree_paths(&config.repo_root, &commit_sha)?;
     let previous = latest_code_snapshot(config, repo_id, &target_branch)?;
-    if previous.as_ref().is_some_and(|(revision, _)| revision == &commit_sha) {
-        let mut report = code_graph_index_report(config, repo_id)?;
-        report.head_revision = Some(commit_sha);
-        report.diagnostics.push("revision already indexed".to_string());
-        return Ok(report);
-    }
+    let same_revision = previous
+        .as_ref()
+        .is_some_and(|(revision, _)| revision == &commit_sha);
 
     persist_code_snapshot_state(
         config,
@@ -813,6 +810,7 @@ pub fn index_code_repository_at(
         if let Some(previous_file) = previous_files.get(&relative_display)
             && previous_file.content_sha256 == content_sha256
             && previous_file.language == language_id
+            && !same_revision
             && ((previous_file.analyzed
                 && previous_file.parser_version == current_parser_version
                 && previous_file.query_pack_version == versions.query_pack)
@@ -1168,6 +1166,8 @@ fn git_tree_paths(
             if object_kind == "tree" {
                 if skipped_directory_name(Path::new(path)).is_none() {
                     directories.push(path.to_string());
+                } else {
+                    entries.push((PathBuf::from(path), mode, object_id));
                 }
             } else if object_kind == "blob" {
                 entries.push((PathBuf::from(path), mode, object_id));
@@ -1415,6 +1415,15 @@ fn promote_staged_code_snapshot(
         })
     })?;
     let mut stale_rows = 0;
+    stale_rows += transaction
+        .execute(
+            "UPDATE code_symbols AS current SET freshness = 'stale' WHERE current.repo_id = ? AND current.freshness = 'current' AND EXISTS (SELECT 1 FROM code_symbols AS staged WHERE staged.repo_id = current.repo_id AND staged.path = current.path AND staged.symbol_key = current.symbol_key AND staged.commit_sha = ? AND staged.freshness = 'staged')",
+            params![repo_id, commit_sha],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
     for path in changed_paths {
         for table in [
             "code_documents",
@@ -3524,6 +3533,19 @@ mod code_graph_tests {
             )
             .expect("legacy document should remain current");
         assert_eq!(freshness, "current");
+        let (symbol_count, unique_symbol_count): (i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT symbol_key) FROM code_symbols WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current symbols should remain unique");
+        assert_eq!(symbol_count, unique_symbol_count);
+        drop(connection);
+
+        let refreshed = index_code_repository(&config, "fixture-repo")
+            .expect("same revision should be revalidated");
+        assert!(refreshed.parsed_files > 0);
 
         fs::write(
             repo.path().join("src/lib.rs"),
@@ -3622,9 +3644,13 @@ mod code_graph_tests {
 
         let paths = super::git_tree_paths(repo.path(), &commit).expect("tree should list");
         assert!(paths.iter().any(|(path, _, _)| path == Path::new("src/lib.rs")));
-        assert!(!paths
+        assert!(paths
             .iter()
-            .any(|(path, _, _)| path.starts_with(Path::new("node_modules"))));
+            .any(|(path, mode, _)| path == Path::new("node_modules") && mode == "040000"));
+        assert!(!paths.iter().any(|(path, _, _)| {
+            path != Path::new("node_modules")
+                && path.starts_with(Path::new("node_modules"))
+        }));
     }
 
     #[test]

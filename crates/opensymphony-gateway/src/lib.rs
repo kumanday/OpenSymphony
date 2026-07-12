@@ -1759,6 +1759,7 @@ async fn index_code_repo(
     progress
         .diagnostics
         .push("indexing target branch".to_string());
+    let failure_cursor = accepted.cursor.clone();
     tokio::spawn(async move {
         let _ = append_code_index_status_event(&journal, &progress.repo_id, &progress).await;
         let result = tokio::task::spawn_blocking(move || {
@@ -1799,7 +1800,7 @@ async fn index_code_repo(
                     stale_rows: 0,
                     skipped_files: Vec::new(),
                     diagnostics: vec![error.to_string()],
-                    cursor: StreamCursor::new(0, "code-graph:unknown"),
+                    cursor: failure_cursor.clone(),
                     indexed_at: Utc::now(),
                 };
                 let _ = append_code_index_status_event(&journal, &failed.repo_id, &failed).await;
@@ -1818,7 +1819,7 @@ async fn index_code_repo(
                     stale_rows: 0,
                     skipped_files: Vec::new(),
                     diagnostics: vec![format!("code index task failed: {error}")],
-                    cursor: StreamCursor::new(0, "code-graph:failed"),
+                    cursor: failure_cursor,
                     indexed_at: Utc::now(),
                 };
                 let _ = append_code_index_status_event(&journal, &failed.repo_id, &failed).await;
