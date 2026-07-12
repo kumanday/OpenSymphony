@@ -109,6 +109,7 @@ export type CodeGraphAction =
   | { type: "LOAD_FAILED"; error: string }
   | { type: "SNAPSHOT_LOADED"; snapshot: CodeGraphSnapshot }
   | { type: "SYMBOL_DETAIL_LOADED"; detail: CodeSymbolDetail }
+  | { type: "SYMBOL_DETAILS_INVALIDATED" }
   | { type: "DIFF_LOADED"; overlay: CodeDiffOverlay }
   | { type: "MODE_SET"; mode: CodeGraphMode }
   | { type: "REPO_SELECTED"; repoId: string | null }
@@ -244,6 +245,8 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
           [`${action.detail.repo_id}:${action.detail.symbol_key}`]: action.detail,
         },
       };
+    case "SYMBOL_DETAILS_INVALIDATED":
+      return { ...state, symbolDetails: {} };
     case "DIFF_LOADED":
       return {
         ...state,

@@ -231,11 +231,9 @@ fn code_graph_related_memory(
     for issue in issues {
         let source_match = issue.source_refs.iter().any(|source| {
             let repo_matches = source.repo_id.as_deref().is_none_or(|id| id == repo_id);
-            repo_matches
-                && (source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str())
-                    || (source.kind == "path" && source.id == symbol.path)
-                    || (source.kind == "code-symbol"
-                        && source.id.starts_with(&format!("{}:", symbol.path))))
+            repo_matches && (source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str())
+                || (source.kind == "path" && source.id == symbol.path)
+                || (source.kind == "code-symbol" && code_symbol_source_ref_matches(source, symbol)))
         });
         let scope_match = issue.scope_refs.iter().any(|scope| {
             matches!(scope.kind, KnowledgeScopeKind::CodePath)
@@ -249,13 +247,15 @@ fn code_graph_related_memory(
             continue;
         }
         let freshness = freshness_from_str(issue.freshness.as_str());
-        related_issues.push(CodeGraphIssueChip {
-            issue_key: issue.issue_key.clone(),
-            title: redact_for_dto(config, &issue.title),
-            state: issue.state.clone().map(|state| redact_for_dto(config, &state)),
-            url: None,
-            freshness,
-        });
+        if issue.concept_type == "issue-capsule" {
+            related_issues.push(CodeGraphIssueChip {
+                issue_key: issue.issue_key.clone(),
+                title: redact_for_dto(config, &issue.title),
+                state: issue.state.clone().map(|state| redact_for_dto(config, &state)),
+                url: None,
+                freshness,
+            });
+        }
         related_memory_concepts.push(CodeGraphMemoryChip {
             bundle_id: DEFAULT_MEMORY_GRAPH_BUNDLE_ID.to_string(),
             concept_id: issue.concept_id.clone(),
@@ -267,6 +267,32 @@ fn code_graph_related_memory(
     related_issues.sort_by(|left, right| left.issue_key.cmp(&right.issue_key));
     related_memory_concepts.sort_by(|left, right| left.concept_id.cmp(&right.concept_id));
     Ok((related_issues, related_memory_concepts))
+}
+
+fn code_symbol_source_ref_matches(source: &MemorySourceRef, symbol: &CodeSymbolRecord) -> bool {
+    let Some(span) = source.id.strip_prefix(&format!("{}:", symbol.path)) else {
+        return false;
+    };
+    code_symbol_span_matches(
+        span,
+        symbol.start_line,
+        symbol.start_col,
+        symbol.end_line,
+        symbol.end_col,
+    )
+}
+
+fn code_symbol_span_matches(
+    span: &str,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> bool {
+    span == format!(
+        "{}:{}-{}:{}",
+        start_line, start_col, end_line, end_col
+    )
 }
 
 pub fn code_graph_diff_overlay(
@@ -1964,5 +1990,17 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
             Ok(_) => return next,
             Err(current) => previous = current,
         }
+    }
+}
+
+#[cfg(test)]
+mod code_graph_tests {
+    use super::code_symbol_span_matches;
+
+    #[test]
+    fn legacy_code_symbol_refs_match_only_their_exact_span() {
+        assert!(code_symbol_span_matches("10:1-12:2", 10, 1, 12, 2));
+        assert!(!code_symbol_span_matches("10:1-12:2", 20, 1, 22, 2));
+        assert!(!code_symbol_span_matches("10:1-12:2", 10, 1, 12, 3));
     }
 }

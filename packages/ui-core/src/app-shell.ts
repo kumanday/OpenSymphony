@@ -1497,6 +1497,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (envelope.event_kind === "memory_graph_updated") {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SYMBOL_DETAILS_INVALIDATED" });
         const selectedBundleId = this.state.knowledgeGraph.selectedBundleId;
         if (!selectedBundleId || selectedBundleId === envelope.payload.bundle_id) {
           this.state.knowledgeGraph = graphReducer(this.state.knowledgeGraph, { type: "GRAPH_UPDATED", event: envelope.payload });
@@ -1807,6 +1808,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private openTaskIssue(issueKey: string): void {
+    this.interactionEpoch += 1;
+    this.runOpenSeq += 1;
+    this.diffSelectSeq += 1;
     const node = this.state.taskGraph?.nodes.find((candidate) => candidate.identifier === issueKey);
     this.state.graphPaneView = "task";
     if (!node) {

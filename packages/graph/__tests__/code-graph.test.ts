@@ -76,6 +76,18 @@ describe("Code Graph adapters and state", () => {
     expect(state.symbolDetails).toEqual({});
   });
 
+  it("invalidates memory-derived symbol details without clearing selection", async () => {
+    const adapter = createFixtureCodeGraphAdapter();
+    const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
+    const detail = await adapter.getSymbolDetail("opensymphony", "graphReducer");
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "SYMBOL_DETAIL_LOADED", detail });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:graphReducer" });
+    state = codeGraphReducer(state, { type: "SYMBOL_DETAILS_INVALIDATED" });
+    expect(state.symbolDetails).toEqual({});
+    expect(state.selectedNodeIds).toEqual(["symbol:graphReducer"]);
+  });
+
   it("keeps removed diff symbols visible and clears diff state when leaving Diff", async () => {
     const adapter = createFixtureCodeGraphAdapter();
     const snapshot = await adapter.getGraphSnapshot("opensymphony", { mode: "neighborhood" });
