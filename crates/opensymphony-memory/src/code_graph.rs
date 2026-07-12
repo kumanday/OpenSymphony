@@ -1070,11 +1070,26 @@ fn configured_code_index_branch(root: &Path) -> Result<String, CodeGraphProjecti
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_CODE_INDEX_BRANCH.to_string());
     if branch.starts_with('-')
+        || branch.starts_with("origin/")
+        || branch.starts_with("refs/")
+        || branch.starts_with("@{-")
         || branch.contains("..")
         || branch.contains("@{")
         || branch.contains('`')
         || branch.split('/').any(|part| part.is_empty())
     {
+        return Err(CodeGraphProjectionError::InvalidRequest(
+            "configured target branch is invalid".to_string(),
+        ));
+    }
+    let branch_check = Command::new("git")
+        .args(["check-ref-format", "--branch", &branch])
+        .output()
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
+            path: root.to_path_buf(),
+            source,
+        }))?;
+    if !branch_check.status.success() {
         return Err(CodeGraphProjectionError::InvalidRequest(
             "configured target branch is invalid".to_string(),
         ));
@@ -3198,7 +3213,7 @@ fn code_diagnostics_read_model_ready(
 
 fn code_freshness_filter(include_stale: bool) -> &'static str {
     if include_stale {
-        "1 = 1"
+        "freshness IN ('current', 'stale')"
     } else {
         "freshness = 'current'"
     }

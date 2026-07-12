@@ -756,6 +756,7 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                 &CodeFreshnessKey {
                     repo_id: &batch.repo_id,
                     path: &path,
+                    commit_sha: batch.commit_sha.as_deref(),
                     content_sha256: &document.content_sha256,
                     parser_version: &document.parser_version,
                     query_pack_version: &document.query_pack_version,
@@ -1665,15 +1666,14 @@ fn query_code_symbol_by_key(
     symbol_key: &str,
     current_only: bool,
 ) -> Result<Option<CodeSymbolRecord>, MemoryError> {
-    let sql = if current_only {
-        format!(
-            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
-        )
+    let freshness = if current_only {
+        "freshness = 'current'"
     } else {
-        format!(
-            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, symbol_id LIMIT 1"
-        )
+        code_freshness_filter(true)
     };
+    let sql = format!(
+        "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND {freshness} ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, symbol_id LIMIT 1"
+    );
     let mut statement = connection
         .prepare(&sql)
         .map_err(|source| MemoryError::DuckDb {
@@ -1825,11 +1825,7 @@ fn query_edges_for_symbol_key_with_stale(
     symbol_key: &str,
     include_stale: bool,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
-    let freshness = if include_stale {
-        "1 = 1"
-    } else {
-        "freshness = 'current'"
-    };
+    let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
             "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges WHERE {freshness} AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id"
@@ -1964,6 +1960,7 @@ fn symbol_contains_point(symbol: &CodeSymbolRecord, line: usize, column: usize) 
 struct CodeFreshnessKey<'a> {
     repo_id: &'a str,
     path: &'a str,
+    commit_sha: Option<&'a str>,
     content_sha256: &'a str,
     parser_version: &'a str,
     query_pack_version: &'a str,
@@ -1990,6 +1987,12 @@ fn stale_code_rows(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
+    if let Some(commit_sha) = key.commit_sha {
+        stale_rows += connection.execute(
+            "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current'",
+            params![key.repo_id, key.path, commit_sha],
+        )?;
+    }
     Ok(stale_rows)
 }
 
@@ -3071,6 +3074,22 @@ fn all_known_areas(config: &MemoryConfig, issues: &[IndexedIssue]) -> Vec<AreaCo
 mod index_tests {
     use super::*;
 
+    fn test_code_document(path: &str, content_sha256: &str) -> CodeIntelDocumentInput {
+        CodeIntelDocumentInput {
+            path: PathBuf::from(path),
+            language: "rust".to_string(),
+            content_sha256: content_sha256.to_string(),
+            parser_id: "tree-sitter".to_string(),
+            parser_version: "test-parser".to_string(),
+            query_pack_version: "test-query-pack".to_string(),
+            byte_len: 1,
+            line_count: 1,
+            symbols: Vec::new(),
+            edges: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
     #[test]
     fn issue_log_date_uses_stable_sentinel_for_malformed_timestamps() {
         let issue = IndexedIssue {
@@ -3102,5 +3121,80 @@ mod index_tests {
         };
 
         assert_eq!(issue_log_date(&issue), UNDATED_LOG_DATE);
+    }
+
+    #[test]
+    fn staged_code_rows_are_hidden_and_parsed_files_stale_same_revision_skips() {
+        let repo = tempfile::TempDir::new().expect("repository tempdir");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        persist_code_intel_documents_with_freshness(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("staged-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/staged.rs", "staged-hash")],
+            },
+            "staged",
+            false,
+        )
+        .expect("staged document should persist");
+        assert!(
+            code_graph_repos(&config, true)
+                .expect("staged rows should be hidden")
+                .repos
+                .is_empty()
+        );
+
+        persist_code_intel_skipped_files(
+            &config,
+            "fixture-repo",
+            Some("commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/lib.rs"),
+                reason: "oversized".to_string(),
+                content_sha256: "skipped-hash".to_string(),
+            }],
+        )
+        .expect("skip coverage should persist");
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/lib.rs", "parsed-hash")],
+            },
+        )
+        .expect("parsed document should persist");
+
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let freshness: String = connection
+            .query_row(
+                "SELECT freshness FROM code_skipped_files WHERE repo_id = ? AND path = ? AND commit_sha = ?",
+                params!["fixture-repo", "src/lib.rs", "commit"],
+                |row| row.get(0),
+            )
+            .expect("skip coverage should remain queryable");
+        assert_eq!(freshness, "stale");
+    }
+
+    #[test]
+    fn configured_target_branch_rejects_invalid_git_branch_marker() {
+        let repo = tempfile::TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "## Branch target\n\nTarget branch: `HEAD`\n",
+        )
+        .expect("workflow marker");
+
+        let result = configured_code_index_branch(repo.path());
+        assert!(matches!(
+            result,
+            Err(CodeGraphProjectionError::InvalidRequest(message))
+                if message == "configured target branch is invalid"
+        ));
     }
 }
