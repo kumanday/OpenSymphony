@@ -64,6 +64,7 @@ export interface CodeGraphAdapter {
     headRevision: string,
     options?: CodeGraphDiffOptions,
   ): Promise<CodeDiffOverlay>;
+  getRunDiffOverlay?(runId: string, repoId?: string, options?: CodeGraphDiffOptions): Promise<CodeDiffOverlay>;
 }
 
 /** Tauri/native providers keep the same DTO contract without importing Tauri. */
@@ -554,8 +555,18 @@ export interface CodeEdgeVisualStyle {
   lineStyle: "solid" | "dashed" | "dotted";
 }
 
-export function codeNodeVisualStyle(node: Pick<CodeGraphNode, "kind" | "symbol_kind" | "freshness" | "diagnostic_count">): CodeNodeVisualStyle {
-  const color = node.kind === "directory"
+export function codeNodeVisualStyle(
+  node: Pick<CodeGraphNode, "kind" | "symbol_kind" | "freshness" | "diagnostic_count">,
+  deltaStatus: CodeGraphDeltaStatus = "unchanged",
+  blastRadius = false,
+): CodeNodeVisualStyle {
+  const color = deltaStatus === "added"
+    ? "#15803d"
+    : deltaStatus === "removed"
+      ? "#64748b"
+      : deltaStatus === "modified"
+        ? "#b45309"
+        : node.kind === "directory"
     ? "#475569"
     : node.kind === "file"
       ? "#2563eb"
@@ -571,9 +582,11 @@ export function codeNodeVisualStyle(node: Pick<CodeGraphNode, "kind" | "symbol_k
       : { opacity: 0.45, borderStyle: "dotted" as const, label: "unknown" };
   return {
     color,
-    opacity: node.diagnostic_count > 0 ? Math.max(0.5, freshness.opacity) : freshness.opacity,
-    borderStyle: freshness.borderStyle,
-    freshnessLabel: node.diagnostic_count > 0 ? `${freshness.label}, diagnostics` : freshness.label,
+    opacity: deltaStatus === "removed" ? 0.42 : node.diagnostic_count > 0 ? Math.max(0.5, freshness.opacity) : freshness.opacity,
+    borderStyle: deltaStatus === "removed" || blastRadius ? "dashed" : freshness.borderStyle,
+    freshnessLabel: deltaStatus !== "unchanged"
+      ? `${deltaStatus}${blastRadius ? ", blast radius" : ""}`
+      : blastRadius ? `${freshness.label}, blast radius` : node.diagnostic_count > 0 ? `${freshness.label}, diagnostics` : freshness.label,
   };
 }
 
@@ -633,6 +646,12 @@ export function createHttpCodeGraphAdapter(
       const params = new URLSearchParams({ base_revision: baseRevision, head_revision: headRevision });
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
       return read<CodeDiffOverlay>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/diff-overlay`, params);
+    },
+    getRunDiffOverlay: (runId, repoId, options) => {
+      const params = new URLSearchParams();
+      if (repoId) params.set("repo_id", repoId);
+      if (options?.limit !== undefined) params.set("limit", String(options.limit));
+      return read<CodeDiffOverlay>(`/api/v1/runs/${encodeURIComponent(runId)}/code/diff-overlay`, params);
     },
   };
 }
@@ -718,7 +737,6 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
     const side = symbol.status === "removed" ? symbol.before : symbol.after ?? symbol.before;
     if (side) syntheticSides.set(symbol.symbol_key, side);
   }
-  if (syntheticSides.size === 0) return snapshot;
   const syntheticNodes = [...syntheticSides].map(([symbolKey, side]) => ({
     id: `symbol:${symbolKey}`,
     kind: "symbol" as const,
@@ -737,7 +755,28 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
     diagnostic_severity: null,
     metrics: { in_degree: 0, out_degree: 0, community_id: null },
   }));
-  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes] };
+  const radiusNodes = overlay.blast_radius
+    .filter((entry) => !existingKeys.has(entry.symbol_key) && !syntheticSides.has(entry.symbol_key))
+    .map((entry) => ({
+      id: `symbol:${entry.symbol_key}`,
+      kind: "symbol" as const,
+      label: entry.symbol_key,
+      symbol_kind: "blast_radius",
+      symbol_key: entry.symbol_key,
+      symbol_id: null,
+      path_display: null,
+      language: null,
+      container_chain: [],
+      signature: null,
+      span: null,
+      selection_span: null,
+      freshness: "unknown" as const,
+      diagnostic_count: 0,
+      diagnostic_severity: null,
+      metrics: { in_degree: entry.inbound_count, out_degree: entry.outbound_count, community_id: null },
+    }));
+  if (syntheticNodes.length === 0 && radiusNodes.length === 0) return snapshot;
+  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes] };
 }
 
 function matchesCodeNode(

@@ -38,8 +38,12 @@ export {
 export {
   renderChangedFileList,
   renderFileDiff,
+  renderCodeDiffDeltaList,
+  renderCodeDiffSummary,
+  resolveDiffSymbolRegions,
+  innermostSymbolAtLine,
 } from "./diff.js";
-export type { DiffFileItem } from "./diff.js";
+export type { DiffFileItem, DiffSymbolRegion } from "./diff.js";
 export { renderValidationSummary } from "./validation.js";
 export {
   renderApprovalList,
