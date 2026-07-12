@@ -595,6 +595,30 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_index_snapshots (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  target_branch TEXT NOT NULL,
+  status TEXT NOT NULL,
+  total_files BIGINT NOT NULL,
+  parsed_files BIGINT NOT NULL,
+  skipped_files BIGINT NOT NULL,
+  deleted_files BIGINT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha)
+);
+CREATE TABLE IF NOT EXISTS code_snapshot_membership (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  analyzed BOOLEAN NOT NULL,
+  skip_reason TEXT,
+  PRIMARY KEY (repo_id, commit_sha, path)
+);
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS symbol_key TEXT DEFAULT '';
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS container_chain TEXT DEFAULT '';
 UPDATE code_symbols SET container_chain = '' WHERE container_chain IS NULL;
@@ -904,6 +928,7 @@ pub fn persist_code_intel_documents(
         for diagnostic in &document.diagnostics {
             let diagnostic_id = code_row_id(&[
                 &batch.repo_id,
+                batch.commit_sha.as_deref().unwrap_or(""),
                 &path,
                 &document.content_sha256,
                 &document.parser_version,
@@ -1494,8 +1519,8 @@ pub fn compare_code_symbols(
             dropped_records: 0,
         });
     }
-    let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
-    let head = query_symbols_for_revision(&connection, repo_id, head_revision)?;
+    let base = query_symbols_for_revision(config, &connection, repo_id, base_revision)?;
+    let head = query_symbols_for_revision(config, &connection, repo_id, head_revision)?;
     let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();
     keys.extend(head.keys().cloned());
     let mut diffs = Vec::new();
@@ -1628,36 +1653,63 @@ fn query_code_symbol_for_edge(
 }
 
 fn query_symbols_for_revision(
+    config: &MemoryConfig,
     connection: &Connection,
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
-    let mut statement = connection
-        .prepare(
-            &format!("SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id"),
+    let membership_ready =
+        code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+    let query = if membership_ready {
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN s.worktree_dirty THEN 1 ELSE 0 END FROM code_symbols AS s WHERE s.repo_id = ? AND s.symbol_key != '' AND NOT s.worktree_dirty AND (s.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = s.repo_id AND m.commit_sha = ? AND m.path = s.path AND m.content_sha256 = s.content_sha256 AND m.parser_version = s.parser_version AND m.query_pack_version = s.query_pack_version AND m.analyzed)) ORDER BY s.symbol_key, s.indexed_at DESC, s.symbol_id"
         )
+    } else {
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id"
+        )
+    };
+    let mut statement = connection
+        .prepare(&query)
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
         })?;
-    let rows = statement
-        .query_map(params![repo_id, revision], |row| {
-            let dirty = row.get::<_, i64>(25)?;
-            if dirty != 0 {
-                Ok(None)
-            } else {
-                code_symbol_from_row(row).map(Some)
-            }
-        })
-        .map_err(|source| MemoryError::DuckDb {
-            path: PathBuf::from("<memory-index>"),
-            source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| MemoryError::DuckDb {
-            path: PathBuf::from("<memory-index>"),
-            source,
-        })?;
+    let rows = if membership_ready {
+        statement
+            .query_map(params![repo_id, revision, revision], |row| {
+                let dirty = row.get::<_, i64>(25)?;
+                if dirty != 0 {
+                    Ok(None)
+                } else {
+                    code_symbol_from_row(row).map(Some)
+                }
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    } else {
+        statement
+            .query_map(params![repo_id, revision], |row| {
+                let dirty = row.get::<_, i64>(25)?;
+                if dirty != 0 {
+                    Ok(None)
+                } else {
+                    code_symbol_from_row(row).map(Some)
+                }
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    }
+    .map_err(|source| MemoryError::DuckDb {
+        path: PathBuf::from("<memory-index>"),
+        source,
+    })?;
     let mut symbols = BTreeMap::new();
     for row in rows {
         let Some(mut symbol) = row else {
@@ -1830,20 +1882,12 @@ fn stale_code_rows(
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
-        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
-    )?;
-    stale_rows += connection.execute(
         "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
         "UPDATE code_edges SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
-    )?;
-    stale_rows += connection.execute(
-        "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
-        params![key.repo_id, key.path],
     )?;
     stale_rows += connection.execute(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
@@ -1860,10 +1904,6 @@ fn stale_code_rows_for_skipped_file(
     let mut stale_rows = 0;
     stale_rows += connection.execute(
         "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
-        params![repo_id, path],
-    )?;
-    stale_rows += connection.execute(
-        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
         params![repo_id, path],
     )?;
     stale_rows += connection.execute(

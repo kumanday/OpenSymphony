@@ -181,6 +181,12 @@ pub enum EventKind {
     CodeGraphUpdated {
         repo_id: String,
     },
+    CodeIndexProgress {
+        repo_id: String,
+    },
+    CodeIndexFailed {
+        repo_id: String,
+    },
 
     // Catch-all for unknown future events
     Unknown {
@@ -233,6 +239,8 @@ impl EventKind {
             // clients even though older gateway event families use dotted tags.
             Self::MemoryGraphUpdated { .. } => "memory_graph_updated".into(),
             Self::CodeGraphUpdated { .. } => "code_graph_updated".into(),
+            Self::CodeIndexProgress { .. } => "code_index_progress".into(),
+            Self::CodeIndexFailed { .. } => "code_index_failed".into(),
             Self::Unknown { raw_kind } => raw_kind.clone(),
         }
     }

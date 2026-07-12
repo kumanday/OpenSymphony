@@ -222,7 +222,7 @@ export interface CodeDiffBlastRadius {
 export interface CodeIndexReport {
   schema_version: SchemaVersion;
   repo_id: string;
-  status: "accepted" | "completed" | "unavailable";
+  status: "accepted" | "progress" | "completed" | "unavailable" | "failed";
   head_revision?: string | null;
   parsed_files: number;
   persisted_documents: number;

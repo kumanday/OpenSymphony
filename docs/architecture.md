@@ -112,6 +112,17 @@ The supported model is now:
 
 This keeps one canonical Linear API surface for the agent path.
 
+### 3.7 Code Graph snapshots are repository-owned
+
+The Code Graph indexer resolves the configured repository and target branch
+server-side from `WORKFLOW.md`. It reads Git tree/blob objects and sends source
+text through the bounded Tree-sitter provider; it does not execute target-repo
+code or accept client filesystem roots. Snapshot membership is immutable by
+repository and commit, while current read-model rows may be marked stale for
+deletions. A single process-wide writer owner serializes index mutations so
+DuckDB reads remain available during gateway jobs. Issue-workspace code remains
+an overlay concern rather than being folded into the shared baseline.
+
 ## 4. Component model
 
 ### Internal subsystem modules
@@ -126,7 +137,8 @@ This keeps one canonical Linear API surface for the agent path.
 - `opensymphony_linear`
   - Linear GraphQL read adapter and guarded archive mutation
 - `opensymphony_memory`
-  - issue capsules, DuckDB memory index, docs sync, and archive eligibility
+  - issue capsules, DuckDB memory index, repository code snapshots, docs sync,
+    and archive eligibility
 - `opensymphony_code_intel`
   - built-in Tree-sitter parser provider skeletons, starting with Rust source
     summaries, one-based spans, symbols, and recoverable AST diagnostics

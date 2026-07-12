@@ -47,8 +47,8 @@ use crate::opensymphony_memory::{
     MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
     MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
     code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
-    code_graph_updated_event, memory_completed_task_rows, memory_concept_detail,
-    memory_graph_bundles, memory_graph_communities_with_options,
+    code_graph_updated_event, code_index_target, index_code_repository, memory_completed_task_rows,
+    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
     memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
@@ -1680,44 +1680,206 @@ async fn index_code_repo(
     State(state): State<GatewayState>,
     AxumPath(repo_id): AxumPath<String>,
 ) -> Result<Json<CodeIndexReport>, (StatusCode, Json<serde_json::Value>)> {
-    let config = configured_code_memory(&state)?;
-    let report = code_graph_index_report(config, &repo_id).map_err(code_graph_error)?;
-    if matches!(
-        report.status,
-        crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Completed
-    ) {
-        let update = code_graph_updated_event(config, &repo_id, report.head_revision.clone())
-            .map_err(code_graph_error)?;
-        let payload = serde_json::to_value(&update).map_err(|_| {
-            code_graph_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "code_graph_event_error",
-                "failed to serialize code graph update event",
+    let config = configured_code_memory(&state)?.clone();
+    let Some((target_branch, head_revision)) =
+        code_index_target(&config).map_err(code_graph_error)?
+    else {
+        let report = code_graph_index_report(&config, &repo_id).map_err(code_graph_error)?;
+        if matches!(
+            report.status,
+            crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Completed
+        ) {
+            append_code_graph_updated_event(
+                &state.journal,
+                &config,
+                &repo_id,
+                report.head_revision.clone(),
             )
-        })?;
-        let event = EventRecord::builder()
-            .actor(EventActor::system("gateway"))
-            .entity_ref(EntityRef {
-                kind: EntityKind::Repository,
-                id: repo_id.clone(),
-                identifier: None,
-            })
-            .kind(EventKind::CodeGraphUpdated {
-                repo_id: repo_id.clone(),
-            })
-            .summary(format!("code graph updated for {repo_id}"))
-            .payload(payload)
-            .happened_at(update.updated_at)
-            .build();
-        state.journal.append(event).await.map_err(|_| {
+            .await
+            .map_err(|_| {
+                code_graph_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "event_journal_error",
+                    "failed to append code graph update event",
+                )
+            })?;
+        }
+        return Ok(Json(report));
+    };
+
+    let accepted = CodeIndexReport {
+        schema_version: SchemaVersion::v1(),
+        repo_id: repo_id.clone(),
+        status: crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Accepted,
+        head_revision: Some(head_revision.clone()),
+        parsed_files: 0,
+        persisted_documents: 0,
+        persisted_symbols: 0,
+        persisted_edges: 0,
+        persisted_diagnostics: 0,
+        stale_rows: 0,
+        skipped_files: Vec::new(),
+        diagnostics: vec![format!("indexing target branch `{target_branch}`")],
+        cursor: code_graph_updated_event(&config, &repo_id, Some(head_revision.clone()))
+            .map_err(code_graph_error)?
+            .cursor,
+        indexed_at: Utc::now(),
+    };
+    append_code_index_status_event(&state.journal, &repo_id, &accepted)
+        .await
+        .map_err(|_| {
             code_graph_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "event_journal_error",
-                "failed to append code graph update event",
+                "failed to append code index accepted event",
             )
         })?;
-    }
-    Ok(Json(report))
+
+    let journal = state.journal.clone();
+    let job_config = config.clone();
+    let event_config = config.clone();
+    let job_repo_id = repo_id.clone();
+    let job_repo_id_for_index = job_repo_id.clone();
+    let mut progress = accepted.clone();
+    progress.status = crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Progress;
+    progress
+        .diagnostics
+        .push("indexing target branch".to_string());
+    tokio::spawn(async move {
+        let _ = append_code_index_status_event(&journal, &progress.repo_id, &progress).await;
+        let result = tokio::task::spawn_blocking(move || {
+            index_code_repository(&job_config, &job_repo_id_for_index)
+        })
+        .await;
+        match result {
+            Ok(Ok(report)) => {
+                let _ = append_code_index_status_event(&journal, &report.repo_id, &report).await;
+                if matches!(
+                    report.status,
+                    crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Completed
+                ) {
+                    let _ = append_code_graph_updated_event(
+                        &journal,
+                        &event_config,
+                        &report.repo_id,
+                        report.head_revision.clone(),
+                    )
+                    .await;
+                }
+            }
+            Ok(Err(error)) => {
+                let failed = CodeIndexReport {
+                    schema_version: SchemaVersion::v1(),
+                    repo_id: job_repo_id,
+                    status: crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Failed,
+                    head_revision: None,
+                    parsed_files: 0,
+                    persisted_documents: 0,
+                    persisted_symbols: 0,
+                    persisted_edges: 0,
+                    persisted_diagnostics: 0,
+                    stale_rows: 0,
+                    skipped_files: Vec::new(),
+                    diagnostics: vec![error.to_string()],
+                    cursor: StreamCursor::new(0, "code-graph:unknown"),
+                    indexed_at: Utc::now(),
+                };
+                let _ = append_code_index_status_event(&journal, &failed.repo_id, &failed).await;
+            }
+            Err(error) => {
+                let failed = CodeIndexReport {
+                    schema_version: SchemaVersion::v1(),
+                    repo_id: job_repo_id,
+                    status: crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Failed,
+                    head_revision: None,
+                    parsed_files: 0,
+                    persisted_documents: 0,
+                    persisted_symbols: 0,
+                    persisted_edges: 0,
+                    persisted_diagnostics: 0,
+                    stale_rows: 0,
+                    skipped_files: Vec::new(),
+                    diagnostics: vec![format!("code index task failed: {error}")],
+                    cursor: StreamCursor::new(0, "code-graph:failed"),
+                    indexed_at: Utc::now(),
+                };
+                let _ = append_code_index_status_event(&journal, &failed.repo_id, &failed).await;
+            }
+        }
+    });
+    Ok(Json(accepted))
+}
+
+async fn append_code_index_status_event(
+    journal: &InMemoryEventJournal,
+    repo_id: &str,
+    report: &CodeIndexReport,
+) -> Result<(), String> {
+    let payload = serde_json::to_value(report).map_err(|error| error.to_string())?;
+    let kind = if matches!(
+        report.status,
+        crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Failed
+    ) {
+        EventKind::CodeIndexFailed {
+            repo_id: repo_id.to_string(),
+        }
+    } else {
+        EventKind::CodeIndexProgress {
+            repo_id: repo_id.to_string(),
+        }
+    };
+    journal
+        .append(
+            EventRecord::builder()
+                .actor(EventActor::system("gateway"))
+                .entity_ref(EntityRef {
+                    kind: EntityKind::Repository,
+                    id: repo_id.to_string(),
+                    identifier: None,
+                })
+                .kind(kind)
+                .summary(format!(
+                    "code index {} for {repo_id}",
+                    format!("{:?}", report.status).to_ascii_lowercase()
+                ))
+                .payload(payload)
+                .happened_at(report.indexed_at)
+                .build(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
+}
+
+async fn append_code_graph_updated_event(
+    journal: &InMemoryEventJournal,
+    config: &MemoryConfig,
+    repo_id: &str,
+    head_revision: Option<String>,
+) -> Result<(), String> {
+    let update = code_graph_updated_event(config, repo_id, head_revision)
+        .map_err(|error| error.to_string())?;
+    let payload = serde_json::to_value(&update).map_err(|error| error.to_string())?;
+    journal
+        .append(
+            EventRecord::builder()
+                .actor(EventActor::system("gateway"))
+                .entity_ref(EntityRef {
+                    kind: EntityKind::Repository,
+                    id: repo_id.to_string(),
+                    identifier: None,
+                })
+                .kind(EventKind::CodeGraphUpdated {
+                    repo_id: repo_id.to_string(),
+                })
+                .summary(format!("code graph updated for {repo_id}"))
+                .payload(payload)
+                .happened_at(update.updated_at)
+                .build(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
 }
 
 async fn get_run_code_outline(

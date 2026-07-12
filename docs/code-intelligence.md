@@ -48,6 +48,35 @@ are rendered from local files on demand.
 There is no filesystem watcher in V1. Re-run `memory.context` after editing
 source files.
 
+## Target-branch repository snapshots
+
+The Code Graph repository index is an explicit, server-side operation:
+
+```text
+POST /api/v1/code/repos/{repo_id}/index
+code_index_repo(repoId)
+```
+
+The server resolves the configured repository root and target branch from the
+target repository's `WORKFLOW.md`. It reads the selected commit through Git's
+tree and blob objects, never accepts a client filesystem root, and never runs
+target-repository code. The branch marker defaults to `develop` when it is not
+present; `main`, `master`, and `origin/HEAD` are not implicit fallbacks.
+
+Each completed run stores an immutable snapshot keyed by repository and commit,
+including complete file membership. Parsed documents, symbols, edges,
+diagnostics, and skipped-file coverage are persisted in bounded batches. When a
+later target-branch commit exists, unchanged files reuse their prior snapshot
+membership and only changed, added, or deleted paths are parsed or staled.
+DuckDB writes are serialized through the repository index writer; reads remain
+available while a gateway request performs the background job.
+
+The gateway returns `accepted`, `progress`, `completed`, `unavailable`, or
+`failed` reports and journals progress/failure events plus `code_graph_updated`
+after completion. This shared target-branch baseline is not the live truth for
+an issue workspace; workspace-specific code belongs to the overlay/composite
+graph path.
+
 ## Agent Workflow
 
 Use memory first, then code-intelligence context after file discovery:

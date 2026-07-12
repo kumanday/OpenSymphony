@@ -300,6 +300,24 @@ When the configured transport uses managed local OpenHands, `doctor` can
 bootstrap the pinned tooling into the configured `openhands.tool_dir` before
 continuing the rest of its checks.
 
+## 4.0 Code Graph repository indexing
+
+Trigger a target-branch repository snapshot through the gateway or desktop
+native mirror:
+
+```bash
+curl -X POST http://127.0.0.1:2468/api/v1/code/repos/opensymphony/index
+```
+
+The server reads the branch marker in `WORKFLOW.md` (default `develop`) and
+resolves the commit from `origin/<branch>` or the local branch. It reads Git
+objects without running repository code, applies the configured Tree-sitter
+limits, and writes immutable revision membership in bounded batches. Repeated
+indexing of a later commit reuses unchanged paths and records deletions without
+removing older revisions. Requests return an accepted report; inspect the event
+journal for progress and the terminal completion/failure event. Concurrent
+requests are serialized by the index writer.
+
 ## 4.1 Subscription Credential Operations
 
 OpenAI ChatGPT/Codex subscription mode is explicit and feature-gated. Build or

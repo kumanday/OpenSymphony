@@ -59,6 +59,12 @@ opensymphony update --target-branch release/next
 opensymphony update --target-branch release/next --code-review openhands
 ```
 
+The target-branch marker is also the source of truth for persistent Code Graph
+indexing. `POST /api/v1/code/repos/{repo_id}/index` and
+`code_index_repo` resolve that branch server-side; they do not accept a client
+path. If the marker is absent, the indexer uses `develop`. Ensure the selected
+branch is available as `origin/<branch>` or a local branch before indexing.
+
 The template repository is still the upstream source of those starter assets,
 but it is an implementation detail of `opensymphony init`, not a required
 manual setup step:
