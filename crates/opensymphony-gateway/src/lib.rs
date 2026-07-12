@@ -48,9 +48,9 @@ use crate::opensymphony_memory::{
     MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
     code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
     code_graph_updated_event, code_index_repository_is_git, code_index_target,
-    index_code_repository, memory_completed_task_rows, memory_concept_detail, memory_graph_bundles,
-    memory_graph_communities_with_options, memory_graph_search as search_memory_graph,
-    memory_graph_snapshot_with_options,
+    index_code_repository, index_code_repository_at, memory_completed_task_rows,
+    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
+    memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
 pub mod action_handler;
@@ -1762,7 +1762,11 @@ async fn index_code_repo(
     tokio::spawn(async move {
         let _ = append_code_index_status_event(&journal, &progress.repo_id, &progress).await;
         let result = tokio::task::spawn_blocking(move || {
-            index_code_repository(&job_config, &job_repo_id_for_index)
+            index_code_repository_at(
+                &job_config,
+                &job_repo_id_for_index,
+                Some((target_branch, head_revision)),
+            )
         })
         .await;
         match result {

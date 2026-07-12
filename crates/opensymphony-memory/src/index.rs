@@ -909,40 +909,58 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                 &edge.start_byte.to_string(),
                 &edge.end_byte.to_string(),
             ]);
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        edge_id,
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        edge.edge_kind,
-                        resolved.source_symbol_id,
-                        resolved.source_symbol_key,
-                        resolved.target_symbol_id,
-                        resolved.target_symbol_key,
-                        edge.target_hint,
-                        normalized_confidence,
-                        edge.start_line as i64,
-                        edge.start_col as i64,
-                        edge.end_line as i64,
-                        edge.end_col as i64,
-                        edge.start_byte as i64,
-                        edge.end_byte as i64,
-                        document.content_sha256,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        freshness,
-                    ],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
+            let current_edge_exists = if freshness == "staged" {
+                transaction
+                    .query_row(
+                        "SELECT 1 FROM code_edges WHERE edge_id = ? AND freshness = 'current' LIMIT 1",
+                        params![edge_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?
+                    .is_some()
+            } else {
+                false
+            };
+            if !current_edge_exists {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            edge_id,
+                            batch.repo_id,
+                            batch.commit_sha.clone(),
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            edge.edge_kind,
+                            resolved.source_symbol_id,
+                            resolved.source_symbol_key,
+                            resolved.target_symbol_id,
+                            resolved.target_symbol_key,
+                            edge.target_hint,
+                            normalized_confidence,
+                            edge.start_line as i64,
+                            edge.start_col as i64,
+                            edge.end_line as i64,
+                            edge.end_col as i64,
+                            edge.start_byte as i64,
+                            edge.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             if !batch.worktree_dirty
                 && let Some(commit_sha) = batch.commit_sha.as_deref()
             {
@@ -1000,36 +1018,54 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                 &diagnostic.start_byte.to_string(),
                 &diagnostic.end_byte.to_string(),
             ]);
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        &diagnostic_id,
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        diagnostic.kind,
-                        diagnostic.severity,
-                        diagnostic.message,
-                        diagnostic.start_line as i64,
-                        diagnostic.start_col as i64,
-                        diagnostic.end_line as i64,
-                        diagnostic.end_col as i64,
-                        diagnostic.start_byte as i64,
-                        diagnostic.end_byte as i64,
-                        document.content_sha256,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        freshness,
-                    ],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
+            let current_diagnostic_exists = if freshness == "staged" {
+                transaction
+                    .query_row(
+                        "SELECT 1 FROM code_diagnostics WHERE diagnostic_id = ? AND freshness = 'current' LIMIT 1",
+                        params![&diagnostic_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?
+                    .is_some()
+            } else {
+                false
+            };
+            if !current_diagnostic_exists {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            &diagnostic_id,
+                            batch.repo_id,
+                            batch.commit_sha.clone(),
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            diagnostic.kind,
+                            diagnostic.severity,
+                            diagnostic.message,
+                            diagnostic.start_line as i64,
+                            diagnostic.start_col as i64,
+                            diagnostic.end_line as i64,
+                            diagnostic.end_col as i64,
+                            diagnostic.start_byte as i64,
+                            diagnostic.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             if !batch.worktree_dirty
                 && let Some(commit_sha) = batch.commit_sha.as_deref()
             {
@@ -3114,6 +3150,36 @@ mod index_tests {
         }
     }
 
+    fn test_code_document_with_edges_and_diagnostics(
+        path: &str,
+        content_sha256: &str,
+    ) -> CodeIntelDocumentInput {
+        let mut document = test_code_document(path, content_sha256);
+        document.edges.push(CodeIntelEdgeInput {
+            edge_kind: "reference".to_string(),
+            target_hint: Some("helper".to_string()),
+            confidence: "exact".to_string(),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 7,
+            start_byte: 0,
+            end_byte: 6,
+        });
+        document.diagnostics.push(CodeIntelDiagnosticInput {
+            kind: "syntax".to_string(),
+            severity: "warning".to_string(),
+            message: "test diagnostic".to_string(),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 2,
+            start_byte: 0,
+            end_byte: 1,
+        });
+        document
+    }
+
     #[test]
     fn issue_log_date_uses_stable_sentinel_for_malformed_timestamps() {
         let issue = IndexedIssue {
@@ -3158,7 +3224,10 @@ mod index_tests {
                 repo_id: "fixture-repo".to_string(),
                 commit_sha: Some("base-commit".to_string()),
                 worktree_dirty: false,
-                documents: vec![test_code_document("src/reused.rs", "same-hash")],
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
             },
         )
         .expect("current document should persist");
@@ -3168,7 +3237,10 @@ mod index_tests {
                 repo_id: "fixture-repo".to_string(),
                 commit_sha: Some("next-commit".to_string()),
                 worktree_dirty: false,
-                documents: vec![test_code_document("src/reused.rs", "same-hash")],
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
             },
             "staged",
             false,
@@ -3182,6 +3254,24 @@ mod index_tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("current document should remain queryable");
+        assert_eq!(commit_sha, "base-commit");
+        assert_eq!(freshness, "current");
+        let (commit_sha, freshness): (String, String) = connection
+            .query_row(
+                "SELECT commit_sha, freshness FROM code_edges WHERE repo_id = ? AND path = ?",
+                params!["fixture-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current edge should remain queryable");
+        assert_eq!(commit_sha, "base-commit");
+        assert_eq!(freshness, "current");
+        let (commit_sha, freshness): (String, String) = connection
+            .query_row(
+                "SELECT commit_sha, freshness FROM code_diagnostics WHERE repo_id = ? AND path = ?",
+                params!["fixture-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current diagnostic should remain queryable");
         assert_eq!(commit_sha, "base-commit");
         assert_eq!(freshness, "current");
         drop(connection);

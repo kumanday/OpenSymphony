@@ -623,6 +623,15 @@ pub fn index_code_repository(
     config: &MemoryConfig,
     repo_id: &str,
 ) -> Result<CodeIndexReport, CodeGraphProjectionError> {
+    let target = code_index_target(config)?;
+    index_code_repository_at(config, repo_id, target)
+}
+
+pub fn index_code_repository_at(
+    config: &MemoryConfig,
+    repo_id: &str,
+    target: Option<(String, String)>,
+) -> Result<CodeIndexReport, CodeGraphProjectionError> {
     let _guard = CODE_INDEX_WRITE_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -632,7 +641,7 @@ pub fn index_code_repository(
             )
         })?;
     let indexed_at = Utc::now();
-    let Some((target_branch, commit_sha)) = code_index_target(config)? else {
+    let Some((target_branch, commit_sha)) = target else {
         let mut report = code_graph_index_report(config, repo_id)?;
         report.status = CodeIndexStatus::Unavailable;
         report.head_revision = None;
@@ -804,9 +813,12 @@ pub fn index_code_repository(
         if let Some(previous_file) = previous_files.get(&relative_display)
             && previous_file.content_sha256 == content_sha256
             && previous_file.language == language_id
-            && previous_file.analyzed
-            && previous_file.parser_version == current_parser_version
-            && previous_file.query_pack_version == versions.query_pack
+            && ((previous_file.analyzed
+                && previous_file.parser_version == current_parser_version
+                && previous_file.query_pack_version == versions.query_pack)
+                || (!previous_file.analyzed
+                    && previous_file.parser_version.is_empty()
+                    && previous_file.query_pack_version.is_empty()))
         {
             current_files.insert(relative_display.clone(), previous_file.clone());
             memberships.push(CodeSnapshotMembershipInput {
@@ -995,17 +1007,7 @@ pub fn index_code_repository(
     persist_code_snapshot_membership(config, repo_id, &commit_sha, &memberships)?;
     let mut promotion_paths = Vec::new();
     for file in &memberships {
-        let reused = previous_files.get(&file.path.to_string_lossy().to_string()).is_some_and(
-            |previous| {
-                previous.language == file.language
-                    && previous.content_sha256 == file.content_sha256
-                    && previous.parser_version == file.parser_version
-                    && previous.query_pack_version == file.query_pack_version
-                    && previous.analyzed == file.analyzed
-                    && previous.skip_reason == file.skip_reason
-            },
-        );
-        if !reused {
+        if !current_code_snapshot_file_matches(config, repo_id, file)? {
             promotion_paths.push(file.path.to_string_lossy().to_string());
         }
     }
@@ -1126,35 +1128,52 @@ fn git_tree_paths(
     root: &Path,
     commit: &str,
 ) -> Result<Vec<(PathBuf, String, String)>, CodeGraphProjectionError> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(root)
-        .args(["ls-tree", "-r", "-z", "--full-tree"])
-        .arg(commit)
-        .output()
-        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
-            path: root.to_path_buf(),
-            source,
-        }))?;
-    if !output.status.success() {
-        return Err(CodeGraphProjectionError::InvalidRequest(
-            "failed to list configured target branch files".to_string(),
-        ));
-    }
-    let entries = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-        .filter_map(|record| {
+    let mut directories = vec![String::new()];
+    let mut entries = Vec::new();
+    while let Some(directory) = directories.pop() {
+        let pathspec = if directory.is_empty() {
+            ".".to_string()
+        } else {
+            format!("{directory}/")
+        };
+        let output = Command::new("git")
+            .args(["-C"])
+            .arg(root)
+            .args(["ls-tree", "-z", "--full-tree"])
+            .arg(commit)
+            .args(["--", &pathspec])
+            .output()
+            .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
+                path: root.to_path_buf(),
+                source,
+            }))?;
+        if !output.status.success() {
+            return Err(CodeGraphProjectionError::InvalidRequest(
+                "failed to list configured target branch files".to_string(),
+            ));
+        }
+        for record in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
             let record = String::from_utf8_lossy(record);
-            let (metadata, path) = record.split_once('\t')?;
+            let Some((metadata, path)) = record.split_once('\t') else {
+                continue;
+            };
             let mut parts = metadata.split_whitespace();
-            let mode = parts.next()?.to_string();
-            let object_kind = parts.next()?;
-            let blob_id = parts.next()?.to_string();
-            (object_kind == "blob").then(|| (PathBuf::from(path), mode, blob_id))
-        })
-        .collect::<Vec<_>>();
+            let mode = parts.next().unwrap_or_default().to_string();
+            let object_kind = parts.next().unwrap_or_default();
+            let object_id = parts.next().unwrap_or_default().to_string();
+            if object_kind == "tree" {
+                if skipped_directory_name(Path::new(path)).is_none() {
+                    directories.push(path.to_string());
+                }
+            } else if object_kind == "blob" {
+                entries.push((PathBuf::from(path), mode, object_id));
+            }
+        }
+    }
     for (path, _, _) in &entries {
         if normalize_code_path(&path.to_string_lossy()).is_err() {
             return Err(CodeGraphProjectionError::InvalidRequest(format!(
@@ -1464,6 +1483,56 @@ fn promote_staged_code_snapshot(
         })
     })?;
     Ok(stale_rows)
+}
+
+fn current_code_snapshot_file_matches(
+    config: &MemoryConfig,
+    repo_id: &str,
+    file: &CodeSnapshotMembershipInput,
+) -> Result<bool, CodeGraphProjectionError> {
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(false);
+    };
+    let path = file.path.to_string_lossy().to_string();
+    let exists = if file.analyzed {
+        connection
+            .query_row(
+                "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' LIMIT 1",
+                params![
+                    repo_id,
+                    path,
+                    file.content_sha256,
+                    file.parser_version,
+                    file.query_pack_version,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .is_some()
+    } else {
+        connection
+            .query_row(
+                "SELECT 1 FROM code_skipped_files WHERE repo_id = ? AND path = ? AND reason = ? AND content_sha256 = ? AND freshness = 'current' LIMIT 1",
+                params![
+                    repo_id,
+                    path,
+                    file.skip_reason.as_deref().unwrap_or(""),
+                    file.content_sha256,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .is_some()
+    };
+    Ok(exists)
 }
 
 fn persist_code_index_documents_in_batches(
@@ -3353,19 +3422,23 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 mod code_graph_tests {
-    use crate::opensymphony_code_intel::{CaptureRecord, SourceSpan};
-    use crate::opensymphony_memory::{KnowledgeScope, KnowledgeScopeKind, MemoryConfig};
+    use crate::opensymphony_code_intel::{CaptureRecord, SourceSpan, parse_path};
+    use crate::opensymphony_memory::{
+        CodeIntelPersistBatch, KnowledgeScope, KnowledgeScopeKind, MemoryConfig,
+        persist_code_intel_documents,
+    };
     use chrono::Utc;
-    use std::{fs, process::Command, sync::Arc};
+    use std::{fs, path::{Path, PathBuf}, process::Command, sync::Arc};
     use tempfile::TempDir;
 
     use super::{
         code_citation_matches_symbol, code_graph_diff_overlay, code_graph_repos,
-        code_symbol_span_matches, has_work_item_scope, index_code_repository,
+        code_index_document, code_symbol_span_matches, has_work_item_scope,
+        index_code_repository, index_code_repository_at, open_existing_index_read_only,
         repository_scope_matches,
     };
 
-    fn git(root: &std::path::Path, args: &[&str]) -> String {
+    fn git(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(["-C"])
             .arg(root)
@@ -3413,12 +3486,44 @@ mod code_graph_tests {
         let baseline = git(repo.path(), &["rev-parse", "HEAD"]);
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
 
+        let source = fs::read_to_string(repo.path().join("src/lib.rs")).expect("baseline source");
+        let summary = parse_path(Path::new("src/lib.rs"), &source).expect("baseline parse");
+        let mut remaining_matches = config.code_intel.ast.max_matches_per_request;
+        let legacy_document = code_index_document(
+            PathBuf::from("src/lib.rs"),
+            &source,
+            &summary,
+            &mut remaining_matches,
+            config.code_intel.ast.max_capture_bytes,
+        );
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("legacy-code-intel".to_string()),
+                worktree_dirty: false,
+                documents: vec![legacy_document],
+            },
+        )
+        .expect("legacy code-intel document should persist");
+
         let first = index_code_repository(&config, "fixture-repo").expect("baseline index");
         assert_eq!(first.status, crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Completed);
         assert_eq!(first.head_revision.as_deref(), Some(baseline.as_str()));
         assert!(first.persisted_documents > 0);
         assert!(first.persisted_symbols > 0);
         assert!(first.persisted_edges > 0);
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let freshness: String = connection
+            .query_row(
+                "SELECT freshness FROM code_documents WHERE repo_id = ? AND path = ?",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("legacy document should remain current");
+        assert_eq!(freshness, "current");
 
         fs::write(
             repo.path().join("src/lib.rs"),
@@ -3472,6 +3577,14 @@ mod code_graph_tests {
         assert_eq!(repos.repos[0].repo_id, "fixture-repo");
         assert_eq!(repos.repos[0].head_revision.as_deref(), Some(identical.as_str()));
 
+        let bound = index_code_repository_at(
+            &config,
+            "bound-repo",
+            Some(("develop".to_string(), baseline.clone())),
+        )
+        .expect("explicit accepted revision should index");
+        assert_eq!(bound.head_revision.as_deref(), Some(baseline.as_str()));
+
         fs::write(repo.path().join("src/new.rs"), "pub fn new_symbol() {}\n")
             .expect("new source");
         git(repo.path(), &["add", "."]);
@@ -3486,6 +3599,32 @@ mod code_graph_tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn target_tree_listing_prunes_skipped_directories_before_recursion() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::create_dir_all(repo.path().join("src")).expect("src directory");
+        fs::create_dir_all(repo.path().join("node_modules/dependency")).expect("node modules");
+        fs::write(repo.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+            .expect("source file");
+        fs::write(
+            repo.path().join("node_modules/dependency/generated.js"),
+            "module.exports = {};\n",
+        )
+        .expect("skipped file");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "tree"]);
+        let commit = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let paths = super::git_tree_paths(repo.path(), &commit).expect("tree should list");
+        assert!(paths.iter().any(|(path, _, _)| path == Path::new("src/lib.rs")));
+        assert!(!paths
+            .iter()
+            .any(|(path, _, _)| path.starts_with(Path::new("node_modules"))));
     }
 
     #[test]
