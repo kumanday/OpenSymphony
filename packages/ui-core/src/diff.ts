@@ -10,7 +10,9 @@ import { escapeHtml, escapeAttr } from "./html.js";
 export interface DiffSymbolRegion {
   symbol: CodeOutlineSymbol;
   firstChangedLine: number;
+  firstChangedLineKey: string;
   changedLines: number[];
+  changedLineKeys: string[];
 }
 
 /** UI model for a single changed file in the diff viewer. */
@@ -60,10 +62,9 @@ export function renderFileDiff(
     return `<div class="os-file-diff os-empty" data-testid="file-diff" data-file-path="${escapeAttr(diff.file_path)}">${header}<div>No diff available</div></div>`;
   }
   const regions = outline ? resolveDiffSymbolRegions(diff, outline) : [];
-  const regionByLine = new Map(regions.map((region) => [region.firstChangedLine, region]));
-  const symbolLines = new Map<number, DiffSymbolRegion>();
+  const symbolLines = new Map<string, DiffSymbolRegion>();
   for (const region of regions) {
-    for (const line of region.changedLines) symbolLines.set(line, region);
+    for (const lineKey of region.changedLineKeys) symbolLines.set(lineKey, region);
   }
   const hunks = diff.hunks
     .map((hunk) => {
@@ -71,8 +72,9 @@ export function renderFileDiff(
       const lines = hunk.lines
         .map((line) => {
           const lineNumber = line.type === "deletion" ? oldLine : newLine;
-          const region = symbolLines.get(lineNumber);
-          const glyph = region && regionByLine.get(lineNumber) === region
+          const lineKey = diffLineKey(line.type, lineNumber);
+          const region = symbolLines.get(lineKey);
+          const glyph = region && region.firstChangedLineKey === lineKey
             ? renderDiffSymbolGlyph(region.symbol, codeDeepLink?.(region.symbol.symbol_key) ?? null)
             : "";
           const typeClass = `os-diff-line-${escapeAttr(line.type)}`;
@@ -110,9 +112,21 @@ export function resolveDiffSymbolRegions(
         const symbol = innermostSymbolAtLine(outline.symbols, lineNumber)
           ?? (line.type === "deletion" ? nearestSymbolAtLine(outline.symbols, lineNumber) : null);
         if (symbol) {
-          const region = regions.get(symbol.symbol_key) ?? { symbol, firstChangedLine: renderedLine, changedLines: [] };
-          region.firstChangedLine = Math.min(region.firstChangedLine, renderedLine);
+          const lineKey = diffLineKey(line.type, renderedLine);
+          const region = regions.get(symbol.symbol_key) ?? {
+            symbol,
+            firstChangedLine: renderedLine,
+            firstChangedLineKey: lineKey,
+            changedLines: [],
+            changedLineKeys: [],
+          };
+          if (renderedLine < region.firstChangedLine
+            || (renderedLine === region.firstChangedLine && lineKey < region.firstChangedLineKey)) {
+            region.firstChangedLine = renderedLine;
+            region.firstChangedLineKey = lineKey;
+          }
           if (!region.changedLines.includes(renderedLine)) region.changedLines.push(renderedLine);
+          if (!region.changedLineKeys.includes(lineKey)) region.changedLineKeys.push(lineKey);
           regions.set(symbol.symbol_key, region);
         }
       }
@@ -122,6 +136,10 @@ export function resolveDiffSymbolRegions(
     }
   }
   return [...regions.values()].sort((a, b) => a.firstChangedLine - b.firstChangedLine || a.symbol.symbol_key.localeCompare(b.symbol.symbol_key));
+}
+
+function diffLineKey(type: FileDiffPage["hunks"][number]["lines"][number]["type"], line: number): string {
+  return `${type}:${line}`;
 }
 
 function hunkLineStarts(hunk: FileDiffPage["hunks"][number]): [number, number] {

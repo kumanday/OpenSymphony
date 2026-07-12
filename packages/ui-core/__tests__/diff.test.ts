@@ -88,6 +88,34 @@ describe("diff symbol navigation", () => {
     expect(html).toContain("No diff available");
   });
 
+  it("keeps old and new line coordinates distinct", () => {
+    const coordinateDiff: FileDiffPage = {
+      ...diff,
+      hunks: [{
+        ...diff.hunks[0],
+        header: "@@ -5,7 +10,7 @@",
+        start_line: 5,
+        lines: [
+          { type: "addition", line: "new symbol" },
+          ...Array.from({ length: 5 }, () => ({ type: "context" as const, line: "context" })),
+          { type: "deletion", line: "old symbol" },
+        ],
+      }],
+    };
+    const coordinateOutline: CodeFileOutline = {
+      ...outline,
+      symbols: [
+        { ...outline.symbols[0], symbol_key: "added", name: "added", span: { ...outline.symbols[0].span, start_line: 10, end_line: 10 } },
+        { ...outline.symbols[1], symbol_key: "removed", name: "removed", span: { ...outline.symbols[1].span, start_line: 16, end_line: 16 } },
+      ],
+    };
+    const root = document.createElement("div");
+    root.innerHTML = renderFileDiff(coordinateDiff, coordinateOutline, (symbolKey) => `opensymphony://code/${symbolKey}`);
+    expect(root.querySelectorAll("[data-diff-symbol-action]")).toHaveLength(2);
+    expect(root.querySelector("[data-line-type='addition']")?.getAttribute("data-diff-symbol-key")).toBe("added");
+    expect(root.querySelector("[data-line-type='deletion']")?.getAttribute("data-diff-symbol-key")).toBe("removed");
+  });
+
   it("lists blast-radius-only symbols in the accessible delta", () => {
     const overlay = {
       schema_version: { major: 1, minor: 0, patch: 0 },

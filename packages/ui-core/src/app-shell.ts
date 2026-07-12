@@ -1208,7 +1208,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   ): Promise<void> {
     if (!this.codeGraphAdapter) return;
     const dirtyRun = this.state.codeGraph.runId
-      && (!baseRevision || !headRevision || headRevision.startsWith("HEAD+"));
+      && (!baseRevision || !headRevision || headRevision.startsWith("HEAD+") || headRevision.endsWith("+worktree"));
     const overlay = dirtyRun
       && this.state.codeGraph.runId
       && this.codeGraphAdapter.getRunDiffOverlay
@@ -1274,10 +1274,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       onSelectArea: this.onCodeAggregateSelected,
       nodeStyle: (node) => {
         const codeNode = snapshot?.nodes.find((candidate) => candidate.id === node.nodeId);
-        if (!codeNode) return undefined;
-        const deltaStatus = codeGraphNodeDeltaStatus(codeNode.symbol_key, this.state.codeGraph.diffOverlay);
-        const blastRadius = Boolean(codeNode.symbol_key && this.state.codeGraph.diffOverlay?.blast_radius.some((entry) => entry.symbol_key === codeNode.symbol_key));
-        return codeNodeVisualStyle(codeNode, deltaStatus, blastRadius);
+        const renderedNode = renderSnapshot?.nodes.find((candidate) => candidate.id === node.nodeId);
+        const styleNode = codeNode ?? (renderedNode ? {
+          kind: renderedNode.kind as CodeGraphNode["kind"],
+          symbol_kind: renderedNode.concept_type ?? null,
+          freshness: renderedNode.freshness as CodeGraphNode["freshness"],
+          diagnostic_count: renderedNode.warning_count,
+          symbol_key: renderedNode.concept_id ?? null,
+        } : undefined);
+        if (!styleNode) return undefined;
+        const deltaStatus = codeGraphNodeDeltaStatus(styleNode.symbol_key, this.state.codeGraph.diffOverlay);
+        const blastRadius = Boolean(styleNode.symbol_key && this.state.codeGraph.diffOverlay?.blast_radius.some((entry) => entry.symbol_key === styleNode.symbol_key));
+        return codeNodeVisualStyle(styleNode, deltaStatus, blastRadius);
       },
       edgeStyle: (edge) => edge.confidence
         ? codeEdgeVisualStyle({ confidence: edge.confidence as "exact" | "syntactic" | "heuristic" })
