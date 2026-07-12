@@ -1807,20 +1807,17 @@ fn query_symbols_for_revision(
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
-    if let Some(status) = code_snapshot_status(connection, config, repo_id, revision)?
-        && status != "completed"
-    {
-        return Ok(BTreeMap::new());
-    }
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
     let membership_ready =
-        code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+        code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+            && matches!(snapshot_status.as_deref(), None | Some("completed"));
     let query = if membership_ready {
         format!(
-            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN s.worktree_dirty THEN 1 ELSE 0 END FROM code_symbols AS s WHERE s.repo_id = ? AND s.symbol_key != '' AND NOT s.worktree_dirty AND (s.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = s.repo_id AND m.commit_sha = ? AND m.path = s.path AND m.content_sha256 = s.content_sha256 AND m.parser_version = s.parser_version AND m.query_pack_version = s.query_pack_version AND m.analyzed)) ORDER BY s.symbol_key, s.indexed_at DESC, s.symbol_id"
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN s.worktree_dirty THEN 1 ELSE 0 END FROM code_symbols AS s WHERE s.repo_id = ? AND s.symbol_key != '' AND s.freshness <> 'staged' AND NOT s.worktree_dirty AND (s.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = s.repo_id AND m.commit_sha = ? AND m.path = s.path AND m.content_sha256 = s.content_sha256 AND m.parser_version = s.parser_version AND m.query_pack_version = s.query_pack_version AND m.analyzed)) ORDER BY s.symbol_key, s.indexed_at DESC, s.symbol_id"
         )
     } else {
         format!(
-            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id"
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' AND freshness <> 'staged' ORDER BY symbol_key, indexed_at DESC, symbol_id"
         )
     };
     let mut statement = connection

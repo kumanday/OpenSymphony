@@ -665,6 +665,7 @@ pub fn index_code_repository_at(
     drop(connection);
 
     let paths = git_tree_paths(&config.repo_root, &commit_sha)?;
+    let repo_prefix = git_repo_prefix(&config.repo_root)?;
     let previous = latest_code_snapshot(config, repo_id, &target_branch)?;
     let same_revision = previous
         .as_ref()
@@ -739,7 +740,7 @@ pub fn index_code_repository_at(
             continue;
         }
         let relative_display = path.to_string_lossy().to_string();
-        let blob_size = git_blob_size(&config.repo_root, &commit_sha, &path)?;
+        let blob_size = git_blob_size(&config.repo_root, &repo_prefix, &commit_sha, &path)?;
         let Some(language) = detect_language(&path) else {
             let content_sha256 = format!("git-blob:{blob_id}");
             skipped_files.push(format!("{relative_display}: unsupported language"));
@@ -803,7 +804,7 @@ pub fn index_code_repository_at(
             continue;
         }
 
-        let bytes = git_blob(&config.repo_root, &commit_sha, &path)?;
+        let bytes = git_blob(&config.repo_root, &repo_prefix, &commit_sha, &path)?;
         let content_sha256 = sha256_bytes_hex(&bytes);
         let versions = current_parser_versions(language);
         let current_parser_version = format!("{}:{}", versions.grammar, versions.tree_sitter);
@@ -816,7 +817,8 @@ pub fn index_code_repository_at(
                 && previous_file.query_pack_version == versions.query_pack)
                 || (!previous_file.analyzed
                     && previous_file.parser_version.is_empty()
-                    && previous_file.query_pack_version.is_empty()))
+                    && previous_file.query_pack_version.is_empty()
+                    && previous_file.skip_reason.as_deref() != Some("max files per request")))
         {
             current_files.insert(relative_display.clone(), previous_file.clone());
             memberships.push(CodeSnapshotMembershipInput {
@@ -1185,12 +1187,31 @@ fn git_tree_paths(
     Ok(entries)
 }
 
+fn git_repo_prefix(root: &Path) -> Result<PathBuf, CodeGraphProjectionError> {
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["rev-parse", "--show-prefix"])
+        .output()
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
+            path: root.to_path_buf(),
+            source,
+        }))?;
+    if !output.status.success() {
+        return Err(CodeGraphProjectionError::InvalidRequest(
+            "failed to resolve configured repository path".to_string(),
+        ));
+    }
+    Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+}
+
 fn git_blob(
     root: &Path,
+    repo_prefix: &Path,
     commit: &str,
     path: &Path,
 ) -> Result<Vec<u8>, CodeGraphProjectionError> {
-    let object = format!("{}:{}", commit, path.to_string_lossy());
+    let object = format!("{}:{}", commit, repo_prefix.join(path).to_string_lossy());
     let output = Command::new("git")
         .args(["-C"])
         .arg(root)
@@ -1212,10 +1233,11 @@ fn git_blob(
 
 fn git_blob_size(
     root: &Path,
+    repo_prefix: &Path,
     commit: &str,
     path: &Path,
 ) -> Result<u64, CodeGraphProjectionError> {
-    let object = format!("{}:{}", commit, path.to_string_lossy());
+    let object = format!("{}:{}", commit, repo_prefix.join(path).to_string_lossy());
     let output = Command::new("git")
         .args(["-C"])
         .arg(root)
@@ -1432,6 +1454,15 @@ fn promote_staged_code_snapshot(
         })
     })?;
     let mut stale_rows = 0;
+    transaction
+        .execute(
+            "UPDATE code_edges AS current SET commit_sha = staged.commit_sha, worktree_dirty = staged.worktree_dirty, path = staged.path, language = staged.language, edge_kind = staged.edge_kind, source_symbol_id = staged.source_symbol_id, source_symbol_key = staged.source_symbol_key, target_symbol_id = staged.target_symbol_id, target_symbol_key = staged.target_symbol_key, target_hint = staged.target_hint, confidence = staged.confidence, start_line = staged.start_line, start_col = staged.start_col, end_line = staged.end_line, end_col = staged.end_col, start_byte = staged.start_byte, end_byte = staged.end_byte, content_sha256 = staged.content_sha256, parser_version = staged.parser_version, query_pack_version = staged.query_pack_version, indexed_at = staged.indexed_at FROM code_edge_revisions AS staged WHERE current.edge_id = staged.edge_id AND current.repo_id = staged.repo_id AND current.freshness = 'current' AND staged.repo_id = ? AND staged.commit_sha = ? AND staged.freshness = 'staged'",
+            params![repo_id, commit_sha],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
     stale_rows += transaction
         .execute(
             "UPDATE code_symbols AS current SET freshness = 'stale' WHERE current.repo_id = ? AND current.freshness = 'current' AND EXISTS (SELECT 1 FROM code_symbols AS staged WHERE staged.repo_id = current.repo_id AND staged.path = current.path AND staged.symbol_key = current.symbol_key AND staged.commit_sha = ? AND staged.freshness = 'staged')",
@@ -2376,8 +2407,9 @@ fn code_revision_indexed(
     repo_id: &str,
     revision: &str,
 ) -> Result<bool, MemoryError> {
-    if let Some(status) = code_snapshot_status(connection, config, repo_id, revision)? {
-        return Ok(status == "completed");
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
+    if snapshot_status.as_deref() == Some("completed") {
+        return Ok(true);
     }
     for (table, ready) in [
         (
@@ -2405,7 +2437,9 @@ fn code_revision_indexed(
             return Ok(true);
         }
     }
-    if code_snapshot_membership_read_model_ready(connection, &config.index_path)? {
+    if matches!(snapshot_status.as_deref(), None | Some("completed"))
+        && code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+    {
         let mut statement = connection
             .prepare("SELECT 1 FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? LIMIT 1")
             .map_err(|source| MemoryError::DuckDb {
@@ -2473,7 +2507,7 @@ fn code_revision_exists_in_table(
 ) -> Result<bool, MemoryError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty LIMIT 1"
+            "SELECT 1 FROM {table} WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty LIMIT 1"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -2918,12 +2952,10 @@ fn query_revision_documents(
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, RevisionDocumentKey>, MemoryError> {
-    if code_snapshot_membership_read_model_ready(connection, &config.index_path)? {
-        if let Some(status) = code_snapshot_status(connection, config, repo_id, revision)?
-            && status != "completed"
-        {
-            return Ok(BTreeMap::new());
-        }
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
+    if matches!(snapshot_status.as_deref(), None | Some("completed"))
+        && code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+    {
         let mut statement = connection
             .prepare("SELECT path, content_sha256, parser_version, query_pack_version, analyzed FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? ORDER BY path")
             .map_err(|source| MemoryError::DuckDb {
@@ -2951,7 +2983,7 @@ fn query_revision_documents(
                 path: config.index_path.clone(),
                 source,
             })?;
-        if code_snapshot_status(connection, config, repo_id, revision)?.is_some() {
+        if snapshot_status.is_some() {
             return Ok(rows);
         }
     }
@@ -2986,7 +3018,7 @@ fn query_revision_documents_from_table(
 ) -> Result<BTreeMap<String, RevisionDocumentKey>, MemoryError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC"
+            "SELECT path, content_sha256, parser_version, query_pack_version FROM {table} WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC"
         ))
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -3035,7 +3067,7 @@ fn query_revision_skipped_files(
     }
     let mut statement = connection
         .prepare(
-            "SELECT path, content_sha256 FROM code_skipped_files WHERE repo_id = ? AND commit_sha = ? AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC",
+            "SELECT path, content_sha256 FROM code_skipped_files WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -3559,6 +3591,14 @@ mod code_graph_tests {
             )
             .expect("current symbols should remain unique");
         assert_eq!(symbol_count, unique_symbol_count);
+        let current_edge_commit: String = connection
+            .query_row(
+                "SELECT commit_sha FROM code_edges WHERE repo_id = ? AND path = ? AND freshness = 'current' LIMIT 1",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("target snapshot edge should be current");
+        assert_eq!(current_edge_commit, baseline);
         drop(connection);
 
         let refreshed = index_code_repository(&config, "fixture-repo")
@@ -3591,6 +3631,29 @@ mod code_graph_tests {
             .expect("snapshot should exist");
         assert_eq!(snapshot_status, "completed");
         drop(connection);
+        super::persist_code_snapshot_state(
+            &config,
+            super::CodeSnapshotState {
+                repo_id: "fixture-repo",
+                commit_sha: "legacy-code-intel",
+                target_branch: "develop",
+                status: "running",
+                total_files: 0,
+                parsed_files: 0,
+                skipped_files: 0,
+                deleted_files: 0,
+                indexed_at: Utc::now(),
+            },
+        )
+        .expect("record legacy interrupted index");
+        assert!(code_graph_diff_overlay(
+            &config,
+            "fixture-repo",
+            "legacy-code-intel",
+            &baseline,
+            500,
+        )
+        .is_ok());
 
         fs::write(
             repo.path().join("src/lib.rs"),
@@ -3706,6 +3769,11 @@ mod code_graph_tests {
             .expect("outside source");
         fs::write(repo.path().join("configured/src/lib.rs"), "pub fn inside() {}\n")
             .expect("inside source");
+        fs::write(
+            repo.path().join("configured/WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("workflow marker");
         git(repo.path(), &["init", "-b", "develop"]);
         git(repo.path(), &["config", "user.email", "test@example.com"]);
         git(repo.path(), &["config", "user.name", "Test User"]);
@@ -3721,6 +3789,43 @@ mod code_graph_tests {
         assert!(!paths
             .iter()
             .any(|(path, _, _)| path == Path::new("outside.rs")));
+        let config = MemoryConfig::load(repo.path().join("configured"), None)
+            .expect("scoped memory config should load");
+        let report = index_code_repository(&config, "scoped-repo")
+            .expect("scoped target index should read configured blobs");
+        assert!(report.parsed_files >= 1);
+        assert!(super::code_graph_file_snapshot(&config, "scoped-repo", "src/lib.rs", false).is_ok());
+        assert!(super::code_graph_file_snapshot(&config, "scoped-repo", "outside.rs", false).is_err());
+    }
+
+    #[test]
+    fn target_index_reparses_files_previously_skipped_by_file_limit() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("workflow marker");
+        fs::write(repo.path().join("a.rs"), "pub fn first() {}\n").expect("first source");
+        fs::write(repo.path().join("b.rs"), "pub fn second() {}\n").expect("second source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "limited tree"]);
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.code_intel.ast.max_files_per_request = 1;
+        let first = index_code_repository(&config, "limited-repo").expect("limited index");
+        assert_eq!(first.parsed_files, 1);
+
+        git(repo.path(), &["commit", "--allow-empty", "-m", "raise limit"]);
+        config.code_intel.ast.max_files_per_request = 2;
+        let second = index_code_repository(&config, "limited-repo").expect("expanded index");
+        assert!(second.parsed_files > first.parsed_files);
+        assert!(!second
+            .skipped_files
+            .iter()
+            .any(|path| path.contains("max files per request")));
     }
 
     #[test]
