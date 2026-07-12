@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
-import type { CodeFileOutline, FileDiffPage } from "@opensymphony/gateway-schema";
-import { innermostSymbolAtLine, renderFileDiff, resolveDiffSymbolRegions } from "../src/diff.js";
+import type { CodeDiffOverlay, CodeFileOutline, FileDiffPage } from "@opensymphony/gateway-schema";
+import { innermostSymbolAtLine, renderCodeDiffDeltaList, renderCodeDiffSummary, renderFileDiff, resolveDiffSymbolRegions } from "../src/diff.js";
 
 const outline: CodeFileOutline = {
   schema_version: { major: 1, minor: 0, patch: 0 },
@@ -66,5 +66,35 @@ describe("diff symbol navigation", () => {
     expect(root.querySelectorAll("[data-diff-symbol-action]")).toHaveLength(1);
     expect(root.querySelector("[data-diff-symbol-action]")?.getAttribute("aria-label")).toContain("inner");
     expect(root.querySelector("[data-diff-symbol-copy]")?.getAttribute("data-diff-symbol-copy")).toContain("opensymphony://code/");
+  });
+
+  it("keeps deletion-only regions navigable and hides unavailable file actions", () => {
+    const deletion: FileDiffPage = {
+      ...diff,
+      hunks: [{ ...diff.hunks[0], header: "@@ -9,1 +9,0 @@", lines: [{ type: "deletion", line: "}" }] }],
+      total_lines_added: 0,
+      total_lines_removed: 1,
+    };
+    expect(resolveDiffSymbolRegions(deletion, outline).map((region) => region.symbol.symbol_key)).toEqual(["outer"]);
+    expect(renderFileDiff(diff, outline)).not.toContain("os-diff-file-graph");
+    expect(renderFileDiff(diff, outline, (_symbolKey, path) => `opensymphony://code/file/${path}`)).toContain("os-diff-file-graph");
+  });
+
+  it("lists blast-radius-only symbols in the accessible delta", () => {
+    const overlay = {
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      repo_id: "repo",
+      base_revision: "base",
+      head_revision: "head",
+      added_symbols: [],
+      removed_symbols: [],
+      modified_symbols: [],
+      blast_radius: [{ symbol_key: "caller", inbound_count: 2 }],
+      unanalyzed_files: [],
+      truncation: { truncated: false, reason: null },
+      generated_at: "2026-07-12T00:00:00Z",
+    } satisfies CodeDiffOverlay;
+    expect(renderCodeDiffSummary(overlay)).toContain("data-run-code-summary");
+    expect(renderCodeDiffDeltaList(overlay)).toContain("caller");
   });
 });

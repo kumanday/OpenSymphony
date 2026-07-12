@@ -261,9 +261,12 @@ describe("Run detail views", () => {
     };
     const handle = renderOpenSymphonyApp({ root, mode: "web", transport, codeGraphAdapter: codeAdapter });
     await openRun(root);
+    await flushUntil(() => root.querySelector("[data-testid='run-code-summary']") !== null);
 
     expect(root.querySelector("[data-testid='run-code-summary']")?.textContent).toContain("1 modified");
     expect(root.querySelector("[data-testid='run-code-delta-list']")).not.toBeNull();
+    (root.querySelector("[data-testid='run-code-summary']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
     expect(root.querySelector("[data-diff-symbol-action]")).not.toBeNull();
     (root.querySelector("[data-diff-symbol-action]") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);

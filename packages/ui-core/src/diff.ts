@@ -48,7 +48,7 @@ export function renderChangedFileList(
 export function renderFileDiff(
   diff: FileDiffPage,
   outline?: CodeFileOutline | null,
-  codeDeepLink?: (symbolKey: string) => string | null,
+  codeDeepLink?: (symbolKey: string, path?: string) => string | null,
 ): string {
   if (diff.hunks.length === 0) {
     return `<div class="os-file-diff os-empty" data-testid="file-diff" data-file-path="${escapeAttr(diff.file_path)}">No diff available</div>`;
@@ -59,10 +59,11 @@ export function renderFileDiff(
   for (const region of regions) {
     for (const line of region.changedLines) symbolLines.set(line, region);
   }
+  const fileDeepLink = codeDeepLink?.("", diff.file_path) ?? null;
   const header = `<div class="os-diff-header" data-testid="diff-header">
     <span class="os-diff-path">${escapeHtml(diff.file_path)}</span>
     <span class="os-diff-stats">${renderLineStats(diff.total_lines_added, diff.total_lines_removed)}</span>
-    <button type="button" class="os-diff-file-graph" data-diff-file-graph="${escapeAttr(diff.file_path)}" aria-label="Open ${escapeAttr(diff.file_path)} in Code Graph">Open file in Code Graph</button>
+    ${fileDeepLink ? `<button type="button" class="os-diff-file-graph" data-diff-file-graph="${escapeAttr(diff.file_path)}" aria-label="Open ${escapeAttr(diff.file_path)} in Code Graph">Open file in Code Graph</button>` : ""}
   </div>`;
   const hunks = diff.hunks
     .map((hunk) => {
@@ -106,7 +107,8 @@ export function resolveDiffSymbolRegions(
       const lineNumber = line.type === "deletion" ? Math.max(1, newLine) : newLine;
       const renderedLine = line.type === "deletion" ? oldLine : newLine;
       if (line.type !== "context") {
-        const symbol = innermostSymbolAtLine(outline.symbols, lineNumber);
+        const symbol = innermostSymbolAtLine(outline.symbols, lineNumber)
+          ?? (line.type === "deletion" ? nearestSymbolAtLine(outline.symbols, lineNumber) : null);
         if (symbol) {
           const region = regions.get(symbol.symbol_key) ?? { symbol, firstChangedLine: renderedLine, changedLines: [] };
           region.firstChangedLine = Math.min(region.firstChangedLine, renderedLine);
@@ -138,6 +140,17 @@ export function innermostSymbolAtLine(
       || a.symbol_key.localeCompare(b.symbol_key))[0] ?? null;
 }
 
+function nearestSymbolAtLine(
+  symbols: readonly CodeOutlineSymbol[],
+  line: number,
+): CodeOutlineSymbol | null {
+  return [...symbols]
+    .sort((a, b) => Math.min(Math.abs(a.span.start_line - line), Math.abs(a.span.end_line - line))
+      - Math.min(Math.abs(b.span.start_line - line), Math.abs(b.span.end_line - line))
+      || a.span.start_line - b.span.start_line
+      || a.symbol_key.localeCompare(b.symbol_key))[0] ?? null;
+}
+
 function renderDiffSymbolGlyph(symbol: CodeOutlineSymbol, deepLink: string | null): string {
   const label = `Open ${symbol.name} in Code Graph`;
   const copy = deepLink
@@ -154,19 +167,24 @@ export function renderCodeDiffSummary(overlay: CodeDiffOverlay | null | undefine
     `${overlay.modified_symbols.length} modified`,
     `${overlay.blast_radius.length} blast radius`,
   ];
-  return `<div class="os-run-code-summary" data-testid="run-code-summary" aria-label="Code diff summary">${counts.map((value) => `<span>${escapeHtml(value)}</span>`).join(" · ")}</div>`;
+  return `<button type="button" class="os-run-code-summary" data-testid="run-code-summary" data-run-code-summary aria-label="Open code diff summary in Code Graph">${counts.map((value) => `<span>${escapeHtml(value)}</span>`).join(" · ")}</button>`;
 }
 
 export function renderCodeDiffDeltaList(overlay: CodeDiffOverlay | null | undefined): string {
   if (!overlay) return "";
   const symbols = [...overlay.added_symbols, ...overlay.removed_symbols, ...overlay.modified_symbols];
+  const changedKeys = new Set(symbols.map((symbol) => symbol.symbol_key));
   const rows = symbols.map((symbol) => {
     const side = symbol.after ?? symbol.before;
     const radius = overlay.blast_radius.find((entry) => entry.symbol_key === symbol.symbol_key);
     return `<li><span data-code-delta-status="${escapeAttr(symbol.status)}">${escapeHtml(symbol.status)}</span> <strong>${escapeHtml(side?.name ?? symbol.symbol_key)}</strong> <code>${escapeHtml(side?.path_display ?? "unknown path")}</code>${radius ? ` <span>(${radius.inbound_count} inbound)</span>` : ""}</li>`;
   }).join("");
+  const radiusOnlyRows = overlay.blast_radius
+    .filter((entry) => !changedKeys.has(entry.symbol_key))
+    .map((entry) => `<li><span data-code-delta-status="blast-radius">blast radius</span> <strong>${escapeHtml(entry.symbol_key)}</strong> <code>unknown path</code> <span>(${entry.inbound_count} inbound)</span></li>`)
+    .join("");
   const files = overlay.unanalyzed_files.map((path) => `<li><span>unanalyzed</span> <code>${escapeHtml(path)}</code></li>`).join("");
-  return `<details class="os-run-code-delta-list" data-testid="run-code-delta-list"><summary>Code delta details</summary><ul>${rows || "<li>No analyzed symbol changes</li>"}${files}</ul></details>`;
+  return `<details class="os-run-code-delta-list" data-testid="run-code-delta-list"><summary>Code delta details</summary><ul>${rows || radiusOnlyRows ? `${rows}${radiusOnlyRows}` : "<li>No analyzed symbol changes</li>"}${files}</ul></details>`;
 }
 
 function renderLineStats(added: number, removed: number): string {
