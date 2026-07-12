@@ -363,6 +363,8 @@ describe("Code Graph adapters and state", () => {
     expect(atlas.nodes.length).toBeLessThanOrEqual(2_000);
     expect(atlas.truncation).toEqual({ nodes_dropped: 48_000, edges_dropped: 198_001, reason: "directory aggregation" });
     expect(atlas.nodes.every((node) => node.kind !== "symbol")).toBe(true);
+    const renderedIds = new Set(atlas.nodes.map((node) => node.id));
+    expect(atlas.edges.every((edge) => renderedIds.has(edge.source_id) && renderedIds.has(edge.target_id))).toBe(true);
   });
 
   it("keeps HTTP and native adapters byte-equivalent for fixture DTOs", async () => {

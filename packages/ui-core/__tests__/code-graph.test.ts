@@ -59,6 +59,7 @@ describe("Code Graph renderer surface", () => {
     expect(summary?.textContent).toContain("48,000 nodes");
     expect(summary?.textContent).toContain("198,001 edges");
     expect(summary?.textContent).toContain("directory aggregation");
+    expect(summary?.id).toBe("code-graph-screen-reader-summary");
     expect(root.querySelector("canvas")?.getAttribute("aria-describedby")).toBe("code-graph-screen-reader-summary");
   });
 

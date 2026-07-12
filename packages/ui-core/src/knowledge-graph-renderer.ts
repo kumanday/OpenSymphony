@@ -159,7 +159,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
       </div>
       ${renderCodeGraphFilters(surface)}
       ${renderCodeBreadcrumb(state)}
-      <p class="os-sr-only" data-testid="code-graph-screen-reader-summary" role="status" aria-live="polite">${escapeHtml(accessibleSummary)}</p>
+      <p id="code-graph-screen-reader-summary" class="os-sr-only" data-testid="code-graph-screen-reader-summary" role="status" aria-live="polite">${escapeHtml(accessibleSummary)}</p>
       <div class="os-knowledge-stage" data-kg-stage>
         <canvas class="os-knowledge-canvas os-code-graph-canvas" data-testid="code-graph-canvas" role="img" aria-label="Code Graph canvas" aria-describedby="code-graph-screen-reader-summary"></canvas>
         <div class="os-knowledge-labels" data-kg-labels data-morph-ignore-children></div>

@@ -788,7 +788,7 @@ export function createCodeGraphReferenceAtlasFixture(): CodeGraphSnapshot {
     ),
   );
   const edges = nodes.slice(1).map((node, index) =>
-    codeEdge(`reference:${index}`, "contains", "community:reference", node.id, "exact"),
+    codeEdge(`reference:${index}`, "contains", nodes[index]!.id, node.id, "exact"),
   );
   return {
     schema_version: codeGraphSchemaVersion,
