@@ -269,6 +269,11 @@ Tasks:
 - OSYM-874 Run Diff Symbol Navigation And Code Overlay
 - OSYM-875 Cross Graph Code Memory And Work Chips
 - OSYM-876 Code Graph Scale Accessibility And Parity Hardening
+- OSYM-879 Target Branch Code Index And Revision Snapshots
+- OSYM-880 Workspace Code Overlay And Composite Graph
+- OSYM-881 Indexed Agent Code Context And Retrieval
+- OSYM-882 Edge Delta And Module Topology Diff
+- OSYM-883 Code Graph Bootstrap UX And End-To-End Validation
 
 ## M15: Hardening And Release Quality
 

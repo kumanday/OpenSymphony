@@ -1,9 +1,15 @@
-planningWave: codex-thread-lifecycle
+planningWave: code-graph-operational-indexing-and-overlays
 tasksDir: docs/tasks
 milestones:
-  - "M12.85: Codex Thread Lifecycle"
+  - "M12.9: Code Graph View"
 tasks:
-  - id: OSYM-877
-    file: docs/tasks/osym-877-canonical-codex-thread-reuse-and-workspace-retention.md
-  - id: OSYM-878
-    file: docs/tasks/osym-878-durable-codex-thread-archive-and-debug-recovery.md
+  - id: OSYM-879
+    file: docs/tasks/osym-879-target-branch-code-index-and-revision-snapshots.md
+  - id: OSYM-880
+    file: docs/tasks/osym-880-workspace-code-overlay-and-composite-graph.md
+  - id: OSYM-881
+    file: docs/tasks/osym-881-indexed-agent-code-context-and-retrieval.md
+  - id: OSYM-882
+    file: docs/tasks/osym-882-edge-delta-and-module-topology-diff.md
+  - id: OSYM-883
+    file: docs/tasks/osym-883-code-graph-bootstrap-ux-and-end-to-end-validation.md

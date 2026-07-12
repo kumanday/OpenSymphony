@@ -1,18 +1,33 @@
-planningWave: codex-thread-lifecycle
+planningWave: code-graph-operational-indexing-and-overlays
 linearProject: opensymphony-bootstrap-e7b957855cb7
-publishedAt: '2026-07-10T21:21:00.058570+00:00'
+publishedAt: '2026-07-12T18:03:02.108095+00:00'
 milestones:
-  'M12.85: Codex Thread Lifecycle':
-    milestoneId: f1e9559c-a53b-4104-808a-289c6be0b461
-    name: 'M12.85: Codex Thread Lifecycle'
+  'M12.9: Code Graph View':
+    milestoneId: b6d6eb2b-bbf9-4960-965d-3ad57e424507
+    name: 'M12.9: Code Graph View'
 tasks:
-  OSYM-877:
-    issue: COE-540
-    issueId: 03c5231a-dfa9-4486-85c8-824a71705668
-    url: https://linear.app/trilogy-ai-coe/issue/COE-540/canonical-codex-thread-reuse-and-workspace-retention
-    file: docs/tasks/osym-877-canonical-codex-thread-reuse-and-workspace-retention.md
-  OSYM-878:
-    issue: COE-541
-    issueId: 63ba049a-60f6-472b-8da1-e37d87953a4a
-    url: https://linear.app/trilogy-ai-coe/issue/COE-541/durable-codex-thread-archive-and-debug-recovery
-    file: docs/tasks/osym-878-durable-codex-thread-archive-and-debug-recovery.md
+  OSYM-879:
+    issue: COE-542
+    issueId: 8a385e1c-fe71-42a5-a162-34a976a6ab34
+    url: https://linear.app/trilogy-ai-coe/issue/COE-542/target-branch-code-index-and-revision-snapshots
+    file: docs/tasks/osym-879-target-branch-code-index-and-revision-snapshots.md
+  OSYM-880:
+    issue: COE-543
+    issueId: 7aba69d0-10de-42d5-a853-d51c26d0c878
+    url: https://linear.app/trilogy-ai-coe/issue/COE-543/workspace-code-overlay-and-composite-graph
+    file: docs/tasks/osym-880-workspace-code-overlay-and-composite-graph.md
+  OSYM-881:
+    issue: COE-544
+    issueId: c2131af3-23cc-4fb4-956b-b6abbacda586
+    url: https://linear.app/trilogy-ai-coe/issue/COE-544/indexed-agent-code-context-and-retrieval
+    file: docs/tasks/osym-881-indexed-agent-code-context-and-retrieval.md
+  OSYM-882:
+    issue: COE-545
+    issueId: 2db8072d-c710-436c-b3ee-97f61c439985
+    url: https://linear.app/trilogy-ai-coe/issue/COE-545/edge-delta-and-module-topology-diff
+    file: docs/tasks/osym-882-edge-delta-and-module-topology-diff.md
+  OSYM-883:
+    issue: COE-546
+    issueId: ca2b222d-20b2-4ef2-8c61-99d129c45db3
+    url: https://linear.app/trilogy-ai-coe/issue/COE-546/code-graph-bootstrap-ux-and-end-to-end-validation
+    file: docs/tasks/osym-883-code-graph-bootstrap-ux-and-end-to-end-validation.md

@@ -45,6 +45,7 @@ areas:
       - area:memory
       - area:operations
       - area:release
+      - area:run-detail
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -143,6 +144,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -211,6 +213,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -267,6 +270,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:rust
       - area:security
       - area:target-repo-bootstrap
@@ -295,6 +299,7 @@ areas:
     - code-review
     source_refs:
       linear_labels:
+      - area:accessibility
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -302,11 +307,14 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:gateway
       - area:graph-view
       - area:installer
       - area:memory
       - area:release
+      - area:run-detail
       - area:template
+      - area:testing
       - area:web
       - area:workflow
       - area:workspace-lifecycle
@@ -354,6 +362,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -433,6 +442,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:rust
       - area:security
       - area:target-repo-bootstrap
@@ -517,6 +527,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -554,10 +565,21 @@ areas:
     - debugging
     source_refs:
       linear_labels:
+      - area:accessibility
+      - area:code-intelligence
+      - area:codex-runtime
       - area:debugging
+      - area:desktop
+      - area:gateway
+      - area:graph-view
+      - area:memory
+      - area:run-detail
+      - area:testing
+      - area:web
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.9: Code Graph View'
   deployment-modes:
     title: Deployment Modes
     docs_target: docs/deployment-modes.md
@@ -612,6 +634,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -679,6 +702,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -782,6 +806,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -819,6 +844,7 @@ areas:
     - documentation
     source_refs:
       linear_labels:
+      - area:accessibility
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -826,13 +852,16 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:gateway
       - area:graph-view
       - area:installer
       - area:memory
       - area:operations
       - area:release
+      - area:run-detail
       - area:target-repo-bootstrap
       - area:template
+      - area:testing
       - area:web
       - area:workflow
       - area:workspace-lifecycle
@@ -882,6 +911,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -948,6 +978,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -1003,6 +1034,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1059,6 +1091,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:rust
       - area:security
       - area:target-repo-bootstrap
@@ -1116,6 +1149,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1259,6 +1293,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1324,6 +1359,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1405,6 +1441,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1476,6 +1513,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1559,6 +1597,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1624,6 +1663,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1708,6 +1748,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:rust
       - area:security
       - area:target-repo-bootstrap
@@ -1767,6 +1808,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1839,6 +1881,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -1911,6 +1954,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -1937,16 +1981,20 @@ areas:
     - release
     source_refs:
       linear_labels:
+      - area:accessibility
       - area:cli
       - area:code-intelligence
       - area:codex-runtime
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:gateway
       - area:graph-view
       - area:installer
       - area:memory
       - area:release
+      - area:run-detail
+      - area:testing
       - area:web
       - area:workspace-lifecycle
       linear_milestones:
@@ -1971,6 +2019,32 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M9.5: Developer Build Acceleration'
+  run-detail:
+    title: Run Detail
+    docs_target: docs/run-detail.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - run detail
+    - run-detail
+    source_refs:
+      linear_labels:
+      - area:accessibility
+      - area:code-intelligence
+      - area:codex-runtime
+      - area:debugging
+      - area:desktop
+      - area:gateway
+      - area:graph-view
+      - area:memory
+      - area:run-detail
+      - area:testing
+      - area:web
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.9: Code Graph View'
   runtime:
     title: Runtime
     docs_target: docs/runtime.md
@@ -2010,6 +2084,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -2065,6 +2140,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:rust
       - area:security
       - area:target-repo-bootstrap
@@ -2122,6 +2198,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -2192,6 +2269,7 @@ areas:
     - target-repo-bootstrap
     source_refs:
       linear_labels:
+      - area:accessibility
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2199,12 +2277,15 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:gateway
       - area:graph-view
       - area:installer
       - area:memory
       - area:release
+      - area:run-detail
       - area:target-repo-bootstrap
       - area:template
+      - area:testing
       - area:web
       - area:workflow
       - area:workspace-lifecycle
@@ -2223,17 +2304,21 @@ areas:
     - template
     source_refs:
       linear_labels:
+      - area:accessibility
       - area:cli
       - area:code-intelligence
       - area:codex-runtime
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:gateway
       - area:graph-view
       - area:installer
       - area:memory
       - area:release
+      - area:run-detail
       - area:template
+      - area:testing
       - area:web
       - area:workflow
       - area:workspace-lifecycle
@@ -2281,6 +2366,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -2332,6 +2418,7 @@ areas:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -2364,6 +2451,7 @@ areas:
       - area:memory
       - area:operations
       - area:release
+      - area:run-detail
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -2408,6 +2496,7 @@ areas:
       - area:memory
       - area:operations
       - area:release
+      - area:run-detail
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -2462,6 +2551,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -2527,6 +2617,7 @@ areas:
       - area:orchestrator
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:runtime
       - area:rust
       - area:security
@@ -2578,12 +2669,16 @@ areas:
     - web
     source_refs:
       linear_labels:
+      - area:accessibility
       - area:code-intelligence
       - area:codex-runtime
       - area:debugging
       - area:desktop
+      - area:gateway
       - area:graph-view
       - area:memory
+      - area:run-detail
+      - area:testing
       - area:web
       - area:workspace-lifecycle
       linear_milestones:
@@ -2632,6 +2727,7 @@ areas:
       - area:operations
       - area:query-packs
       - area:release
+      - area:run-detail
       - area:rust
       - area:security
       - area:target-repo-bootstrap
@@ -2675,10 +2771,20 @@ areas:
     - workspace-lifecycle
     source_refs:
       linear_labels:
+      - area:accessibility
+      - area:code-intelligence
       - area:codex-runtime
       - area:debugging
+      - area:desktop
+      - area:gateway
+      - area:graph-view
+      - area:memory
+      - area:run-detail
+      - area:testing
+      - area:web
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.9: Code Graph View'
 redaction:
   deny_patterns: []

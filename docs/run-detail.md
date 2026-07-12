@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: security
+area: run-detail
 visibility: public
-last_memory_sync: 2026-06-23T15:32:29.524342+00:00
+last_memory_sync: 2026-07-12T04:38:41.689952+00:00
 ---
 
-# Security
+# Run Detail
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
