@@ -4,10 +4,11 @@ use crate::opensymphony_gateway_schema::{
         CodeDiagnostic, CodeDiffBlastRadius, CodeDiffOverlay, CodeDiffSymbol,
         CodeDiffSymbolSide, CodeDiffSymbolStatus as DtoDiffStatus, CodeEdgeSummary,
         CodeFileOutline, CodeGraphAggregate, CodeGraphCommunity, CodeGraphConfidence,
-        CodeGraphEdge, CodeGraphFreshness, CodeGraphMode, CodeGraphNode, CodeGraphNodeKind,
-        CodeGraphNodeMetrics, CodeGraphSnapshot, CodeGraphTruncation, CodeGraphUpdatedEvent,
-        CodeIndexReport, CodeIndexStatus, CodeOutlineSymbol, CodeRepoList, CodeRepoSummary,
-        CodeSpan, CodeSymbolDetail, CodeSymbolProvenance,
+        CodeGraphEdge, CodeGraphFreshness, CodeGraphIssueChip, CodeGraphMemoryChip,
+        CodeGraphMode, CodeGraphNode, CodeGraphNodeKind, CodeGraphNodeMetrics, CodeGraphSnapshot,
+        CodeGraphTruncation, CodeGraphUpdatedEvent, CodeIndexReport, CodeIndexStatus,
+        CodeOutlineSymbol, CodeRepoList, CodeRepoSummary, CodeSpan, CodeSymbolDetail,
+        CodeSymbolProvenance,
     },
 };
 
@@ -164,6 +165,7 @@ pub fn code_graph_symbol_detail(
     repo_id: &str,
     symbol_key: &str,
     include_stale: bool,
+    access: MemoryGraphAccess,
 ) -> Result<CodeSymbolDetail, CodeGraphProjectionError> {
     let Some(connection) = open_existing_index_read_only(config)? else {
         return Err(CodeGraphProjectionError::SymbolNotFound(symbol_key.to_string()));
@@ -179,6 +181,8 @@ pub fn code_graph_symbol_detail(
     }
     let diagnostics = query_symbol_diagnostics(&connection, config, &symbol, include_stale)?;
     let edge_summary = query_symbol_edge_summary(&connection, &symbol, include_stale)?;
+    let (related_issues, related_memory_concepts) =
+        code_graph_related_memory(config, repo_id, &symbol, access)?;
 
     Ok(CodeSymbolDetail {
         schema_version: SchemaVersion::v1(),
@@ -205,7 +209,64 @@ pub fn code_graph_symbol_detail(
         diagnostics,
         edge_summary,
         source_snippet: None,
+        related_issues,
+        related_memory_concepts,
     })
+}
+
+fn code_graph_related_memory(
+    config: &MemoryConfig,
+    repo_id: &str,
+    symbol: &CodeSymbolRecord,
+    access: MemoryGraphAccess,
+) -> Result<(Vec<CodeGraphIssueChip>, Vec<CodeGraphMemoryChip>), CodeGraphProjectionError> {
+    // ponytail: scan the accessible issue catalog per selected symbol; add a
+    // source-ref index when cross-graph chip latency needs to scale further.
+    let issues = accessible_issues(config, access).map_err(|error| match error {
+        MemoryGraphProjectionError::Memory(error) => error,
+        other => MemoryError::InvalidInput(other.to_string()),
+    })?;
+    let mut related_issues = Vec::new();
+    let mut related_memory_concepts = Vec::new();
+    for issue in issues {
+        let source_match = issue.source_refs.iter().any(|source| {
+            let repo_matches = source.repo_id.as_deref().is_none_or(|id| id == repo_id);
+            repo_matches
+                && (source.symbol_key.as_deref() == Some(symbol.symbol_key.as_str())
+                    || (source.kind == "path" && source.id == symbol.path)
+                    || (source.kind == "code-symbol"
+                        && source.id.starts_with(&format!("{}:", symbol.path))))
+        });
+        let scope_match = issue.scope_refs.iter().any(|scope| {
+            matches!(scope.kind, KnowledgeScopeKind::CodePath)
+                && (scope.id == symbol.path
+                    || symbol.path.starts_with(&format!("{}/", scope.id)))
+        });
+        let citation_match = issue.citations.iter().any(|citation| {
+            citation.target.contains(&symbol.symbol_key) || citation.target.contains(&symbol.path)
+        });
+        if !(source_match || scope_match || citation_match) {
+            continue;
+        }
+        let freshness = freshness_from_str(issue.freshness.as_str());
+        related_issues.push(CodeGraphIssueChip {
+            issue_key: issue.issue_key.clone(),
+            title: redact_for_dto(config, &issue.title),
+            state: issue.state.clone().map(|state| redact_for_dto(config, &state)),
+            url: None,
+            freshness,
+        });
+        related_memory_concepts.push(CodeGraphMemoryChip {
+            bundle_id: DEFAULT_MEMORY_GRAPH_BUNDLE_ID.to_string(),
+            concept_id: issue.concept_id.clone(),
+            title: redact_for_dto(config, &issue.title),
+            visibility: issue.visibility.as_str().to_string(),
+            freshness,
+        });
+    }
+    related_issues.sort_by(|left, right| left.issue_key.cmp(&right.issue_key));
+    related_memory_concepts.sort_by(|left, right| left.concept_id.cmp(&right.concept_id));
+    Ok((related_issues, related_memory_concepts))
 }
 
 pub fn code_graph_diff_overlay(

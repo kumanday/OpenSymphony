@@ -189,6 +189,30 @@ pub struct CodeSymbolDetail {
     pub edge_summary: Vec<CodeEdgeSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snippet: Option<CodeSourceSnippet>,
+    #[serde(default)]
+    pub related_issues: Vec<CodeGraphIssueChip>,
+    #[serde(default)]
+    pub related_memory_concepts: Vec<CodeGraphMemoryChip>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeGraphIssueChip {
+    pub issue_key: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub freshness: CodeGraphFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeGraphMemoryChip {
+    pub bundle_id: String,
+    pub concept_id: String,
+    pub title: String,
+    pub visibility: String,
+    pub freshness: CodeGraphFreshness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

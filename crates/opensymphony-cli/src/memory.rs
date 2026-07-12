@@ -2676,7 +2676,9 @@ async fn call_memory_ingest_code_intel_tool(
             "summary": artifact.summary,
             "sourceRefs": artifact.source_refs.into_iter().map(|source| json!({
                 "kind": source.kind,
-                "id": source.id
+                "id": source.id,
+                "repoId": source.repo_id,
+                "symbolKey": source.symbol_key
             })).collect::<Vec<_>>()
         })).collect::<Vec<_>>()
     }))
@@ -2748,6 +2750,7 @@ fn code_intel_documents_for_persistence(
     request: &CodeIntelPersistRequest,
 ) -> Result<CodeIntelPersistencePlan, MemoryError> {
     let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+    let repo_id = repo_id_for_code_intel(&request.config, &request.scope);
     let mut artifacts = Vec::new();
     let mut documents = Vec::new();
     let mut skipped_files = Vec::new();
@@ -2837,7 +2840,7 @@ fn code_intel_documents_for_persistence(
         let (summary_artifacts, used_symbols) = code_intel_artifacts_for_summary(
             &summary,
             &relative,
-            &relative_display,
+            &repo_id,
             &request.scope_refs,
             commit_sha.clone(),
             &request.symbols,
@@ -2892,12 +2895,13 @@ fn record_skipped_code_intel_file(
 fn code_intel_artifacts_for_summary(
     summary: &ParsedDocumentSummary,
     relative_path: &Path,
-    relative_display: &str,
+    repo_id: &str,
     scope_refs: &[CodeIntelScope],
     commit_sha: Option<String>,
     symbols: &BTreeSet<String>,
     symbol_limit: usize,
 ) -> (Vec<CodeIntelArtifact>, usize) {
+    let relative_display = relative_path.to_string_lossy().to_string();
     let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
     let mut artifacts = vec![CodeIntelArtifact {
         provider: summary.versions.provider.clone(),
@@ -2905,8 +2909,10 @@ fn code_intel_artifacts_for_summary(
         scope_refs: scope_refs.to_vec(),
         source_refs: vec![CodeIntelSourceRef {
             kind: "path".to_string(),
-            id: relative_display.to_string(),
+            id: relative_display.clone(),
             url: None,
+            repo_id: Some(repo_id.to_string()),
+            symbol_key: None,
         }],
         path: Some(relative_path.to_path_buf()),
         commit_sha: commit_sha.clone(),
@@ -2922,21 +2928,42 @@ fn code_intel_artifacts_for_summary(
         ),
     }];
 
-    let selected_symbols = summary
+    let mut key_counts = BTreeSet::new();
+    let symbols_with_keys = summary
         .symbols
         .iter()
-        .filter(|symbol| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
+        .map(|symbol| {
+            let base_key = sha256_hex(
+                &[
+                    repo_id,
+                    &relative_display,
+                    source_language_id(summary.source.language),
+                    symbol_kind_id(&symbol.kind),
+                    &symbol.container_chain.join("\u{1f}"),
+                    &symbol.name,
+                ]
+                .join("\u{1f}"),
+            );
+            let mut symbol_key = base_key.clone();
+            let mut ordinal = 1usize;
+            while !key_counts.insert(symbol_key.clone()) {
+                ordinal += 1;
+                symbol_key = format!("{base_key}#{ordinal}");
+            }
+            (symbol, symbol_key)
+        })
+        .filter(|(symbol, _)| symbols.is_empty() || symbols.contains(symbol_kind_id(&symbol.kind)))
         .take(symbol_limit)
         .collect::<Vec<_>>();
 
-    if selected_symbols.is_empty() {
+    if symbols_with_keys.is_empty() {
         return (artifacts, 0);
     }
 
-    let used_symbols = selected_symbols.len();
-    let rendered_symbols = selected_symbols
+    let used_symbols = symbols_with_keys.len();
+    let rendered_symbols = symbols_with_keys
         .iter()
-        .map(|symbol| {
+        .map(|(symbol, _)| {
             format!(
                 "- {} `{}` at {}:{}",
                 symbol_kind_id(&symbol.kind),
@@ -2951,12 +2978,14 @@ fn code_intel_artifacts_for_summary(
         provider: PROVIDER_NAME.to_string(),
         kind: "ast-symbols".to_string(),
         scope_refs: scope_refs.to_vec(),
-        source_refs: selected_symbols
+        source_refs: symbols_with_keys
             .iter()
-            .map(|symbol| CodeIntelSourceRef {
+            .map(|(symbol, symbol_key)| CodeIntelSourceRef {
                 kind: "code-symbol".to_string(),
                 id: format!("{relative_display}:{}", symbol.rendered_span),
                 url: None,
+                repo_id: Some(repo_id.to_string()),
+                symbol_key: Some(symbol_key.clone()),
             })
             .collect(),
         path: Some(relative_path.to_path_buf()),
@@ -4973,6 +5002,23 @@ mod tests {
                 .as_str()
                 .expect("diagnostic")
                 .contains("src/bad.rs")
+        );
+        let symbol_source = result["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .iter()
+            .flat_map(|artifact| artifact["sourceRefs"].as_array().into_iter().flatten())
+            .find(|source| source["kind"] == "code-symbol")
+            .expect("persisted symbol source ref");
+        assert!(
+            symbol_source["repoId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert!(
+            symbol_source["symbolKey"]
+                .as_str()
+                .is_some_and(|key| !key.is_empty())
         );
         let connection = Connection::open(repo.path().join(".opensymphony/memory/memory.duckdb"))
             .expect("index opens");

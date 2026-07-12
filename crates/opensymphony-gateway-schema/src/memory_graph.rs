@@ -185,6 +185,10 @@ pub struct MemoryGraphSourceRef {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

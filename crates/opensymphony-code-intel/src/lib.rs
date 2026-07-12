@@ -83,6 +83,10 @@ pub struct CodeIntelSourceRef {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1001,6 +1005,8 @@ fn ast_artifacts_for_summary(
             kind: "path".to_string(),
             id: relative_display.to_string(),
             url: None,
+            repo_id: None,
+            symbol_key: None,
         }],
         path: Some(relative_path.to_path_buf()),
         commit_sha: commit_sha.clone(),
@@ -1053,6 +1059,8 @@ fn ast_artifacts_for_summary(
                     kind: "code-symbol".to_string(),
                     id: format!("{relative_display}:{}", symbol.rendered_span),
                     url: None,
+                    repo_id: None,
+                    symbol_key: None,
                 })
                 .collect(),
             path: Some(relative_path.to_path_buf()),

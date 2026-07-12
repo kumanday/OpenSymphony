@@ -91,6 +91,26 @@ describe("Code Graph renderer surface", () => {
     expect(parseCodeDeepLink(deepLink!)).toMatchObject({ mode: "neighborhood", symbolKey: "codeGraphReducer" });
   });
 
+  it("renders cross-graph chips as links to current targets", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const detail = codeGraphFixtureSymbolDetails.find((candidate) => candidate.symbol_key === "codeGraphReducer")!;
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({
+      snapshot,
+      layout: null,
+      state,
+      symbolDetail: {
+        ...detail,
+        related_issues: [{ issue_key: "COE-536", title: "Cross graph", freshness: "current" }],
+        related_memory_concepts: [{ bundle_id: "local-default", concept_id: "issues/COE-536", title: "Cross graph", visibility: "private", freshness: "current" }],
+      },
+      rawRecord: false,
+    });
+    expect(root.querySelector("[data-task-issue-key='COE-536']")).not.toBeNull();
+    expect(root.querySelector("[data-memory-deeplink='opensymphony://memory/local-default/concepts/issues/COE-536']")).not.toBeNull();
+  });
+
   it("renders a file fallback and omits delta-only filters from copied links", () => {
     let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
     state = codeGraphReducer(state, { type: "FILTERS_SET", filters: { deltaStatuses: ["modified"] } });

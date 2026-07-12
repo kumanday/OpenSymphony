@@ -51,6 +51,7 @@ export interface CodeRepoListRequestOptions {
 
 export interface CodeSymbolDetailRequestOptions {
   includeStale?: boolean;
+  visibility?: "public" | "all_accessible";
 }
 
 export interface CodeGraphAdapter {
@@ -619,6 +620,7 @@ export function createHttpCodeGraphAdapter(
     getSymbolDetail: (repoId, symbolKey, options) => {
       const params = new URLSearchParams();
       if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
+      if (options?.visibility !== undefined) params.set("visibility", options.visibility);
       return read<CodeSymbolDetail>(
         `/api/v1/code/repos/${encodeURIComponent(repoId)}/symbols/${encodeURIComponent(symbolKey)}`,
         params,
