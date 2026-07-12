@@ -175,6 +175,12 @@ function createDesktopNativeCodeGraphApi(invoke: TauriInvoke): NativeCodeGraphAp
         headRevision,
         limit: options?.limit ?? null,
       }),
+    getRunDiffOverlay: (runId, repoId, options?: CodeGraphDiffOptions) =>
+      invoke<CodeDiffOverlay>("run_code_diff_overlay", {
+        runId,
+        repoId: repoId ?? null,
+        limit: options?.limit ?? null,
+      }),
   };
 }
 

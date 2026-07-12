@@ -25,6 +25,8 @@ import type {
   CodeGraphUpdatedEvent,
   CodeGraphNode,
   CodeGraphSnapshot,
+  CodeDiffOverlay,
+  CodeFileOutline,
   CodeSymbolDetail,
 } from "@opensymphony/gateway-schema";
 import {
@@ -35,6 +37,7 @@ import {
   codeGraphNeedsBroadFreshness,
   codeGraphReducer,
   codeGraphSnapshotForRendering,
+  codeGraphNodeDeltaStatus,
   codeNodeVisualStyle,
   isConceptDetailStale,
   createGraphLayoutAdapter,
@@ -42,6 +45,7 @@ import {
   createInitialGraphState,
   currentCodeGraphSnapshot,
   formatMemoryDeepLink,
+  formatCodeDeepLink,
   graphLayoutKindForMode,
   graphReducer,
   currentGraphSnapshot,
@@ -73,7 +77,12 @@ import {
   validateStoredCredentialRef,
   validateSubscriptionCredential,
 } from "@opensymphony/gateway-schema";
-import { renderChangedFileList, renderFileDiff } from "./diff.js";
+import {
+  renderChangedFileList,
+  renderCodeDiffDeltaList,
+  renderCodeDiffSummary,
+  renderFileDiff,
+} from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
 import { renderApprovalList, type ApprovalDecision } from "./approval.js";
 import {
@@ -256,6 +265,8 @@ interface AppState {
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
+  runCodeOverlay: CodeDiffOverlay | null;
+  runCodeOutline: CodeFileOutline | null;
   evidenceView: EvidenceView;
   runEvents: RunEvent[] | null;
   expandedActivityEvents: Set<string>;
@@ -314,13 +325,20 @@ interface AuditTrailEntry {
 
 /** Evidence for one run, fetched concurrently and applied atomically. */
 interface RunDetailBundle {
+  runId: string;
   runFiles: ChangedFileEntry[];
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
+  runCodeOverlay: CodeDiffOverlay | null;
+  runCodeOutline: CodeFileOutline | null;
   runEvents: RunEvent[];
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[];
   warnings: string[];
+}
+
+function runOutlineCacheKey(runId: string, path: string, diff: FileDiffPage | null): string {
+  return `${runId}:${path}:${diff ? JSON.stringify(diff.hunks) : "none"}`;
 }
 
 type EvidenceView = "diff" | "activity";
@@ -423,8 +441,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    * loading — only a newer open, project switch, or full refresh does.
    */
   private runOpenSeq = 0;
+  private runCodeOverlaySeq = 0;
   /** Guards in-flight selectDiffFile loads (superseded by newer diff clicks or opens). */
   private diffSelectSeq = 0;
+  private readonly runOutlineCache = new Map<string, CodeFileOutline>();
   /** Tracks bindEvents sites already attached per element (see listen()). */
   private boundListeners = new WeakMap<Element, Set<string>>();
 
@@ -455,6 +475,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runFiles: null,
       selectedDiffPath: null,
       runDiff: null,
+      runCodeOverlay: null,
+      runCodeOutline: null,
       evidenceView: "diff",
       runEvents: null,
       expandedActivityEvents: new Set(),
@@ -601,13 +623,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runValidation,
       runApprovals,
     ] = await Promise.all([filesAndDiff, events, validation, approvals]);
-    return { runFiles, selectedDiffPath, runDiff, runEvents, runValidation, runApprovals, warnings };
+    return { runId, runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline: null, runEvents, runValidation, runApprovals, warnings };
   }
 
   private applyRunDetailBundle(bundle: RunDetailBundle): void {
+    const sameRun = this.state.runDetail?.run_id === bundle.runId;
+    const sameDiff = sameRun
+      && this.state.selectedDiffPath === bundle.selectedDiffPath
+      && runOutlineCacheKey(bundle.runId, bundle.selectedDiffPath ?? "", this.state.runDiff)
+        === runOutlineCacheKey(bundle.runId, bundle.selectedDiffPath ?? "", bundle.runDiff);
     this.state.runFiles = bundle.runFiles;
     this.state.selectedDiffPath = bundle.selectedDiffPath;
     this.state.runDiff = bundle.runDiff;
+    this.state.runCodeOverlay = bundle.runCodeOverlay ?? (sameRun ? this.state.runCodeOverlay : null);
+    this.state.runCodeOutline = bundle.runCodeOutline ?? (sameDiff ? this.state.runCodeOutline : null);
     this.state.runEvents = bundle.runEvents;
     this.state.runValidation = bundle.runValidation;
     this.state.runApprovals = bundle.runApprovals;
@@ -627,6 +656,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.interactionEpoch += 1;
     this.runOpenSeq += 1;
     this.diffSelectSeq += 1;
+    this.runCodeOverlaySeq += 1;
     this.state.loading = true;
     this.render();
 
@@ -775,6 +805,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runDetail = null;
     this.state.runFiles = null;
     this.state.runDiff = null;
+    this.state.runCodeOverlay = null;
+    this.state.runCodeOutline = null;
     this.state.evidenceView = "diff";
     this.state.runEvents = null;
     this.state.expandedActivityEvents = new Set();
@@ -885,6 +917,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.runCodeOverlay = null;
+      this.state.runCodeOutline = null;
       this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.expandedActivityEvents = new Set();
@@ -903,6 +937,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runDetail = null;
     this.state.runFiles = null;
     this.state.runDiff = null;
+    this.state.runCodeOverlay = null;
+    this.state.runCodeOutline = null;
     this.state.evidenceView = "diff";
     this.state.runEvents = null;
     this.state.expandedActivityEvents = new Set();
@@ -1123,8 +1159,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       requestKey = this.codeGraphRequestKey();
       await this.refreshCodeGraphSnapshot(repoId, requestKey, navigationVersion);
       if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
-      if (this.state.codeGraph.mode === "diff" && this.state.codeGraph.baseRevision && this.state.codeGraph.headRevision) {
-        await this.loadCodeDiffOverlay(repoId, this.state.codeGraph.baseRevision, this.state.codeGraph.headRevision, requestKey, navigationVersion);
+      if (this.state.codeGraph.mode === "diff"
+        && (this.state.codeGraph.runId || (this.state.codeGraph.baseRevision && this.state.codeGraph.headRevision))) {
+        await this.loadCodeDiffOverlay(repoId, this.state.codeGraph.baseRevision ?? "", this.state.codeGraph.headRevision ?? "", requestKey, navigationVersion);
       }
     } catch (error) {
       if (this.destroyed
@@ -1170,7 +1207,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     navigationVersion: number,
   ): Promise<void> {
     if (!this.codeGraphAdapter) return;
-    const overlay = await this.codeGraphAdapter.getDiffOverlay(repoId, baseRevision, headRevision);
+    const overlay = this.state.codeGraph.runId
+      && this.codeGraphAdapter.getRunDiffOverlay
+      ? await this.codeGraphAdapter.getRunDiffOverlay(this.state.codeGraph.runId, repoId)
+      : await this.codeGraphAdapter.getDiffOverlay(repoId, baseRevision, headRevision);
     if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "DIFF_LOADED", overlay });
     this.invalidateCodeGraphLayout();
@@ -1184,6 +1224,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       code.mode,
       code.path,
       code.symbolKey,
+      code.runId,
       code.depth,
       code.baseRevision,
       code.headRevision,
@@ -1230,7 +1271,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       onSelectArea: this.onCodeAggregateSelected,
       nodeStyle: (node) => {
         const codeNode = snapshot?.nodes.find((candidate) => candidate.id === node.nodeId);
-        return codeNode ? codeNodeVisualStyle(codeNode) : undefined;
+        const renderedNode = renderSnapshot?.nodes.find((candidate) => candidate.id === node.nodeId);
+        const styleNode = codeNode ?? (renderedNode ? {
+          kind: renderedNode.kind as CodeGraphNode["kind"],
+          symbol_kind: renderedNode.concept_type ?? null,
+          freshness: renderedNode.freshness as CodeGraphNode["freshness"],
+          diagnostic_count: renderedNode.warning_count,
+          symbol_key: renderedNode.concept_id ?? null,
+        } : undefined);
+        if (!styleNode) return undefined;
+        const deltaStatus = codeGraphNodeDeltaStatus(styleNode.symbol_key, this.state.codeGraph.diffOverlay);
+        const blastRadius = Boolean(styleNode.symbol_key && this.state.codeGraph.diffOverlay?.blast_radius.some((entry) => entry.symbol_key === styleNode.symbol_key));
+        return codeNodeVisualStyle(styleNode, deltaStatus, blastRadius);
       },
       edgeStyle: (edge) => edge.confidence
         ? codeEdgeVisualStyle({ confidence: edge.confidence as "exact" | "syntactic" | "heuristic" })
@@ -1649,9 +1701,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runOverlays = overlays;
     this.state.selectedNodeId = selectedNode?.node_id ?? null;
     if (selectedRun) {
+      const changedRun = this.state.runDetail?.run_id !== selectedRun.runDetail.run_id;
+      if (changedRun) {
+        this.state.runCodeOverlay = null;
+        this.state.runCodeOutline = null;
+      }
       this.state.runDetail = selectedRun.runDetail;
       this.state.runOverlays.set(selectedRun.runDetail.run_id, selectedRun.runDetail);
       this.applyRunDetailBundle(selectedRun.bundle);
+      void this.loadRunCodeOutline(selectedRun.runDetail.run_id, selectedRun.bundle.selectedDiffPath, selectedRun.bundle.runDiff);
+      void this.loadRunCodeOverlay(selectedRun.runDetail.run_id);
     }
     if (completedSetChanged) {
       void this.loadCompletedTasks();
@@ -1709,6 +1768,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const runId = runIdForNode(node);
     this.interactionEpoch += 1;
     this.diffSelectSeq += 1;
+    this.runCodeOverlaySeq += 1;
     const openSeq = ++this.runOpenSeq;
     this.state.selectedNodeId = node.node_id;
     this.state.loading = true;
@@ -1723,12 +1783,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (this.destroyed || openSeq !== this.runOpenSeq) {
         return;
       }
+      this.state.runCodeOverlay = null;
+      this.state.runCodeOutline = null;
       this.state.runDetail = runDetail;
       this.state.runOverlays.set(runId, runDetail);
       this.state.evidenceView = "diff";
       this.state.expandedActivityEvents = new Set();
       this.state.collapsedActivityEvents = new Set();
       this.applyRunDetailBundle(bundle);
+      void this.loadRunCodeOutline(runId, bundle.selectedDiffPath, bundle.runDiff);
+      void this.loadRunCodeOverlay(runId);
     } catch (error) {
       if (this.destroyed || openSeq !== this.runOpenSeq) {
         return;
@@ -1736,6 +1800,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.runCodeOverlay = null;
+      this.state.runCodeOutline = null;
       this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.expandedActivityEvents = new Set();
@@ -1764,30 +1830,98 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const seq = ++this.diffSelectSeq;
     this.state.selectedDiffPath = path;
     this.state.evidenceView = "diff";
-    this.render();
     const runId = this.state.runDetail?.run_id;
+    this.state.runCodeOutline = null;
+    this.render();
     if (runId && typeof this.transport.runDiffs === "function") {
-      let runDiff: FileDiffPage | null = null;
-      let warning: string | null = null;
-      try {
-        runDiff = await this.transport.runDiffs!(runId, path);
-      } catch (error) {
-        warning = `Diff unavailable: ${errorMessage(error)}`;
-      }
-      // Drop the result if a newer diff click or task open superseded this
-      // fetch, or if the shown run changed while it was in flight.
-      if (this.destroyed || seq !== this.diffSelectSeq || this.state.runDetail?.run_id !== runId) {
-        return;
-      }
+      let diffError: unknown = null;
+      const runDiff = await this.transport.runDiffs!(runId, path).catch((error) => {
+        diffError = error;
+        return null;
+      });
+      if (this.destroyed || seq !== this.diffSelectSeq || this.state.runDetail?.run_id !== runId) return;
+      if (diffError) this.state.connectionMessage = `Diff unavailable: ${errorMessage(diffError)}`;
       this.state.runDiff = runDiff;
-      if (warning) {
-        this.state.connectionMessage = warning;
-      }
+      this.state.runCodeOutline = null;
+      this.render();
+      void this.loadRunCodeOutline(runId, path, runDiff);
+      return;
     } else if (runId) {
       this.state.runDiff = null;
       this.state.connectionMessage = "Diff endpoint unavailable for the active transport";
     }
     this.render();
+  }
+
+  private runCodeDeepLink(symbolKey?: string, path?: string): string | null {
+    const run = this.state.runDetail;
+    const overlay = this.state.runCodeOverlay;
+    if (!run || !overlay || (symbolKey && path)) return null;
+    try {
+      return formatCodeDeepLink({
+        repoId: overlay.repo_id,
+        mode: "diff",
+        symbolKey: symbolKey ?? null,
+        path: path ?? null,
+        runId: run.run_id,
+        baseRevision: overlay.base_revision,
+        headRevision: overlay.head_revision,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async loadRunCodeOverlay(runId: string): Promise<void> {
+    if (!this.codeGraphAdapter?.getRunDiffOverlay) return;
+    const seq = ++this.runCodeOverlaySeq;
+    try {
+      const overlay = await this.codeGraphAdapter.getRunDiffOverlay(runId);
+      if (this.destroyed || seq !== this.runCodeOverlaySeq || this.state.runDetail?.run_id !== runId) return;
+      this.state.runCodeOverlay = overlay;
+      this.render();
+    } catch {
+      // Code Graph is optional; Run Detail remains usable without its overlay.
+    }
+  }
+
+  private async loadRunCodeOutline(
+    runId: string,
+    path: string | null,
+    diff: FileDiffPage | null,
+  ): Promise<void> {
+    if (!path || !diff || !this.codeGraphAdapter?.getFileOutline) return;
+    const cacheKey = runOutlineCacheKey(runId, path, diff);
+    const apply = (outline: CodeFileOutline): void => {
+      if (this.destroyed
+        || this.state.runDetail?.run_id !== runId
+        || this.state.selectedDiffPath !== path
+        || !this.state.runDiff
+        || runOutlineCacheKey(runId, path, this.state.runDiff) !== cacheKey) return;
+      this.state.runCodeOutline = outline;
+      this.render();
+    };
+    const cached = this.runOutlineCache.get(cacheKey);
+    if (cached) {
+      apply(cached);
+      return;
+    }
+    try {
+      const outline = await this.codeGraphAdapter.getFileOutline(runId, path);
+      this.runOutlineCache.set(cacheKey, outline);
+      apply(outline);
+    } catch {
+      // Code intelligence is optional; the plain diff remains available.
+    }
+  }
+
+  private async openRunCodeTarget(symbolKey?: string, path?: string): Promise<void> {
+    const runId = this.state.runDetail?.run_id;
+    if (!runId || (symbolKey && path)) return;
+    if (!this.state.runCodeOverlay) await this.loadRunCodeOverlay(runId);
+    if (this.state.runDetail?.run_id !== runId) return;
+    const link = this.runCodeDeepLink(symbolKey, path);
+    if (link) await this.openCodeDeepLink(link);
   }
 
   private selectEvidenceView(view: AppState["evidenceView"]): void {
@@ -2183,6 +2317,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.interactionEpoch += 1;
     this.runOpenSeq += 1;
     this.diffSelectSeq += 1;
+    this.runCodeOverlaySeq += 1;
     this.state.selectedProjectId = projectId;
     this.state.loading = true;
     this.render();
@@ -3266,6 +3401,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private renderLowerColumn(column: "left" | "right"): string {
+    if (this.state.graphPaneView === "code" && this.state.codeGraph.runId === this.state.runDetail?.run_id) {
+      return column === "left" ? this.renderRunDetail() : this.renderRunEvidence();
+    }
     switch (this.state.graphPaneView) {
       case "task":
         return column === "left" ? this.renderRunDetail() : this.renderRunEvidence();
@@ -3344,6 +3482,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const actionItems = buildActionBarItems(run);
     const actionBar = renderActionBar(actionItems);
     const files = renderChangedFileList(this.state.runFiles ?? [], this.state.selectedDiffPath ?? undefined);
+    const codeSummary = renderCodeDiffSummary(this.state.runCodeOverlay);
+    const codeDeltaList = renderCodeDiffDeltaList(this.state.runCodeOverlay);
     const selectedNode = this.selectedTaskNode();
     const dependencyDetail = selectedNode
       ? renderDependencyDetail(selectedNode, this.state.taskGraph?.nodes ?? [])
@@ -3406,6 +3546,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         ${receipt}
         <div class="os-run-section">
           <h3>Changed Files</h3>
+          ${codeSummary}
+          ${codeDeltaList}
           ${files}
         </div>
         ${validation || approvals ? `<div class="os-run-panels">${validation ? `<div class="os-validation-panel">${validation}</div>` : ""}${approvals ? `<div class="os-approval-panel">${approvals}</div>` : ""}</div>` : ""}
@@ -3432,7 +3574,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!run) {
       return panel("Inspector", `<div class="os-empty">Select an issue to inspect a diff or activity</div>`, "os-run-evidence-panel");
     }
-    const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
+    const diff = this.state.runDiff
+      ? renderFileDiff(this.state.runDiff, this.state.runCodeOutline, (symbolKey, path) => this.runCodeDeepLink(symbolKey || undefined, path))
+      : "";
     const activity = renderRunActivity(
       this.state.runEvents,
       this.state.expandedActivityEvents,
@@ -4187,6 +4331,39 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         if (path) {
           void this.selectDiffFile(path);
         }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-diff-symbol-action]").forEach((button) => {
+      this.listen(button, "diff-symbol-action", "click", () => {
+        const symbolKey = button.dataset.diffSymbolAction;
+        if (symbolKey) void this.openRunCodeTarget(symbolKey);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-diff-symbol-copy]").forEach((button) => {
+      this.listen(button, "diff-symbol-copy", "click", (event) => {
+        event.stopPropagation();
+        const link = button.dataset.diffSymbolCopy;
+        if (!link) return;
+        void navigator.clipboard?.writeText(link).catch(() => undefined);
+        button.textContent = "✓";
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-diff-file-graph]").forEach((button) => {
+      this.listen(button, "diff-file-graph", "click", () => {
+        const path = button.dataset.diffFileGraph;
+        if (path) void this.openRunCodeTarget(undefined, path);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-run-code-summary]").forEach((button) => {
+      this.listen(button, "run-code-summary", "click", () => {
+        void this.openRunCodeTarget();
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-diff-symbol-key]").forEach((line) => {
+      this.listen(line, "diff-symbol-context", "contextmenu", (event) => {
+        event.preventDefault();
+        const symbolKey = line.dataset.diffSymbolKey;
+        if (symbolKey) void this.openRunCodeTarget(symbolKey);
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-evidence-view]").forEach((button) => {
@@ -6989,9 +7166,18 @@ function appShellStyles(): string {
     .os-change-kind-removed { background: #fee2e2; color: #991b1b; }
     .os-file-diff { border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
     .os-diff-header { display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #d8dee4; background: #eef3f8; font-size: 12px; }
+    .os-diff-file-graph { min-height: 24px; padding: 2px 7px; font-size: 11px; }
     .os-diff-hunk { padding: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
     .os-diff-hunk-header { color: #667788; margin-bottom: 4px; }
     .os-diff-line { white-space: pre-wrap; }
+    .os-diff-line-number { display: inline-block; width: 34px; margin-right: 6px; color: #98a6b3; text-align: right; user-select: none; }
+    .os-diff-symbol-glyph, .os-diff-symbol-copy { min-height: 21px; min-width: 21px; padding: 0 3px; margin-right: 4px; border-radius: 4px; color: #23566f; font-weight: 700; vertical-align: baseline; }
+    .os-diff-symbol-copy { color: #536170; }
+    .os-diff-line[data-diff-symbol-key]:hover { outline: 1px solid #39708f; outline-offset: -1px; }
+    .os-run-code-summary { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 7px 9px; border: 1px solid #cbd5df; border-radius: 6px; background: #eef7f8; color: #23566f; font-size: 11px; font-weight: 600; }
+    .os-run-code-delta-list { font-size: 11px; }
+    .os-run-code-delta-list ul { margin: 6px 0 0; padding-left: 18px; }
+    .os-run-code-delta-list code { color: #536170; }
     .os-diff-line-addition { color: #1f9d55; background: #dcfce7; }
     .os-diff-line-deletion { color: #c2410c; background: #fee2e2; }
     .os-diff-line-context { color: #334155; }
@@ -7198,6 +7384,7 @@ function appShellStyles(): string {
       .os-run-section + .os-run-section { border-color: #2a3440; }
       .os-run-section h3 { color: #94a3b3; }
       .os-diff-header, .os-validation-header { background: #1f2a35; border-color: #2a3440; }
+      .os-run-code-summary { background: #18303a; border-color: #3b6574; color: #c6edf3; }
       .os-diff-line-addition { background: #14532d; color: #86efac; }
       .os-diff-line-deletion { background: #7f1d1d; color: #fecaca; }
       .os-diff-line-context { color: #94a3b3; }

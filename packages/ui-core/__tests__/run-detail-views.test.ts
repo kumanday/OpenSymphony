@@ -8,6 +8,7 @@
 
 import { renderOpenSymphonyApp } from "../src/app-shell.js";
 import { MockGatewayTransport } from "@opensymphony/api-client";
+import { codeGraphFixtureDiffOverlays, codeGraphFixtureOutlines, createFixtureCodeGraphAdapter } from "@opensymphony/graph";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import type {
   ApprovalRequest,
@@ -239,6 +240,68 @@ async function openRun(root: HTMLElement): Promise<void> {
 }
 
 describe("Run detail views", () => {
+  it("loads the run overlay and keeps Run Detail mounted after symbol navigation", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = buildTransport(runDetail);
+    const codePath = codeGraphFixtureOutlines[0].path;
+    const codeDiff: FileDiffPage = {
+      ...diff,
+      file_path: codePath,
+      hunks: [{ ...diff.hunks[0], file_path: codePath, header: "@@ -10,1 +10,1 @@", start_line: 10, lines: [{ type: "addition", line: "const changed = true;" }] }],
+    };
+    Object.assign(transport, {
+      runFiles: async () => [{ ...files[0], path: codePath }],
+      runDiffs: async () => codeDiff,
+    });
+    const codeAdapter = {
+      ...createFixtureCodeGraphAdapter(),
+      getFileOutline: async () => ({ ...codeGraphFixtureOutlines[0], run_id: runDetail.run_id }),
+      getRunDiffOverlay: async () => codeGraphFixtureDiffOverlays[0],
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "web", transport, codeGraphAdapter: codeAdapter });
+    await openRun(root);
+    await flushUntil(() => root.querySelector("[data-testid='run-code-summary']") !== null);
+
+    expect(root.querySelector("[data-testid='run-code-summary']")?.textContent).toContain("1 modified");
+    expect(root.querySelector("[data-testid='run-code-delta-list']")).not.toBeNull();
+    (root.querySelector("[data-testid='run-code-summary']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
+    expect(root.querySelector("[data-diff-symbol-action]")).not.toBeNull();
+    (root.querySelector("[data-diff-symbol-action]") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
+    expect(root.querySelector(".os-run-detail-panel")).not.toBeNull();
+    expect(root.querySelector(".os-run-evidence-panel")).not.toBeNull();
+    handle.destroy();
+  });
+
+  it("keeps a pending run overlay alive while selecting another file", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    let releaseOverlay!: (overlay: typeof codeGraphFixtureDiffOverlays[number]) => void;
+    const pendingOverlay = new Promise<typeof codeGraphFixtureDiffOverlays[number]>((resolve) => {
+      releaseOverlay = resolve;
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(runDetail),
+      codeGraphAdapter: {
+        ...createFixtureCodeGraphAdapter(),
+        getRunDiffOverlay: async () => pendingOverlay,
+      },
+    });
+
+    await openRun(root);
+    root.querySelector<HTMLElement>("[data-path='src/new.ts']")!.click();
+    await flushAsync();
+    expect(root.querySelector("[data-testid='run-code-summary']")).toBeNull();
+
+    releaseOverlay(codeGraphFixtureDiffOverlays[0]);
+    await flushUntil(() => root.querySelector("[data-testid='run-code-summary']") !== null);
+    await handle.destroy();
+  });
+
   it("renders changed files, diff, validation, approvals, and TUI-parity metadata", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
