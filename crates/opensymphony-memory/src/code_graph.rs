@@ -832,7 +832,7 @@ fn code_graph_workspace_focused_overlay(
                         key,
                     )?;
                     for edge in baseline_edges {
-                        if changed_paths.contains(&edge.path) {
+                        if analyzed_paths.contains(&edge.path) {
                             continue;
                         }
                         base_edges.insert(edge.edge_id.clone(), edge.clone());
@@ -1307,13 +1307,15 @@ fn render_workspace_graph_snapshot(
                 .into_iter()
                 .take(CODE_GRAPH_MAX_RECORDS)
                 .collect();
-            selected_keys.extend(
-                overlay
-                    .symbols
-                    .iter()
-                    .filter(|(_, symbol)| paths.contains(&symbol.path))
-                    .map(|(key, _)| key.clone()),
-            );
+            if options.aggregate != Some(CodeGraphAggregate::Directory) {
+                selected_keys.extend(
+                    overlay
+                        .symbols
+                        .iter()
+                        .filter(|(_, symbol)| paths.contains(&symbol.path))
+                        .map(|(key, _)| key.clone()),
+                );
+            }
         }
         CodeGraphMode::File => {
             let path = options.path.as_deref().ok_or_else(|| {
@@ -1879,6 +1881,7 @@ fn re_resolve_workspace_edges(
         {
             return false;
         }
+        let was_unresolved = edge.target_symbol_key.is_none() && edge.unresolved;
         if edge
             .target_symbol_key
             .as_deref()
@@ -1887,7 +1890,8 @@ fn re_resolve_workspace_edges(
             edge.target_symbol_key = None;
             edge.unresolved = true;
         }
-        if edge.target_symbol_key.is_none()
+        if was_unresolved
+            && edge.target_symbol_key.is_none()
             && let Some(name) = edge
                 .target_hint
                 .as_deref()
@@ -4472,13 +4476,13 @@ fn query_symbol_diagnostics(
     symbol: &CodeSymbolRecord,
     include_stale: bool,
 ) -> Result<Vec<CodeDiagnostic>, MemoryError> {
-    if let Some(commit_sha) = symbol.commit_sha.as_deref()
+    if symbol.commit_sha.is_some()
         && code_diagnostic_revisions_read_model_ready(connection, &config.index_path)?
     {
         let freshness = code_freshness_filter(include_stale);
         let mut statement = connection
             .prepare(&format!(
-                "SELECT commit_sha, kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostic_revisions WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? AND start_line <= ? AND end_line >= ? ORDER BY start_line, start_col, diagnostic_id"
+                "SELECT DISTINCT kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostic_revisions WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND start_line <= ? AND end_line >= ? ORDER BY start_line, start_col, message"
             ))
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
@@ -4490,35 +4494,29 @@ fn query_symbol_diagnostics(
                     &symbol.repo_id,
                     &symbol.path,
                     &symbol.content_sha256,
+                    &symbol.parser_version,
+                    &symbol.query_pack_version,
                     symbol.end_line as i64,
                     symbol.start_line as i64
                 ],
                 |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        CodeDiagnostic {
-                            kind: row.get(1)?,
-                            severity: row.get(2)?,
-                            message: row.get(3)?,
-                            span: CodeSpan {
-                                start_line: row.get::<_, i64>(4)? as usize,
-                                start_col: row.get::<_, i64>(5)? as usize,
-                                end_line: row.get::<_, i64>(6)? as usize,
-                                end_col: row.get::<_, i64>(7)? as usize,
-                            },
+                    Ok(CodeDiagnostic {
+                        kind: row.get(0)?,
+                        severity: row.get(1)?,
+                        message: row.get(2)?,
+                        span: CodeSpan {
+                            start_line: row.get::<_, i64>(3)? as usize,
+                            start_col: row.get::<_, i64>(4)? as usize,
+                            end_line: row.get::<_, i64>(5)? as usize,
+                            end_col: row.get::<_, i64>(6)? as usize,
                         },
-                    ))
+                    })
                 },
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?
-            .filter_map(|row| match row {
-                Ok((revision, diagnostic)) if revision == commit_sha => Some(Ok(diagnostic)),
-                Ok(_) => None,
-                Err(source) => Some(Err(source)),
-            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
@@ -5717,7 +5715,7 @@ mod code_graph_tests {
         persist_code_intel_documents,
     };
     use chrono::Utc;
-    use std::{fs, path::{Path, PathBuf}, process::Command, sync::Arc};
+    use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command, sync::Arc};
     use tempfile::TempDir;
 
     use super::{
@@ -5729,7 +5727,9 @@ mod code_graph_tests {
         CodeSnapshotMembershipInput,
         CodeGraphMode, CodeGraphSnapshotOptions,
         index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
-        open_existing_index_read_only,
+        migrate_index, open_existing_index_read_only, open_index,
+        query_revision_file_symbols, query_symbol_diagnostics, re_resolve_workspace_edges,
+        CodeEdgeRecord, CodeSymbolRecord,
         repository_scope_matches, workspace_git_bytes, CodeGraphProjectionError,
     };
 
@@ -5747,6 +5747,77 @@ mod code_graph_tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn workspace_edges_do_not_retarget_disappeared_symbols() {
+        let symbol = |symbol_key: &str, name: &str| CodeSymbolRecord {
+            symbol_id: symbol_key.to_string(),
+            symbol_key: symbol_key.to_string(),
+            repo_id: "repo".to_string(),
+            commit_sha: None,
+            path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            kind: "function".to_string(),
+            name: name.to_string(),
+            container_symbol_id: None,
+            container_chain: Vec::new(),
+            signature: None,
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 1,
+            start_byte: 0,
+            end_byte: 1,
+            selection_start_line: 1,
+            selection_end_line: 1,
+            content_sha256: "content".to_string(),
+            snippet_sha256: "snippet".to_string(),
+            parser_version: "parser".to_string(),
+            query_pack_version: "query-pack".to_string(),
+            freshness: "current".to_string(),
+            indexed_at: "now".to_string(),
+        };
+        let symbols = BTreeMap::from([
+            ("source".to_string(), symbol("source", "source")),
+            ("replacement".to_string(), symbol("replacement", "helper")),
+        ]);
+        let edge = |edge_id: &str, target_symbol_key: Option<&str>, unresolved: bool| {
+            CodeEdgeRecord {
+                edge_id: edge_id.to_string(),
+                edge_kind: "call".to_string(),
+                source_symbol_key: Some("source".to_string()),
+                target_symbol_key: target_symbol_key.map(str::to_string),
+                target_hint: Some("helper".to_string()),
+                confidence: "exact".to_string(),
+                unresolved,
+                path: "src/lib.rs".to_string(),
+                commit_sha: None,
+                freshness: "current".to_string(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 1,
+            }
+        };
+        let mut edges = BTreeMap::from([
+            ("resolved".to_string(), edge("resolved", Some("deleted"), false)),
+            ("unresolved".to_string(), edge("unresolved", None, true)),
+        ]);
+
+        re_resolve_workspace_edges(&mut edges, &symbols);
+
+        let disappeared = edges.get("resolved").expect("disappeared edge retained");
+        assert_eq!(disappeared.target_symbol_key, None);
+        assert!(disappeared.unresolved);
+        assert_eq!(
+            edges
+                .get("unresolved")
+                .expect("unresolved edge retained")
+                .target_symbol_key
+                .as_deref(),
+            Some("replacement")
+        );
     }
 
     #[test]
@@ -5898,6 +5969,47 @@ mod code_graph_tests {
             .expect("second symbol node");
         assert_eq!(first.diagnostic_count, 1);
         assert_eq!(second.diagnostic_count, 0);
+
+        let connection = open_index(&config).expect("open diagnostic index");
+        migrate_index(&connection).expect("migrate diagnostic index");
+        connection
+            .execute(
+                "INSERT INTO code_snapshot_membership (repo_id, commit_sha, path, language, content_sha256, parser_version, query_pack_version, analyzed, skip_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "diagnostic-repo",
+                    "diagnostic-snapshot",
+                    "src/diagnostics.rs",
+                    "rust",
+                    "diagnostic-content",
+                    "test-parser",
+                    "test-query-pack",
+                    1_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .expect("snapshot membership");
+        drop(connection);
+        let connection = open_existing_index_read_only(&config)
+            .expect("diagnostic index should open")
+            .expect("diagnostic index should exist");
+        let reused_symbol = query_revision_file_symbols(
+            &config,
+            &connection,
+            "diagnostic-repo",
+            "diagnostic-snapshot",
+            "src/diagnostics.rs",
+        )
+        .expect("reused snapshot symbols")
+        .into_iter()
+        .find(|symbol| symbol.name == "first")
+        .expect("reused first symbol");
+        assert_eq!(reused_symbol.commit_sha.as_deref(), Some("diagnostic-snapshot"));
+        assert_eq!(
+            query_symbol_diagnostics(&connection, &config, &reused_symbol, false)
+                .expect("reused diagnostics")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -6024,6 +6136,26 @@ mod code_graph_tests {
             .nodes
             .iter()
             .any(|node| node.id == "file:src/empty.rs"));
+        let directory_snapshot = code_graph_workspace_snapshot(
+            &limited_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543",
+            &base,
+            CodeGraphSnapshotOptions {
+                mode: CodeGraphMode::Atlas,
+                path: None,
+                symbol_key: None,
+                depth: 1,
+                aggregate: Some(super::CodeGraphAggregate::Directory),
+                include_stale: false,
+            },
+        )
+        .expect("directory atlas graph");
+        assert!(directory_snapshot
+            .nodes
+            .iter()
+            .all(|node| !node.id.starts_with("symbol:") && !node.id.starts_with("hint:")));
         let caller_key = overlay
             .symbols
             .values()
@@ -6196,6 +6328,34 @@ mod code_graph_tests {
             .unanalyzed_files
             .iter()
             .any(|path| path == "src/lib.rs"));
+        let mut no_parse_config = limited_config.clone();
+        no_parse_config.code_intel.ast.max_files_per_request = 0;
+        let baseline_key = overlay
+            .base_symbols
+            .values()
+            .find(|symbol| symbol.name == "baseline")
+            .map(|symbol| symbol.symbol_key.clone())
+            .expect("baseline symbol");
+        let unanalyzed_neighborhood = code_graph_workspace_snapshot(
+            &no_parse_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543-unparsed",
+            &base,
+            CodeGraphSnapshotOptions {
+                mode: CodeGraphMode::Neighborhood,
+                path: None,
+                symbol_key: Some(baseline_key),
+                depth: 1,
+                aggregate: None,
+                include_stale: false,
+            },
+        )
+        .expect("unanalyzed baseline neighborhood");
+        assert!(unanalyzed_neighborhood
+            .nodes
+            .iter()
+            .any(|node| node.label == "caller"));
     }
 
     #[test]
