@@ -2426,8 +2426,13 @@ fn query_code_edges_for_revision(
     revision: &str,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
     let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
-    let membership_ready = matches!(snapshot_status.as_deref(), Some("completed"))
-        && code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+    let membership_model_ready = code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+    let membership_ready = membership_model_ready
+        && match snapshot_status.as_deref() {
+            Some("completed") => true,
+            None => code_snapshot_membership_rows_available(connection, config, repo_id, revision)?,
+            _ => false,
+        };
     let revision_rows = code_edge_revisions_read_model_ready(connection, &config.index_path)?
         && code_edge_revision_rows_available(connection, config, repo_id, revision)?;
     let query = if membership_ready {
@@ -5980,6 +5985,35 @@ fn code_snapshot_status(
             path: config.index_path.clone(),
             source,
         })
+}
+
+fn code_snapshot_membership_rows_available(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+) -> Result<bool, MemoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT 1 FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? AND analyzed LIMIT 1",
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![repo_id, revision])
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(rows
+        .next()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .is_some())
 }
 
 fn code_diagnostics_read_model_ready(

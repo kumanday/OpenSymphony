@@ -352,8 +352,36 @@ describe("Code Graph adapters and state", () => {
       }),
     ]));
     expect(rendered.nodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "symbol:newRetargetedSymbol", path_display: "packages/graph/src/code-graph.ts" }),
+      expect.objectContaining({ id: "symbol:newRetargetedSymbol", path_display: undefined }),
     ]));
+  });
+
+  it("materializes topology deltas only once after filtering", async () => {
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "atlas" });
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      blast_radius: [{ symbol_key: "unchangedCaller", inbound_count: 1, outbound_count: 0, inbound: [], outbound: [] }],
+      edge_deltas: [{
+        edge_key: "fixture-edge-radius",
+        status: "added" as const,
+        before: null,
+        after: {
+          edge_id: "fixture-edge-radius-head",
+          kind: "call",
+          source_symbol_key: "unchangedCaller",
+          target_symbol_key: "codeGraphReducer",
+          target_hint: null,
+          confidence: "exact" as const,
+          unresolved: false,
+          path: "packages/graph/src/caller.ts",
+          span: { start_line: 1, start_col: 1, end_line: 1, end_col: 8 },
+        },
+      }],
+    };
+    const filtered = applyCodeGraphFilters(snapshot, initialCodeGraphFilters, overlay);
+    const rendered = codeGraphSnapshotForRendering(filtered, overlay);
+    expect(rendered.edges.filter((edge) => edge.id === "fixture-edge-radius")).toHaveLength(1);
+    expect(rendered.nodes.filter((node) => node.id === "symbol:unchangedCaller")).toHaveLength(1);
   });
 
   it("uses community node membership without requiring a metrics community id", async () => {
