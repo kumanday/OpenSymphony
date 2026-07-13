@@ -797,7 +797,7 @@ pub fn code_file_outline_from_workspace(
     raw_path: &str,
 ) -> Result<CodeFileOutline, CodeGraphProjectionError> {
     let path = normalize_code_path(raw_path).map_err(CodeGraphProjectionError::InvalidRequest)?;
-    let Some(file_path) = workspace_file_path(workspace_path, &path)? else {
+    let Some(file_path) = workspace_outline_file_path(workspace_path, &path)? else {
         return Err(CodeGraphProjectionError::FileNotFound(path));
     };
     let Some(connection) = open_existing_index_read_only(config)? else {
@@ -882,6 +882,7 @@ pub fn code_graph_workspace_snapshot(
     let mut paths = BTreeSet::new();
     let mut selected_keys = BTreeSet::new();
     let mut dropped_paths = 0;
+    let mut tombstoned_file = false;
     match mode {
         CodeGraphMode::Atlas => {
             paths.extend(overlay.base_paths.iter().cloned());
@@ -907,6 +908,7 @@ pub fn code_graph_workspace_snapshot(
                 CodeGraphProjectionError::InvalidRequest("file mode requires `path`".to_string())
             })?;
             let path = normalize_code_path(path).map_err(CodeGraphProjectionError::InvalidRequest)?;
+            tombstoned_file = overlay.tombstones.contains(&path);
             if !overlay.symbols.values().any(|symbol| symbol.path == path)
                 && !overlay.changed_paths.contains(&path)
                 && !overlay.base_paths.contains(&path)
@@ -914,13 +916,23 @@ pub fn code_graph_workspace_snapshot(
                 return Err(CodeGraphProjectionError::FileNotFound(path));
             }
             paths.insert(path.clone());
-            selected_keys.extend(
-                overlay
-                    .symbols
-                    .values()
-                    .filter(|symbol| symbol.path == path)
-                    .map(|symbol| symbol.symbol_key.clone()),
-            );
+            if tombstoned_file {
+                selected_keys.extend(
+                    overlay
+                        .base_symbols
+                        .values()
+                        .filter(|symbol| symbol.path == path)
+                        .map(|symbol| symbol.symbol_key.clone()),
+                );
+            } else {
+                selected_keys.extend(
+                    overlay
+                        .symbols
+                        .values()
+                        .filter(|symbol| symbol.path == path)
+                        .map(|symbol| symbol.symbol_key.clone()),
+                );
+            }
         }
         CodeGraphMode::Neighborhood => {
             let center = options.symbol_key.as_deref().ok_or_else(|| {
@@ -967,7 +979,12 @@ pub fn code_graph_workspace_snapshot(
         .take(CODE_GRAPH_MAX_RECORDS)
         .collect();
     for key in &selected_keys {
-        if let Some(symbol) = overlay.symbols.get(key) {
+        let symbol = if tombstoned_file {
+            overlay.base_symbols.get(key)
+        } else {
+            overlay.symbols.get(key)
+        };
+        if let Some(symbol) = symbol {
             paths.insert(symbol.path.clone());
         }
     }
@@ -975,7 +992,7 @@ pub fn code_graph_workspace_snapshot(
     let mut nodes = BTreeMap::new();
     let mut graph_edges = BTreeMap::new();
     for path in paths {
-        if overlay.tombstones.contains(&path) {
+        if overlay.tombstones.contains(&path) && !tombstoned_file {
             continue;
         }
         let language = overlay
@@ -989,14 +1006,26 @@ pub fn code_graph_workspace_snapshot(
             &mut graph_edges,
             &path,
             language,
-            CodeGraphFreshness::Current,
+            if tombstoned_file {
+                CodeGraphFreshness::Stale
+            } else {
+                CodeGraphFreshness::Current
+            },
         );
     }
     for key in &selected_keys {
-        let Some(symbol) = overlay.symbols.get(key) else {
+        let symbol = if tombstoned_file {
+            overlay.base_symbols.get(key)
+        } else {
+            overlay.symbols.get(key)
+        };
+        let Some(symbol) = symbol else {
             continue;
         };
-        let node = workspace_symbol_node(symbol);
+        let mut node = workspace_symbol_node(symbol);
+        if tombstoned_file {
+            node.freshness = CodeGraphFreshness::Stale;
+        }
         let file_id = file_node_id(&symbol.path);
         insert_code_graph_edge(
             &mut graph_edges,
@@ -1011,7 +1040,12 @@ pub fn code_graph_workspace_snapshot(
     }
 
     let mut dropped_edges = 0;
-    for edge in &overlay.edges {
+    let graph_source_edges = if tombstoned_file {
+        &overlay.base_edges
+    } else {
+        &overlay.edges
+    };
+    for edge in graph_source_edges {
         let Some(source) = edge.source_symbol_key.as_deref() else {
             continue;
         };
@@ -1321,6 +1355,21 @@ fn workspace_file_path(
     workspace_path: &Path,
     path: &str,
 ) -> Result<Option<PathBuf>, CodeGraphProjectionError> {
+    workspace_file_path_with_symlink_policy(workspace_path, path, false)
+}
+
+fn workspace_outline_file_path(
+    workspace_path: &Path,
+    path: &str,
+) -> Result<Option<PathBuf>, CodeGraphProjectionError> {
+    workspace_file_path_with_symlink_policy(workspace_path, path, true)
+}
+
+fn workspace_file_path_with_symlink_policy(
+    workspace_path: &Path,
+    path: &str,
+    allow_contained_symlink: bool,
+) -> Result<Option<PathBuf>, CodeGraphProjectionError> {
     let relative = normalize_code_path(path).map_err(CodeGraphProjectionError::InvalidRequest)?;
     let root = workspace_path
         .canonicalize()
@@ -1332,7 +1381,7 @@ fn workspace_file_path(
     let Ok(metadata) = fs::symlink_metadata(&candidate) else {
         return Ok(None);
     };
-    if metadata.file_type().is_symlink() {
+    if metadata.file_type().is_symlink() && !allow_contained_symlink {
         return Ok(None);
     }
     let Ok(resolved) = candidate.canonicalize() else {
@@ -5087,6 +5136,30 @@ mod code_graph_tests {
             .nodes
             .iter()
             .any(|node| node.id == "file:src/empty.rs"));
+        let deleted_snapshot = code_graph_workspace_snapshot(
+            &limited_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543",
+            &base,
+            CodeGraphSnapshotOptions {
+                mode: CodeGraphMode::File,
+                path: Some("src/remove.rs".to_string()),
+                symbol_key: None,
+                depth: 1,
+                aggregate: None,
+                include_stale: false,
+            },
+        )
+        .expect("deleted file should retain its baseline graph");
+        assert!(deleted_snapshot
+            .nodes
+            .iter()
+            .any(|node| node.id == "file:src/remove.rs"));
+        assert!(deleted_snapshot
+            .nodes
+            .iter()
+            .any(|node| node.label == "removed" && node.freshness == super::CodeGraphFreshness::Stale));
         assert!(!overlay.symbols.values().any(|symbol| symbol.name == "removed"));
         assert!(overlay
             .unanalyzed_files

@@ -341,14 +341,23 @@ impl Clone for GatewayState {
 #[derive(Clone, Default)]
 pub struct WorkspaceScans {
     state: Arc<tokio::sync::Mutex<HashMap<PathBuf, WorkspaceScanReceiver>>>,
+    trusted_target_branch: Option<Result<String, String>>,
 }
 
 #[derive(Clone, Default)]
 pub struct WorkspaceComparisonBases {
     state: Arc<Mutex<HashMap<String, (PathBuf, WorkspaceComparisonBase)>>>,
+    trusted_target_branch: Option<Result<String, String>>,
 }
 
 impl WorkspaceComparisonBases {
+    fn with_target_branch(target_branch: Option<Result<String, String>>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            trusted_target_branch: target_branch,
+        }
+    }
+
     fn resolve(
         &self,
         run_id: &str,
@@ -363,7 +372,7 @@ impl WorkspaceComparisonBases {
         {
             return Ok(base.clone());
         }
-        let base = workspace_comparison_base(workspace_path)?;
+        let base = workspace_comparison_base(workspace_path, self.trusted_target_branch.as_ref())?;
         state.insert(
             run_id.to_string(),
             (workspace_path.to_path_buf(), base.clone()),
@@ -383,7 +392,15 @@ pub(crate) struct WorkspaceScanOutcome {
 }
 
 impl WorkspaceScans {
+    fn with_target_branch(target_branch: Option<Result<String, String>>) -> Self {
+        Self {
+            state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            trusted_target_branch: target_branch,
+        }
+    }
+
     pub(crate) async fn scan(&self, workspace_path: PathBuf) -> WorkspaceScanOutcome {
+        let trusted_target_branch = self.trusted_target_branch.clone();
         let mut receiver = {
             let mut state = self.state.lock().await;
             if let Some(receiver) = state.get(&workspace_path) {
@@ -395,13 +412,15 @@ impl WorkspaceScans {
                 let path = workspace_path.clone();
                 tokio::spawn(async move {
                     let scan_path = path.clone();
-                    let outcome =
-                        tokio::task::spawn_blocking(move || compute_workspace_scan(&scan_path))
-                            .await
-                            .unwrap_or_else(|error| WorkspaceScanOutcome {
-                                comparison_base: None,
-                                files: Err(format!("workspace scan task failed: {error}")),
-                            });
+                    let target_branch = trusted_target_branch.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        compute_workspace_scan(&scan_path, target_branch.as_ref())
+                    })
+                    .await
+                    .unwrap_or_else(|error| WorkspaceScanOutcome {
+                        comparison_base: None,
+                        files: Err(format!("workspace scan task failed: {error}")),
+                    });
                     let _ = sender.send(Some(outcome));
                     entries.lock().await.remove(&path);
                 });
@@ -424,8 +443,11 @@ impl WorkspaceScans {
     }
 }
 
-fn compute_workspace_scan(workspace_path: &StdPath) -> WorkspaceScanOutcome {
-    match workspace_comparison_base(workspace_path) {
+fn compute_workspace_scan(
+    workspace_path: &StdPath,
+    trusted_target_branch: Option<&Result<String, String>>,
+) -> WorkspaceScanOutcome {
+    match workspace_comparison_base(workspace_path, trusted_target_branch) {
         Ok(base) => {
             let files =
                 build_workspace_run_file_changes_with_base(workspace_path, &base).map(Arc::new);
@@ -689,6 +711,10 @@ impl GatewayServer {
 
     /// Install the local memory catalog used by `/api/v1/memory/*` reads.
     pub fn with_memory_config(mut self, config: Option<MemoryConfig>) -> Self {
+        let target_branch = config
+            .as_ref()
+            .map(|config| code_index_branch(&config.repo_root).map_err(|error| error.to_string()));
+        self.comparison_bases = WorkspaceComparisonBases::with_target_branch(target_branch);
         self.memory_config = config;
         self
     }
@@ -726,7 +752,9 @@ impl GatewayServer {
             memory_config: self.memory_config.clone(),
             active_states: self.active_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
-            workspace_scans: WorkspaceScans::default(),
+            workspace_scans: WorkspaceScans::with_target_branch(self.memory_config.as_ref().map(
+                |config| code_index_branch(&config.repo_root).map_err(|error| error.to_string()),
+            )),
             comparison_bases: self.comparison_bases.clone(),
             pr_urls: PrUrls::default(),
         };
@@ -3286,7 +3314,7 @@ async fn issue_file_changes_coalesced(
 fn build_workspace_run_file_changes(
     workspace_path: &StdPath,
 ) -> Result<Vec<WorkspaceRunFileChange>, String> {
-    let comparison_base = workspace_comparison_base(workspace_path)?;
+    let comparison_base = workspace_comparison_base(workspace_path, None)?;
     build_workspace_run_file_changes_with_base(workspace_path, &comparison_base)
 }
 
@@ -3305,8 +3333,15 @@ struct WorkspaceComparisonBase {
     merge_base: String,
 }
 
-fn workspace_comparison_base(workspace_path: &StdPath) -> Result<WorkspaceComparisonBase, String> {
-    let target_branch = code_index_branch(workspace_path).map_err(|error| error.to_string())?;
+fn workspace_comparison_base(
+    workspace_path: &StdPath,
+    trusted_target_branch: Option<&Result<String, String>>,
+) -> Result<WorkspaceComparisonBase, String> {
+    let target_branch = match trusted_target_branch {
+        Some(Ok(branch)) => branch.clone(),
+        Some(Err(error)) => return Err(error.clone()),
+        None => code_index_branch(workspace_path).map_err(|error| error.to_string())?,
+    };
     let mut references = vec![format!("origin/{target_branch}"), target_branch];
     references.extend([
         // Legacy workspaces without WORKFLOW.md may still expose one of
@@ -3503,7 +3538,7 @@ fn workspace_diff_for_change(
     let comparison_base = if change.status_code.starts_with("??") {
         None
     } else {
-        Some(workspace_comparison_base(workspace_path)?)
+        Some(workspace_comparison_base(workspace_path, None)?)
     };
     workspace_diff_for_change_with_base(workspace_path, change, comparison_base.as_ref())
 }
@@ -6162,6 +6197,61 @@ exit 2
             .expect("tracked change");
         assert_eq!(modified.change_kind, ControlPlaneFileChangeKind::Modified);
         assert!(modified.lines_added > 0);
+    }
+
+    #[test]
+    fn workspace_comparison_base_uses_trusted_target_branch_over_mutable_workflow() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::write(workspace.join("WORKFLOW.md"), "Target branch: `develop`\n")
+            .expect("write workflow");
+        std::fs::write(workspace.join("README.md"), "baseline\n").expect("write baseline");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "develop"]);
+        run_git(workspace, &["add", "."]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "baseline",
+                "--no-gpg-sign",
+            ],
+        );
+        let develop_revision =
+            command_single_line(workspace, "git", &["rev-parse", "HEAD"]).expect("revision");
+        run_git(workspace, &["checkout", "-B", "feature/worktree"]);
+        std::fs::write(workspace.join("README.md"), "feature\n").expect("write feature");
+        run_git(workspace, &["add", "README.md"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature",
+                "--no-gpg-sign",
+            ],
+        );
+        std::fs::write(
+            workspace.join("WORKFLOW.md"),
+            "Target branch: `feature/worktree`\n",
+        )
+        .expect("mutate workflow target");
+
+        let untrusted = workspace_comparison_base(workspace, None).expect("workspace target");
+        let trusted_target = Ok("develop".to_owned());
+        let trusted =
+            workspace_comparison_base(workspace, Some(&trusted_target)).expect("configured target");
+
+        let head_revision =
+            command_single_line(workspace, "git", &["rev-parse", "HEAD"]).expect("revision");
+        assert_eq!(untrusted.merge_base, head_revision);
+        assert_eq!(trusted.merge_base, develop_revision);
     }
 
     #[test]
