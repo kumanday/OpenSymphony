@@ -3340,7 +3340,7 @@ fn workspace_comparison_base(
     let target_branch = match trusted_target_branch {
         Some(Ok(branch)) => branch.clone(),
         Some(Err(error)) => return Err(error.clone()),
-        None => code_index_branch(workspace_path).map_err(|error| error.to_string())?,
+        None => "develop".to_owned(),
     };
     let mut references = vec![format!("origin/{target_branch}"), target_branch];
     references.extend([
@@ -6250,8 +6250,9 @@ exit 2
 
         let head_revision =
             command_single_line(workspace, "git", &["rev-parse", "HEAD"]).expect("revision");
-        assert_eq!(untrusted.merge_base, head_revision);
+        assert_eq!(untrusted.merge_base, develop_revision);
         assert_eq!(trusted.merge_base, develop_revision);
+        assert_ne!(untrusted.merge_base, head_revision);
     }
 
     #[test]
