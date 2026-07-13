@@ -7,6 +7,27 @@ last_memory_sync: 2026-06-21T19:11:22.242702+00:00
 
 # Gateway
 
+## Code Graph repository indexing
+
+The repository index route is a server-side, bounded job:
+
+```text
+POST /api/v1/code/repos/{repo_id}/index
+```
+
+It resolves the configured repository and `WORKFLOW.md` target branch, reads
+the target commit's Git tree/blob objects, and persists an immutable snapshot.
+The request does not accept a filesystem root and indexing never executes
+repository code. A first response is `accepted`; background progress and the
+terminal `completed`, `unavailable`, or `failed` result are written to the event
+journal. Completion also emits `code_graph_updated`. Re-indexing a later commit
+parses only changed/added paths, records deletions as stale current rows, and
+retains older snapshot membership for revision queries.
+
+The Tauri `code_index_repo` command is a thin native mirror of this route and
+uses the same DTOs and event behavior. The persistent index is a target-branch
+baseline, not an issue-workspace overlay.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

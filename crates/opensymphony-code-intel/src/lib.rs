@@ -1163,6 +1163,30 @@ pub fn detect_language(path: impl AsRef<Path>) -> Option<SourceLanguage> {
     }
 }
 
+/// Return the versions that a fresh parse would record for a language.
+///
+/// Indexers use this before deciding whether a content-identical file can be
+/// reused, so parser or query-pack upgrades invalidate reuse without parsing
+/// the file just to discover its metadata.
+pub fn current_parser_versions(language: SourceLanguage) -> ParserVersions {
+    if language.is_lightweight() {
+        return ParserVersions {
+            provider: LIGHTWEIGHT_PROVIDER_NAME.to_string(),
+            tree_sitter: LIGHTWEIGHT_TREE_SITTER_VERSION.to_string(),
+            grammar: "lightweight-text".to_string(),
+            query_pack: format!("{}-lightweight-v1", language.id()),
+        };
+    }
+
+    let config = language_config(language);
+    ParserVersions {
+        provider: PROVIDER_NAME.to_string(),
+        tree_sitter: TREE_SITTER_VERSION.to_string(),
+        grammar: format!("{}-{}", config.grammar_crate, config.grammar_version),
+        query_pack: config.query_pack_version.to_string(),
+    }
+}
+
 pub fn parse_path(
     path: impl AsRef<Path>,
     source: &str,

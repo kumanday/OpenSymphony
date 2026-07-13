@@ -357,8 +357,10 @@ pub struct CodeIndexReport {
 #[serde(rename_all = "snake_case")]
 pub enum CodeIndexStatus {
     Accepted,
+    Progress,
     Completed,
     Unavailable,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

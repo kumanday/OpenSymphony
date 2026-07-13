@@ -345,7 +345,20 @@ Returns the graph-diff DTO for any two indexed revisions of the repo. This revis
 POST /api/v1/code/repos/{repo_id}/index
 ```
 
-Operator-triggered batch ingest (equivalent to admin `memory.ingest_code_intel` with `persist=true`), local-trusted by default and admin-gated in hosted mode. The initial gateway route may report the current read-model index state when no async indexer is configured; successful ingest/reindex emits `code_graph_updated` on completion.
+Operator-triggered, bounded repository indexing (equivalent to admin
+`memory.ingest_code_intel` with `persist=true`), local-trusted by default and
+admin-gated in hosted mode. The server resolves the configured repository root
+and the target branch marker in `WORKFLOW.md` (default `develop`); clients never
+provide arbitrary filesystem roots. It reads the selected Git tree and blob
+objects without executing target-repository code and persists an immutable
+repository/commit snapshot with complete membership and skipped coverage.
+
+The initial response reports `accepted`. Background progress and terminal
+`completed`, `unavailable`, or `failed` reports are journaled. A later commit
+reuses unchanged file membership, parses changed or added paths, records
+deletions in the current read model, and emits `code_graph_updated` only after a
+completed snapshot is available. The indexed repository is the shared
+target-branch baseline, not the live truth for an issue workspace overlay.
 
 ### 8.5 Events
 
@@ -362,6 +375,12 @@ Operator-triggered batch ingest (equivalent to admin `memory.ingest_code_intel` 
 ```
 
 Fired after ingest/reindex completes and after a diff-overlay computation persists fresh rows. Cursors use the same strictly monotonic sequence semantics as memory-graph cursors. A future incremental watch path fires the same event; consumers do not change.
+
+Repository indexing also journals `code_index_progress` with the serialized
+`CodeIndexReport` for accepted/progress/completed/unavailable states and
+`code_index_failed` for terminal failures. Consumers can use these reports for
+bounded counts and diagnostics; `code_graph_updated` remains the completion
+signal for refreshed graph reads.
 
 ### 8.6 Tauri native commands
 

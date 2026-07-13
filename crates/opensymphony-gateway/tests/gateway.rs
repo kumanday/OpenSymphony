@@ -2291,6 +2291,100 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
 }
 
 #[tokio::test]
+async fn gateway_index_starts_target_branch_job_and_journals_completion() {
+    let repo = tempfile::tempdir().expect("target repository");
+    std::fs::create_dir_all(repo.path().join("src")).expect("source directory");
+    std::fs::write(
+        repo.path().join("WORKFLOW.md"),
+        "## Branch target\n\nTarget branch: `develop`\n",
+    )
+    .expect("workflow marker");
+    std::fs::write(repo.path().join("src/lib.rs"), "pub fn main_branch() {}\n")
+        .expect("main source");
+    run_git(repo.path(), &["init", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test User"]);
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "main"]);
+    run_git(repo.path(), &["switch", "-c", "develop"]);
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn develop_branch() { helper(); }\nfn helper() {}\n",
+    )
+    .expect("develop source");
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "develop"]);
+
+    let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+    let server = GatewayServer::new(SnapshotStore::new(fixture_snapshot(0)))
+        .with_memory_config(Some(config));
+    let (journal, _) = server.clone().journal_and_broker();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server_task = tokio::spawn(async move {
+        server.serve(listener).await.expect("gateway should serve");
+    });
+
+    let report = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/v1/code/repos/target-repo/index"
+        ))
+        .send()
+        .await
+        .expect("index request")
+        .json::<CodeIndexReport>()
+        .await
+        .expect("accepted report");
+    assert_eq!(report.status, CodeIndexStatus::Accepted);
+
+    let mut completed = false;
+    for _ in 0..200 {
+        let events = journal.all_events().await;
+        completed = events.iter().any(|event| {
+            matches!(
+                event.kind,
+                opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeGraphUpdated { .. }
+            )
+        });
+        if completed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(completed, "index completion should be journaled");
+    assert!(journal.all_events().await.iter().any(|event| {
+        matches!(
+            event.kind,
+            opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeIndexProgress { .. }
+        )
+    }));
+    let events = journal.all_events().await;
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.kind,
+            opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeIndexProgress { .. }
+        ) && event
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("status"))
+            == Some(&serde_json::json!("progress"))
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.kind,
+            opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeIndexProgress { .. }
+        ) && event
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("status"))
+            == Some(&serde_json::json!("completed"))
+    }));
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_code_graph_contract_endpoints() {
     let repo = tempfile::tempdir().expect("memory repo");
     let config = write_code_graph_fixture(repo.path());
