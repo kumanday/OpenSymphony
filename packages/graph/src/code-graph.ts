@@ -1,4 +1,7 @@
 import type {
+  CodeDiffBlastRadius,
+  CodeDiffEdge,
+  CodeDiffEdgeSide,
   CodeDiffOverlay,
   CodeDiffSymbolSide,
   CodeFileOutline,
@@ -43,6 +46,39 @@ export interface CodeGraphRequestOptions {
 
 export interface CodeGraphDiffOptions {
   limit?: number;
+}
+
+type CodeDiffOverlayArrayField =
+  | "added_symbols"
+  | "removed_symbols"
+  | "modified_symbols"
+  | "edge_deltas"
+  | "module_connection_deltas"
+  | "blast_radius"
+  | "unanalyzed_files";
+
+type CodeDiffBlastRadiusPayload = Omit<CodeDiffBlastRadius, "inbound" | "outbound">
+  & Partial<Pick<CodeDiffBlastRadius, "inbound" | "outbound">>;
+
+type CodeDiffOverlayPayload = Omit<CodeDiffOverlay, CodeDiffOverlayArrayField>
+  & Partial<Pick<CodeDiffOverlay, Exclude<CodeDiffOverlayArrayField, "blast_radius">>>
+  & { blast_radius?: CodeDiffBlastRadiusPayload[] };
+
+export function normalizeCodeDiffOverlay(overlay: CodeDiffOverlayPayload): CodeDiffOverlay {
+  return {
+    ...overlay,
+    added_symbols: overlay.added_symbols ?? [],
+    removed_symbols: overlay.removed_symbols ?? [],
+    modified_symbols: overlay.modified_symbols ?? [],
+    edge_deltas: overlay.edge_deltas ?? [],
+    module_connection_deltas: overlay.module_connection_deltas ?? [],
+    blast_radius: (overlay.blast_radius ?? []).map((entry) => ({
+      ...entry,
+      inbound: entry.inbound ?? [],
+      outbound: entry.outbound ?? [],
+    })),
+    unanalyzed_files: overlay.unanalyzed_files ?? [],
+  };
 }
 
 export interface CodeRepoListRequestOptions {
@@ -255,15 +291,18 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
     case "SYMBOL_DETAILS_INVALIDATED":
       return { ...state, symbolDetails: {} };
     case "DIFF_LOADED":
+      {
+        const overlay = normalizeCodeDiffOverlay(action.overlay);
       return {
         ...state,
-        diffOverlay: action.overlay,
-        repoId: action.overlay.repo_id,
-        baseRevision: action.overlay.base_revision,
-        headRevision: action.overlay.head_revision,
+        diffOverlay: overlay,
+        repoId: overlay.repo_id,
+        baseRevision: overlay.base_revision,
+        headRevision: overlay.head_revision,
         mode: "diff",
-        lastUpdatedAt: action.overlay.generated_at,
+        lastUpdatedAt: overlay.generated_at,
       };
+      }
     case "MODE_SET":
       return action.mode === "diff" || state.mode !== "diff"
         ? { ...state, mode: action.mode }
@@ -428,6 +467,8 @@ export function normalizeCodeGraphFilters(filters: CodeGraphFilters): CodeGraphF
   };
 }
 
+const materializedCodeDiffSnapshots = new WeakSet<CodeGraphSnapshot>();
+
 export function applyCodeGraphFilters(
   snapshot: CodeGraphSnapshot,
   filters: CodeGraphFilters,
@@ -450,7 +491,7 @@ export function applyCodeGraphFilters(
     && (normalized.edgeKinds.length === 0 || normalized.edgeKinds.includes(edge.kind))
     && (normalized.confidences.length === 0 || normalized.confidences.includes(edge.confidence)),
   );
-  return {
+  const filteredSnapshot = {
     ...sourceSnapshot,
     nodes: sourceSnapshot.nodes.filter((node) => visibleIds.has(node.id)),
     edges,
@@ -466,6 +507,8 @@ export function applyCodeGraphFilters(
       ...codeGraphFilterTokens(normalized),
     ]),
   };
+  if (overlay) materializedCodeDiffSnapshots.add(filteredSnapshot);
+  return filteredSnapshot;
 }
 
 export function codeGraphFilterTokens(filters: CodeGraphFilters): string[] {
@@ -500,7 +543,9 @@ export function codeGraphSnapshotForRendering(
   snapshot: CodeGraphSnapshot,
   overlay?: CodeDiffOverlay | null,
 ): MemoryGraphSnapshot {
-  const sourceSnapshot = withCodeDiffNodes(snapshot, overlay);
+  const sourceSnapshot = materializedCodeDiffSnapshots.has(snapshot)
+    ? snapshot
+    : withCodeDiffNodes(snapshot, overlay);
   const deltaBySymbol = deltaStatuses(overlay);
   return {
     schema_version: sourceSnapshot.schema_version,
@@ -663,13 +708,15 @@ export function createHttpCodeGraphAdapter(
     getDiffOverlay: (repoId, baseRevision, headRevision, options) => {
       const params = new URLSearchParams({ base_revision: baseRevision, head_revision: headRevision });
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
-      return read<CodeDiffOverlay>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/diff-overlay`, params);
+      return read<CodeDiffOverlayPayload>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/diff-overlay`, params)
+        .then(normalizeCodeDiffOverlay);
     },
     getRunDiffOverlay: (runId, repoId, options) => {
       const params = new URLSearchParams();
       if (repoId) params.set("repo_id", repoId);
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
-      return read<CodeDiffOverlay>(`/api/v1/runs/${encodeURIComponent(runId)}/code/diff-overlay`, params);
+      return read<CodeDiffOverlayPayload>(`/api/v1/runs/${encodeURIComponent(runId)}/code/diff-overlay`, params)
+        .then(normalizeCodeDiffOverlay);
     },
   };
 }
@@ -692,6 +739,11 @@ export function createTauriNativeCodeGraphAdapter(
 ): CodeGraphAdapter {
   return {
     ...api,
+    getDiffOverlay: (repoId, baseRevision, headRevision, options) =>
+      api.getDiffOverlay(repoId, baseRevision, headRevision, options).then(normalizeCodeDiffOverlay),
+    getRunDiffOverlay: api.getRunDiffOverlay
+      ? (runId, repoId, options) => api.getRunDiffOverlay!(runId, repoId, options).then(normalizeCodeDiffOverlay)
+      : undefined,
     getSymbolDetail: (repoId, symbolKey, options) => api.getSymbolDetail(repoId, symbolKey, {
       ...options,
       visibility: effectiveCodeVisibility(options?.visibility, policy),
@@ -747,7 +799,7 @@ export function createFixtureCodeGraphAdapter(fixtures: CodeGraphFixtures = {}):
         && candidate.head_revision === headRevision,
       );
       if (!overlay) throw new Error(`Code diff overlay not found: ${baseRevision}..${headRevision}`);
-      return overlay;
+      return normalizeCodeDiffOverlay(overlay);
     },
   };
 }
@@ -767,6 +819,7 @@ function codeGraphRequestParams(options?: CodeGraphRequestOptions): URLSearchPar
 
 function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverlay | null): CodeGraphSnapshot {
   if (!overlay) return snapshot;
+  overlay = normalizeCodeDiffOverlay(overlay);
   const existingKeys = new Set(snapshot.nodes.map((node) => node.symbol_key).filter((key): key is string => Boolean(key)));
   const syntheticSides = new Map<string, CodeDiffSymbolSide>();
   for (const symbol of [...overlay.added_symbols, ...overlay.modified_symbols, ...overlay.removed_symbols]) {
@@ -812,8 +865,101 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
       diagnostic_severity: null,
       metrics: { in_degree: entry.inbound_count, out_degree: entry.outbound_count, community_id: null },
     }));
-  if (syntheticNodes.length === 0 && radiusNodes.length === 0) return snapshot;
-  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes] };
+  const radiusKeys = new Set(radiusNodes.map((node) => node.symbol_key).filter((key): key is string => Boolean(key)));
+  const symbolNodeIds = new Map<string, string>();
+  for (const node of [...snapshot.nodes, ...syntheticNodes, ...radiusNodes]) {
+    if (node.symbol_key && !symbolNodeIds.has(node.symbol_key)) symbolNodeIds.set(node.symbol_key, node.id);
+  }
+  const topologySides = (delta: CodeDiffEdge): Array<{ side: CodeDiffEdgeSide; suffix: string }> => {
+    if (delta.status === "retargeted" && delta.before && delta.after) {
+      return [{ side: delta.before, suffix: ":before" }, { side: delta.after, suffix: ":after" }];
+    }
+    const side = delta.after ?? delta.before;
+    return side ? [{ side, suffix: "" }] : [];
+  };
+  const topologyEntries = overlay.edge_deltas.flatMap((delta) =>
+    topologySides(delta).map(({ side, suffix }) => ({ delta, side, suffix })));
+  const topologySymbolKeys = new Set<string>();
+  const topologySymbolPaths = new Map<string, string>();
+  for (const { side } of topologyEntries) {
+    for (const symbolKey of [side?.source_symbol_key, side?.target_symbol_key]) {
+      if (!symbolKey) continue;
+      if (!existingKeys.has(symbolKey) && !syntheticSides.has(symbolKey) && !radiusKeys.has(symbolKey)) topologySymbolKeys.add(symbolKey);
+    }
+    if (side.source_symbol_key && !topologySymbolPaths.has(side.source_symbol_key)) {
+      topologySymbolPaths.set(side.source_symbol_key, side.path);
+    }
+  }
+  const topologySymbolNodes: CodeGraphNode[] = [...topologySymbolKeys].map((symbolKey) => ({
+    id: `symbol:${symbolKey}`,
+    kind: "symbol",
+    label: symbolKey,
+    symbol_kind: "topology",
+    symbol_key: symbolKey,
+    symbol_id: null,
+    path_display: topologySymbolPaths.get(symbolKey) ?? null,
+    language: null,
+    container_chain: [],
+    signature: null,
+    span: null,
+    selection_span: null,
+    freshness: "unknown",
+    diagnostic_count: 0,
+    diagnostic_severity: null,
+    metrics: { in_degree: 0, out_degree: 0, community_id: null },
+  }));
+  for (const node of topologySymbolNodes) {
+    if (node.symbol_key && !symbolNodeIds.has(node.symbol_key)) symbolNodeIds.set(node.symbol_key, node.id);
+  }
+  const symbolNodeId = (symbolKey: string): string => symbolNodeIds.get(symbolKey) ?? `symbol:${symbolKey}`;
+  const existingNodeIds = new Set(snapshot.nodes.map((node) => node.id));
+  const existingEdgeIds = new Set(snapshot.edges.map((edge) => edge.id));
+  const topologyHintNodes = topologyEntries.flatMap(({ delta, side, suffix }) => {
+    if (!side || side.target_symbol_key || (!side.target_hint && !side.unresolved)) return [];
+    const id = `hint:${delta.edge_key}${suffix}`;
+    if (existingNodeIds.has(id)) return [];
+    return [{
+      id,
+      kind: "symbol" as const,
+      label: side.target_hint ?? "unresolved",
+      symbol_kind: "unresolved",
+      symbol_key: null,
+      symbol_id: null,
+      path_display: null,
+      language: null,
+      container_chain: [],
+      signature: null,
+      span: null,
+      selection_span: null,
+      freshness: "unknown" as const,
+      diagnostic_count: 0,
+      diagnostic_severity: null,
+      metrics: { in_degree: 0, out_degree: 0, community_id: null },
+    }];
+  });
+  const topologyEdges = topologyEntries.flatMap(({ delta, side, suffix }) => {
+    if (!side?.source_symbol_key) return [];
+    const id = `${delta.edge_key}${suffix}`;
+    if (existingEdgeIds.has(id)) return [];
+    const targetId = side.target_symbol_key ? symbolNodeId(side.target_symbol_key) : `hint:${delta.edge_key}${suffix}`;
+    return [{
+      id,
+      kind: side.kind as CodeGraphEdge["kind"],
+      source_id: symbolNodeId(side.source_symbol_key),
+      target_id: targetId,
+      confidence: side.confidence,
+      unresolved: side.unresolved,
+      target_hint: side.target_hint ?? null,
+    }];
+  });
+  if (syntheticNodes.length === 0 && radiusNodes.length === 0 && topologySymbolNodes.length === 0 && topologyHintNodes.length === 0 && topologyEdges.length === 0) return snapshot;
+  const materializedSnapshot = {
+    ...snapshot,
+    nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes, ...topologySymbolNodes, ...topologyHintNodes.filter((node, index, nodes) => nodes.findIndex((candidate) => candidate.id === node.id) === index)],
+    edges: [...snapshot.edges, ...topologyEdges],
+  };
+  materializedCodeDiffSnapshots.add(materializedSnapshot);
+  return materializedSnapshot;
 }
 
 function matchesCodeNode(
@@ -844,6 +990,7 @@ function codePathMatchesPrefix(path: string, prefix: string): boolean {
 function deltaStatuses(overlay?: CodeDiffOverlay | null): Map<string, CodeGraphDeltaStatus> {
   const result = new Map<string, CodeGraphDeltaStatus>();
   if (!overlay) return result;
+  overlay = normalizeCodeDiffOverlay(overlay);
   for (const symbol of [...overlay.added_symbols, ...overlay.removed_symbols, ...overlay.modified_symbols]) {
     result.set(symbol.symbol_key, symbol.status);
   }

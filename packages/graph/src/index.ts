@@ -88,6 +88,7 @@ export {
   initialCodeGraphFilters,
   initialCodeGraphState,
   normalizeCodeGraphFilters,
+  normalizeCodeDiffOverlay,
   type CodeEdgeVisualStyle,
   type CodeGraphAction,
   type CodeGraphAdapter,

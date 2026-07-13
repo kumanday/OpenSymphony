@@ -2,6 +2,7 @@
   "schema_version": { "major": 1, "minor": 0, "patch": 0 },
   "repo_id": "opensymphony",
   "head_revision": "head-rev",
+  "topology_delta_available": true,
   "cursor": { "sequence": 3, "partition": "code-graph:opensymphony" },
   "updated_at": "2026-07-07T03:00:00Z"
 }

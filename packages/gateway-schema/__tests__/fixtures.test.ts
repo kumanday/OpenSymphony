@@ -228,6 +228,7 @@ describe("code graph fixtures", () => {
     expect(report.cursor.partition).toBe("code-graph:opensymphony");
     expect(update.repo_id).toBe("opensymphony");
     expect(update.head_revision).toBe("head-rev");
+    expect(update.topology_delta_available).toBe(true);
     expect(update.cursor.partition).toBe("code-graph:opensymphony");
   });
 });

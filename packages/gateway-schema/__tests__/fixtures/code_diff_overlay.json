@@ -20,6 +20,8 @@
   ],
   "removed_symbols": [],
   "modified_symbols": [],
+  "edge_deltas": [],
+  "module_connection_deltas": [],
   "blast_radius": [],
   "unanalyzed_files": [],
   "truncation": { "nodes_dropped": 0, "edges_dropped": 0 },

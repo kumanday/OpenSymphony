@@ -283,6 +283,82 @@ pub enum CodeDiffSymbolStatus {
     Modified,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeDiffEdgeStatus {
+    Added,
+    Removed,
+    Retargeted,
+    ConfidenceChanged,
+    Changed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffEdge {
+    pub edge_key: String,
+    pub status: CodeDiffEdgeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<CodeDiffEdgeSide>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<CodeDiffEdgeSide>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffEdgeSide {
+    pub edge_id: String,
+    pub kind: String,
+    pub source_symbol_key: Option<String>,
+    pub target_symbol_key: Option<String>,
+    pub target_hint: Option<String>,
+    pub confidence: CodeGraphConfidence,
+    pub unresolved: bool,
+    pub path: String,
+    pub span: CodeSpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeDiffConnectionScope {
+    Directory,
+    Module,
+    Community,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffModuleConnection {
+    pub connection_key: String,
+    pub scope: CodeDiffConnectionScope,
+    pub source: String,
+    pub target: String,
+    pub status: CodeDiffEdgeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<CodeDiffModuleConnectionSide>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<CodeDiffModuleConnectionSide>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffModuleConnectionSide {
+    pub edge_count: usize,
+    #[serde(default)]
+    pub edge_kind_counts: Vec<CodeDiffCountByKind>,
+    #[serde(default)]
+    pub confidence_counts: Vec<CodeDiffCountByConfidence>,
+    pub unresolved_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffCountByKind {
+    pub kind: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffCountByConfidence {
+    pub confidence: CodeGraphConfidence,
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeDiffOverlay {
     pub schema_version: SchemaVersion,
@@ -295,6 +371,10 @@ pub struct CodeDiffOverlay {
     pub removed_symbols: Vec<CodeDiffSymbol>,
     #[serde(default)]
     pub modified_symbols: Vec<CodeDiffSymbol>,
+    #[serde(default)]
+    pub edge_deltas: Vec<CodeDiffEdge>,
+    #[serde(default)]
+    pub module_connection_deltas: Vec<CodeDiffModuleConnection>,
     #[serde(default)]
     pub blast_radius: Vec<CodeDiffBlastRadius>,
     #[serde(default)]
@@ -330,6 +410,20 @@ pub struct CodeDiffBlastRadius {
     pub symbol_key: String,
     pub inbound_count: usize,
     pub outbound_count: usize,
+    #[serde(default)]
+    pub inbound: Vec<CodeDiffBlastRadiusEntry>,
+    #[serde(default)]
+    pub outbound: Vec<CodeDiffBlastRadiusEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDiffBlastRadiusEntry {
+    pub edge_key: String,
+    pub symbol_key: Option<String>,
+    pub path: String,
+    pub edge_kind: String,
+    pub confidence: CodeGraphConfidence,
+    pub distance: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -369,6 +463,8 @@ pub struct CodeGraphUpdatedEvent {
     pub repo_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_revision: Option<String>,
+    #[serde(default)]
+    pub topology_delta_available: bool,
     pub cursor: StreamCursor,
     pub updated_at: DateTime<Utc>,
 }

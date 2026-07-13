@@ -125,12 +125,32 @@ describe("diff symbol navigation", () => {
       added_symbols: [],
       removed_symbols: [],
       modified_symbols: [],
-      blast_radius: [{ symbol_key: "caller", inbound_count: 2 }],
+      edge_deltas: [],
+      module_connection_deltas: [],
+      blast_radius: [{ symbol_key: "caller", inbound_count: 2, outbound_count: 0, inbound: [], outbound: [] }],
       unanalyzed_files: [],
-      truncation: { truncated: false, reason: null },
+      truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
       generated_at: "2026-07-12T00:00:00Z",
     } satisfies CodeDiffOverlay;
     expect(renderCodeDiffSummary(overlay)).toContain("data-run-code-summary");
     expect(renderCodeDiffDeltaList(overlay)).toContain("caller");
+  });
+
+  it("renders legacy overlays with missing topology arrays", () => {
+    const legacyOverlay = {
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      repo_id: "repo",
+      base_revision: "base",
+      head_revision: "head",
+      added_symbols: [],
+      removed_symbols: [],
+      modified_symbols: [],
+      blast_radius: [{ symbol_key: "legacyCaller", inbound_count: 1, outbound_count: 1 }],
+      unanalyzed_files: [],
+      truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+      generated_at: "2026-07-12T00:00:00Z",
+    } as unknown as CodeDiffOverlay;
+    expect(renderCodeDiffSummary(legacyOverlay)).toContain("0 topology edges");
+    expect(renderCodeDiffDeltaList(legacyOverlay)).toContain("legacyCaller");
   });
 });

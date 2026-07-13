@@ -1503,6 +1503,7 @@ pub struct CodeSymbolRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeEdgeRecord {
     pub edge_id: String,
+    pub edge_key: String,
     pub edge_kind: String,
     pub source_symbol_key: Option<String>,
     pub target_symbol_key: Option<String>,
@@ -2072,6 +2073,7 @@ fn code_edge_from_row(row: &duckdb::Row<'_>) -> Result<CodeEdgeRecord, duckdb::E
     let target_symbol_key = row.get::<_, Option<String>>(3)?;
     Ok(CodeEdgeRecord {
         edge_id: row.get(0)?,
+        edge_key: String::new(),
         edge_kind: row.get(1)?,
         source_symbol_key: row.get(2)?,
         unresolved: target_symbol_key.is_none(),
