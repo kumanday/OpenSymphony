@@ -67,6 +67,339 @@ pub struct CodeWorkspaceOverlay {
     pub unanalyzed_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeGraphContextQuery {
+    pub repo_id: String,
+    pub query: Option<String>,
+    pub path: Option<String>,
+    pub symbol: Option<String>,
+    pub depth: usize,
+    pub limit: usize,
+}
+
+/// Return bounded, source-cited discovery evidence from the indexed graph.
+///
+/// The optional overlay is already resolved by the caller so this read path
+/// cannot accept a client filesystem root or accidentally persist workspace
+/// text. Changed paths in the overlay replace the baseline maps before the
+/// selectors and neighborhood traversal run.
+pub fn code_graph_context(
+    config: &MemoryConfig,
+    options: CodeGraphContextQuery,
+    overlay: Option<&CodeWorkspaceOverlay>,
+) -> Result<serde_json::Value, CodeGraphProjectionError> {
+    if options.query.as_deref().is_none_or(|value| value.trim().is_empty())
+        && options.path.as_deref().is_none_or(|value| value.trim().is_empty())
+        && options
+            .symbol
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(CodeGraphProjectionError::InvalidRequest(
+            "code graph context requires query, path, or symbol".to_string(),
+        ));
+    }
+    ensure_code_repo(config, &options.repo_id, false)?;
+
+    let path = options
+        .path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_code_path)
+        .transpose()
+        .map_err(CodeGraphProjectionError::InvalidRequest)?;
+    let query = options
+        .query
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let symbol_selector = options
+        .symbol
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let base_revision = match overlay {
+        Some(overlay) => Some(overlay.base_revision.clone()),
+        None => code_graph_repos(config, false)?
+            .repos
+            .into_iter()
+            .find(|repo| repo.repo_id == options.repo_id)
+            .and_then(|repo| repo.head_revision),
+    }
+    .ok_or(CodeGraphProjectionError::IndexUnavailable)?;
+    let connection = open_existing_index_read_only(config)?;
+    let (symbols, edges) = if let Some(overlay) = overlay {
+        (overlay.symbols.clone(), overlay.edges.clone())
+    } else {
+        let Some(connection) = connection.as_ref() else {
+            return Err(CodeGraphProjectionError::IndexUnavailable);
+        };
+        (
+            query_symbols_for_revision(config, connection, &options.repo_id, &base_revision)?,
+            query_code_edges_for_revision(connection, config, &options.repo_id, &base_revision)?,
+        )
+    };
+    let depth = options.depth.min(8);
+    let limit = options.limit.clamp(1, CODE_GRAPH_MAX_RECORDS);
+    let mut selected = BTreeMap::<String, (CodeSymbolRecord, &'static str)>::new();
+    for candidate in symbols.values().filter(|candidate| {
+        let path_matches = path.as_deref().is_none_or(|path| {
+            candidate.path == path || candidate.path.starts_with(&format!("{path}/"))
+        });
+        let query_matches = query.as_deref().is_none_or(|query| {
+            candidate.name.to_ascii_lowercase().contains(query)
+                || candidate.path.to_ascii_lowercase().contains(query)
+                || candidate
+                    .container_chain
+                    .iter()
+                    .any(|container| container.to_ascii_lowercase().contains(query))
+        });
+        let symbol_matches = symbol_selector.as_deref().is_none_or(|selector| {
+            candidate.symbol_key.to_ascii_lowercase() == selector
+                || candidate.name.to_ascii_lowercase() == selector
+                || candidate.name.to_ascii_lowercase().contains(selector)
+        });
+        path_matches && query_matches && symbol_matches
+    }) {
+        if selected.len() >= limit {
+            break;
+        }
+        selected.insert(candidate.symbol_key.clone(), (candidate.clone(), "match"));
+    }
+
+    let mut frontier = selected.keys().cloned().collect::<BTreeSet<_>>();
+    let mut dropped_neighbors = 0;
+    for _ in 0..depth {
+        let mut next_frontier = BTreeSet::new();
+        for edge in &edges {
+            let adjacent = if edge
+                .source_symbol_key
+                .as_deref()
+                .is_some_and(|key| frontier.contains(key))
+            {
+                edge.target_symbol_key.as_deref()
+            } else if edge
+                .target_symbol_key
+                .as_deref()
+                .is_some_and(|key| frontier.contains(key))
+            {
+                edge.source_symbol_key.as_deref()
+            } else {
+                None
+            };
+            let Some(adjacent) = adjacent else {
+                continue;
+            };
+            if selected.contains_key(adjacent) {
+                continue;
+            }
+            let Some(symbol) = symbols.get(adjacent) else {
+                continue;
+            };
+            if selected.len() >= limit {
+                dropped_neighbors += 1;
+                continue;
+            }
+            let relation = if is_test_code_symbol(symbol) {
+                "related_test"
+            } else if edge
+                .target_symbol_key
+                .as_deref()
+                .is_some_and(|key| frontier.contains(key))
+            {
+                "caller"
+            } else {
+                "reference"
+            };
+            selected.insert(adjacent.to_string(), (symbol.clone(), relation));
+            next_frontier.insert(adjacent.to_string());
+        }
+        if next_frontier.is_empty() {
+            break;
+        }
+        frontier = next_frontier;
+    }
+
+    let provenance = overlay
+        .map(|overlay| {
+            serde_json::json!({
+                "kind": "workspace_overlay",
+                "runId": overlay.run_id,
+                "baseRevision": overlay.base_revision,
+                "headRevision": overlay.head_revision,
+                "overlayDigest": overlay.workspace_content_digest
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "kind": "indexed_baseline",
+                "baseRevision": base_revision
+            })
+        });
+    let mut evidence = Vec::new();
+    for (key, (symbol, relation)) in &selected {
+        evidence.push(context_symbol_json(
+            &options.repo_id,
+            &base_revision,
+            overlay,
+            symbol,
+            relation,
+        ));
+        for edge in edges.iter().filter(|edge| {
+            edge.source_symbol_key.as_deref() == Some(key.as_str())
+                || edge.target_symbol_key.as_deref() == Some(key.as_str())
+        }) {
+            let edge_relation = if edge.target_symbol_key.as_deref() == Some(key.as_str()) {
+                "caller"
+            } else {
+                "reference"
+            };
+            evidence.push(context_edge_json(
+                &options.repo_id,
+                &base_revision,
+                overlay,
+                edge,
+                symbols.get(key),
+                edge_relation,
+            ));
+        }
+        if let Some(connection) = connection.as_ref()
+            && !overlay.is_some_and(|overlay| overlay.changed_paths.contains(&symbol.path))
+        {
+            for diagnostic in query_symbol_diagnostics(connection, config, symbol, false)? {
+                evidence.push(serde_json::json!({
+                    "kind": "diagnostic",
+                    "repository": options.repo_id,
+                    "path": symbol.path,
+                    "symbolKey": symbol.symbol_key,
+                    "span": context_span_json(&diagnostic.span),
+                    "message": diagnostic.message,
+                    "diagnosticKind": diagnostic.kind,
+                    "severity": diagnostic.severity,
+                    "baseRevision": base_revision,
+                    "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+                    "freshness": symbol.freshness,
+                    "sourceRef": context_source_ref(&symbol.path, diagnostic.span.start_line, diagnostic.span.start_col, diagnostic.span.end_line, diagnostic.span.end_col)
+                }));
+            }
+        }
+    }
+
+    let dropped = dropped_neighbors + evidence.len().saturating_sub(limit);
+    evidence.truncate(limit);
+    Ok(serde_json::json!({
+        "repository": options.repo_id,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": provenance,
+        "depth": depth,
+        "limit": limit,
+        "truncated": dropped > 0,
+        "dropped": dropped,
+        "evidence": evidence,
+        "unanalyzedFiles": overlay.map(|overlay| overlay.unanalyzed_files.clone()).unwrap_or_default()
+    }))
+}
+
+fn is_test_code_symbol(symbol: &CodeSymbolRecord) -> bool {
+    let path = symbol.path.to_ascii_lowercase();
+    path.contains("/test/")
+        || path.starts_with("test/")
+        || path.contains("/tests/")
+        || path.starts_with("tests/")
+        || symbol.name.to_ascii_lowercase().starts_with("test")
+        || symbol
+            .container_chain
+            .iter()
+            .any(|container| container.to_ascii_lowercase().starts_with("test"))
+}
+
+fn context_symbol_json(
+    repo_id: &str,
+    base_revision: &str,
+    overlay: Option<&CodeWorkspaceOverlay>,
+    symbol: &CodeSymbolRecord,
+    relation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "symbol",
+        "relation": relation,
+        "repository": repo_id,
+        "symbolKey": symbol.symbol_key,
+        "symbolId": symbol.symbol_id,
+        "name": symbol.name,
+        "symbolKind": symbol.kind,
+        "path": symbol.path,
+        "containerChain": symbol.container_chain,
+        "span": context_span_json_values(symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col),
+        "parserVersion": symbol.parser_version,
+        "queryPackVersion": symbol.query_pack_version,
+        "confidence": "exact",
+        "freshness": symbol.freshness,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": if overlay.is_some_and(|overlay| overlay.changed_paths.contains(&symbol.path)) { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceRef": context_source_ref(&symbol.path, symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col)
+    })
+}
+
+fn context_edge_json(
+    repo_id: &str,
+    base_revision: &str,
+    overlay: Option<&CodeWorkspaceOverlay>,
+    edge: &CodeEdgeRecord,
+    related_symbol: Option<&CodeSymbolRecord>,
+    relation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "edge",
+        "relation": relation,
+        "repository": repo_id,
+        "edgeKind": edge.edge_kind,
+        "sourceSymbolKey": edge.source_symbol_key,
+        "targetSymbolKey": edge.target_symbol_key,
+        "targetHint": edge.target_hint,
+        "path": edge.path,
+        "span": context_span_json_values(edge.start_line, edge.start_col, edge.end_line, edge.end_col),
+        "parserVersion": related_symbol.map(|symbol| symbol.parser_version.clone()),
+        "queryPackVersion": related_symbol.map(|symbol| symbol.query_pack_version.clone()),
+        "confidence": edge.confidence,
+        "freshness": edge.freshness,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": if overlay.is_some_and(|overlay| overlay.changed_paths.contains(&edge.path)) { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceRef": context_source_ref(&edge.path, edge.start_line, edge.start_col, edge.end_line, edge.end_col)
+    })
+}
+
+fn context_span_json(span: &CodeSpan) -> serde_json::Value {
+    context_span_json_values(span.start_line, span.start_col, span.end_line, span.end_col)
+}
+
+fn context_span_json_values(
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "startLine": start_line,
+        "startColumn": start_col,
+        "endLine": end_line,
+        "endColumn": end_col
+    })
+}
+
+fn context_source_ref(
+    path: &str,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> String {
+    format!("{path}:{start_line}:{start_col}-{end_line}:{end_col}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct WorkspaceDocumentCacheKey {
     repo_id: String,
