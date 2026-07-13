@@ -331,7 +331,8 @@ The web and desktop clients both mount the shared `OpenSymphonyApp` shell from `
 Code Graph UI validation also covers the real empty-state interaction: the
 keyboard-accessible index button, disabled progress state, skipped-file
 coverage, retry diagnostics, target-revision/provenance labels, stale and
-truncated status, and refresh after `code_graph_updated`. The packaged desktop
+truncated status, refresh after `code_graph_updated`, and recovery when an
+accepted/progress job completes without event delivery. The packaged desktop
 smoke must use production adapters; passing only `?fixtures` is insufficient.
 
 Release-sensitive evidence for this surface includes:

@@ -279,10 +279,13 @@ empty target instead of showing a dead-end placeholder. `Index repository`
 starts the target-branch job; accepted/progress reports update the accessible
 status and coverage counts, failed or unavailable reports show diagnostics and
 enable `Retry indexing`, and the completed `code_graph_updated` event refreshes
-the graph. The provenance strip identifies the target revision and labels the
-current view as baseline, workspace-composed, stale, truncated, or partially
-covered. Web uses the production HTTP adapter and packaged Tauri uses the
-production native command; `?fixtures` remains a deterministic workbench only.
+the graph. While an accepted/progress job has no event delivery, the shell
+polls repository summaries and promotes an observed indexed baseline so the
+surface cannot remain stuck on the empty state. The provenance strip identifies
+the target revision and labels the current view as baseline, workspace-composed,
+stale, truncated, or partially covered. Web uses the production HTTP adapter
+and packaged Tauri uses the production native command; `?fixtures` remains a
+deterministic workbench only.
 
 ### Tests that gate this area
 

@@ -104,9 +104,11 @@ does not start Vite.
 For an empty Code Graph store, launch the normal desktop shell, open Graph, and
 choose the configured repository's `Index repository` action. The status panel
 shows target-branch progress, parsed/persisted coverage, skipped files, and
-retry diagnostics; completion is driven by `code_graph_updated`. This path
-uses the production Tauri command, not fixture data. The equivalent web smoke
-uses the production HTTP adapter. A packaged parity check is:
+retry diagnostics; completion is driven by `code_graph_updated`, with a
+repository-summary polling fallback while accepted/progress jobs have no event
+delivery. This path uses the production Tauri command, not fixture data. The
+equivalent web smoke uses the production HTTP adapter. A packaged parity check
+is:
 
 ```bash
 npm run build --workspace=@opensymphony/desktop

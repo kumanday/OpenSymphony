@@ -27,6 +27,7 @@ export interface CodeRepoSummary {
   symbol_count: number;
   edge_count: number;
   freshness: CodeGraphFreshness;
+  indexed?: boolean;
   indexed_at?: string | null;
   head_revision?: string | null;
   worktree_dirty?: boolean;

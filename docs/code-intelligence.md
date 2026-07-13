@@ -86,7 +86,9 @@ operator can choose `Index repository` without an admin MCP call. Progress
 reports include parsed and persisted coverage; skipped files and diagnostics
 remain visible in the empty-state panel; failures are retryable. After
 `code_graph_updated`, the client reloads the repository summary and baseline
-snapshot, retaining the selected target revision in the provenance strip.
+snapshot, retaining the selected target revision in the provenance strip. If an
+accepted/progress job completes while the event stream is unavailable, the
+client polls repository summaries and recognizes the indexed baseline directly.
 
 ## Workspace overlays
 

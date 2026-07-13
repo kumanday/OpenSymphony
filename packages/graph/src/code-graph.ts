@@ -260,6 +260,7 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         : state;
     case "INDEX_REPORT":
       return state.repoId === action.report.repo_id
+        && !isStaleCodeIndexReport(state.indexReport, action.report)
         ? {
             ...state,
             indexReport: action.report,
@@ -461,6 +462,31 @@ function selectCodeGraphRepo(state: CodeGraphState, repoId: string | null): Code
     layoutStatus: "idle",
     layoutError: null,
   };
+}
+
+function isStaleCodeIndexReport(
+  current: CodeIndexReport | null,
+  candidate: CodeIndexReport,
+): boolean {
+  if (!current || current.repo_id !== candidate.repo_id) return false;
+  if (current.cursor.partition !== candidate.cursor.partition) return false;
+  if (candidate.cursor.sequence < current.cursor.sequence) return true;
+  if (candidate.cursor.sequence > current.cursor.sequence) return false;
+  return codeIndexStatusRank(candidate.status) <= codeIndexStatusRank(current.status);
+}
+
+function codeIndexStatusRank(status: CodeIndexReport["status"]): number {
+  switch (status) {
+    case "accepted":
+      return 0;
+    case "progress":
+      return 1;
+    case "failed":
+    case "unavailable":
+      return 2;
+    case "completed":
+      return 3;
+  }
 }
 
 export function currentCodeGraphSnapshot(state: CodeGraphState): CodeGraphSnapshot | null {

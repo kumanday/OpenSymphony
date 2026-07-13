@@ -2481,6 +2481,7 @@ async fn gateway_code_graph_bootstraps_empty_store_and_dirty_workspace_flow() {
         .find(|summary| summary.repo_id == repo_id)
         .expect("configured repository should be discoverable before indexing");
     assert_eq!(empty_repo.document_count, 0);
+    assert!(!empty_repo.indexed);
 
     let accepted = client
         .post(format!("{base}/repos/{repo_id}/index"))
@@ -2547,6 +2548,7 @@ async fn gateway_code_graph_bootstraps_empty_store_and_dirty_workspace_flow() {
         indexed_repo.head_revision.as_deref(),
         Some(base_revision.as_str())
     );
+    assert!(indexed_repo.indexed);
     assert!(indexed_repo.document_count > 0);
 
     let snapshot = client

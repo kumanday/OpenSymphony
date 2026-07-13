@@ -24,6 +24,7 @@ import type {
   MemoryGraphUpdatedEvent,
   CodeGraphUpdatedEvent,
   CodeIndexReport,
+  CodeRepoSummary,
   CodeGraphNode,
   CodeGraphSnapshot,
   CodeDiffOverlay,
@@ -359,6 +360,7 @@ const schemaVersion = { major: 1, minor: 0, patch: 0 };
 // Two consecutive failures avoid noisy transient warnings while still surfacing stale live data.
 const liveRefreshFailureThreshold = 2;
 const liveRefreshPollIntervalMs = 5_000;
+const codeGraphIndexPollIntervalMs = 1_000;
 const defaultWorkspacePaneSizes: WorkspacePaneSizes = { left: 50, right: 50 };
 const minWorkspacePaneSizes: WorkspacePaneSizes = { left: 30, right: 30 };
 type TaskSidePane = "done" | "backlog";
@@ -411,6 +413,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private codeGraphLayoutSize: { width: number; height: number } | null = null;
   private codeGraphLoadInFlight: Promise<void> | null = null;
   private codeGraphLoadQueued = false;
+  private codeGraphIndexPollTimer: ReturnType<typeof setTimeout> | null = null;
   private codeGraphLayoutRun = 0;
   private codeGraphNavigationVersion = 0;
   private codeGraphView: KnowledgeGraphViewState = createKnowledgeGraphViewState();
@@ -680,6 +683,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       clearTimeout(this.completedTasksSearchTimer);
       this.completedTasksSearchTimer = null;
     }
+    this.clearCodeGraphIndexPoll();
     this.stopLiveRefreshTimer();
     this.stopEventSubscription();
     this.graphLayoutAdapter.dispose();
@@ -852,6 +856,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private resetCodeGraph(): void {
     const shouldReload = this.state.graphPaneView === "code" && !this.destroyed;
+    this.clearCodeGraphIndexPoll();
     this.state.codeGraph = createInitialCodeGraphState();
     this.codeGraphLayout = null;
     this.codeGraphLayoutSize = null;
@@ -1147,9 +1152,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       const report = await adapter.indexRepo(repoId);
       if (this.destroyed) return;
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "INDEX_REPORT", report });
-      this.render();
-      if (report.status === "completed") {
+      if (report.status === "accepted" || report.status === "progress" || report.status === "completed") {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
+      }
+      if (report.status === "accepted" || report.status === "progress") {
+        this.scheduleCodeGraphIndexPoll();
+      } else {
+        this.clearCodeGraphIndexPoll();
+      }
+      this.render();
+      if (report.status === "accepted" || report.status === "progress" || report.status === "completed") {
         await this.loadCodeGraph();
       }
     } catch (error) {
@@ -1159,8 +1171,51 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         repoId,
         error: errorMessage(error),
       });
+      this.clearCodeGraphIndexPoll();
       this.render();
     }
+  }
+
+  private clearCodeGraphIndexPoll(): void {
+    if (this.codeGraphIndexPollTimer === null) return;
+    clearTimeout(this.codeGraphIndexPollTimer);
+    this.codeGraphIndexPollTimer = null;
+  }
+
+  private scheduleCodeGraphIndexPoll(): void {
+    if (this.destroyed || this.codeGraphIndexPollTimer !== null) return;
+    this.codeGraphIndexPollTimer = setTimeout(() => {
+      this.codeGraphIndexPollTimer = null;
+      void this.pollCodeGraphIndex();
+    }, codeGraphIndexPollIntervalMs);
+  }
+
+  private async pollCodeGraphIndex(): Promise<void> {
+    if (this.destroyed) return;
+    const report = this.state.codeGraph.indexReport;
+    if (!report || (report.status !== "accepted" && report.status !== "progress")) return;
+    if (this.state.graphPaneView === "code") {
+      try {
+        await this.loadCodeGraph();
+      } catch {
+        // The normal load path records UI diagnostics; keep the fallback alive
+        // so a transient repository read failure does not strand the job.
+      }
+    }
+    if (this.destroyed) return;
+    const currentReport = this.state.codeGraph.indexReport;
+    if (!currentReport || (currentReport.status !== "accepted" && currentReport.status !== "progress")) return;
+    const repo = this.state.codeGraph.repos?.repos.find((candidate) => candidate.repo_id === currentReport.repo_id);
+    if (repo && codeRepoMatchesIndexTarget(repo, currentReport)) {
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "INDEX_REPORT",
+        report: completedCodeIndexReport(currentReport, repo),
+      });
+      this.clearCodeGraphIndexPoll();
+      this.render();
+      return;
+    }
+    this.scheduleCodeGraphIndexPoll();
   }
 
   private async loadCodeGraphOnce(): Promise<void> {
@@ -1171,7 +1226,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     try {
-      if (!this.state.codeGraph.repos) {
+      const indexIsInFlight = this.state.codeGraph.indexing
+        || this.state.codeGraph.indexReport?.status === "accepted"
+        || this.state.codeGraph.indexReport?.status === "progress";
+      if (!this.state.codeGraph.repos || indexIsInFlight) {
         const includeStale = codeGraphNeedsBroadFreshness(this.state.codeGraph.filters);
         const repos = await this.codeGraphAdapter.listRepos({
           includeStale,
@@ -1192,8 +1250,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }
       const repo = this.state.codeGraph.repos?.repos.find((candidate) => candidate.repo_id === repoId);
       const hasIndexedBaseline = Boolean(
-        repo?.indexed_at
-          || repo?.head_revision
+        (repo && codeRepoHasIndexedBaseline(repo))
           || (this.state.codeGraph.indexReport?.repo_id === repoId
             && this.state.codeGraph.indexReport.status === "completed"),
       );
@@ -1642,10 +1699,25 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if ((envelope.event_kind === "code_index_progress" || envelope.event_kind === "code_index_failed")
       && isCodeIndexReport(envelope.payload)) {
       handledCodeIndexStatus = true;
+      const previousReport = this.state.codeGraph.indexReport;
+      const report = envelope.payload;
       this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
         type: "INDEX_REPORT",
-        report: envelope.payload,
+        report,
       });
+      if (this.state.codeGraph.indexReport !== previousReport) {
+        if (report.status === "accepted" || report.status === "progress") {
+          this.scheduleCodeGraphIndexPoll();
+        } else {
+          this.clearCodeGraphIndexPoll();
+          if (report.status === "completed") {
+            this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
+            if (this.state.graphPaneView === "code") {
+              void this.loadCodeGraph();
+            }
+          }
+        }
+      }
       this.render();
     }
     if (!handledMemoryGraphUpdate && !handledCodeGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
@@ -5609,6 +5681,32 @@ function isCodeIndexReport(value: unknown): value is CodeIndexReport {
     && !!cursor
     && typeof cursor.sequence === "number"
     && typeof cursor.partition === "string";
+}
+
+function codeRepoHasIndexedBaseline(repo: CodeRepoSummary): boolean {
+  return repo.indexed === true || Boolean(repo.indexed_at || repo.head_revision);
+}
+
+function codeRepoMatchesIndexTarget(repo: CodeRepoSummary, report: CodeIndexReport): boolean {
+  if (!codeRepoHasIndexedBaseline(repo)) return false;
+  return !report.head_revision
+    || !repo.head_revision
+    || repo.head_revision === report.head_revision;
+}
+
+function completedCodeIndexReport(report: CodeIndexReport, repo: CodeRepoSummary): CodeIndexReport {
+  return {
+    ...report,
+    status: "completed",
+    head_revision: repo.head_revision ?? report.head_revision,
+    parsed_files: repo.document_count,
+    persisted_documents: repo.document_count,
+    persisted_symbols: repo.symbol_count,
+    persisted_edges: repo.edge_count,
+    persisted_diagnostics: 0,
+    diagnostics: [],
+    indexed_at: repo.indexed_at ?? report.indexed_at,
+  };
 }
 
 function sameCodeGraphTopology(a: CodeGraphSnapshot, b: CodeGraphSnapshot): boolean {

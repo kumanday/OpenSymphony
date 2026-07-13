@@ -256,9 +256,10 @@ An empty DuckDB is a supported starting state. The gateway advertises the
 configured repository with zero coverage, allowing the web or desktop Code
 Graph surface to start indexing directly. The surface renders accepted and
 progress coverage, skipped-file diagnostics, retryable failures, and refreshes
-from `code_graph_updated`; production web requests use HTTP and packaged
-desktop requests use the Tauri-native `code_index_repo` command against the
-same report contract.
+from `code_graph_updated`; during accepted/progress work with no event delivery,
+the shell polls repository summaries and recognizes a newly indexed baseline.
+Production web requests use HTTP and packaged desktop requests use the
+Tauri-native `code_index_repo` command against the same report contract.
 
 Initialize the shared memory policy and learned ontology file once:
 

@@ -323,7 +323,9 @@ configured repository and choose `Index repository`. It is safe to start from
 an empty `.opensymphony/memory/memory.duckdb`; the repository row is exposed
 with zero counts until the job begins. `accepted` and `progress` reports show
 coverage, `failed` and `unavailable` reports show diagnostics with a retry
-action, and `code_graph_updated` causes the shell to refresh the baseline.
+action, and `code_graph_updated` causes the shell to refresh the baseline. If
+the event stream is silent during an accepted/progress job, the shell polls the
+repository summary and refreshes as soon as an indexed baseline is visible.
 The provenance strip should show the configured target revision and whether a
 view is baseline, workspace-composed, stale, truncated, or partially analyzed.
 

@@ -150,7 +150,10 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
       || diffOverlay?.unanalyzed_files.length,
   );
   const repositoryHasNoBaseline = !selectedRepo
-    || (selectedRepo.document_count === 0 && !selectedRepo.indexed_at && !selectedRepo.head_revision);
+    || (selectedRepo.indexed !== true
+      && selectedRepo.document_count === 0
+      && !selectedRepo.indexed_at
+      && !selectedRepo.head_revision);
   const emptySnapshot = repositoryHasNoBaseline && (!snapshot || snapshot.nodes.length === 0);
   const truncationSummary = hasTruncation
     ? ` Truncated ${formatCount(truncation.nodes_dropped)} nodes and ${formatCount(truncation.edges_dropped)} edges${truncation.reason ? `: ${truncation.reason}` : "."}`

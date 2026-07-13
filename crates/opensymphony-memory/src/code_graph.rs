@@ -1251,13 +1251,7 @@ fn unindexed_code_repo_list(config: &MemoryConfig) -> CodeRepoList {
 }
 
 fn unindexed_code_repo_summary(config: &MemoryConfig) -> CodeRepoSummary {
-    let repo_id = config
-        .repo_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("repository")
-        .to_string();
+    let repo_id = configured_code_repo_id(config);
     CodeRepoSummary {
         repo_id: repo_id.clone(),
         display_root: repo_id,
@@ -1266,10 +1260,41 @@ fn unindexed_code_repo_summary(config: &MemoryConfig) -> CodeRepoSummary {
         symbol_count: 0,
         edge_count: 0,
         freshness: CodeGraphFreshness::Unknown,
+        indexed: false,
         indexed_at: None,
         head_revision: None,
         worktree_dirty: false,
     }
+}
+
+fn configured_code_repo_id(config: &MemoryConfig) -> String {
+    let remote = Command::new("git")
+        .args(["-C"])
+        .arg(&config.repo_root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| repo_id_from_remote_url(&String::from_utf8_lossy(&output.stdout)));
+    remote.unwrap_or_else(|| {
+        config
+            .repo_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("repository")
+            .to_string()
+    })
+}
+
+fn repo_id_from_remote_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches(".git").trim_end_matches('/');
+    let name = trimmed
+        .rsplit(['/', ':'])
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    Some(name.to_string())
 }
 
 pub fn code_graph_snapshot(
@@ -3734,12 +3759,13 @@ pub fn code_graph_index_report(
         .repos
         .into_iter()
         .find(|repo| repo.repo_id == repo_id);
-    let status = if repo.is_some() {
+    let indexed = repo.as_ref().is_some_and(|repo| repo.indexed);
+    let status = if indexed {
         CodeIndexStatus::Completed
     } else {
         CodeIndexStatus::Unavailable
     };
-    let head_revision = repo.and_then(|repo| repo.head_revision);
+    let head_revision = repo.as_ref().and_then(|repo| repo.head_revision.clone());
     let counts = code_index_counts(config, repo_id)?;
     Ok(CodeIndexReport {
         schema_version: SchemaVersion::v1(),
@@ -3753,7 +3779,11 @@ pub fn code_graph_index_report(
         persisted_diagnostics: counts.diagnostics,
         stale_rows: counts.stale_rows,
         skipped_files: Vec::new(),
-        diagnostics: Vec::new(),
+        diagnostics: if indexed {
+            Vec::new()
+        } else {
+            vec!["configured repository has not been indexed".to_string()]
+        },
         cursor: code_graph_cursor(repo_id, indexed_at),
         indexed_at,
     })
@@ -5465,6 +5495,7 @@ impl CodeRepoAccumulator {
             } else {
                 CodeGraphFreshness::Unknown
             },
+            indexed: self.indexed_at.is_some() || self.head_revision.is_some(),
             indexed_at: self.indexed_at,
             head_revision: self.head_revision,
             worktree_dirty: self.worktree_dirty,
@@ -7394,7 +7425,7 @@ mod code_graph_tests {
 
     use super::{
         code_citation_matches_symbol, code_file_outline_from_workspace, code_graph_diff_overlay,
-        code_graph_repos, code_graph_snapshot, code_graph_workspace_diff_overlay,
+        code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_workspace_diff_overlay,
         code_graph_workspace_overlay,
         code_graph_workspace_snapshot,
         assign_edge_keys, code_index_document, code_symbol_span_matches,
@@ -9088,6 +9119,31 @@ mod code_graph_tests {
             .expect("skipped-only repo summary");
         assert_eq!(summary.document_count, 0);
         assert!(summary.languages.is_empty());
+    }
+
+    #[test]
+    fn empty_repo_discovery_uses_origin_id_and_stays_unavailable() {
+        let repo = TempDir::new().expect("repository tempdir");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", "git@github.com:example/canonical.git"],
+        );
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        let repos = code_graph_repos(&config, false).expect("empty repo discovery");
+        assert_eq!(repos.repos[0].repo_id, "canonical");
+        assert!(!repos.repos[0].indexed);
+
+        let report = code_graph_index_report(&config, "canonical").expect("index report");
+        assert_eq!(
+            report.status,
+            crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Unavailable
+        );
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("has not been indexed")));
     }
 
     #[test]
