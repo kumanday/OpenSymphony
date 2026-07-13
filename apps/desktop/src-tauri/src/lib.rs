@@ -70,6 +70,7 @@ pub fn run() {
             commands::memory_completed_tasks,
             commands::code_repos,
             commands::code_graph,
+            commands::run_code_graph,
             commands::code_symbol_detail,
             commands::code_diff_overlay,
             commands::run_code_outline,

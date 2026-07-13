@@ -62,6 +62,7 @@ export interface CodeGraphAdapterPolicy {
 export interface CodeGraphAdapter {
   listRepos(options?: CodeRepoListRequestOptions): Promise<CodeRepoList>;
   getGraphSnapshot(repoId: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
+  getRunGraphSnapshot?(runId: string, repoId?: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
   getSymbolDetail(repoId: string, symbolKey: string, options?: CodeSymbolDetailRequestOptions): Promise<CodeSymbolDetail>;
   getFileOutline(runId: string, filePath: string, repoId?: string): Promise<CodeFileOutline>;
   getDiffOverlay(
@@ -638,6 +639,11 @@ export function createHttpCodeGraphAdapter(
     getGraphSnapshot: (repoId, options) => {
       const params = codeGraphRequestParams(options);
       return read<CodeGraphSnapshot>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/graph`, params);
+    },
+    getRunGraphSnapshot: (runId, repoId, options) => {
+      const params = codeGraphRequestParams(options);
+      if (repoId) params.set("repo_id", repoId);
+      return read<CodeGraphSnapshot>(`/api/v1/runs/${encodeURIComponent(runId)}/code/graph`, params);
     },
     getSymbolDetail: (repoId, symbolKey, options) => {
       const params = new URLSearchParams();

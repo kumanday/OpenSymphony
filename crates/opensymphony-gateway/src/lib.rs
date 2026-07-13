@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     convert::Infallible,
     ffi::OsStr,
     path::{Path as StdPath, PathBuf},
@@ -7,6 +7,9 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -45,12 +48,14 @@ use crate::opensymphony_gateway_schema::{
 use crate::opensymphony_memory::{
     CodeGraphProjectionError, CodeGraphSnapshotOptions, DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
     MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
-    MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
-    code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
-    code_graph_updated_event, code_index_repository_is_git, code_index_target,
-    index_code_repository_at, index_code_repository_at_current_target, memory_completed_task_rows,
-    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
-    memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
+    MemoryGraphProjectionError, code_file_outline_from_source, code_file_outline_from_workspace,
+    code_graph_diff_overlay, code_graph_index_report, code_graph_repos, code_graph_snapshot,
+    code_graph_symbol_detail, code_graph_updated_event, code_graph_workspace_diff_overlay,
+    code_graph_workspace_snapshot, code_index_branch, code_index_repository_is_git,
+    code_index_target, index_code_repository_at, index_code_repository_at_current_target,
+    memory_completed_task_rows, memory_concept_detail, memory_graph_bundles,
+    memory_graph_communities_with_options, memory_graph_search as search_memory_graph,
+    memory_graph_snapshot_with_options,
 };
 
 pub mod action_handler;
@@ -301,6 +306,7 @@ pub struct GatewayState {
     pub active_states: Arc<HashSet<String>>,
     pub codex_readiness_cache: Arc<CodexReadinessCache>,
     pub workspace_scans: WorkspaceScans,
+    pub comparison_bases: WorkspaceComparisonBases,
     pub pr_urls: PrUrls,
 }
 
@@ -319,6 +325,7 @@ impl Clone for GatewayState {
             active_states: self.active_states.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
             workspace_scans: self.workspace_scans.clone(),
+            comparison_bases: self.comparison_bases.clone(),
             pr_urls: self.pr_urls.clone(),
         }
     }
@@ -334,6 +341,44 @@ impl Clone for GatewayState {
 #[derive(Clone, Default)]
 pub struct WorkspaceScans {
     state: Arc<tokio::sync::Mutex<HashMap<PathBuf, WorkspaceScanReceiver>>>,
+    trusted_target_branch: Option<Result<String, String>>,
+}
+
+#[derive(Clone, Default)]
+pub struct WorkspaceComparisonBases {
+    state: Arc<Mutex<HashMap<String, (PathBuf, WorkspaceComparisonBase)>>>,
+    trusted_target_branch: Option<Result<String, String>>,
+}
+
+impl WorkspaceComparisonBases {
+    fn with_target_branch(target_branch: Option<Result<String, String>>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            trusted_target_branch: target_branch,
+        }
+    }
+
+    fn resolve(
+        &self,
+        run_id: &str,
+        workspace_path: &StdPath,
+    ) -> Result<WorkspaceComparisonBase, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "workspace comparison base cache poisoned".to_string())?;
+        if let Some((cached_path, base)) = state.get(run_id)
+            && cached_path == workspace_path
+        {
+            return Ok(base.clone());
+        }
+        let base = workspace_comparison_base(workspace_path, self.trusted_target_branch.as_ref())?;
+        state.insert(
+            run_id.to_string(),
+            (workspace_path.to_path_buf(), base.clone()),
+        );
+        Ok(base)
+    }
 }
 
 type WorkspaceScanReceiver = tokio::sync::watch::Receiver<Option<WorkspaceScanOutcome>>;
@@ -347,7 +392,15 @@ pub(crate) struct WorkspaceScanOutcome {
 }
 
 impl WorkspaceScans {
+    fn with_target_branch(target_branch: Option<Result<String, String>>) -> Self {
+        Self {
+            state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            trusted_target_branch: target_branch,
+        }
+    }
+
     pub(crate) async fn scan(&self, workspace_path: PathBuf) -> WorkspaceScanOutcome {
+        let trusted_target_branch = self.trusted_target_branch.clone();
         let mut receiver = {
             let mut state = self.state.lock().await;
             if let Some(receiver) = state.get(&workspace_path) {
@@ -359,13 +412,15 @@ impl WorkspaceScans {
                 let path = workspace_path.clone();
                 tokio::spawn(async move {
                     let scan_path = path.clone();
-                    let outcome =
-                        tokio::task::spawn_blocking(move || compute_workspace_scan(&scan_path))
-                            .await
-                            .unwrap_or_else(|error| WorkspaceScanOutcome {
-                                comparison_base: None,
-                                files: Err(format!("workspace scan task failed: {error}")),
-                            });
+                    let target_branch = trusted_target_branch.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        compute_workspace_scan(&scan_path, target_branch.as_ref())
+                    })
+                    .await
+                    .unwrap_or_else(|error| WorkspaceScanOutcome {
+                        comparison_base: None,
+                        files: Err(format!("workspace scan task failed: {error}")),
+                    });
                     let _ = sender.send(Some(outcome));
                     entries.lock().await.remove(&path);
                 });
@@ -388,8 +443,11 @@ impl WorkspaceScans {
     }
 }
 
-fn compute_workspace_scan(workspace_path: &StdPath) -> WorkspaceScanOutcome {
-    match workspace_comparison_base(workspace_path) {
+fn compute_workspace_scan(
+    workspace_path: &StdPath,
+    trusted_target_branch: Option<&Result<String, String>>,
+) -> WorkspaceScanOutcome {
+    match workspace_comparison_base(workspace_path, trusted_target_branch) {
         Ok(base) => {
             let files =
                 build_workspace_run_file_changes_with_base(workspace_path, &base).map(Arc::new);
@@ -502,6 +560,12 @@ impl axum::extract::FromRef<GatewayState> for WorkspaceScans {
     }
 }
 
+impl axum::extract::FromRef<GatewayState> for WorkspaceComparisonBases {
+    fn from_ref(state: &GatewayState) -> Self {
+        state.comparison_bases.clone()
+    }
+}
+
 impl axum::extract::FromRef<GatewayState> for PrUrls {
     fn from_ref(state: &GatewayState) -> Self {
         state.pr_urls.clone()
@@ -519,6 +583,7 @@ pub struct GatewayServer {
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     memory_config: Option<MemoryConfig>,
     active_states: Arc<HashSet<String>>,
+    comparison_bases: WorkspaceComparisonBases,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -533,6 +598,7 @@ impl Clone for GatewayServer {
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
             active_states: self.active_states.clone(),
+            comparison_bases: self.comparison_bases.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -589,6 +655,7 @@ impl GatewayServer {
             linear_task_graph: None,
             memory_config: None,
             active_states: Arc::new(HashSet::new()),
+            comparison_bases: WorkspaceComparisonBases::default(),
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -608,6 +675,7 @@ impl GatewayServer {
             linear_task_graph: None,
             memory_config: None,
             active_states: Arc::new(HashSet::new()),
+            comparison_bases: WorkspaceComparisonBases::default(),
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -643,6 +711,10 @@ impl GatewayServer {
 
     /// Install the local memory catalog used by `/api/v1/memory/*` reads.
     pub fn with_memory_config(mut self, config: Option<MemoryConfig>) -> Self {
+        let target_branch = config
+            .as_ref()
+            .map(|config| code_index_branch(&config.repo_root).map_err(|error| error.to_string()));
+        self.comparison_bases = WorkspaceComparisonBases::with_target_branch(target_branch);
         self.memory_config = config;
         self
     }
@@ -680,7 +752,10 @@ impl GatewayServer {
             memory_config: self.memory_config.clone(),
             active_states: self.active_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
-            workspace_scans: WorkspaceScans::default(),
+            workspace_scans: WorkspaceScans::with_target_branch(self.memory_config.as_ref().map(
+                |config| code_index_branch(&config.repo_root).map_err(|error| error.to_string()),
+            )),
+            comparison_bases: self.comparison_bases.clone(),
             pr_urls: PrUrls::default(),
         };
 
@@ -781,6 +856,7 @@ impl GatewayServer {
                 "/api/v1/runs/{run_id}/code/diff-overlay",
                 get(get_run_code_diff_overlay),
             )
+            .route("/api/v1/runs/{run_id}/code/graph", get(get_run_code_graph))
             .route("/api/v1/runs/{run_id}/events", get(get_run_events))
             .route("/api/v1/runs/{run_id}/files", get(get_run_files))
             .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
@@ -1567,6 +1643,7 @@ struct CodeReposQuery {
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct CodeGraphQuery {
+    repo_id: Option<String>,
     mode: Option<String>,
     path: Option<String>,
     symbol_key: Option<String>,
@@ -1601,14 +1678,6 @@ struct RunCodeOutlineQuery {
 struct RunCodeDiffOverlayQuery {
     repo_id: Option<String>,
     limit: Option<usize>,
-}
-
-struct RunCodeDiffOverlayResolution {
-    base_revision: String,
-    indexed_head_revision: String,
-    head_revision: String,
-    unanalyzed_files: Vec<String>,
-    worktree_dirty: bool,
 }
 
 async fn get_code_repos(
@@ -1983,6 +2052,45 @@ async fn get_run_code_outline(
     let relative_path = validate_workspace_relative_path(raw_path)?;
     let file_path = contained_workspace_path(&workspace_path, &relative_path)?;
     let file_path = resolve_contained_workspace_file(&workspace_path, &file_path).await?;
+    let repo_id = params
+        .repo_id
+        .or_else(|| code_repo_id_for_workspace(&workspace_path));
+    let run_identifier = issue.identifier.clone();
+    if let (Some(repo_id), Some(config)) = (repo_id.clone(), state.memory_config.clone()) {
+        let comparison_bases = state.comparison_bases.clone();
+        let overlay_run_identifier = run_identifier.clone();
+        let overlay_relative_path = relative_path.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            let Ok(base) = comparison_bases.resolve(&overlay_run_identifier, &workspace_path)
+            else {
+                return Ok(None);
+            };
+            code_file_outline_from_workspace(
+                &config,
+                &repo_id,
+                &workspace_path,
+                &overlay_run_identifier,
+                &base.merge_base,
+                &overlay_relative_path,
+            )
+            .map(Some)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            Err(CodeGraphProjectionError::InvalidRequest(format!(
+                "code outline resolver task failed: {error}"
+            )))
+        });
+        match snapshot {
+            Ok(Some(snapshot)) => return Ok(Json(snapshot)),
+            Ok(None) => {}
+            Err(CodeGraphProjectionError::IndexUnavailable)
+            | Err(CodeGraphProjectionError::RepoNotFound(_))
+            | Err(CodeGraphProjectionError::RevisionNotFound(_))
+            | Err(CodeGraphProjectionError::FileNotFound(_)) => {}
+            Err(error) => return Err(code_graph_error(error)),
+        }
+    }
     let source = tokio::fs::read_to_string(&file_path).await.map_err(|_| {
         code_graph_response(
             StatusCode::NOT_FOUND,
@@ -1990,12 +2098,8 @@ async fn get_run_code_outline(
             "requested run file is not available",
         )
     })?;
-    let repo_id = params
-        .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path));
-    let run_id = issue.identifier.clone();
     tokio::task::spawn_blocking(move || {
-        code_file_outline_from_source(&run_id, repo_id, &relative_path, &source)
+        code_file_outline_from_source(&run_identifier, repo_id, &relative_path, &source)
     })
     .await
     .unwrap_or_else(|error| {
@@ -2034,66 +2138,95 @@ async fn get_run_code_diff_overlay(
                 "run code diff overlay requires a repo id",
             )
         })?;
-    let resolution = tokio::task::spawn_blocking({
+    let comparison_bases = state.comparison_bases.clone();
+    let config = config.clone();
+    let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
+    let overlay = tokio::task::spawn_blocking({
         let workspace_path = workspace_path.clone();
+        let repo_id = repo_id.clone();
+        let run_id = run_id.clone();
         move || {
-            let base = workspace_comparison_base(&workspace_path)?;
-            let dirty_status =
-                command_single_line(&workspace_path, "git", &["status", "--porcelain"])?;
-            let head = command_single_line(&workspace_path, "git", &["rev-parse", "HEAD"])?;
-            let worktree_dirty = !dirty_status.is_empty();
-            let unanalyzed_files = if worktree_dirty {
-                dirty_workspace_paths(&workspace_path)?
-            } else {
-                Vec::new()
-            };
-            let head_revision = if worktree_dirty {
-                format!("{head}+worktree")
-            } else {
-                head.clone()
-            };
-            Ok::<_, String>(RunCodeDiffOverlayResolution {
-                base_revision: base.merge_base,
-                indexed_head_revision: head,
-                head_revision,
-                unanalyzed_files,
-                worktree_dirty,
-            })
+            let base = comparison_bases
+                .resolve(&run_id, &workspace_path)
+                .map_err(CodeGraphProjectionError::InvalidRequest)?;
+            code_graph_workspace_diff_overlay(
+                &config,
+                &repo_id,
+                &workspace_path,
+                &run_id,
+                &base.merge_base,
+                limit,
+            )
         }
     })
     .await
-    .unwrap_or_else(|error| Err(format!("code diff resolver task failed: {error}")))
-    .map_err(|_| {
+    .unwrap_or_else(|error| {
+        Err(CodeGraphProjectionError::InvalidRequest(format!(
+            "code diff resolver task failed: {error}"
+        )))
+    })
+    .map_err(code_graph_error)?;
+    Ok(Json(overlay))
+}
+
+async fn get_run_code_graph(
+    State(state): State<GatewayState>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(params): Query<CodeGraphQuery>,
+) -> Result<Json<CodeGraphSnapshot>, (StatusCode, Json<serde_json::Value>)> {
+    let config = configured_code_memory(&state)?.clone();
+    let envelope = state.store.current().await;
+    let issue = find_issue_snapshot(&envelope, &run_id).ok_or_else(|| {
+        code_graph_response(StatusCode::NOT_FOUND, "run_not_found", "run not found")
+    })?;
+    let workspace_path = workspace_path_for_issue(&envelope, issue).ok_or_else(|| {
         code_graph_response(
-            StatusCode::CONFLICT,
-            "revision_unavailable",
-            "run revisions could not be resolved",
+            StatusCode::NOT_FOUND,
+            "workspace_not_found",
+            "run workspace is not available",
         )
     })?;
-    if resolution.worktree_dirty {
-        let mut overlay = code_graph_diff_overlay(
-            config,
+    let repo_id = params
+        .repo_id
+        .or_else(|| code_repo_id_for_workspace(&workspace_path))
+        .ok_or_else(|| {
+            code_graph_response(
+                StatusCode::BAD_REQUEST,
+                "repo_id_required",
+                "run code graph requires a repo id",
+            )
+        })?;
+    let options = CodeGraphSnapshotOptions {
+        mode: parse_code_graph_mode(params.mode.as_deref())?,
+        path: params.path,
+        symbol_key: params.symbol_key,
+        depth: params.depth.unwrap_or(1).clamp(1, 8),
+        aggregate: parse_code_graph_aggregate(params.aggregate.as_deref())?,
+        include_stale: params.include_stale.unwrap_or(false),
+    };
+    let comparison_bases = state.comparison_bases.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let base = comparison_bases
+            .resolve(&run_id, &workspace_path)
+            .map_err(CodeGraphProjectionError::InvalidRequest)?;
+        code_graph_workspace_snapshot(
+            &config,
             &repo_id,
-            &resolution.base_revision,
-            &resolution.indexed_head_revision,
-            params.limit.unwrap_or(500).clamp(1, 5_000),
+            &workspace_path,
+            &run_id,
+            &base.merge_base,
+            options,
         )
-        .map_err(code_graph_error)?;
-        overlay.head_revision = resolution.head_revision;
-        overlay.unanalyzed_files.extend(resolution.unanalyzed_files);
-        overlay.unanalyzed_files.sort();
-        overlay.unanalyzed_files.dedup();
-        return Ok(Json(overlay));
-    }
-    code_graph_diff_overlay(
-        config,
-        &repo_id,
-        &resolution.base_revision,
-        &resolution.head_revision,
-        params.limit.unwrap_or(500).clamp(1, 5_000),
-    )
+    })
+    .await
+    .unwrap_or_else(|error| {
+        Err(CodeGraphProjectionError::InvalidRequest(format!(
+            "code graph resolver task failed: {error}"
+        )))
+    })
     .map(Json)
-    .map_err(code_graph_error)
+    .map_err(code_graph_error)?;
+    Ok(snapshot)
 }
 
 fn revision_param(
@@ -2277,6 +2410,11 @@ fn configured_code_memory(
 fn code_graph_error(error: CodeGraphProjectionError) -> (StatusCode, Json<serde_json::Value>) {
     let message = error.to_string();
     match error {
+        CodeGraphProjectionError::IndexUnavailable => code_graph_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "code_graph_unavailable",
+            &message,
+        ),
         CodeGraphProjectionError::RepoNotFound(_) => {
             code_graph_response(StatusCode::NOT_FOUND, "code_repo_not_found", &message)
         }
@@ -3180,7 +3318,7 @@ async fn issue_file_changes_coalesced(
 fn build_workspace_run_file_changes(
     workspace_path: &StdPath,
 ) -> Result<Vec<WorkspaceRunFileChange>, String> {
-    let comparison_base = workspace_comparison_base(workspace_path)?;
+    let comparison_base = workspace_comparison_base(workspace_path, None)?;
     build_workspace_run_file_changes_with_base(workspace_path, &comparison_base)
 }
 
@@ -3194,51 +3332,40 @@ fn build_workspace_run_file_changes_with_base(
     Ok(files)
 }
 
-fn dirty_workspace_paths(workspace_path: &StdPath) -> Result<Vec<String>, String> {
-    let mut paths = BTreeSet::new();
-    for output in [
-        command_output_args(
-            workspace_path,
-            "git",
-            ["diff", "--name-only", "-z", "HEAD", "--"],
-        )?,
-        command_output_args(
-            workspace_path,
-            "git",
-            ["ls-files", "--others", "--exclude-standard", "-z"],
-        )?,
-    ] {
-        paths.extend(
-            output
-                .split_terminator('\0')
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-                .map(str::to_owned),
-        );
-    }
-    Ok(paths.into_iter().collect())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceComparisonBase {
     merge_base: String,
 }
 
-fn workspace_comparison_base(workspace_path: &StdPath) -> Result<WorkspaceComparisonBase, String> {
-    for reference in [
-        "main",
-        "origin/main",
-        "master",
-        "origin/master",
-        "origin/HEAD",
-        "HEAD",
-    ] {
-        if git_ref_exists(workspace_path, reference)? {
+fn workspace_comparison_base(
+    workspace_path: &StdPath,
+    trusted_target_branch: Option<&Result<String, String>>,
+) -> Result<WorkspaceComparisonBase, String> {
+    let target_branch = match trusted_target_branch {
+        Some(Ok(branch)) => branch.clone(),
+        Some(Err(error)) => return Err(error.clone()),
+        None => "develop".to_owned(),
+    };
+    let mut references = vec![format!("origin/{target_branch}"), target_branch];
+    if trusted_target_branch.is_none() {
+        references.extend([
+            // Legacy workspaces without a trusted target may still expose
+            // one of these refs.
+            "origin/main".to_string(),
+            "main".to_string(),
+            "origin/master".to_string(),
+            "master".to_string(),
+            "origin/HEAD".to_string(),
+            "HEAD".to_string(),
+        ]);
+    }
+    for reference in references {
+        if git_ref_exists(workspace_path, &reference)? {
             return Ok(WorkspaceComparisonBase {
                 merge_base: command_single_line(
                     workspace_path,
                     "git",
-                    &["merge-base", "HEAD", reference],
+                    &["merge-base", "HEAD", &reference],
                 )?,
             });
         }
@@ -3416,7 +3543,7 @@ fn workspace_diff_for_change(
     let comparison_base = if change.status_code.starts_with("??") {
         None
     } else {
-        Some(workspace_comparison_base(workspace_path)?)
+        Some(workspace_comparison_base(workspace_path, None)?)
     };
     workspace_diff_for_change_with_base(workspace_path, change, comparison_base.as_ref())
 }
@@ -6075,6 +6202,87 @@ exit 2
             .expect("tracked change");
         assert_eq!(modified.change_kind, ControlPlaneFileChangeKind::Modified);
         assert!(modified.lines_added > 0);
+    }
+
+    #[test]
+    fn workspace_comparison_base_uses_trusted_target_branch_over_mutable_workflow() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::write(workspace.join("WORKFLOW.md"), "Target branch: `develop`\n")
+            .expect("write workflow");
+        std::fs::write(workspace.join("README.md"), "baseline\n").expect("write baseline");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "develop"]);
+        run_git(workspace, &["add", "."]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "baseline",
+                "--no-gpg-sign",
+            ],
+        );
+        let develop_revision =
+            command_single_line(workspace, "git", &["rev-parse", "HEAD"]).expect("revision");
+        run_git(workspace, &["checkout", "-B", "feature/worktree"]);
+        std::fs::write(workspace.join("README.md"), "feature\n").expect("write feature");
+        run_git(workspace, &["add", "README.md"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature",
+                "--no-gpg-sign",
+            ],
+        );
+        std::fs::write(
+            workspace.join("WORKFLOW.md"),
+            "Target branch: `feature/worktree`\n",
+        )
+        .expect("mutate workflow target");
+
+        let untrusted = workspace_comparison_base(workspace, None).expect("workspace target");
+        let trusted_target = Ok("develop".to_owned());
+        let trusted =
+            workspace_comparison_base(workspace, Some(&trusted_target)).expect("configured target");
+
+        let head_revision =
+            command_single_line(workspace, "git", &["rev-parse", "HEAD"]).expect("revision");
+        assert_eq!(untrusted.merge_base, develop_revision);
+        assert_eq!(trusted.merge_base, develop_revision);
+        assert_ne!(untrusted.merge_base, head_revision);
+
+        let missing_target = tempfile::tempdir().expect("missing target workspace");
+        std::fs::write(missing_target.path().join("README.md"), "feature\n")
+            .expect("write missing-target baseline");
+        run_git(missing_target.path(), &["init"]);
+        run_git(
+            missing_target.path(),
+            &["checkout", "-B", "feature/worktree"],
+        );
+        run_git(missing_target.path(), &["add", "."]);
+        run_git(
+            missing_target.path(),
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature",
+                "--no-gpg-sign",
+            ],
+        );
+        let missing_target_branch = Ok("develop".to_owned());
+        assert!(
+            workspace_comparison_base(missing_target.path(), Some(&missing_target_branch)).is_err()
+        );
     }
 
     #[test]

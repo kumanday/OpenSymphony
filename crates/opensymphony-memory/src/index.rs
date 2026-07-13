@@ -3504,7 +3504,7 @@ mod index_tests {
         )
         .expect("workflow marker");
 
-        let result = configured_code_index_branch(repo.path());
+        let result = code_index_branch(repo.path());
         assert!(matches!(
             result,
             Err(CodeGraphProjectionError::InvalidRequest(message))

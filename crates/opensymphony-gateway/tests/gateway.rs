@@ -416,6 +416,7 @@ fn write_code_graph_fixture_with_revisions(
                     ],
                     Vec::new(),
                 ),
+                code_graph_diagnostic_document(),
                 code_graph_document_with_path(
                     "src/empty.rs",
                     "empty-base",
@@ -449,6 +450,7 @@ fn write_code_graph_fixture_with_revisions(
             worktree_dirty: false,
             documents: vec![
                 code_graph_head_document(),
+                code_graph_diagnostic_document(),
                 code_graph_document_with_path(
                     "src/empty.rs",
                     "empty-content",
@@ -577,6 +579,33 @@ fn code_graph_head_document() -> CodeIntelDocumentInput {
                 end_byte: 14,
             },
         ],
+    )
+}
+
+fn code_graph_diagnostic_document() -> CodeIntelDocumentInput {
+    code_graph_document_with_path(
+        "src/diag.rs",
+        "diag-content",
+        vec![code_graph_symbol(
+            "function",
+            "diagnosed",
+            &[],
+            "fn diagnosed()",
+            (1, 0, 22),
+            "diag-symbol",
+        )],
+        Vec::new(),
+        vec![CodeIntelDiagnosticInput {
+            kind: "warning".to_string(),
+            severity: "warning".to_string(),
+            message: "diagnostic fixture".to_string(),
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 22,
+            start_byte: 0,
+            end_byte: 22,
+        }],
     )
 }
 
@@ -2419,7 +2448,7 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(repos.schema_version.major, 1);
     assert_eq!(repos.repos.len(), 1);
     assert_eq!(repos.repos[0].repo_id, "opensymphony");
-    assert_eq!(repos.repos[0].document_count, 5);
+    assert_eq!(repos.repos[0].document_count, 6);
     assert_eq!(repos.repos[0].freshness, CodeGraphFreshness::Current);
     assert!(
         !serde_json::to_string(&repos)
@@ -2800,11 +2829,11 @@ async fn gateway_serves_code_graph_contract_endpoints() {
         .await
         .expect("decode code index report");
     assert_eq!(report.status, CodeIndexStatus::Completed);
-    assert_eq!(report.parsed_files, 5);
-    assert_eq!(report.persisted_documents, 5);
-    assert_eq!(report.persisted_symbols, 4);
+    assert_eq!(report.parsed_files, 6);
+    assert_eq!(report.persisted_documents, 6);
+    assert_eq!(report.persisted_symbols, 6);
     assert_eq!(report.persisted_edges, 4);
-    assert_eq!(report.persisted_diagnostics, 2);
+    assert_eq!(report.persisted_diagnostics, 3);
     assert!(report.stale_rows > 0);
     assert_eq!(report.cursor.partition, "code-graph:opensymphony");
     let second_report = client
@@ -3182,6 +3211,8 @@ async fn gateway_serves_code_graph_contract_endpoints() {
 
 #[tokio::test]
 async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
+    let memory_repo = tempfile::tempdir().expect("memory repository");
+    let memory_config = MemoryConfig::load(memory_repo.path(), None).expect("memory config");
     let root = tempfile::tempdir().expect("workspace root");
     let workspace = root.path().join("COE-533");
     std::fs::create_dir_all(workspace.join("src")).expect("workspace dirs");
@@ -3196,7 +3227,7 @@ async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
     snapshot.issues[0].identifier = "COE-533".to_string();
     snapshot.issues[0].workspace_path_suffix = "COE-533".to_string();
     let store = SnapshotStore::new(snapshot);
-    let server = GatewayServer::new(store);
+    let server = GatewayServer::new(store).with_memory_config(Some(memory_config));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -3285,11 +3316,15 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
     let workspace = root.path().join("COE-533");
     std::fs::create_dir_all(workspace.join("src")).expect("workspace dirs");
     run_git(&workspace, &["init"]);
-    run_git(&workspace, &["checkout", "-b", "main"]);
+    run_git(&workspace, &["checkout", "-b", "develop"]);
     run_git(&workspace, &["config", "user.email", "test@example.com"]);
     run_git(&workspace, &["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join(".gitignore"), "generated.rs\n").expect("gitignore");
+    std::fs::write(workspace.join("src/deleted_empty.rs"), "").expect("deleted empty file");
+    std::fs::write(workspace.join("src/diag.rs"), "pub fn diagnosed() {}\n")
+        .expect("diagnostic file");
     std::fs::write(workspace.join("src/lib.rs"), "pub fn base() {}\n").expect("base file");
-    run_git(&workspace, &["add", "src/lib.rs"]);
+    run_git(&workspace, &["add", "."]);
     run_git(&workspace, &["commit", "-m", "base"]);
     let base_revision = run_git(&workspace, &["rev-parse", "HEAD"]);
     run_git(&workspace, &["checkout", "-b", "feat/code-graph"]);
@@ -3298,7 +3333,8 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
         "pub fn base() {}\npub fn head() {}\n",
     )
     .expect("head file");
-    run_git(&workspace, &["add", "src/lib.rs"]);
+    std::fs::remove_file(workspace.join("src/deleted_empty.rs")).expect("delete empty file");
+    run_git(&workspace, &["add", "-A"]);
     run_git(&workspace, &["commit", "-m", "head"]);
     let head_revision = run_git(&workspace, &["rev-parse", "HEAD"]);
     let config =
@@ -3320,6 +3356,30 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
             .await
             .expect("test gateway server should serve")
     });
+
+    std::fs::write(
+        workspace.join("generated.rs"),
+        "pub fn generated_outline() {}\n",
+    )
+    .expect("ignored generated file");
+    let generated_outline = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/outline?file_path=generated.rs&repo_id=opensymphony"
+        ))
+        .send()
+        .await
+        .expect("fetch ignored generated outline");
+    assert_eq!(generated_outline.status(), reqwest::StatusCode::OK);
+    let generated_outline = generated_outline
+        .json::<CodeFileOutline>()
+        .await
+        .expect("decode ignored generated outline");
+    assert!(
+        generated_outline
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "generated_outline")
+    );
 
     let overlay = reqwest::Client::new()
         .get(format!(
@@ -3355,20 +3415,58 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
         .expect("decode dirty run code diff overlay");
     assert_eq!(dirty_overlay.repo_id, "opensymphony");
     assert_eq!(dirty_overlay.base_revision, base_revision);
-    assert!(dirty_overlay.head_revision.ends_with("+worktree"));
     assert_eq!(
-        dirty_overlay.unanalyzed_files,
-        vec![
-            "src/added_empty.rs".to_string(),
-            "src/deleted_empty.rs".to_string(),
-            "src/empty.rs".to_string(),
-            "src/lib.rs".to_string()
-        ]
+        dirty_overlay.head_revision,
+        format!("{head_revision}+worktree")
     );
     assert!(
         !dirty_overlay.added_symbols.is_empty(),
         "dirty overlays should keep indexed base-to-HEAD symbol diffs"
     );
+    assert!(
+        dirty_overlay
+            .unanalyzed_files
+            .iter()
+            .any(|path| path == "src/deleted_empty.rs")
+    );
+    let diagnostic_response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/graph?repo_id=opensymphony&mode=atlas&include_stale=true"
+        ))
+        .send()
+        .await
+        .expect("fetch unchanged diagnostic graph");
+    assert_eq!(diagnostic_response.status(), reqwest::StatusCode::OK);
+    let diagnostic_graph = diagnostic_response
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode unchanged diagnostic graph");
+    assert!(
+        diagnostic_graph
+            .filters_applied
+            .contains(&"include_stale:true".to_string())
+    );
+    let diagnostic_node = diagnostic_graph
+        .nodes
+        .iter()
+        .find(|node| node.label == "diagnosed")
+        .expect("diagnosed symbol node");
+    assert_eq!(diagnostic_node.diagnostic_count, 1);
+    assert_eq!(
+        diagnostic_node.diagnostic_severity.as_deref(),
+        Some("warning")
+    );
+    let graph = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/graph?repo_id=opensymphony&mode=file&path=src/lib.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch dirty run code graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode dirty run code graph");
+    assert!(graph.nodes.iter().any(|node| node.label == "dirty"));
     let dirty_overlay_json = serde_json::to_string(&dirty_overlay).expect("overlay serializes");
     assert!(!dirty_overlay_json.contains("workspace_path"));
     assert!(!dirty_overlay_json.contains(&root.path().display().to_string()));
