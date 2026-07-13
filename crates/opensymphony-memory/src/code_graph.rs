@@ -179,7 +179,7 @@ pub fn code_graph_repos(
 
             let mut membership = connection
                 .prepare(
-                    "SELECT path, language FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? ORDER BY path",
+                    "SELECT path, language FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? AND analyzed ORDER BY path",
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -907,7 +907,11 @@ fn index_code_repository_at_checked(
                             && !previous_file
                                 .skip_reason
                                 .as_deref()
-                                .is_some_and(|reason| reason.starts_with("max file size ")))
+                                .is_some_and(|reason| reason.starts_with("max file size "))
+                            && !matches!(
+                                previous_file.skip_reason.as_deref(),
+                                Some("unsupported language") | Some("parse failed")
+                            ))
                 })
                 .map(|previous_file| {
                     current_code_snapshot_file_matches(
@@ -1154,6 +1158,20 @@ fn index_code_repository_at_checked(
         config_fingerprint: &config_fingerprint,
         indexed_at,
     };
+    if revalidate_target {
+        let current_target = code_index_target(config)?;
+        if current_target.as_ref() != Some(&(target_branch.clone(), commit_sha.clone())) {
+            discard_staged_code_index_rows(config, repo_id)?;
+            let mut report = code_graph_index_report(config, repo_id)?;
+            report.status = CodeIndexStatus::Unavailable;
+            report.head_revision = None;
+            report.diagnostics.push(
+                "configured target branch advanced before index promotion; retry the index"
+                    .to_string(),
+            );
+            return Ok(report);
+        }
+    }
     stale_rows += promote_staged_code_snapshot(
         config,
         repo_id,
@@ -4438,6 +4456,35 @@ mod code_graph_tests {
             .skipped_files
             .iter()
             .any(|path| path.contains("max file size")));
+    }
+
+    #[test]
+    fn code_repo_summary_excludes_skipped_only_snapshot_membership() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("workflow marker");
+        fs::write(repo.path().join("notes.txt"), "not indexed\n").expect("unsupported source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "skipped-only snapshot"]);
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.code_intel.ast.max_file_bytes = 1;
+
+        let report = index_code_repository(&config, "skipped-only-repo").expect("index");
+        assert_eq!(report.parsed_files, 0);
+        let summary = code_graph_repos(&config, false)
+            .expect("repo summaries")
+            .repos
+            .into_iter()
+            .find(|repo| repo.repo_id == "skipped-only-repo")
+            .expect("skipped-only repo summary");
+        assert_eq!(summary.document_count, 0);
+        assert!(summary.languages.is_empty());
     }
 
     #[test]
