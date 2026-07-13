@@ -47,6 +47,31 @@ export interface CodeGraphDiffOptions {
   limit?: number;
 }
 
+type CodeDiffOverlayArrayField =
+  | "added_symbols"
+  | "removed_symbols"
+  | "modified_symbols"
+  | "edge_deltas"
+  | "module_connection_deltas"
+  | "blast_radius"
+  | "unanalyzed_files";
+
+type CodeDiffOverlayPayload = Omit<CodeDiffOverlay, CodeDiffOverlayArrayField>
+  & Partial<Pick<CodeDiffOverlay, CodeDiffOverlayArrayField>>;
+
+export function normalizeCodeDiffOverlay(overlay: CodeDiffOverlayPayload): CodeDiffOverlay {
+  return {
+    ...overlay,
+    added_symbols: overlay.added_symbols ?? [],
+    removed_symbols: overlay.removed_symbols ?? [],
+    modified_symbols: overlay.modified_symbols ?? [],
+    edge_deltas: overlay.edge_deltas ?? [],
+    module_connection_deltas: overlay.module_connection_deltas ?? [],
+    blast_radius: overlay.blast_radius ?? [],
+    unanalyzed_files: overlay.unanalyzed_files ?? [],
+  };
+}
+
 export interface CodeRepoListRequestOptions {
   includeStale?: boolean;
 }
@@ -257,15 +282,18 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
     case "SYMBOL_DETAILS_INVALIDATED":
       return { ...state, symbolDetails: {} };
     case "DIFF_LOADED":
+      {
+        const overlay = normalizeCodeDiffOverlay(action.overlay);
       return {
         ...state,
-        diffOverlay: action.overlay,
-        repoId: action.overlay.repo_id,
-        baseRevision: action.overlay.base_revision,
-        headRevision: action.overlay.head_revision,
+        diffOverlay: overlay,
+        repoId: overlay.repo_id,
+        baseRevision: overlay.base_revision,
+        headRevision: overlay.head_revision,
         mode: "diff",
-        lastUpdatedAt: action.overlay.generated_at,
+        lastUpdatedAt: overlay.generated_at,
       };
+      }
     case "MODE_SET":
       return action.mode === "diff" || state.mode !== "diff"
         ? { ...state, mode: action.mode }
@@ -671,13 +699,15 @@ export function createHttpCodeGraphAdapter(
     getDiffOverlay: (repoId, baseRevision, headRevision, options) => {
       const params = new URLSearchParams({ base_revision: baseRevision, head_revision: headRevision });
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
-      return read<CodeDiffOverlay>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/diff-overlay`, params);
+      return read<CodeDiffOverlayPayload>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/diff-overlay`, params)
+        .then(normalizeCodeDiffOverlay);
     },
     getRunDiffOverlay: (runId, repoId, options) => {
       const params = new URLSearchParams();
       if (repoId) params.set("repo_id", repoId);
       if (options?.limit !== undefined) params.set("limit", String(options.limit));
-      return read<CodeDiffOverlay>(`/api/v1/runs/${encodeURIComponent(runId)}/code/diff-overlay`, params);
+      return read<CodeDiffOverlayPayload>(`/api/v1/runs/${encodeURIComponent(runId)}/code/diff-overlay`, params)
+        .then(normalizeCodeDiffOverlay);
     },
   };
 }
@@ -700,6 +730,11 @@ export function createTauriNativeCodeGraphAdapter(
 ): CodeGraphAdapter {
   return {
     ...api,
+    getDiffOverlay: (repoId, baseRevision, headRevision, options) =>
+      api.getDiffOverlay(repoId, baseRevision, headRevision, options).then(normalizeCodeDiffOverlay),
+    getRunDiffOverlay: api.getRunDiffOverlay
+      ? (runId, repoId, options) => api.getRunDiffOverlay!(runId, repoId, options).then(normalizeCodeDiffOverlay)
+      : undefined,
     getSymbolDetail: (repoId, symbolKey, options) => api.getSymbolDetail(repoId, symbolKey, {
       ...options,
       visibility: effectiveCodeVisibility(options?.visibility, policy),
@@ -755,7 +790,7 @@ export function createFixtureCodeGraphAdapter(fixtures: CodeGraphFixtures = {}):
         && candidate.head_revision === headRevision,
       );
       if (!overlay) throw new Error(`Code diff overlay not found: ${baseRevision}..${headRevision}`);
-      return overlay;
+      return normalizeCodeDiffOverlay(overlay);
     },
   };
 }
@@ -775,6 +810,7 @@ function codeGraphRequestParams(options?: CodeGraphRequestOptions): URLSearchPar
 
 function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverlay | null): CodeGraphSnapshot {
   if (!overlay) return snapshot;
+  overlay = normalizeCodeDiffOverlay(overlay);
   const existingKeys = new Set(snapshot.nodes.map((node) => node.symbol_key).filter((key): key is string => Boolean(key)));
   const syntheticSides = new Map<string, CodeDiffSymbolSide>();
   for (const symbol of [...overlay.added_symbols, ...overlay.modified_symbols, ...overlay.removed_symbols]) {
@@ -945,6 +981,7 @@ function codePathMatchesPrefix(path: string, prefix: string): boolean {
 function deltaStatuses(overlay?: CodeDiffOverlay | null): Map<string, CodeGraphDeltaStatus> {
   const result = new Map<string, CodeGraphDeltaStatus>();
   if (!overlay) return result;
+  overlay = normalizeCodeDiffOverlay(overlay);
   for (const symbol of [...overlay.added_symbols, ...overlay.removed_symbols, ...overlay.modified_symbols]) {
     result.set(symbol.symbol_key, symbol.status);
   }

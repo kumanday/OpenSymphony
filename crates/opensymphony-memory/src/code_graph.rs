@@ -2435,7 +2435,10 @@ fn query_code_edges_for_revision(
         };
     let revision_rows = code_edge_revisions_read_model_ready(connection, &config.index_path)?
         && code_edge_revision_rows_available(connection, config, repo_id, revision)?;
-    let query = if membership_ready {
+    let exact_revision_rows = membership_ready && revision_rows;
+    let query = if exact_revision_rows {
+        "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM (SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty UNION ALL SELECT e.edge_id, e.edge_kind, e.source_symbol_key, e.target_symbol_key, e.target_hint, e.confidence, e.path, e.commit_sha, e.freshness, e.start_line, e.start_col, e.end_line, e.end_col FROM code_edges AS e WHERE e.repo_id = ? AND e.freshness <> 'staged' AND NOT e.worktree_dirty AND EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed) AND NOT EXISTS (SELECT 1 FROM code_edge_revisions AS r WHERE r.repo_id = e.repo_id AND r.commit_sha = ? AND r.path = e.path AND r.freshness <> 'staged' AND NOT r.worktree_dirty)) AS edges ORDER BY path, start_line, start_col, edge_id"
+    } else if membership_ready {
         "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges AS e WHERE e.repo_id = ? AND e.freshness <> 'staged' AND NOT e.worktree_dirty AND (e.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed)) ORDER BY e.path, e.start_line, e.start_col, e.edge_id"
     } else if revision_rows {
         "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, start_line, start_col, edge_id"
@@ -2446,7 +2449,15 @@ fn query_code_edges_for_revision(
         path: config.index_path.clone(),
         source,
     })?;
-    let rows = if membership_ready {
+    let rows = if exact_revision_rows {
+        statement
+            .query_map(params![repo_id, revision, repo_id, revision, revision], code_edge_from_row)
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    } else if membership_ready {
         statement
             .query_map(params![repo_id, revision, revision], code_edge_from_row)
             .map_err(|source| MemoryError::DuckDb {
@@ -6184,7 +6195,8 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
 mod code_graph_tests {
     use crate::opensymphony_code_intel::{CaptureRecord, SourceSpan, parse_path};
     use crate::opensymphony_memory::{
-        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelPersistBatch,
+        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
+        CodeIntelPersistBatch,
         CodeIntelSymbolInput, KnowledgeScope, KnowledgeScopeKind, MemoryConfig,
         persist_code_intel_documents,
     };
@@ -6205,7 +6217,8 @@ mod code_graph_tests {
         CodeGraphMode, CodeGraphSnapshotOptions, DtoDiffStatus,
         index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
         migrate_index, open_existing_index_read_only, open_index,
-        query_revision_file_symbols, query_symbol_diagnostics, re_resolve_workspace_edges,
+        query_code_edges_for_revision, query_revision_file_symbols, query_symbol_diagnostics,
+        re_resolve_workspace_edges,
         CodeEdgeRecord, CodeSymbolRecord,
         repository_scope_matches, workspace_git_bytes, CodeGraphProjectionError,
     };
@@ -6557,6 +6570,135 @@ mod code_graph_tests {
             .iter()
             .any(|symbol| symbol.after.as_ref().is_some_and(|side| side.name == "head")));
         assert!(overlay.unanalyzed_files.is_empty());
+    }
+
+    #[test]
+    fn completed_snapshot_prefers_exact_revision_edges_over_mutable_membership_rows() {
+        let repo = TempDir::new().expect("repository tempdir");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "revision-edge-repo".to_string(),
+                commit_sha: Some("snapshot-head".to_string()),
+                worktree_dirty: false,
+                documents: vec![CodeIntelDocumentInput {
+                    path: PathBuf::from("src/lib.rs"),
+                    language: "rust".to_string(),
+                    content_sha256: "snapshot-content".to_string(),
+                    parser_id: "tree-sitter".to_string(),
+                    parser_version: "test-parser".to_string(),
+                    query_pack_version: "test-query-pack".to_string(),
+                    byte_len: 32,
+                    line_count: 4,
+                    symbols: vec![
+                        CodeIntelSymbolInput {
+                            kind: "function".to_string(),
+                            name: "source".to_string(),
+                            container_chain: Vec::new(),
+                            signature: Some("fn source()".to_string()),
+                            start_line: 1,
+                            start_col: 0,
+                            end_line: 2,
+                            end_col: 1,
+                            start_byte: 0,
+                            end_byte: 16,
+                            selection_start_line: 1,
+                            selection_end_line: 1,
+                            snippet_sha256: "source-snippet".to_string(),
+                        },
+                        CodeIntelSymbolInput {
+                            kind: "function".to_string(),
+                            name: "old_target".to_string(),
+                            container_chain: Vec::new(),
+                            signature: Some("fn old_target()".to_string()),
+                            start_line: 3,
+                            start_col: 0,
+                            end_line: 4,
+                            end_col: 1,
+                            start_byte: 17,
+                            end_byte: 32,
+                            selection_start_line: 3,
+                            selection_end_line: 3,
+                            snippet_sha256: "target-snippet".to_string(),
+                        },
+                    ],
+                    edges: vec![CodeIntelEdgeInput {
+                        edge_kind: "call".to_string(),
+                        target_hint: Some("old_target".to_string()),
+                        confidence: "exact".to_string(),
+                        start_line: 2,
+                        start_col: 0,
+                        end_line: 2,
+                        end_col: 1,
+                        start_byte: 8,
+                        end_byte: 9,
+                    }],
+                    diagnostics: Vec::new(),
+                }],
+            },
+        )
+        .expect("persist snapshot edge");
+
+        let connection = open_index(&config).expect("open revision edge index");
+        migrate_index(&connection).expect("migrate revision edge index");
+        connection
+            .execute(
+                "INSERT INTO code_index_snapshots (repo_id, commit_sha, target_branch, status, total_files, parsed_files, skipped_files, deleted_files, config_fingerprint, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "revision-edge-repo",
+                    "snapshot-head",
+                    "develop",
+                    "completed",
+                    1_i64,
+                    1_i64,
+                    0_i64,
+                    0_i64,
+                    "test-config",
+                    "now",
+                ],
+            )
+            .expect("completed snapshot");
+        connection
+            .execute(
+                "INSERT INTO code_snapshot_membership (repo_id, commit_sha, path, language, content_sha256, parser_version, query_pack_version, analyzed, skip_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "revision-edge-repo",
+                    "snapshot-head",
+                    "src/lib.rs",
+                    "rust",
+                    "snapshot-content",
+                    "test-parser",
+                    "test-query-pack",
+                    1_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .expect("snapshot membership");
+        let exact_target_key = connection
+            .query_row(
+                "SELECT target_symbol_key FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ?",
+                duckdb::params!["revision-edge-repo", "snapshot-head"],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("exact revision target");
+        connection
+            .execute(
+                "UPDATE code_edges SET target_symbol_key = ?, target_hint = ? WHERE repo_id = ?",
+                duckdb::params!["latest_target", "latest_target", "revision-edge-repo"],
+            )
+            .expect("mutate current edge read model");
+
+        let edges = query_code_edges_for_revision(
+            &connection,
+            &config,
+            "revision-edge-repo",
+            "snapshot-head",
+        )
+        .expect("query completed snapshot edges");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_symbol_key.as_deref(), Some(exact_target_key.as_str()));
+        assert_eq!(edges[0].target_hint.as_deref(), Some("old_target"));
     }
 
     #[test]

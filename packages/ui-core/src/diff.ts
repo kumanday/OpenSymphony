@@ -5,6 +5,7 @@ import type {
   CodeOutlineSymbol,
   FileDiffPage,
 } from "@opensymphony/gateway-schema";
+import { normalizeCodeDiffOverlay } from "@opensymphony/graph";
 import { escapeHtml, escapeAttr } from "./html.js";
 
 export interface DiffSymbolRegion {
@@ -179,6 +180,7 @@ function renderDiffSymbolGlyph(symbol: CodeOutlineSymbol, deepLink: string | nul
 
 export function renderCodeDiffSummary(overlay: CodeDiffOverlay | null | undefined): string {
   if (!overlay) return "";
+  overlay = normalizeCodeDiffOverlay(overlay);
  const counts = [
    `${overlay.added_symbols.length} added`,
    `${overlay.removed_symbols.length} removed`,
@@ -192,6 +194,7 @@ export function renderCodeDiffSummary(overlay: CodeDiffOverlay | null | undefine
 
 export function renderCodeDiffDeltaList(overlay: CodeDiffOverlay | null | undefined): string {
   if (!overlay) return "";
+  overlay = normalizeCodeDiffOverlay(overlay);
   const symbols = [...overlay.added_symbols, ...overlay.removed_symbols, ...overlay.modified_symbols];
   const changedKeys = new Set(symbols.map((symbol) => symbol.symbol_key));
   const rows = symbols.map((symbol) => {

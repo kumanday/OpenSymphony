@@ -6,6 +6,7 @@ import {
   codeEdgeVisualStyle,
   codeGraphNodeDeltaStatus,
   codeGraphSnapshotForRendering,
+  normalizeCodeDiffOverlay,
   codeNodeVisualStyle,
   formatMemoryDeepLink,
   type GraphLayoutEdge,
@@ -130,6 +131,9 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
 
 export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
   const { snapshot, state } = surface;
+  const diffOverlay = state.mode === "diff" && state.diffOverlay
+    ? normalizeCodeDiffOverlay(state.diffOverlay)
+    : null;
   const formatCount = (value: number) => value.toLocaleString("en-US");
   const snapshotTruncation = snapshot?.truncation;
   const diffTruncation = state.mode === "diff" ? state.diffOverlay?.truncation : null;
@@ -146,7 +150,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
     ? `${formatCount(snapshot.nodes.length)} nodes / ${formatCount(snapshot.edges.length)} edges${hasTruncation ? ` / ${formatCount(truncation.nodes_dropped)} nodes + ${formatCount(truncation.edges_dropped)} edges truncated${truncation.reason ? `: ${truncation.reason}` : ""}` : ""}`
     : "No code graph snapshot";
   const accessibleSummary = snapshot
-    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${state.mode === "diff" && state.diffOverlay ? `${state.diffOverlay.edge_deltas.length} topology edge changes and ${state.diffOverlay.module_connection_deltas.length} module connection changes. ${state.diffOverlay.blast_radius.reduce((count, entry) => count + entry.inbound.length + entry.outbound.length, 0)} detailed blast-radius relationships. ` : ""}${state.stale ? "Refreshing." : ""}`
+    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${diffOverlay ? `${diffOverlay.edge_deltas.length} topology edge changes and ${diffOverlay.module_connection_deltas.length} module connection changes. ${diffOverlay.blast_radius.reduce((count, entry) => count + entry.inbound.length + entry.outbound.length, 0)} detailed blast-radius relationships. ` : ""}${state.stale ? "Refreshing." : ""}`
     : "Code Graph has no loaded snapshot.";
   const narrowed = state.mode !== "atlas" || state.selectedNodeIds.length > 0 || state.path !== null || state.symbolKey !== null;
   const diffUnavailable = !state.baseRevision || !state.headRevision;
@@ -245,7 +249,9 @@ function renderCodeBreadcrumb(state: CodeGraphState): string {
 }
 
 function renderCodeGraphTopologySummary(state: CodeGraphState): string {
-  const overlay = state.mode === "diff" ? state.diffOverlay : null;
+  const overlay = state.mode === "diff" && state.diffOverlay
+    ? normalizeCodeDiffOverlay(state.diffOverlay)
+    : null;
   if (!overlay) return "";
   const edgeItems = overlay.edge_deltas.map((delta) => {
     const side = delta.after ?? delta.before;
@@ -334,7 +340,9 @@ export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
 }
 
 function renderCodeGraphSelectedTopology(surface: CodeGraphSurface, symbolKey: string | null | undefined): string {
-  const overlay = surface.state.mode === "diff" ? surface.state.diffOverlay : null;
+  const overlay = surface.state.mode === "diff" && surface.state.diffOverlay
+    ? normalizeCodeDiffOverlay(surface.state.diffOverlay)
+    : null;
   if (!overlay || !symbolKey) return "";
   const edgeItems = overlay.edge_deltas.flatMap((delta) => {
     const sides = delta.status === "retargeted" ? [delta.before, delta.after] : [delta.after ?? delta.before];

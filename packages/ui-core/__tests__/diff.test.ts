@@ -135,4 +135,21 @@ describe("diff symbol navigation", () => {
     expect(renderCodeDiffSummary(overlay)).toContain("data-run-code-summary");
     expect(renderCodeDiffDeltaList(overlay)).toContain("caller");
   });
+
+  it("renders legacy overlays with missing topology arrays", () => {
+    const legacyOverlay = {
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      repo_id: "repo",
+      base_revision: "base",
+      head_revision: "head",
+      added_symbols: [],
+      removed_symbols: [],
+      modified_symbols: [],
+      unanalyzed_files: [],
+      truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+      generated_at: "2026-07-12T00:00:00Z",
+    } as unknown as CodeDiffOverlay;
+    expect(renderCodeDiffSummary(legacyOverlay)).toContain("0 topology edges");
+    expect(renderCodeDiffDeltaList(legacyOverlay)).toContain("No analyzed symbol changes");
+  });
 });

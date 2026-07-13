@@ -518,6 +518,31 @@ describe("Code Graph adapters and state", () => {
     expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 
+  it("normalizes legacy diff payloads before graph materialization", async () => {
+    const fetchMock = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        schema_version: { major: 1, minor: 0, patch: 0 },
+        repo_id: "opensymphony",
+        base_revision: "base",
+        head_revision: "head",
+        added_symbols: [],
+        removed_symbols: [],
+        modified_symbols: [],
+        unanalyzed_files: [],
+        truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
+        generated_at: "2026-07-13T00:00:00Z",
+      }),
+    })) as unknown as typeof fetch;
+    const adapter = createHttpCodeGraphAdapter("http://localhost:2468", fetchMock);
+    const overlay = await adapter.getDiffOverlay("opensymphony", "base", "head");
+    expect(overlay.edge_deltas).toEqual([]);
+    expect(overlay.module_connection_deltas).toEqual([]);
+    expect(overlay.blast_radius).toEqual([]);
+    expect(() => codeGraphSnapshotForRendering(codeGraphFixtureDiffBaseSnapshot, overlay)).not.toThrow();
+  });
+
   it("keeps edge-heavy scale tiers and aggregated Atlas within their budgets", () => {
     for (const tier of codeGraphScaleTiers) {
       const fixture = createCodeGraphScaleFixture(tier.nodes);
