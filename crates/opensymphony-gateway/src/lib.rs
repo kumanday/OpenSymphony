@@ -2054,6 +2054,7 @@ async fn get_run_code_outline(
         match snapshot {
             Ok(snapshot) => return Ok(Json(snapshot)),
             Err(CodeGraphProjectionError::IndexUnavailable)
+            | Err(CodeGraphProjectionError::RepoNotFound(_))
             | Err(CodeGraphProjectionError::RevisionNotFound(_)) => {}
             Err(error) => return Err(code_graph_error(error)),
         }

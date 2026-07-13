@@ -598,8 +598,11 @@ pub fn code_graph_workspace_overlay(
         .collect::<BTreeSet<_>>();
     let base_edges = query_code_edges_for_revision(&connection, config, repo_id, base_revision)?;
     let head_revision = workspace_git_line(workspace_path, ["rev-parse", "HEAD"])?;
-    let (changed_paths, tombstones, workspace_content_digest) =
-        workspace_changed_paths(workspace_path, base_revision)?;
+    let (changed_paths, tombstones, workspace_content_digest) = workspace_changed_paths(
+        workspace_path,
+        base_revision,
+        config.code_intel.ast.max_file_bytes,
+    )?;
 
     let mut symbols = base_symbols.clone();
     let mut edges = base_edges
@@ -611,8 +614,11 @@ pub fn code_graph_workspace_overlay(
     let mut remaining_files = config.code_intel.ast.max_files_per_request;
 
     for path in &changed_paths {
-        symbols.retain(|_, symbol| symbol.path != *path);
-        edges.retain(|_, edge| edge.path != *path);
+        if tombstones.contains(path) {
+            symbols.retain(|_, symbol| symbol.path != *path);
+            edges.retain(|_, edge| edge.path != *path);
+            continue;
+        }
 
         let Some(file_path) = workspace_file_path(workspace_path, path)? else {
             unanalyzed_files.insert(path.clone());
@@ -634,6 +640,8 @@ pub fn code_graph_workspace_overlay(
             continue;
         };
         remaining_files = remaining_files.saturating_sub(1);
+        symbols.retain(|_, symbol| symbol.path != *path);
+        edges.retain(|_, edge| edge.path != *path);
         if records.symbols.is_empty() {
             unanalyzed_files.insert(path.clone());
         }
@@ -789,20 +797,47 @@ pub fn code_file_outline_from_workspace(
     raw_path: &str,
 ) -> Result<CodeFileOutline, CodeGraphProjectionError> {
     let path = normalize_code_path(raw_path).map_err(CodeGraphProjectionError::InvalidRequest)?;
-    if !workspace_path.join(&path).is_file() {
+    let Some(file_path) = workspace_file_path(workspace_path, &path)? else {
         return Err(CodeGraphProjectionError::FileNotFound(path));
+    };
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Err(CodeGraphProjectionError::IndexUnavailable);
+    };
+    if !code_symbols_read_model_ready(&connection, &config.index_path)? {
+        return Err(CodeGraphProjectionError::IndexUnavailable);
     }
-    let overlay = code_graph_workspace_overlay(
+    ensure_code_repo(config, repo_id, true)?;
+    if !code_revision_indexed(&connection, config, repo_id, base_revision)? {
+        return Err(CodeGraphProjectionError::RevisionNotFound(
+            base_revision.to_string(),
+        ));
+    }
+
+    let changed = workspace_path_changed(workspace_path, base_revision, &path)?;
+    let symbols = if changed {
+        match workspace_document_records(config, repo_id, &path, &file_path)? {
+            Some(records) => records.symbols,
+            None => query_revision_file_symbols(
+                config,
+                &connection,
+                repo_id,
+                base_revision,
+                &path,
+            )?,
+        }
+    } else if query_revision_file_exists(
+        &connection,
         config,
         repo_id,
-        workspace_path,
-        run_id,
         base_revision,
-    )?;
-    let symbols = overlay
-        .symbols
-        .values()
-        .filter(|symbol| symbol.path == path)
+        &path,
+    )? {
+        query_revision_file_symbols(config, &connection, repo_id, base_revision, &path)?
+    } else {
+        return Err(CodeGraphProjectionError::FileNotFound(path));
+    };
+    let symbols = symbols
+        .iter()
         .map(|symbol| CodeOutlineSymbol {
             symbol_key: symbol.symbol_key.clone(),
             name: symbol.name.clone(),
@@ -846,9 +881,9 @@ pub fn code_graph_workspace_snapshot(
     )?;
     let mut paths = BTreeSet::new();
     let mut selected_keys = BTreeSet::new();
+    let mut dropped_paths = 0;
     match mode {
         CodeGraphMode::Atlas => {
-            selected_keys.extend(overlay.symbols.keys().cloned());
             paths.extend(overlay.base_paths.iter().cloned());
             paths.extend(
                 overlay
@@ -856,6 +891,15 @@ pub fn code_graph_workspace_snapshot(
                     .iter()
                     .filter(|path| !overlay.tombstones.contains(*path))
                     .cloned(),
+            );
+            dropped_paths = paths.len().saturating_sub(CODE_GRAPH_MAX_RECORDS);
+            paths = paths.into_iter().take(CODE_GRAPH_MAX_RECORDS).collect();
+            selected_keys.extend(
+                overlay
+                    .symbols
+                    .iter()
+                    .filter(|(_, symbol)| paths.contains(&symbol.path))
+                    .map(|(key, _)| key.clone()),
             );
         }
         CodeGraphMode::File => {
@@ -865,6 +909,7 @@ pub fn code_graph_workspace_snapshot(
             let path = normalize_code_path(path).map_err(CodeGraphProjectionError::InvalidRequest)?;
             if !overlay.symbols.values().any(|symbol| symbol.path == path)
                 && !overlay.changed_paths.contains(&path)
+                && !overlay.base_paths.contains(&path)
             {
                 return Err(CodeGraphProjectionError::FileNotFound(path));
             }
@@ -1008,7 +1053,11 @@ pub fn code_graph_workspace_snapshot(
         edges,
         false,
         options.aggregate,
-        truncation(dropped_symbols, dropped_edges, "workspace graph records capped"),
+        truncation(
+            dropped_paths + dropped_symbols,
+            dropped_edges,
+            "workspace graph records capped",
+        ),
     ))
 }
 
@@ -1151,6 +1200,7 @@ fn workspace_document_records(
 fn workspace_changed_paths(
     workspace_path: &Path,
     base_revision: &str,
+    max_file_bytes: u64,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>, String), CodeGraphProjectionError> {
     let diff = workspace_git_bytes(
         workspace_path,
@@ -1204,6 +1254,17 @@ fn workspace_changed_paths(
         hasher.update([0]);
         match workspace_file_path(workspace_path, path)? {
             Some(file_path) => {
+                let Ok(metadata) = fs::metadata(&file_path) else {
+                    hasher.update(b"<unreadable>");
+                    hasher.update([0]);
+                    continue;
+                };
+                if metadata.len() > max_file_bytes {
+                    hasher.update(b"<oversized>");
+                    hasher.update(metadata.len().to_le_bytes());
+                    hasher.update([0]);
+                    continue;
+                }
                 let mut file = match fs::File::open(file_path) {
                     Ok(file) => file,
                     Err(_) => {
@@ -1234,6 +1295,26 @@ fn workspace_changed_paths(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok((changed, tombstones, digest))
+}
+
+fn workspace_path_changed(
+    workspace_path: &Path,
+    base_revision: &str,
+    path: &str,
+) -> Result<bool, CodeGraphProjectionError> {
+    if !workspace_git_bytes(
+        workspace_path,
+        ["diff", "--name-only", base_revision, "--", path],
+    )?
+    .is_empty()
+    {
+        return Ok(true);
+    }
+    Ok(!workspace_git_bytes(
+        workspace_path,
+        ["ls-files", "--others", "--exclude-standard", "--", path],
+    )?
+    .is_empty())
 }
 
 fn workspace_file_path(
@@ -3460,6 +3541,120 @@ fn query_file_symbols(
         .collect()
 }
 
+fn query_revision_file_symbols(
+    config: &MemoryConfig,
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+) -> Result<Vec<CodeSymbolRecord>, MemoryError> {
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
+    let membership_ready =
+        code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+            && matches!(snapshot_status.as_deref(), None | Some("completed"));
+    let query = if membership_ready {
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN s.worktree_dirty THEN 1 ELSE 0 END FROM code_symbols AS s WHERE s.repo_id = ? AND s.path = ? AND s.symbol_key != '' AND s.freshness <> 'staged' AND NOT s.worktree_dirty AND (s.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = s.repo_id AND m.commit_sha = ? AND m.path = s.path AND m.content_sha256 = s.content_sha256 AND m.parser_version = s.parser_version AND m.query_pack_version = s.query_pack_version AND m.analyzed)) ORDER BY s.symbol_key, s.indexed_at DESC, s.symbol_id"
+        )
+    } else {
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND path = ? AND commit_sha = ? AND symbol_key != '' AND freshness <> 'staged' ORDER BY symbol_key, indexed_at DESC, symbol_id"
+        )
+    };
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|source| MemoryError::DuckDb {
+            path: PathBuf::from("<memory-index>"),
+            source,
+        })?;
+    let rows = if membership_ready {
+        statement
+            .query_map(params![repo_id, path, revision, revision], |row| {
+                let dirty = row.get::<_, i64>(25)?;
+                if dirty != 0 {
+                    Ok(None)
+                } else {
+                    code_symbol_from_row(row).map(Some)
+                }
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    } else {
+        statement
+            .query_map(params![repo_id, path, revision], |row| {
+                let dirty = row.get::<_, i64>(25)?;
+                if dirty != 0 {
+                    Ok(None)
+                } else {
+                    code_symbol_from_row(row).map(Some)
+                }
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    }
+    .map_err(|source| MemoryError::DuckDb {
+        path: PathBuf::from("<memory-index>"),
+        source,
+    })?;
+    let mut symbols = BTreeMap::new();
+    for row in rows {
+        let Some(mut symbol) = row else {
+            continue;
+        };
+        if symbol.commit_sha.as_deref() != Some(revision) {
+            symbol.commit_sha = Some(revision.to_string());
+        }
+        if !symbols.contains_key(&symbol.symbol_key) {
+            fill_container_chain(connection, &mut symbol)?;
+            symbols.insert(symbol.symbol_key.clone(), symbol);
+        }
+    }
+    Ok(symbols.into_values().collect())
+}
+
+fn query_revision_file_exists(
+    connection: &Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+) -> Result<bool, MemoryError> {
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
+    let membership_ready =
+        code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+            && matches!(snapshot_status.as_deref(), None | Some("completed"));
+    let query = if membership_ready {
+        "SELECT 1 FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? AND path = ? LIMIT 1"
+    } else {
+        "SELECT 1 FROM code_documents WHERE repo_id = ? AND commit_sha = ? AND path = ? AND freshness <> 'staged' AND NOT worktree_dirty LIMIT 1"
+    };
+    let mut statement = connection
+        .prepare(query)
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![repo_id, revision, path])
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Ok(rows
+        .next()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+        .is_some())
+}
+
 fn query_code_document(
     connection: &Connection,
     config: &MemoryConfig,
@@ -4750,10 +4945,12 @@ mod code_graph_tests {
     use tempfile::TempDir;
 
     use super::{
-        code_citation_matches_symbol, code_graph_diff_overlay, code_graph_repos,
-        code_graph_workspace_diff_overlay, code_graph_workspace_overlay,
+        code_citation_matches_symbol, code_file_outline_from_workspace, code_graph_diff_overlay,
+        code_graph_repos, code_graph_workspace_diff_overlay, code_graph_workspace_overlay,
+        code_graph_workspace_snapshot,
         code_index_document, code_symbol_span_matches, has_work_item_scope,
         CodeSnapshotMembershipInput,
+        CodeGraphMode, CodeGraphSnapshotOptions,
         index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
         open_existing_index_read_only,
         repository_scope_matches, CodeGraphProjectionError,
@@ -4788,9 +4985,15 @@ mod code_graph_tests {
             repo.path().join("src/lib.rs"),
             "pub fn baseline() {}\npub fn caller() { baseline(); }\n",
         )
-            .expect("baseline source");
+        .expect("baseline source");
         fs::write(repo.path().join("src/remove.rs"), "pub fn removed() {}\n")
             .expect("removed source");
+        fs::write(
+            repo.path().join("src/large.rs"),
+            "pub fn baseline_large() {}\n",
+        )
+        .expect("baseline oversized source");
+        fs::write(repo.path().join("src/empty.rs"), "").expect("baseline empty source");
         git(repo.path(), &["init", "-b", "develop"]);
         git(repo.path(), &["config", "user.email", "test@example.com"]);
         git(repo.path(), &["config", "user.name", "Test User"]);
@@ -4850,6 +5053,40 @@ mod code_graph_tests {
             .values()
             .any(|symbol| symbol.name == "changed"));
         assert!(overlay.symbols.values().any(|symbol| symbol.name == "added"));
+        assert!(overlay
+            .symbols
+            .values()
+            .any(|symbol| symbol.name == "baseline_large"));
+        let outline = code_file_outline_from_workspace(
+            &limited_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543",
+            &base,
+            "src/large.rs",
+        )
+        .expect("oversized edit should retain baseline outline");
+        assert!(outline.symbols.iter().any(|symbol| symbol.name == "baseline_large"));
+        let empty_snapshot = code_graph_workspace_snapshot(
+            &limited_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543",
+            &base,
+            CodeGraphSnapshotOptions {
+                mode: CodeGraphMode::File,
+                path: Some("src/empty.rs".to_string()),
+                symbol_key: None,
+                depth: 1,
+                aggregate: None,
+                include_stale: false,
+            },
+        )
+        .expect("indexed empty file should have a file graph");
+        assert!(empty_snapshot
+            .nodes
+            .iter()
+            .any(|node| node.id == "file:src/empty.rs"));
         assert!(!overlay.symbols.values().any(|symbol| symbol.name == "removed"));
         assert!(overlay
             .unanalyzed_files
