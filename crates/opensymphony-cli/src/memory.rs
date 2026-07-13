@@ -5276,7 +5276,11 @@ mod tests {
                 .as_array()
                 .expect("unanalyzed evidence")
                 .iter()
-                .all(|item| item["name"] != "answer")
+                .any(|item| {
+                    item["kind"] == "symbol"
+                        && item["name"] == "answer"
+                        && item["provenance"] == "indexed_baseline"
+                })
         );
         assert!(
             unanalyzed["unanalyzedFiles"]

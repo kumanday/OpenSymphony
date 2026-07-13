@@ -347,7 +347,7 @@ fn context_symbol_json(
         "freshness": symbol.freshness,
         "baseRevision": base_revision,
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
-        "provenance": if overlay.is_some_and(|overlay| overlay.changed_paths.contains(&symbol.path)) { "workspace_overlay" } else { "indexed_baseline" },
+        "provenance": if is_live_overlay_path(overlay, &symbol.path) { "workspace_overlay" } else { "indexed_baseline" },
         "sourceRef": context_source_ref(&symbol.path, symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col)
     })
 }
@@ -376,8 +376,15 @@ fn context_edge_json(
         "freshness": edge.freshness,
         "baseRevision": base_revision,
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
-        "provenance": if overlay.is_some_and(|overlay| overlay.changed_paths.contains(&edge.path)) { "workspace_overlay" } else { "indexed_baseline" },
+        "provenance": if is_live_overlay_path(overlay, &edge.path) { "workspace_overlay" } else { "indexed_baseline" },
         "sourceRef": context_source_ref(&edge.path, edge.start_line, edge.start_col, edge.end_line, edge.end_col)
+    })
+}
+
+fn is_live_overlay_path(overlay: Option<&CodeWorkspaceOverlay>, path: &str) -> bool {
+    overlay.is_some_and(|overlay| {
+        overlay.changed_paths.contains(path)
+            && !overlay.unanalyzed_files.iter().any(|candidate| candidate == path)
     })
 }
 
@@ -956,9 +963,6 @@ pub fn code_graph_workspace_overlay(
             continue;
         }
 
-        symbols.retain(|_, symbol| symbol.path != *path);
-        edges.retain(|_, edge| edge.path != *path);
-
         let Some(file_path) = workspace_file_path(workspace_path, path)? else {
             unanalyzed_files.insert(path.clone());
             continue;
@@ -979,6 +983,8 @@ pub fn code_graph_workspace_overlay(
             continue;
         };
         remaining_files = remaining_files.saturating_sub(1);
+        symbols.retain(|_, symbol| symbol.path != *path);
+        edges.retain(|_, edge| edge.path != *path);
         for symbol in records.symbols {
             symbols.insert(symbol.symbol_key.clone(), symbol);
         }
