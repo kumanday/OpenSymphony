@@ -77,6 +77,30 @@ after completion. This shared target-branch baseline is not the live truth for
 an issue workspace; workspace-specific code belongs to the overlay/composite
 graph path.
 
+## Workspace overlays
+
+Run-scoped code reads compose the pinned target-branch merge-base snapshot with
+the owning issue workspace. Git changes are enumerated as committed, staged,
+unstaged, untracked, and deleted paths; renames are represented as a tombstone
+plus an added path. Only changed supported files are parsed, and parsed
+records are reused by content hash within the process. Unsupported, oversized,
+failed, and limit-skipped paths remain in `unanalyzed_files` coverage.
+
+The composite is an ephemeral projection: baseline rows are never mutated and
+no fake worktree revision is persisted. The gateway pins a run's comparison
+base and scopes the projection by repository, run, workspace, base revision,
+and workspace content digest. It is therefore safe for concurrent workspaces
+to edit the same path. The run endpoints are:
+
+```text
+GET /api/v1/runs/{run_id}/code/graph
+GET /api/v1/runs/{run_id}/code/diff-overlay
+```
+
+Both reads rebuild from the recoverable workspace after a process restart;
+workspace removal makes the projection unavailable. There is no continuous
+watcher or second per-workspace DuckDB index.
+
 ## Agent Workflow
 
 Use memory first, then code-intelligence context after file discovery:

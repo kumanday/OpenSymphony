@@ -3355,20 +3355,23 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
         .expect("decode dirty run code diff overlay");
     assert_eq!(dirty_overlay.repo_id, "opensymphony");
     assert_eq!(dirty_overlay.base_revision, base_revision);
-    assert!(dirty_overlay.head_revision.ends_with("+worktree"));
-    assert_eq!(
-        dirty_overlay.unanalyzed_files,
-        vec![
-            "src/added_empty.rs".to_string(),
-            "src/deleted_empty.rs".to_string(),
-            "src/empty.rs".to_string(),
-            "src/lib.rs".to_string()
-        ]
-    );
+    assert_eq!(dirty_overlay.head_revision, head_revision);
+    assert!(dirty_overlay.unanalyzed_files.is_empty());
     assert!(
         !dirty_overlay.added_symbols.is_empty(),
         "dirty overlays should keep indexed base-to-HEAD symbol diffs"
     );
+    let graph = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/graph?repo_id=opensymphony&mode=file&path=src/lib.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch dirty run code graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode dirty run code graph");
+    assert!(graph.nodes.iter().any(|node| node.label == "dirty"));
     let dirty_overlay_json = serde_json::to_string(&dirty_overlay).expect("overlay serializes");
     assert!(!dirty_overlay_json.contains("workspace_path"));
     assert!(!dirty_overlay_json.contains(&root.path().display().to_string()));
