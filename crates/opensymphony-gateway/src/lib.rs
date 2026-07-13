@@ -2061,9 +2061,10 @@ async fn get_run_code_outline(
         let overlay_run_identifier = run_identifier.clone();
         let overlay_relative_path = relative_path.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
-            let base = comparison_bases
-                .resolve(&overlay_run_identifier, &workspace_path)
-                .map_err(CodeGraphProjectionError::InvalidRequest)?;
+            let Ok(base) = comparison_bases.resolve(&overlay_run_identifier, &workspace_path)
+            else {
+                return Ok(None);
+            };
             code_file_outline_from_workspace(
                 &config,
                 &repo_id,
@@ -2072,6 +2073,7 @@ async fn get_run_code_outline(
                 &base.merge_base,
                 &overlay_relative_path,
             )
+            .map(Some)
         })
         .await
         .unwrap_or_else(|error| {
@@ -2080,7 +2082,8 @@ async fn get_run_code_outline(
             )))
         });
         match snapshot {
-            Ok(snapshot) => return Ok(Json(snapshot)),
+            Ok(Some(snapshot)) => return Ok(Json(snapshot)),
+            Ok(None) => {}
             Err(CodeGraphProjectionError::IndexUnavailable)
             | Err(CodeGraphProjectionError::RepoNotFound(_))
             | Err(CodeGraphProjectionError::RevisionNotFound(_))

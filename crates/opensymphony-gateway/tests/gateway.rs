@@ -3211,6 +3211,8 @@ async fn gateway_serves_code_graph_contract_endpoints() {
 
 #[tokio::test]
 async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
+    let memory_repo = tempfile::tempdir().expect("memory repository");
+    let memory_config = MemoryConfig::load(memory_repo.path(), None).expect("memory config");
     let root = tempfile::tempdir().expect("workspace root");
     let workspace = root.path().join("COE-533");
     std::fs::create_dir_all(workspace.join("src")).expect("workspace dirs");
@@ -3225,7 +3227,7 @@ async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
     snapshot.issues[0].identifier = "COE-533".to_string();
     snapshot.issues[0].workspace_path_suffix = "COE-533".to_string();
     let store = SnapshotStore::new(snapshot);
-    let server = GatewayServer::new(store);
+    let server = GatewayServer::new(store).with_memory_config(Some(memory_config));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -3413,7 +3415,10 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
         .expect("decode dirty run code diff overlay");
     assert_eq!(dirty_overlay.repo_id, "opensymphony");
     assert_eq!(dirty_overlay.base_revision, base_revision);
-    assert_eq!(dirty_overlay.head_revision, head_revision);
+    assert_eq!(
+        dirty_overlay.head_revision,
+        format!("{head_revision}+worktree")
+    );
     assert!(
         !dirty_overlay.added_symbols.is_empty(),
         "dirty overlays should keep indexed base-to-HEAD symbol diffs"

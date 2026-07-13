@@ -588,7 +588,7 @@ pub fn code_graph_workspace_overlay(
         .into_keys()
         .collect::<BTreeSet<_>>();
     let base_edges = query_code_edges_for_revision(&connection, config, repo_id, base_revision)?;
-    let head_revision = workspace_git_line(workspace_path, ["rev-parse", "HEAD"])?;
+    let head_revision = workspace_head_revision(workspace_path)?;
     let (changed_paths, tombstones, workspace_content_digest) = workspace_changed_paths(
         workspace_path,
         base_revision,
@@ -696,7 +696,7 @@ fn code_graph_workspace_focused_overlay(
     options: &CodeGraphSnapshotOptions,
 ) -> Result<CodeWorkspaceOverlay, CodeGraphProjectionError> {
     let connection = open_workspace_graph_connection(config, repo_id, workspace_path, base_revision)?;
-    let head_revision = workspace_git_line(workspace_path, ["rev-parse", "HEAD"])?;
+    let head_revision = workspace_head_revision(workspace_path)?;
     let (changed_paths, tombstones, workspace_content_digest) = workspace_changed_paths(
         workspace_path,
         base_revision,
@@ -1037,6 +1037,20 @@ pub fn code_graph_workspace_diff_overlay(
     base_revision: &str,
     max_records: usize,
 ) -> Result<CodeDiffOverlay, CodeGraphProjectionError> {
+    let head_revision = workspace_git_line(workspace_path, ["rev-parse", "HEAD"])?;
+    if !workspace_has_uncommitted_changes(workspace_path)?
+        && let Some(connection) = open_existing_index_read_only(config)?
+        && code_revision_indexed(&connection, config, repo_id, base_revision)?
+        && code_revision_indexed(&connection, config, repo_id, &head_revision)?
+    {
+        return code_graph_diff_overlay(
+            config,
+            repo_id,
+            base_revision,
+            &head_revision,
+            max_records,
+        );
+    }
     let overlay = code_graph_workspace_overlay(
         config,
         repo_id,
@@ -1807,6 +1821,22 @@ fn workspace_git_line<const N: usize>(
     Ok(String::from_utf8_lossy(&workspace_git_bytes(workspace_path, args)?)
         .trim()
         .to_string())
+}
+
+fn workspace_has_uncommitted_changes(
+    workspace_path: &Path,
+) -> Result<bool, CodeGraphProjectionError> {
+    Ok(!workspace_git_bytes(workspace_path, ["status", "--porcelain", "--untracked-files=all"])?
+        .is_empty())
+}
+
+fn workspace_head_revision(workspace_path: &Path) -> Result<String, CodeGraphProjectionError> {
+    let head_revision = workspace_git_line(workspace_path, ["rev-parse", "HEAD"])?;
+    if workspace_has_uncommitted_changes(workspace_path)? {
+        Ok(format!("{head_revision}+worktree"))
+    } else {
+        Ok(head_revision)
+    }
 }
 
 fn workspace_git_bytes<const N: usize>(
@@ -4448,7 +4478,7 @@ fn query_symbol_diagnostics(
         let freshness = code_freshness_filter(include_stale);
         let mut statement = connection
             .prepare(&format!(
-                "SELECT commit_sha, kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostic_revisions WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? ORDER BY start_line, start_col, diagnostic_id"
+                "SELECT commit_sha, kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostic_revisions WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? AND start_line <= ? AND end_line >= ? ORDER BY start_line, start_col, diagnostic_id"
             ))
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
@@ -4456,7 +4486,13 @@ fn query_symbol_diagnostics(
             })?;
         let rows = statement
             .query_map(
-                params![&symbol.repo_id, &symbol.path, &symbol.content_sha256],
+                params![
+                    &symbol.repo_id,
+                    &symbol.path,
+                    &symbol.content_sha256,
+                    symbol.end_line as i64,
+                    symbol.start_line as i64
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -5676,7 +5712,8 @@ fn code_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
 mod code_graph_tests {
     use crate::opensymphony_code_intel::{CaptureRecord, SourceSpan, parse_path};
     use crate::opensymphony_memory::{
-        CodeIntelPersistBatch, KnowledgeScope, KnowledgeScopeKind, MemoryConfig,
+        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelPersistBatch,
+        CodeIntelSymbolInput, KnowledgeScope, KnowledgeScopeKind, MemoryConfig,
         persist_code_intel_documents,
     };
     use chrono::Utc;
@@ -5685,7 +5722,8 @@ mod code_graph_tests {
 
     use super::{
         code_citation_matches_symbol, code_file_outline_from_workspace, code_graph_diff_overlay,
-        code_graph_repos, code_graph_workspace_diff_overlay, code_graph_workspace_overlay,
+        code_graph_repos, code_graph_snapshot, code_graph_workspace_diff_overlay,
+        code_graph_workspace_overlay,
         code_graph_workspace_snapshot,
         code_index_document, code_symbol_span_matches, has_work_item_scope,
         CodeSnapshotMembershipInput,
@@ -5709,6 +5747,157 @@ mod code_graph_tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn workspace_diff_overlay_uses_indexed_clean_head() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::create_dir_all(repo.path().join("src")).expect("source directory");
+        fs::write(repo.path().join("src/lib.rs"), "pub fn base() {}\n")
+            .expect("base source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn base() {}\npub fn head() {}\n",
+        )
+        .expect("head source");
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "head"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let memory_root = TempDir::new().expect("memory root tempdir");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.memory_root = memory_root.path().to_path_buf();
+        config.index_path = memory_root.path().join("index.duckdb");
+        index_code_repository_at(
+            &config,
+            "clean-head-repo",
+            Some(("develop".to_string(), base.clone())),
+        )
+        .expect("base index");
+        index_code_repository_at(
+            &config,
+            "clean-head-repo",
+            Some(("develop".to_string(), head.clone())),
+        )
+        .expect("head index");
+
+        let mut limited_config = config.clone();
+        limited_config.code_intel.ast.max_files_per_request = 0;
+        let overlay = code_graph_workspace_diff_overlay(
+            &limited_config,
+            "clean-head-repo",
+            repo.path(),
+            "COE-543-clean-head",
+            &base,
+            500,
+        )
+        .expect("clean indexed head diff");
+        assert_eq!(overlay.head_revision, head);
+        assert!(overlay
+            .added_symbols
+            .iter()
+            .any(|symbol| symbol.after.as_ref().is_some_and(|side| side.name == "head")));
+        assert!(overlay.unanalyzed_files.is_empty());
+    }
+
+    #[test]
+    fn revision_diagnostics_are_scoped_to_symbol_spans() {
+        let repo = TempDir::new().expect("repository tempdir");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "diagnostic-repo".to_string(),
+                commit_sha: Some("diagnostic-revision".to_string()),
+                worktree_dirty: false,
+                documents: vec![CodeIntelDocumentInput {
+                    path: PathBuf::from("src/diagnostics.rs"),
+                    language: "rust".to_string(),
+                    content_sha256: "diagnostic-content".to_string(),
+                    parser_id: "tree-sitter".to_string(),
+                    parser_version: "test-parser".to_string(),
+                    query_pack_version: "test-query-pack".to_string(),
+                    byte_len: 64,
+                    line_count: 12,
+                    symbols: vec![
+                        CodeIntelSymbolInput {
+                            kind: "function".to_string(),
+                            name: "first".to_string(),
+                            container_chain: Vec::new(),
+                            signature: Some("fn first()".to_string()),
+                            start_line: 1,
+                            start_col: 0,
+                            end_line: 2,
+                            end_col: 1,
+                            start_byte: 0,
+                            end_byte: 16,
+                            selection_start_line: 1,
+                            selection_end_line: 1,
+                            snippet_sha256: "first-snippet".to_string(),
+                        },
+                        CodeIntelSymbolInput {
+                            kind: "function".to_string(),
+                            name: "second".to_string(),
+                            container_chain: Vec::new(),
+                            signature: Some("fn second()".to_string()),
+                            start_line: 10,
+                            start_col: 0,
+                            end_line: 11,
+                            end_col: 1,
+                            start_byte: 32,
+                            end_byte: 50,
+                            selection_start_line: 10,
+                            selection_end_line: 10,
+                            snippet_sha256: "second-snippet".to_string(),
+                        },
+                    ],
+                    edges: Vec::new(),
+                    diagnostics: vec![CodeIntelDiagnosticInput {
+                        kind: "warning".to_string(),
+                        severity: "warning".to_string(),
+                        message: "first only".to_string(),
+                        start_line: 1,
+                        start_col: 0,
+                        end_line: 1,
+                        end_col: 1,
+                        start_byte: 0,
+                        end_byte: 1,
+                    }],
+                }],
+            },
+        )
+        .expect("diagnostic fixture");
+
+        let snapshot = code_graph_snapshot(
+            &config,
+            "diagnostic-repo",
+            CodeGraphSnapshotOptions {
+                mode: CodeGraphMode::File,
+                path: Some("src/diagnostics.rs".to_string()),
+                symbol_key: None,
+                depth: 1,
+                aggregate: None,
+                include_stale: false,
+            },
+        )
+        .expect("diagnostic graph");
+        let first = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "first")
+            .expect("first symbol node");
+        let second = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "second")
+            .expect("second symbol node");
+        assert_eq!(first.diagnostic_count, 1);
+        assert_eq!(second.diagnostic_count, 0);
     }
 
     #[test]
