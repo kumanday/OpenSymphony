@@ -1165,6 +1165,34 @@ pub async fn code_graph(
     gateway_get_json(state, &path).await
 }
 
+/// Get a run-scoped code graph snapshot through the active gateway.
+#[command(rename_all = "camelCase")]
+pub async fn run_code_graph(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+    repo_id: Option<String>,
+    mode: Option<String>,
+    path: Option<String>,
+    symbol_key: Option<String>,
+    depth: Option<u64>,
+    aggregate: Option<String>,
+    include_stale: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let mut params = Vec::new();
+    push_query_param(&mut params, "repo_id", repo_id.as_deref());
+    push_query_param(&mut params, "mode", mode.as_deref());
+    push_query_param(&mut params, "path", path.as_deref());
+    push_query_param(&mut params, "symbol_key", symbol_key.as_deref());
+    push_query_param_value(&mut params, "depth", depth);
+    push_query_param(&mut params, "aggregate", aggregate.as_deref());
+    push_query_param_value(&mut params, "include_stale", include_stale);
+    let path = path_with_query(
+        &format!("/api/v1/runs/{}/code/graph", urlencoding::encode(&run_id)),
+        &params,
+    );
+    gateway_get_json(state, &path).await
+}
+
 /// Get code symbol details through the active gateway.
 #[command(rename_all = "camelCase")]
 pub async fn code_symbol_detail(

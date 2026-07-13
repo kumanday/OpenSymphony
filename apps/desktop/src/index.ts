@@ -165,6 +165,17 @@ function createDesktopNativeCodeGraphApi(invoke: TauriInvoke): NativeCodeGraphAp
         aggregate: options?.aggregate ?? null,
         includeStale: options?.includeStale ?? null,
       }),
+    getRunGraphSnapshot: (runId, repoId, options?: CodeGraphRequestOptions) =>
+      invoke<CodeGraphSnapshot>("run_code_graph", {
+        runId,
+        repoId: repoId ?? null,
+        mode: options?.mode ?? null,
+        path: options?.path ?? null,
+        symbolKey: options?.symbolKey ?? null,
+        depth: options?.depth ?? null,
+        aggregate: options?.aggregate ?? null,
+        includeStale: options?.includeStale ?? null,
+      }),
     getSymbolDetail: (repoId, symbolKey, options) =>
       invoke<CodeSymbolDetail>("code_symbol_detail", {
         repoId,
