@@ -626,6 +626,7 @@ CREATE TABLE IF NOT EXISTS code_index_snapshots (
   parsed_files BIGINT NOT NULL,
   skipped_files BIGINT NOT NULL,
   deleted_files BIGINT NOT NULL,
+  config_fingerprint TEXT NOT NULL DEFAULT '',
   indexed_at TEXT NOT NULL,
   PRIMARY KEY (repo_id, commit_sha)
 );
@@ -668,6 +669,7 @@ ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
 UPDATE code_diagnostics SET end_byte = 0 WHERE end_byte IS NULL;
 ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_diagnostics SET parser_version = '' WHERE parser_version IS NULL;
+ALTER TABLE code_index_snapshots ADD COLUMN IF NOT EXISTS config_fingerprint TEXT DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_key ON code_symbols(symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_path ON code_symbols(path);
@@ -771,7 +773,7 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
         let current_document_exists = if freshness == "staged" {
             transaction
                 .query_row(
-                    "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' LIMIT 1",
+                    "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
                     params![
                         batch.repo_id,
                         path,
@@ -930,7 +932,7 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             let current_edge_exists = if freshness == "staged" {
                 transaction
                     .query_row(
-                        "SELECT 1 FROM code_edges WHERE edge_id = ? AND freshness = 'current' LIMIT 1",
+                        "SELECT 1 FROM code_edges WHERE edge_id = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
                         params![edge_id],
                         |row| row.get::<_, i64>(0),
                     )
@@ -1039,7 +1041,7 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             let current_diagnostic_exists = if freshness == "staged" {
                 transaction
                     .query_row(
-                        "SELECT 1 FROM code_diagnostics WHERE diagnostic_id = ? AND freshness = 'current' LIMIT 1",
+                        "SELECT 1 FROM code_diagnostics WHERE diagnostic_id = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
                         params![&diagnostic_id],
                         |row| row.get::<_, i64>(0),
                     )

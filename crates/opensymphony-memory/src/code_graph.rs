@@ -597,6 +597,7 @@ struct CodeSnapshotState<'a> {
     parsed_files: usize,
     skipped_files: usize,
     deleted_files: usize,
+    config_fingerprint: &'a str,
     indexed_at: DateTime<Utc>,
 }
 
@@ -667,10 +668,14 @@ pub fn index_code_repository_at(
     discard_staged_code_index_rows(config, repo_id)?;
     let paths = git_tree_paths(&config.repo_root, &commit_sha)?;
     let repo_prefix = git_repo_prefix(&config.repo_root)?;
+    let config_fingerprint = code_index_config_fingerprint(config);
     let previous = latest_code_snapshot(config, repo_id, &target_branch)?;
     let same_revision = previous
         .as_ref()
-        .is_some_and(|(revision, _)| revision == &commit_sha);
+        .is_some_and(|(revision, _, _)| revision == &commit_sha);
+    let reuse_edge_limits = previous
+        .as_ref()
+        .is_some_and(|(_, _, fingerprint)| fingerprint == &config_fingerprint);
 
     persist_code_snapshot_state(
         config,
@@ -683,11 +688,14 @@ pub fn index_code_repository_at(
             parsed_files: 0,
             skipped_files: 0,
             deleted_files: 0,
+            config_fingerprint: &config_fingerprint,
             indexed_at,
         },
     )?;
 
-    let previous_files = previous.map(|(_, files)| files).unwrap_or_default();
+    let previous_files = previous
+        .map(|(_, files, _)| files)
+        .unwrap_or_default();
     let mut current_files = BTreeMap::new();
     let mut memberships = Vec::new();
     let mut skipped_inputs = Vec::new();
@@ -705,11 +713,11 @@ pub fn index_code_repository_at(
         let skipped_directory = path.components().any(|component| {
             skipped_directory_name(Path::new(component.as_os_str())).is_some()
         });
-        if mode == "120000" || skipped_directory {
-            let reason = if mode == "120000" {
-                "symlink not indexed"
-            } else {
-                "skipped directory"
+        if mode == "120000" || mode == "160000" || skipped_directory {
+            let reason = match mode.as_str() {
+                "120000" => "symlink not indexed",
+                "160000" => "gitlink not indexed",
+                _ => "skipped directory",
             };
             let relative_display = path.to_string_lossy().to_string();
             skipped_files.push(format!("{relative_display}: {reason}"));
@@ -814,6 +822,7 @@ pub fn index_code_repository_at(
             && previous_file.language == language_id
             && !same_revision
             && ((previous_file.analyzed
+                && reuse_edge_limits
                 && previous_file.parser_version == current_parser_version
                 && previous_file.query_pack_version == versions.query_pack)
                 || (!previous_file.analyzed
@@ -1028,6 +1037,7 @@ pub fn index_code_repository_at(
         parsed_files,
         skipped_files: skipped_files.len(),
         deleted_files,
+        config_fingerprint: &config_fingerprint,
         indexed_at,
     };
     stale_rows += promote_staged_code_snapshot(
@@ -1176,7 +1186,7 @@ fn git_tree_paths(
                 } else {
                     entries.push((PathBuf::from(path), mode, object_id));
                 }
-            } else if object_kind == "blob" {
+            } else if object_kind == "blob" || object_kind == "commit" {
                 entries.push((PathBuf::from(path), mode, object_id));
             }
         }
@@ -1274,13 +1284,13 @@ fn latest_code_snapshot(
     config: &MemoryConfig,
     repo_id: &str,
     target_branch: &str,
-) -> Result<Option<(String, CodeSnapshotFiles)>, CodeGraphProjectionError> {
+) -> Result<Option<(String, CodeSnapshotFiles, String)>, CodeGraphProjectionError> {
     if !config.index_path.exists() {
         return Ok(None);
     }
     let connection = open_index_read_only(config)?;
     let mut statement = connection
-        .prepare("SELECT commit_sha FROM code_index_snapshots WHERE repo_id = ? AND target_branch = ? AND status = 'completed' ORDER BY indexed_at DESC LIMIT 1")
+        .prepare("SELECT commit_sha, config_fingerprint FROM code_index_snapshots WHERE repo_id = ? AND target_branch = ? AND status = 'completed' ORDER BY indexed_at DESC LIMIT 1")
         .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1300,6 +1310,12 @@ fn latest_code_snapshot(
         return Ok(None);
     };
     let revision = row.get::<_, String>(0).map_err(|source| {
+        CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })
+    })?;
+    let config_fingerprint = row.get::<_, String>(1).map_err(|source| {
         CodeGraphProjectionError::Memory(MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -1334,7 +1350,15 @@ fn latest_code_snapshot(
             path: config.index_path.clone(),
             source,
         }))?;
-    Ok(Some((revision, files)))
+    Ok(Some((revision, files, config_fingerprint)))
+}
+
+fn code_index_config_fingerprint(config: &MemoryConfig) -> String {
+    format!(
+        "edge-limits:{}:{}",
+        config.code_intel.ast.max_matches_per_request,
+        config.code_intel.ast.max_capture_bytes
+    )
 }
 
 fn persist_code_snapshot_state(
@@ -1367,7 +1391,7 @@ fn persist_code_snapshot_state(
     }
     connection
         .execute(
-            "INSERT OR REPLACE INTO code_index_snapshots (repo_id, commit_sha, target_branch, status, total_files, parsed_files, skipped_files, deleted_files, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO code_index_snapshots (repo_id, commit_sha, target_branch, status, total_files, parsed_files, skipped_files, deleted_files, config_fingerprint, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 state.repo_id,
                 state.commit_sha,
@@ -1377,6 +1401,7 @@ fn persist_code_snapshot_state(
                 state.parsed_files as i64,
                 state.skipped_files as i64,
                 state.deleted_files as i64,
+                state.config_fingerprint,
                 state.indexed_at.to_rfc3339(),
             ],
         )
@@ -1568,7 +1593,7 @@ fn promote_staged_code_snapshot(
     }
     transaction
         .execute(
-            "UPDATE code_index_snapshots SET target_branch = ?, status = ?, total_files = ?, parsed_files = ?, skipped_files = ?, deleted_files = ?, indexed_at = ? WHERE repo_id = ? AND commit_sha = ?",
+            "UPDATE code_index_snapshots SET target_branch = ?, status = ?, total_files = ?, parsed_files = ?, skipped_files = ?, deleted_files = ?, config_fingerprint = ?, indexed_at = ? WHERE repo_id = ? AND commit_sha = ?",
             params![
                 completed_state.target_branch,
                 completed_state.status,
@@ -1576,6 +1601,7 @@ fn promote_staged_code_snapshot(
                 completed_state.parsed_files as i64,
                 completed_state.skipped_files as i64,
                 completed_state.deleted_files as i64,
+                completed_state.config_fingerprint,
                 completed_state.indexed_at.to_rfc3339(),
                 completed_state.repo_id,
                 completed_state.commit_sha,
@@ -1606,7 +1632,7 @@ fn current_code_snapshot_file_matches(
     let exists = if file.analyzed {
         connection
             .query_row(
-                "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' LIMIT 1",
+                "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
                 params![
                     repo_id,
                     path,
@@ -1625,7 +1651,7 @@ fn current_code_snapshot_file_matches(
     } else {
         connection
             .query_row(
-                "SELECT 1 FROM code_skipped_files WHERE repo_id = ? AND path = ? AND reason = ? AND content_sha256 = ? AND freshness = 'current' LIMIT 1",
+                "SELECT 1 FROM code_skipped_files WHERE repo_id = ? AND path = ? AND reason = ? AND content_sha256 = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
                 params![
                     repo_id,
                     path,
@@ -2602,10 +2628,10 @@ fn query_retained_inbound_impact_count(
         "code_edges"
     };
     let query = if membership_edges {
-        "SELECT DISTINCT e.edge_id, e.source_symbol_key FROM code_edge_revisions AS e WHERE e.repo_id = ? AND e.target_symbol_key = ? AND NOT e.worktree_dirty AND (lower(e.edge_kind) LIKE '%call%' OR lower(e.edge_kind) LIKE '%reference%') AND (e.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed))"
+        "SELECT DISTINCT e.edge_id, e.source_symbol_key FROM code_edge_revisions AS e WHERE e.repo_id = ? AND e.target_symbol_key = ? AND e.freshness <> 'staged' AND NOT e.worktree_dirty AND (lower(e.edge_kind) LIKE '%call%' OR lower(e.edge_kind) LIKE '%reference%') AND (e.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed))"
     } else {
         &format!(
-            "SELECT DISTINCT edge_id, source_symbol_key FROM {edge_table} WHERE repo_id = ? AND target_symbol_key = ? AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL))"
+            "SELECT DISTINCT edge_id, source_symbol_key FROM {edge_table} WHERE repo_id = ? AND target_symbol_key = ? AND freshness <> 'staged' AND NOT worktree_dirty AND (lower(edge_kind) LIKE '%call%' OR lower(edge_kind) LIKE '%reference%') AND (commit_sha = ? OR (? IS NULL AND commit_sha IS NULL))"
         )
     };
     let mut statement = connection
@@ -3652,6 +3678,39 @@ mod code_graph_tests {
         assert_eq!(current_edge_commit, baseline);
         drop(connection);
 
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("workspace-dirty".to_string()),
+                worktree_dirty: true,
+                documents: vec![legacy_document.clone()],
+            },
+        )
+        .expect("dirty workspace document should persist");
+        index_code_repository(&config, "fixture-repo")
+            .expect("clean target rows should replace dirty rows");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let clean_documents: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT worktree_dirty",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("clean document count should be readable");
+        let dirty_documents: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current' AND worktree_dirty",
+                duckdb::params!["fixture-repo", "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("dirty document count should be readable");
+        assert_eq!(clean_documents, 1);
+        assert_eq!(dirty_documents, 0);
+        drop(connection);
+
         let before_staged_symbols = open_existing_index_read_only(&config)
             .expect("index should open")
             .expect("index should exist")
@@ -3729,6 +3788,7 @@ mod code_graph_tests {
                 parsed_files: 0,
                 skipped_files: 0,
                 deleted_files: 0,
+                config_fingerprint: "",
                 indexed_at: Utc::now(),
             },
         )
@@ -3756,6 +3816,7 @@ mod code_graph_tests {
                 parsed_files: 0,
                 skipped_files: 0,
                 deleted_files: 0,
+                config_fingerprint: "",
                 indexed_at: Utc::now(),
             },
         )
@@ -3791,6 +3852,7 @@ mod code_graph_tests {
                 parsed_files: 0,
                 skipped_files: 0,
                 deleted_files: 0,
+                config_fingerprint: "",
                 indexed_at: Utc::now(),
             },
         )
@@ -3971,6 +4033,112 @@ mod code_graph_tests {
             .skipped_files
             .iter()
             .any(|path| path.contains("max file size")));
+    }
+
+    #[test]
+    fn target_index_records_gitlink_coverage() {
+        let repo = TempDir::new().expect("repository tempdir");
+        let submodule = TempDir::new().expect("submodule tempdir");
+        fs::write(submodule.path().join("README.md"), "submodule\n")
+            .expect("submodule file");
+        git(submodule.path(), &["init", "-b", "develop"]);
+        git(submodule.path(), &["config", "user.email", "test@example.com"]);
+        git(submodule.path(), &["config", "user.name", "Test User"]);
+        git(submodule.path(), &["add", "."]);
+        git(submodule.path(), &["commit", "-m", "submodule"]);
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("workflow marker");
+        fs::create_dir_all(repo.path().join("src")).expect("source directory");
+        fs::write(repo.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+            .expect("source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "gitlink base"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                submodule.path().to_string_lossy().as_ref(),
+                "deps/submodule",
+            ],
+        );
+        git(repo.path(), &["commit", "-m", "gitlink pointer"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let paths = super::git_tree_paths(repo.path(), &head).expect("tree should include gitlink");
+        assert!(paths.iter().any(|(path, mode, _)| {
+            path == Path::new("deps/submodule") && mode == "160000"
+        }));
+
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let report = index_code_repository(&config, "gitlink-repo").expect("index");
+        assert!(report
+            .skipped_files
+            .iter()
+            .any(|path| path.contains("deps/submodule: gitlink not indexed")));
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let reason: String = connection
+            .query_row(
+                "SELECT skip_reason FROM code_snapshot_membership WHERE repo_id = ? AND path = ?",
+                duckdb::params!["gitlink-repo", "deps/submodule"],
+                |row| row.get(0),
+            )
+            .expect("gitlink membership should persist");
+        assert_eq!(reason, "gitlink not indexed");
+    }
+
+    #[test]
+    fn target_index_reparses_unchanged_files_when_edge_limits_change() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("workflow marker");
+        fs::write(
+            repo.path().join("src.rs"),
+            "pub fn helper() {}\npub fn caller() { helper(); }\n",
+        )
+        .expect("source");
+        git(repo.path(), &["init", "-b", "develop"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "bounded edges"]);
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.code_intel.ast.max_matches_per_request = 0;
+        let first = index_code_repository(&config, "edge-limit-repo").expect("limited index");
+
+        git(repo.path(), &["commit", "--allow-empty", "-m", "raise edge limit"]);
+        config.code_intel.ast.max_matches_per_request = 100;
+        let second = index_code_repository(&config, "edge-limit-repo").expect("expanded index");
+        assert!(
+            first.parsed_files > 0,
+            "first parsed {}",
+            first.parsed_files
+        );
+        assert!(second.parsed_files > 0);
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let current_edges: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["edge-limit-repo", "src.rs"],
+                |row| row.get(0),
+            )
+            .expect("edge count should be readable");
+        assert!(current_edges > 0);
     }
 
     #[test]
