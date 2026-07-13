@@ -3344,17 +3344,18 @@ fn workspace_comparison_base(
         None => "develop".to_owned(),
     };
     let mut references = vec![format!("origin/{target_branch}"), target_branch];
-    references.extend([
-        // Legacy workspaces without WORKFLOW.md may still expose one of
-        // these refs; configured target branches remain authoritative when
-        // present.
-        "origin/main".to_string(),
-        "main".to_string(),
-        "origin/master".to_string(),
-        "master".to_string(),
-        "origin/HEAD".to_string(),
-        "HEAD".to_string(),
-    ]);
+    if trusted_target_branch.is_none() {
+        references.extend([
+            // Legacy workspaces without a trusted target may still expose
+            // one of these refs.
+            "origin/main".to_string(),
+            "main".to_string(),
+            "origin/master".to_string(),
+            "master".to_string(),
+            "origin/HEAD".to_string(),
+            "HEAD".to_string(),
+        ]);
+    }
     for reference in references {
         if git_ref_exists(workspace_path, &reference)? {
             return Ok(WorkspaceComparisonBase {
@@ -6254,6 +6255,31 @@ exit 2
         assert_eq!(untrusted.merge_base, develop_revision);
         assert_eq!(trusted.merge_base, develop_revision);
         assert_ne!(untrusted.merge_base, head_revision);
+
+        let missing_target = tempfile::tempdir().expect("missing target workspace");
+        std::fs::write(missing_target.path().join("README.md"), "feature\n")
+            .expect("write missing-target baseline");
+        run_git(missing_target.path(), &["init"]);
+        run_git(
+            missing_target.path(),
+            &["checkout", "-B", "feature/worktree"],
+        );
+        run_git(missing_target.path(), &["add", "."]);
+        run_git(
+            missing_target.path(),
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature",
+                "--no-gpg-sign",
+            ],
+        );
+        let missing_target_branch = Ok("develop".to_owned());
+        assert!(
+            workspace_comparison_base(missing_target.path(), Some(&missing_target_branch)).is_err()
+        );
     }
 
     #[test]

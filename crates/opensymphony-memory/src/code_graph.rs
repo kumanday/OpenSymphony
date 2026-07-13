@@ -606,6 +606,9 @@ pub fn code_graph_workspace_overlay(
 
     for path in &changed_paths {
         if tombstones.contains(path) {
+            if !base_symbols.values().any(|symbol| symbol.path == *path) {
+                unanalyzed_files.insert(path.clone());
+            }
             symbols.retain(|_, symbol| symbol.path != *path);
             edges.retain(|_, edge| edge.path != *path);
             continue;
@@ -863,12 +866,13 @@ fn code_graph_workspace_focused_overlay(
                     {
                         continue;
                     }
-                    let (symbol, from_baseline) = if let Some(symbol) =
-                        live_symbols.values().find(|symbol| symbol.name == name)
-                    {
-                        (Some(symbol.clone()), false)
-                    } else {
-                        (
+                    let live_matches = live_symbols
+                        .values()
+                        .filter(|symbol| symbol.name == name)
+                        .collect::<Vec<_>>();
+                    let (symbol, from_baseline) = match live_matches.as_slice() {
+                        [symbol] => (Some((*symbol).clone()), false),
+                        [] => (
                             query_revision_symbol_by_name(
                                 config,
                                 &connection,
@@ -877,7 +881,8 @@ fn code_graph_workspace_focused_overlay(
                                 name,
                             )?,
                             true,
-                        )
+                        ),
+                        _ => (None, false),
                     };
                     let Some(symbol) = symbol else {
                         continue;
@@ -1231,7 +1236,7 @@ pub fn code_graph_workspace_snapshot(
             base_revision,
             &options,
         )?;
-        return render_workspace_graph_snapshot(repo_id, options, overlay);
+        return render_workspace_graph_snapshot(config, repo_id, options, overlay);
     }
     let overlay = code_graph_workspace_overlay(
         config,
@@ -1240,14 +1245,21 @@ pub fn code_graph_workspace_snapshot(
         run_id,
         base_revision,
     )?;
-    render_workspace_graph_snapshot(repo_id, options, overlay)
+    render_workspace_graph_snapshot(config, repo_id, options, overlay)
 }
 
 fn render_workspace_graph_snapshot(
+    config: &MemoryConfig,
     repo_id: &str,
     options: CodeGraphSnapshotOptions,
     overlay: CodeWorkspaceOverlay,
 ) -> Result<CodeGraphSnapshot, CodeGraphProjectionError> {
+    let connection = open_existing_index_read_only(config)?;
+    let diagnostics_ready = if let Some(connection) = connection.as_ref() {
+        code_diagnostics_read_model_ready(connection, &config.index_path)?
+    } else {
+        false
+    };
     let mode = options.mode;
     let mut paths = BTreeSet::new();
     let mut selected_keys = BTreeSet::new();
@@ -1255,16 +1267,28 @@ fn render_workspace_graph_snapshot(
     let mut tombstoned_file = false;
     match mode {
         CodeGraphMode::Atlas => {
-            paths.extend(overlay.base_paths.iter().cloned());
-            paths.extend(
-                overlay
-                    .changed_paths
-                    .iter()
-                    .filter(|path| !overlay.tombstones.contains(*path))
-                    .cloned(),
-            );
-            dropped_paths = paths.len().saturating_sub(CODE_GRAPH_MAX_RECORDS);
-            paths = paths.into_iter().take(CODE_GRAPH_MAX_RECORDS).collect();
+            let changed_paths = overlay
+                .changed_paths
+                .iter()
+                .filter(|path| !overlay.tombstones.contains(*path))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let prioritized_paths = changed_paths
+                .iter()
+                .cloned()
+                .chain(
+                    overlay
+                        .base_paths
+                        .iter()
+                        .filter(|path| !changed_paths.contains(*path))
+                        .cloned(),
+                )
+                .collect::<Vec<_>>();
+            dropped_paths = prioritized_paths.len().saturating_sub(CODE_GRAPH_MAX_RECORDS);
+            paths = prioritized_paths
+                .into_iter()
+                .take(CODE_GRAPH_MAX_RECORDS)
+                .collect();
             selected_keys.extend(
                 overlay
                     .symbols
@@ -1392,7 +1416,16 @@ fn render_workspace_graph_snapshot(
         let Some(symbol) = symbol else {
             continue;
         };
-        let mut node = workspace_symbol_node(symbol);
+        let mut node = if diagnostics_ready {
+            symbol_node(
+                connection.as_ref().expect("diagnostics require an index connection"),
+                config,
+                symbol,
+                options.include_stale,
+            )?
+        } else {
+            workspace_symbol_node(symbol)
+        };
         if tombstoned_file {
             node.freshness = CodeGraphFreshness::Stale;
         }
@@ -1786,10 +1819,9 @@ fn workspace_git_bytes<const N: usize>(
             source,
         }))?;
     if !output.status.success() {
-        return Err(CodeGraphProjectionError::InvalidRequest(format!(
-            "git command failed in workspace {}",
-            workspace_path.display()
-        )));
+        return Err(CodeGraphProjectionError::InvalidRequest(
+            "git command failed in run workspace".to_string(),
+        ));
     }
     Ok(output.stdout)
 }
@@ -4406,6 +4438,54 @@ fn query_symbol_diagnostics(
     symbol: &CodeSymbolRecord,
     include_stale: bool,
 ) -> Result<Vec<CodeDiagnostic>, MemoryError> {
+    if let Some(commit_sha) = symbol.commit_sha.as_deref()
+        && code_diagnostic_revisions_read_model_ready(connection, &config.index_path)?
+    {
+        let freshness = code_freshness_filter(include_stale);
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT commit_sha, kind, severity, message, start_line, start_col, end_line, end_col FROM code_diagnostic_revisions WHERE repo_id = ? AND path = ? AND {freshness} AND content_sha256 = ? ORDER BY start_line, start_col, diagnostic_id"
+            ))
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        let rows = statement
+            .query_map(
+                params![&symbol.repo_id, &symbol.path, &symbol.content_sha256],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        CodeDiagnostic {
+                            kind: row.get(1)?,
+                            severity: row.get(2)?,
+                            message: row.get(3)?,
+                            span: CodeSpan {
+                                start_line: row.get::<_, i64>(4)? as usize,
+                                start_col: row.get::<_, i64>(5)? as usize,
+                                end_line: row.get::<_, i64>(6)? as usize,
+                                end_col: row.get::<_, i64>(7)? as usize,
+                            },
+                        },
+                    ))
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .filter_map(|row| match row {
+                Ok((revision, diagnostic)) if revision == commit_sha => Some(Ok(diagnostic)),
+                Ok(_) => None,
+                Err(source) => Some(Err(source)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        return Ok(rows);
+    }
     let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
@@ -5436,6 +5516,18 @@ fn code_diagnostics_read_model_ready(
     )
 }
 
+fn code_diagnostic_revisions_read_model_ready(
+    connection: &Connection,
+    path: &Path,
+) -> Result<bool, MemoryError> {
+    table_has_columns(
+        connection,
+        path,
+        "code_diagnostic_revisions",
+        &["repo_id", "commit_sha", "path", "content_sha256", "freshness"],
+    )
+}
+
 fn code_freshness_filter(include_stale: bool) -> &'static str {
     if include_stale {
         "freshness IN ('current', 'stale')"
@@ -5596,7 +5688,7 @@ mod code_graph_tests {
         CodeGraphMode, CodeGraphSnapshotOptions,
         index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
         open_existing_index_read_only,
-        repository_scope_matches, CodeGraphProjectionError,
+        repository_scope_matches, workspace_git_bytes, CodeGraphProjectionError,
     };
 
     fn git(root: &Path, args: &[&str]) -> String {
@@ -5631,6 +5723,7 @@ mod code_graph_tests {
         .expect("baseline source");
         fs::write(repo.path().join("src/remove.rs"), "pub fn removed() {}\n")
             .expect("removed source");
+        fs::write(repo.path().join("src/delete_empty.rs"), "").expect("empty deleted source");
         fs::write(
             repo.path().join("src/large.rs"),
             "pub fn baseline_large() {}\n",
@@ -5657,6 +5750,7 @@ mod code_graph_tests {
         )
         .expect("modified source");
         fs::remove_file(repo.path().join("src/remove.rs")).expect("deleted source");
+        fs::remove_file(repo.path().join("src/delete_empty.rs")).expect("deleted empty source");
         fs::write(repo.path().join("src/new.rs"), "pub fn added() {}\n").expect("added source");
         fs::write(repo.path().join("src/zchanged_empty.rs"), "").expect("empty added source");
         fs::write(repo.path().join("notes.txt"), "unsupported\n").expect("unsupported source");
@@ -5822,6 +5916,10 @@ mod code_graph_tests {
             .unanalyzed_files
             .iter()
             .any(|path| path == "src/large.rs"));
+        assert!(overlay
+            .unanalyzed_files
+            .iter()
+            .any(|path| path == "src/delete_empty.rs"));
         #[cfg(unix)]
         {
             assert!(overlay
@@ -5877,6 +5975,17 @@ mod code_graph_tests {
             .unanalyzed_files
             .iter()
             .any(|path| path == "src/lib.rs"));
+    }
+
+    #[test]
+    fn workspace_git_errors_do_not_include_workspace_paths() {
+        let workspace = TempDir::new().expect("workspace tempdir");
+        let error = workspace_git_bytes(workspace.path(), ["status"])
+            .expect_err("non-git workspace should fail");
+        assert!(!error.to_string().contains(&workspace.path().display().to_string()));
+        assert!(error
+            .to_string()
+            .contains("git command failed in run workspace"));
     }
 
     #[test]
