@@ -828,9 +828,12 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
   const topologyEntries = overlay.edge_deltas.flatMap((delta) =>
     topologySides(delta).map(({ side, suffix }) => ({ delta, side, suffix })));
   const topologySymbolKeys = new Set<string>();
+  const topologySymbolPaths = new Map<string, string>();
   for (const { side } of topologyEntries) {
     for (const symbolKey of [side?.source_symbol_key, side?.target_symbol_key]) {
-      if (symbolKey && !existingKeys.has(symbolKey) && !syntheticSides.has(symbolKey)) topologySymbolKeys.add(symbolKey);
+      if (!symbolKey) continue;
+      if (!topologySymbolPaths.has(symbolKey)) topologySymbolPaths.set(symbolKey, side.path);
+      if (!existingKeys.has(symbolKey) && !syntheticSides.has(symbolKey)) topologySymbolKeys.add(symbolKey);
     }
   }
   const topologySymbolNodes: CodeGraphNode[] = [...topologySymbolKeys].map((symbolKey) => ({
@@ -840,7 +843,7 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
     symbol_kind: "topology",
     symbol_key: symbolKey,
     symbol_id: null,
-    path_display: null,
+    path_display: topologySymbolPaths.get(symbolKey) ?? null,
     language: null,
     container_chain: [],
     signature: null,
@@ -856,13 +859,12 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
   }
   const symbolNodeId = (symbolKey: string): string => symbolNodeIds.get(symbolKey) ?? `symbol:${symbolKey}`;
   const topologyHintNodes = topologyEntries.flatMap(({ delta, side, suffix }) => {
-    if (!side?.target_symbol_key && !side?.target_hint) return [];
-    if (side.target_symbol_key || !side.target_hint) return [];
+    if (!side || side.target_symbol_key || (!side.target_hint && !side.unresolved)) return [];
     return [{
       id: `hint:${delta.edge_key}${suffix}`,
       kind: "symbol" as const,
       label: side.target_hint ?? "unresolved",
-      symbol_kind: null,
+      symbol_kind: "unresolved",
       symbol_key: null,
       symbol_id: null,
       path_display: null,

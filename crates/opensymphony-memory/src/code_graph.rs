@@ -2425,10 +2425,9 @@ fn query_code_edges_for_revision(
     repo_id: &str,
     revision: &str,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
-    let membership_ready = matches!(
-        code_snapshot_status(connection, config, repo_id, revision)?.as_deref(),
-        None | Some("completed")
-    ) && code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
+    let membership_ready = matches!(snapshot_status.as_deref(), Some("completed"))
+        && code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
     let revision_rows = code_edge_revisions_read_model_ready(connection, &config.index_path)?
         && code_edge_revision_rows_available(connection, config, repo_id, revision)?;
     let query = if membership_ready {

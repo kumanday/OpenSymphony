@@ -336,13 +336,14 @@ export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
 function renderCodeGraphSelectedTopology(surface: CodeGraphSurface, symbolKey: string | null | undefined): string {
   const overlay = surface.state.mode === "diff" ? surface.state.diffOverlay : null;
   if (!overlay || !symbolKey) return "";
-  const edgeItems = overlay.edge_deltas.filter((delta) => {
-    const side = delta.after ?? delta.before;
-    return side?.source_symbol_key === symbolKey || side?.target_symbol_key === symbolKey;
-  }).map((delta) => {
-    const side = delta.after ?? delta.before;
-    const target = side?.target_symbol_key ?? side?.target_hint ?? "unresolved";
-    return `<li><strong>${escapeHtml(delta.status)}</strong> ${escapeHtml(side?.kind ?? "unknown")} → ${escapeHtml(target)} · confidence ${escapeHtml(side?.confidence ?? "unknown")}${side?.unresolved ? " · unresolved" : ""}</li>`;
+  const edgeItems = overlay.edge_deltas.flatMap((delta) => {
+    const sides = delta.status === "retargeted" ? [delta.before, delta.after] : [delta.after ?? delta.before];
+    return sides.flatMap((side, index) => {
+      if (!side || (side.source_symbol_key !== symbolKey && side.target_symbol_key !== symbolKey)) return [];
+      const target = side.target_symbol_key ?? side.target_hint ?? "unresolved";
+      const sideLabel = delta.status === "retargeted" ? ` ${index === 0 ? "before" : "after"}` : "";
+      return [`<li><strong>${escapeHtml(delta.status)}${sideLabel}</strong> ${escapeHtml(side.kind)} → ${escapeHtml(target)} · confidence ${escapeHtml(side.confidence)}${side.unresolved ? " · unresolved" : ""}</li>`];
+    });
   });
   const connectionItems = overlay.module_connection_deltas.filter((delta) => {
     return delta.source.includes(symbolKey) || delta.target.includes(symbolKey);

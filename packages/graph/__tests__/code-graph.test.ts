@@ -241,6 +241,38 @@ describe("Code Graph adapters and state", () => {
             span: { start_line: 92, start_col: 2, end_line: 92, end_col: 16 },
           },
         },
+        {
+          edge_key: "fixture-edge-hintless",
+          status: "added" as const,
+          before: null,
+          after: {
+            edge_id: "fixture-edge-hintless-head",
+            kind: "import",
+            source_symbol_key: "codeGraphReducer",
+            target_symbol_key: null,
+            target_hint: null,
+            confidence: "heuristic" as const,
+            unresolved: true,
+            path: "packages/graph/src/code-graph.ts",
+            span: { start_line: 93, start_col: 2, end_line: 93, end_col: 16 },
+          },
+        },
+        {
+          edge_key: "fixture-edge-topology-source",
+          status: "added" as const,
+          before: null,
+          after: {
+            edge_id: "fixture-edge-topology-source-head",
+            kind: "call",
+            source_symbol_key: "topologyOnlySource",
+            target_symbol_key: "codeGraphReducer",
+            target_hint: null,
+            confidence: "exact" as const,
+            unresolved: false,
+            path: "packages/graph/src/topology-only.ts",
+            span: { start_line: 4, start_col: 1, end_line: 4, end_col: 8 },
+          },
+        },
       ],
     };
     const rendered = codeGraphSnapshotForRendering(snapshot, overlay);
@@ -256,9 +288,16 @@ describe("Code Graph adapters and state", () => {
         unresolved: true,
         metadata: expect.objectContaining({ target_hint: "missing::helper", confidence: "heuristic" }),
       }),
+      expect.objectContaining({
+        id: "fixture-edge-hintless",
+        target_id: "hint:fixture-edge-hintless",
+        unresolved: true,
+      }),
     ]));
     expect(rendered.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "hint:fixture-edge-unresolved", label: "missing::helper" }),
+      expect.objectContaining({ id: "hint:fixture-edge-hintless", label: "unresolved", concept_type: "unresolved" }),
+      expect.objectContaining({ id: "symbol:topologyOnlySource", path_display: "packages/graph/src/topology-only.ts" }),
     ]));
   });
 
@@ -311,6 +350,9 @@ describe("Code Graph adapters and state", () => {
         source_id: "sym:codeGraphReducer",
         target_id: "symbol:newRetargetedSymbol",
       }),
+    ]));
+    expect(rendered.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "symbol:newRetargetedSymbol", path_display: "packages/graph/src/code-graph.ts" }),
     ]));
   });
 
