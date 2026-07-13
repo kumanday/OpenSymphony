@@ -1184,14 +1184,23 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const mode = code.mode === "diff"
       ? code.path ? "file" : code.symbolKey ? "neighborhood" : "atlas"
       : code.mode;
-    const snapshot = await this.codeGraphAdapter.getGraphSnapshot(repoId, {
-      mode,
-      path: code.path ?? undefined,
-      symbolKey: code.symbolKey ?? undefined,
-      depth: code.depth,
-      aggregate: mode === "atlas" ? "directory" : undefined,
-      includeStale: codeGraphNeedsBroadFreshness(code.filters),
-    });
+    const snapshot = code.runId && this.codeGraphAdapter.getRunGraphSnapshot
+      ? await this.codeGraphAdapter.getRunGraphSnapshot(code.runId, repoId, {
+        mode,
+        path: code.path ?? undefined,
+        symbolKey: code.symbolKey ?? undefined,
+        depth: code.depth,
+        aggregate: mode === "atlas" ? "directory" : undefined,
+        includeStale: codeGraphNeedsBroadFreshness(code.filters),
+      })
+      : await this.codeGraphAdapter.getGraphSnapshot(repoId, {
+        mode,
+        path: code.path ?? undefined,
+        symbolKey: code.symbolKey ?? undefined,
+        depth: code.depth,
+        aggregate: mode === "atlas" ? "directory" : undefined,
+        includeStale: codeGraphNeedsBroadFreshness(code.filters),
+      });
     if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
     if (this.state.codeGraph.snapshot !== previousSnapshot && (!previousSnapshot || !sameCodeGraphTopology(previousSnapshot, snapshot))) {

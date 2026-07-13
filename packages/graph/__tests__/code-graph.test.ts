@@ -328,6 +328,8 @@ describe("Code Graph adapters and state", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos?include_stale=true");
     await http.getGraphSnapshot("opensymphony", { mode: "atlas", includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
+    await http.getRunGraphSnapshot!("COE-543", "opensymphony", { mode: "file", path: "src/lib.rs", depth: 1 });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/runs/COE-543/code/graph?mode=file&path=src%2Flib.rs&depth=1&repo_id=opensymphony");
     await http.getSymbolDetail("opensymphony", "staleSymbol", { includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/symbols/staleSymbol?include_stale=true");
     const publicHttp = createHttpCodeGraphAdapter("http://localhost:2468", fetchMock, {
@@ -348,7 +350,7 @@ describe("Code Graph adapters and state", () => {
     expect(() => publicNative.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
       .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 
   it("keeps edge-heavy scale tiers and aggregated Atlas within their budgets", () => {

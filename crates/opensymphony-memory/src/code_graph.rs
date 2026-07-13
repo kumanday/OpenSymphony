@@ -25,6 +25,8 @@ const DEFAULT_CODE_INDEX_BRANCH: &str = "develop";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodeGraphProjectionError {
+    #[error("code graph index is unavailable")]
+    IndexUnavailable,
     #[error("unknown code repo `{0}`")]
     RepoNotFound(String),
     #[error("unknown indexed code file `{0}`")]
@@ -578,9 +580,13 @@ pub fn code_graph_workspace_overlay(
         ));
     }
     let Some(connection) = open_existing_index_read_only(config)? else {
-        return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
+        return Err(CodeGraphProjectionError::IndexUnavailable);
     };
     if !code_symbols_read_model_ready(&connection, &config.index_path)? {
+        return Err(CodeGraphProjectionError::IndexUnavailable);
+    }
+    ensure_code_repo(config, repo_id, true)?;
+    if !code_revision_indexed(&connection, config, repo_id, base_revision)? {
         return Err(CodeGraphProjectionError::RevisionNotFound(
             base_revision.to_string(),
         ));
@@ -608,29 +614,26 @@ pub fn code_graph_workspace_overlay(
         symbols.retain(|_, symbol| symbol.path != *path);
         edges.retain(|_, edge| edge.path != *path);
 
-        let file_path = workspace_path.join(path);
-        if !file_path.is_file() {
-            if !base_symbols.values().any(|symbol| symbol.path == *path) {
-                unanalyzed_files.insert(path.clone());
-            }
+        let Some(file_path) = workspace_file_path(workspace_path, path)? else {
+            unanalyzed_files.insert(path.clone());
             continue;
-        }
+        };
         if remaining_files == 0 {
             unanalyzed_files.insert(path.clone());
             continue;
         }
-        remaining_files = remaining_files.saturating_sub(1);
 
         let Some(records) = workspace_document_records(
             config,
             repo_id,
-            workspace_path,
             path,
+            &file_path,
         )?
         else {
             unanalyzed_files.insert(path.clone());
             continue;
         };
+        remaining_files = remaining_files.saturating_sub(1);
         if records.symbols.is_empty() {
             unanalyzed_files.insert(path.clone());
         }
@@ -1012,20 +1015,19 @@ pub fn code_graph_workspace_snapshot(
 fn workspace_document_records(
     config: &MemoryConfig,
     repo_id: &str,
-    workspace_path: &Path,
     path: &str,
+    file_path: &Path,
 ) -> Result<Option<WorkspaceDocumentRecords>, CodeGraphProjectionError> {
-    let file_path = workspace_path.join(path);
-    let Ok(bytes) = fs::read(&file_path) else {
-        return Ok(None);
-    };
     let Some(language) = detect_language(Path::new(path)) else {
         return Ok(None);
     };
-    if bytes.len() as u64 > config.code_intel.ast.max_file_bytes {
+    let Ok(metadata) = fs::metadata(file_path) else {
+        return Ok(None);
+    };
+    if metadata.len() > config.code_intel.ast.max_file_bytes {
         return Ok(None);
     }
-    let Ok(source) = String::from_utf8(bytes) else {
+    let Ok(source) = fs::read_to_string(file_path) else {
         return Ok(None);
     };
     let content_sha256 = sha256_hex(&source);
@@ -1196,17 +1198,69 @@ fn workspace_changed_paths(
         changed.insert(path.to_string());
     }
 
-    let mut digest_input = Vec::new();
+    let mut hasher = Sha256::new();
     for path in &changed {
-        digest_input.extend_from_slice(path.as_bytes());
-        digest_input.push(0);
-        match fs::read(workspace_path.join(path)) {
-            Ok(bytes) => digest_input.extend_from_slice(&bytes),
-            Err(_) => digest_input.extend_from_slice(b"<deleted>"),
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        match workspace_file_path(workspace_path, path)? {
+            Some(file_path) => {
+                let mut file = match fs::File::open(file_path) {
+                    Ok(file) => file,
+                    Err(_) => {
+                        hasher.update(b"<unreadable>");
+                        hasher.update([0]);
+                        continue;
+                    }
+                };
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    match io::Read::read(&mut file, &mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => hasher.update(&buffer[..read]),
+                        Err(_) => {
+                            hasher.update(b"<unreadable>");
+                            break;
+                        }
+                    }
+                }
+            }
+            None => hasher.update(b"<deleted-or-outside-workspace>"),
         }
-        digest_input.push(0);
+        hasher.update([0]);
     }
-    Ok((changed, tombstones, sha256_bytes_hex(&digest_input)))
+    let digest = hasher.finalize();
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok((changed, tombstones, digest))
+}
+
+fn workspace_file_path(
+    workspace_path: &Path,
+    path: &str,
+) -> Result<Option<PathBuf>, CodeGraphProjectionError> {
+    let relative = normalize_code_path(path).map_err(CodeGraphProjectionError::InvalidRequest)?;
+    let root = workspace_path
+        .canonicalize()
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
+            path: workspace_path.to_path_buf(),
+            source,
+        }))?;
+    let candidate = workspace_path.join(relative);
+    let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+        return Ok(None);
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let Ok(resolved) = candidate.canonicalize() else {
+        return Ok(None);
+    };
+    if !resolved.starts_with(root) || !resolved.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(resolved))
 }
 
 fn workspace_git_line<const N: usize>(
@@ -4764,6 +4818,18 @@ mod code_graph_tests {
             "pub fn too_large() {}\n".repeat(10),
         )
         .expect("oversized source");
+        #[cfg(unix)]
+        let _outside = {
+            let outside = TempDir::new().expect("outside tempdir");
+            fs::write(outside.path().join("escaped.rs"), "pub fn escaped() {}\n")
+                .expect("outside source");
+            std::os::unix::fs::symlink(
+                outside.path().join("escaped.rs"),
+                repo.path().join("src/linked.rs"),
+            )
+            .expect("workspace symlink");
+            outside
+        };
         let mut limited_config = config.clone();
         limited_config.code_intel.ast.max_file_bytes = 128;
 
@@ -4793,6 +4859,14 @@ mod code_graph_tests {
             .unanalyzed_files
             .iter()
             .any(|path| path == "src/large.rs"));
+        #[cfg(unix)]
+        {
+            assert!(overlay
+                .unanalyzed_files
+                .iter()
+                .any(|path| path == "src/linked.rs"));
+            assert!(!overlay.symbols.values().any(|symbol| symbol.name == "escaped"));
+        }
         assert_eq!(overlay.base_revision, base);
         assert_eq!(overlay.run_id, "COE-543");
         assert!(!overlay.workspace_content_digest.is_empty());
@@ -4824,6 +4898,22 @@ mod code_graph_tests {
                 .is_some_and(|symbol| symbol.symbol_key == radius.symbol_key)
                 && radius.inbound_count > 0
         }));
+
+        let mut budget_config = limited_config.clone();
+        budget_config.code_intel.ast.max_files_per_request = 1;
+        let budget_overlay = code_graph_workspace_overlay(
+            &budget_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543-budget",
+            &base,
+        )
+        .expect("workspace overlay with file budget");
+        assert!(budget_overlay.symbols.values().any(|symbol| symbol.name == "changed"));
+        assert!(!budget_overlay
+            .unanalyzed_files
+            .iter()
+            .any(|path| path == "src/lib.rs"));
     }
 
     #[test]
@@ -4850,6 +4940,27 @@ mod code_graph_tests {
             Some(("develop".to_string(), base.clone())),
         )
         .expect("shared baseline index");
+
+        assert!(matches!(
+            code_graph_workspace_overlay(
+                &config,
+                "missing-repo",
+                source.path(),
+                "COE-543-missing-repo",
+                &base,
+            ),
+            Err(CodeGraphProjectionError::RepoNotFound(_))
+        ));
+        assert!(matches!(
+            code_graph_workspace_overlay(
+                &config,
+                "shared-repo",
+                source.path(),
+                "COE-543-missing-revision",
+                "missing-revision",
+            ),
+            Err(CodeGraphProjectionError::RevisionNotFound(_))
+        ));
 
         let left = TempDir::new().expect("left workspace tempdir");
         let right = TempDir::new().expect("right workspace tempdir");

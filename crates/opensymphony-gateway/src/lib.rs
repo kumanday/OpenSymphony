@@ -2030,17 +2030,19 @@ async fn get_run_code_outline(
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), state.memory_config.clone()) {
         let comparison_bases = state.comparison_bases.clone();
+        let overlay_run_identifier = run_identifier.clone();
+        let overlay_relative_path = relative_path.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
             let base = comparison_bases
-                .resolve(&run_identifier, &workspace_path)
+                .resolve(&overlay_run_identifier, &workspace_path)
                 .map_err(CodeGraphProjectionError::InvalidRequest)?;
             code_file_outline_from_workspace(
                 &config,
                 &repo_id,
                 &workspace_path,
-                &run_identifier,
+                &overlay_run_identifier,
                 &base.merge_base,
-                &relative_path,
+                &overlay_relative_path,
             )
         })
         .await
@@ -2048,9 +2050,13 @@ async fn get_run_code_outline(
             Err(CodeGraphProjectionError::InvalidRequest(format!(
                 "code outline resolver task failed: {error}"
             )))
-        })
-        .map_err(code_graph_error)?;
-        return Ok(Json(snapshot));
+        });
+        match snapshot {
+            Ok(snapshot) => return Ok(Json(snapshot)),
+            Err(CodeGraphProjectionError::IndexUnavailable)
+            | Err(CodeGraphProjectionError::RevisionNotFound(_)) => {}
+            Err(error) => return Err(code_graph_error(error)),
+        }
     }
     let source = tokio::fs::read_to_string(&file_path).await.map_err(|_| {
         code_graph_response(
@@ -2371,6 +2377,11 @@ fn configured_code_memory(
 fn code_graph_error(error: CodeGraphProjectionError) -> (StatusCode, Json<serde_json::Value>) {
     let message = error.to_string();
     match error {
+        CodeGraphProjectionError::IndexUnavailable => code_graph_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "code_graph_unavailable",
+            &message,
+        ),
         CodeGraphProjectionError::RepoNotFound(_) => {
             code_graph_response(StatusCode::NOT_FOUND, "code_repo_not_found", &message)
         }

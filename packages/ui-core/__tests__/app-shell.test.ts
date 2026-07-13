@@ -1354,6 +1354,7 @@ describe("OpenSymphonyApp mount", () => {
     document.body.appendChild(root);
     const fixtureCodeGraphAdapter = createFixtureCodeGraphAdapter();
     const graphRequests: Array<{ mode?: string; includeStale?: boolean; path?: string; symbolKey?: string }> = [];
+    const runGraphRequests: Array<{ runId: string; repoId?: string; mode?: string; path?: string }> = [];
     const repoRequests: Array<{ includeStale?: boolean }> = [];
     const codeGraphAdapter = {
       ...fixtureCodeGraphAdapter,
@@ -1364,6 +1365,10 @@ describe("OpenSymphonyApp mount", () => {
       async getGraphSnapshot(repoId: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
         graphRequests.push(options ?? {});
         return fixtureCodeGraphAdapter.getGraphSnapshot(repoId, options);
+      },
+      async getRunGraphSnapshot(runId: string, repoId?: string, options?: Parameters<typeof fixtureCodeGraphAdapter.getGraphSnapshot>[1]) {
+        runGraphRequests.push({ runId, repoId, ...options });
+        return fixtureCodeGraphAdapter.getGraphSnapshot(repoId ?? "opensymphony", options);
       },
     };
     const handle = renderOpenSymphonyApp({
@@ -1446,6 +1451,14 @@ describe("OpenSymphonyApp mount", () => {
       app.drillIntoCodeNode(directory!);
       await flushUntil(() => app.state.codeGraph.filters.pathPrefixes.includes("packages/graph"));
       expect(app.state.codeGraph.mode).toBe("atlas");
+      expect(await handle.openCodeDeepLink("opensymphony://code/opensymphony/files/packages/graph/src/index.ts?run_id=COE-449")).toBe(true);
+      await flushUntil(() => runGraphRequests.some((request) => request.runId === "COE-449"));
+      expect(runGraphRequests.at(-1)).toMatchObject({
+        runId: "COE-449",
+        repoId: "opensymphony",
+        mode: "file",
+        path: "packages/graph/src/index.ts",
+      });
     } finally {
       await handle.destroy();
     }
