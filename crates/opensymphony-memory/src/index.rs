@@ -466,6 +466,21 @@ CREATE TABLE IF NOT EXISTS code_documents (
   freshness TEXT NOT NULL,
   PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
 );
+CREATE TABLE IF NOT EXISTS code_documents_staging (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_id TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  byte_len BIGINT NOT NULL,
+  line_count BIGINT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, parser_version, query_pack_version)
+);
 CREATE TABLE IF NOT EXISTS code_document_revisions (
   repo_id TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
@@ -696,6 +711,7 @@ CREATE INDEX IF NOT EXISTS idx_code_skipped_files_revision ON code_skipped_files
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostic_revisions_path ON code_diagnostic_revisions(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_snapshot_membership_staging_repo ON code_snapshot_membership_staging(repo_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_code_documents_staging_repo ON code_documents_staging(repo_id, commit_sha);
 "#,
     ))?;
     for table in [
@@ -784,29 +800,36 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             })?;
         }
 
-        let current_document_exists = if freshness == "staged" {
+        if freshness == "staged" {
+            let Some(commit_sha) = batch.commit_sha.as_deref() else {
+                return Err(MemoryError::InvalidInput(
+                    "staged code documents require a commit revision".to_string(),
+                ));
+            };
             transaction
-                .query_row(
-                    "SELECT 1 FROM code_documents WHERE repo_id = ? AND path = ? AND content_sha256 = ? AND parser_version = ? AND query_pack_version = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
+                .execute(
+                    "INSERT OR REPLACE INTO code_documents_staging (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         batch.repo_id,
+                        commit_sha,
+                        worktree_dirty,
                         path,
+                        document.language,
                         document.content_sha256,
+                        document.parser_id,
                         document.parser_version,
                         document.query_pack_version,
+                        document.byte_len as i64,
+                        document.line_count as i64,
+                        indexed_at,
                     ],
-                    |row| row.get::<_, i64>(0),
                 )
-                .optional()
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
                     source,
-                })?
-                .is_some()
+                })?;
+            report.persisted_documents += 1;
         } else {
-            false
-        };
-        if !current_document_exists {
             transaction
                 .execute(
                     "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3304,6 +3327,46 @@ mod index_tests {
             )
             .expect("staged diagnostic should remain visible to promotion");
         assert_eq!(staged_diagnostics, 1);
+        drop(connection);
+
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "dirty-repo".to_string(),
+                commit_sha: Some("workspace-commit".to_string()),
+                worktree_dirty: true,
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
+            },
+        )
+        .expect("dirty current document should persist");
+        persist_code_intel_documents_with_freshness(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "dirty-repo".to_string(),
+                commit_sha: Some("next-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
+            },
+            "staged",
+            false,
+        )
+        .expect("staged document should not replace a dirty current row");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (commit_sha, worktree_dirty): (String, bool) = connection
+            .query_row(
+                "SELECT commit_sha, worktree_dirty FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                params!["dirty-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("dirty current document should remain queryable");
+        assert_eq!(commit_sha, "workspace-commit");
+        assert!(worktree_dirty);
         drop(connection);
 
         persist_code_intel_documents_with_freshness(

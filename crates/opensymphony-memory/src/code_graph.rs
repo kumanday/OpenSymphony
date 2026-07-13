@@ -624,7 +624,7 @@ pub fn index_code_repository(
     config: &MemoryConfig,
     repo_id: &str,
 ) -> Result<CodeIndexReport, CodeGraphProjectionError> {
-    if !config.enabled {
+    if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
         return index_code_repository_at(config, repo_id, None);
     }
     let target = code_index_target(config)?;
@@ -636,7 +636,24 @@ pub fn index_code_repository_at(
     repo_id: &str,
     target: Option<(String, String)>,
 ) -> Result<CodeIndexReport, CodeGraphProjectionError> {
-    if !config.enabled {
+    index_code_repository_at_checked(config, repo_id, target, false)
+}
+
+pub fn index_code_repository_at_current_target(
+    config: &MemoryConfig,
+    repo_id: &str,
+    target: Option<(String, String)>,
+) -> Result<CodeIndexReport, CodeGraphProjectionError> {
+    index_code_repository_at_checked(config, repo_id, target, true)
+}
+
+fn index_code_repository_at_checked(
+    config: &MemoryConfig,
+    repo_id: &str,
+    target: Option<(String, String)>,
+    revalidate_target: bool,
+) -> Result<CodeIndexReport, CodeGraphProjectionError> {
+    if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
         let indexed_at = Utc::now();
         return Ok(CodeIndexReport {
             schema_version: SchemaVersion::v1(),
@@ -650,7 +667,11 @@ pub fn index_code_repository_at(
             persisted_diagnostics: 0,
             stale_rows: 0,
             skipped_files: Vec::new(),
-            diagnostics: vec!["memory is disabled in configuration".to_string()],
+            diagnostics: vec![if !config.enabled {
+                "memory is disabled in configuration".to_string()
+            } else {
+                "code intelligence is disabled in configuration".to_string()
+            }],
             cursor: code_graph_cursor(repo_id, indexed_at),
             indexed_at,
         });
@@ -674,6 +695,19 @@ pub fn index_code_repository_at(
         ));
         return Ok(report);
     };
+    if revalidate_target {
+        let current_target = code_index_target(config)?;
+        if current_target.as_ref() != Some(&(target_branch.clone(), commit_sha.clone())) {
+            let mut report = code_graph_index_report(config, repo_id)?;
+            report.status = CodeIndexStatus::Unavailable;
+            report.head_revision = None;
+            report.diagnostics.push(
+                "configured target branch advanced before index promotion; retry the index"
+                    .to_string(),
+            );
+            return Ok(report);
+        }
+    }
 
     // Existing memory stores may predate the snapshot tables. Migrate once
     // before the read-only previous-snapshot lookup so a first index works on
@@ -1032,6 +1066,13 @@ pub fn index_code_repository_at(
             deleted_files += 1;
             deleted_paths.push(path.clone());
             diagnostics.push(format!("{path}: deleted from target branch"));
+        }
+    }
+    for path in current_code_snapshot_paths(config, repo_id)? {
+        if !current_files.contains_key(&path) && !deleted_paths.contains(&path) {
+            deleted_files += 1;
+            deleted_paths.push(path.clone());
+            diagnostics.push(format!("{path}: removed from configured target branch"));
         }
     }
 
@@ -1492,6 +1533,15 @@ fn discard_staged_code_index_rows(
     }
     transaction
         .execute(
+            "DELETE FROM code_documents_staging WHERE repo_id = ?",
+            params![repo_id],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
+    transaction
+        .execute(
             "DELETE FROM code_snapshot_membership_staging WHERE repo_id = ?",
             params![repo_id],
         )
@@ -1623,20 +1673,43 @@ fn promote_staged_code_snapshot(
         }
     }
     for path in edge_refresh_paths {
-        for table in ["code_edges", "code_diagnostics"] {
-            stale_rows += transaction
-                .execute(
-                    &format!(
-                        "UPDATE {table} SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'"
-                    ),
-                    params![repo_id, path],
-                )
-                .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                }))?;
-        }
+        stale_rows += transaction
+            .execute(
+                "UPDATE code_edges AS current SET freshness = 'stale' WHERE current.repo_id = ? AND current.path = ? AND current.freshness = 'current' AND NOT EXISTS (SELECT 1 FROM code_edge_revisions AS staged WHERE staged.edge_id = current.edge_id AND staged.repo_id = ? AND staged.commit_sha = ? AND staged.freshness = 'staged')",
+                params![repo_id, path, repo_id, commit_sha],
+            )
+            .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }))?;
+        stale_rows += transaction
+            .execute(
+                "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                params![repo_id, path],
+            )
+            .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }))?;
     }
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) SELECT repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, 'current' FROM code_documents_staging WHERE repo_id = ? AND commit_sha = ?",
+            params![repo_id, commit_sha],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
+    transaction
+        .execute(
+            "DELETE FROM code_documents_staging WHERE repo_id = ? AND commit_sha = ?",
+            params![repo_id, commit_sha],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
     for table in [
         "code_documents",
         "code_document_revisions",
@@ -1714,6 +1787,34 @@ fn promote_staged_code_snapshot(
         })
     })?;
     Ok(stale_rows)
+}
+
+fn current_code_snapshot_paths(
+    config: &MemoryConfig,
+    repo_id: &str,
+) -> Result<BTreeSet<String>, CodeGraphProjectionError> {
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(BTreeSet::new());
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT path FROM code_documents WHERE repo_id = ? AND freshness = 'current' UNION SELECT path FROM code_skipped_files WHERE repo_id = ? AND freshness = 'current'",
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
+    statement
+        .query_map(params![repo_id, repo_id], |row| row.get::<_, String>(0))
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))
 }
 
 fn current_code_snapshot_file_matches(
@@ -3667,7 +3768,8 @@ mod code_graph_tests {
         code_citation_matches_symbol, code_graph_diff_overlay, code_graph_repos,
         code_index_document, code_symbol_span_matches, has_work_item_scope,
         CodeSnapshotMembershipInput,
-        index_code_repository, index_code_repository_at, open_existing_index_read_only,
+        index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
+        open_existing_index_read_only,
         repository_scope_matches,
     };
 
@@ -4033,6 +4135,20 @@ mod code_graph_tests {
         )
         .expect("explicit accepted revision should index");
         assert_eq!(bound.head_revision.as_deref(), Some(baseline.as_str()));
+        let stale_bound = index_code_repository_at_current_target(
+            &config,
+            "stale-bound-repo",
+            Some(("develop".to_string(), baseline.clone())),
+        )
+        .expect("stale accepted revision should be rejected without indexing");
+        assert_eq!(
+            stale_bound.status,
+            crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Unavailable
+        );
+        assert!(stale_bound
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("advanced before index promotion")));
 
         fs::write(repo.path().join("src/new.rs"), "pub fn new_symbol() {}\n")
             .expect("new source");
@@ -4290,6 +4406,23 @@ mod code_graph_tests {
             )
             .expect("stale edge count should be readable");
         assert!(stale_edges > 0);
+        drop(connection);
+
+        git(repo.path(), &["commit", "--allow-empty", "-m", "raise edge limit"]);
+        config.code_intel.ast.max_matches_per_request = 100;
+        let third = index_code_repository(&config, "edge-limit-repo").expect("raised index");
+        assert!(third.parsed_files > 0);
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let current_edges_after_raise: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["edge-limit-repo", "src.rs"],
+                |row| row.get(0),
+            )
+            .expect("raised edge count should be readable");
+        assert!(current_edges_after_raise > 0);
     }
 
     #[test]
@@ -4314,6 +4447,93 @@ mod code_graph_tests {
             .iter()
             .any(|diagnostic| diagnostic.contains("memory is disabled")));
         assert!(!config.index_path.exists());
+
+        config.enabled = true;
+        config.code_intel.enabled = false;
+        let report = index_code_repository_at(
+            &config,
+            "disabled-code-intel-repo",
+            Some(("develop".to_string(), "commit".to_string())),
+        )
+        .expect("disabled code intelligence should return unavailable");
+        assert_eq!(
+            report.status,
+            crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Unavailable
+        );
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("code intelligence is disabled")));
+        assert!(!config.index_path.exists());
+
+        config.code_intel.enabled = true;
+        config.code_intel.ast.enabled = false;
+        let report = index_code_repository_at(
+            &config,
+            "disabled-ast-repo",
+            Some(("develop".to_string(), "commit".to_string())),
+        )
+        .expect("disabled AST code intelligence should return unavailable");
+        assert_eq!(
+            report.status,
+            crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Unavailable
+        );
+        assert!(!config.index_path.exists());
+    }
+
+    #[test]
+    fn target_branch_switch_stales_rows_from_the_previous_branch() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `main`\n",
+        )
+        .expect("workflow marker");
+        fs::write(repo.path().join("old.rs"), "pub fn old() {}\n").expect("old source");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "main baseline"]);
+        git(repo.path(), &["switch", "-c", "develop"]);
+        fs::remove_file(repo.path().join("old.rs")).expect("remove old source");
+        fs::write(repo.path().join("new.rs"), "pub fn new() {}\n").expect("new source");
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "develop baseline"]);
+
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `develop`\n",
+        )
+        .expect("develop target marker");
+        index_code_repository(&config, "branch-switch-repo").expect("develop index");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "Target branch: `main`\n",
+        )
+        .expect("main target marker");
+        let report = index_code_repository(&config, "branch-switch-repo").expect("main index");
+        assert!(report.stale_rows > 0);
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let old_current: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["branch-switch-repo", "new.rs"],
+                |row| row.get(0),
+            )
+            .expect("old branch document count should be readable");
+        let new_current: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                duckdb::params!["branch-switch-repo", "old.rs"],
+                |row| row.get(0),
+            )
+            .expect("new branch document count should be readable");
+        assert_eq!(old_current, 0);
+        assert_eq!(new_current, 1);
     }
 
     #[test]

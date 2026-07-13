@@ -48,8 +48,8 @@ use crate::opensymphony_memory::{
     MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
     code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
     code_graph_updated_event, code_index_repository_is_git, code_index_target,
-    index_code_repository_at, memory_completed_task_rows, memory_concept_detail,
-    memory_graph_bundles, memory_graph_communities_with_options,
+    index_code_repository_at, index_code_repository_at_current_target, memory_completed_task_rows,
+    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
     memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
@@ -1682,7 +1682,7 @@ async fn index_code_repo(
     AxumPath(repo_id): AxumPath<String>,
 ) -> Result<Json<CodeIndexReport>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_code_memory(&state)?.clone();
-    if !config.enabled {
+    if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
         let report = index_code_repository_at(&config, &repo_id, None).map_err(code_graph_error)?;
         append_code_index_status_event(&state.journal, &repo_id, &report)
             .await
@@ -1815,7 +1815,7 @@ async fn index_code_repo(
     tokio::spawn(async move {
         let _ = append_code_index_status_event(&journal, &progress.repo_id, &progress).await;
         let result = tokio::task::spawn_blocking(move || {
-            index_code_repository_at(
+            index_code_repository_at_current_target(
                 &job_config,
                 &job_repo_id_for_index,
                 Some((target_branch, head_revision)),
