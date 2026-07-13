@@ -587,6 +587,15 @@ CREATE TABLE IF NOT EXISTS code_skipped_files (
   freshness TEXT NOT NULL,
   PRIMARY KEY (repo_id, commit_sha, path, content_sha256)
 );
+CREATE TABLE IF NOT EXISTS code_skipped_files_staging (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, content_sha256)
+);
 CREATE TABLE IF NOT EXISTS code_diagnostics (
   diagnostic_id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
@@ -712,6 +721,7 @@ CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostic_revisions_path ON code_diagnostic_revisions(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_snapshot_membership_staging_repo ON code_snapshot_membership_staging(repo_id, run_id);
 CREATE INDEX IF NOT EXISTS idx_code_documents_staging_repo ON code_documents_staging(repo_id, commit_sha);
+CREATE INDEX IF NOT EXISTS idx_code_skipped_files_staging_repo ON code_skipped_files_staging(repo_id, commit_sha);
 "#,
     ))?;
     for table in [
@@ -1225,9 +1235,28 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
                     source,
                 })?;
         }
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO code_skipped_files (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        let table = if freshness == "staged" {
+            "code_skipped_files_staging"
+        } else {
+            "code_skipped_files"
+        };
+        let query = if freshness == "staged" {
+            format!(
+                "INSERT OR REPLACE INTO {table} (repo_id, commit_sha, path, reason, content_sha256, indexed_at) VALUES (?, ?, ?, ?, ?, ?)"
+            )
+        } else {
+            format!(
+                "INSERT OR REPLACE INTO {table} (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+        };
+        let result = if freshness == "staged" {
+            transaction.execute(
+                &query,
+                params![repo_id, commit_sha, path, skipped.reason, skipped.content_sha256, indexed_at],
+            )
+        } else {
+            transaction.execute(
+                &query,
                 params![
                     repo_id,
                     commit_sha,
@@ -1239,6 +1268,8 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
                     freshness,
                 ],
             )
+        };
+        result
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -3367,6 +3398,49 @@ mod index_tests {
             .expect("dirty current document should remain queryable");
         assert_eq!(commit_sha, "workspace-commit");
         assert!(worktree_dirty);
+        drop(connection);
+
+        persist_code_intel_skipped_files(
+            &config,
+            "dirty-skipped-repo",
+            Some("workspace-commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/skipped.rs"),
+                reason: "unsupported".to_string(),
+                content_sha256: "skipped-hash".to_string(),
+            }],
+        )
+        .expect("current skipped row should persist");
+        persist_code_intel_skipped_files_with_freshness(
+            &config,
+            "dirty-skipped-repo",
+            Some("workspace-commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/skipped.rs"),
+                reason: "unsupported".to_string(),
+                content_sha256: "skipped-hash".to_string(),
+            }],
+            "staged",
+            false,
+        )
+        .expect("staged skipped row should not replace current coverage");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (freshness, staged_count): (String, i64) = connection
+            .query_row(
+                "SELECT (SELECT freshness FROM code_skipped_files WHERE repo_id = ? AND path = ?), (SELECT COUNT(*) FROM code_skipped_files_staging WHERE repo_id = ? AND path = ?)",
+                params![
+                    "dirty-skipped-repo",
+                    "src/skipped.rs",
+                    "dirty-skipped-repo",
+                    "src/skipped.rs"
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("skipped staging rows should be readable");
+        assert_eq!(freshness, "current");
+        assert_eq!(staged_count, 1);
         drop(connection);
 
         persist_code_intel_documents_with_freshness(
