@@ -2083,7 +2083,8 @@ async fn get_run_code_outline(
             Ok(snapshot) => return Ok(Json(snapshot)),
             Err(CodeGraphProjectionError::IndexUnavailable)
             | Err(CodeGraphProjectionError::RepoNotFound(_))
-            | Err(CodeGraphProjectionError::RevisionNotFound(_)) => {}
+            | Err(CodeGraphProjectionError::RevisionNotFound(_))
+            | Err(CodeGraphProjectionError::FileNotFound(_)) => {}
             Err(error) => return Err(code_graph_error(error)),
         }
     }

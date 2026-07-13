@@ -85,6 +85,7 @@ struct WorkspaceDocumentRecords {
 type WorkspaceLiveChangedRecords = (
     BTreeMap<String, CodeSymbolRecord>,
     BTreeMap<String, CodeEdgeRecord>,
+    BTreeSet<String>,
     Vec<String>,
 );
 
@@ -788,7 +789,7 @@ fn code_graph_workspace_focused_overlay(
                     "neighborhood mode requires `symbol_key`".to_string(),
                 )
             })?;
-            let (live_symbols, live_edges, unanalyzed_files) =
+            let (live_symbols, live_edges, analyzed_paths, unanalyzed_files) =
                 workspace_live_changed_records(config, repo_id, workspace_path, &changed_paths, &tombstones)?;
             let mut symbols = BTreeMap::new();
             let mut base_symbols = BTreeMap::new();
@@ -801,7 +802,7 @@ fn code_graph_workspace_focused_overlay(
                 base_revision,
                 center,
             )? {
-                if tombstones.contains(&symbol.path) {
+                if tombstones.contains(&symbol.path) || analyzed_paths.contains(&symbol.path) {
                     return Err(CodeGraphProjectionError::SymbolNotFound(center.to_string()));
                 }
                 base_symbols.insert(center.to_string(), symbol.clone());
@@ -862,16 +863,30 @@ fn code_graph_workspace_focused_overlay(
                     {
                         continue;
                     }
-                    let Some(symbol) = query_revision_symbol_by_name(
-                        config,
-                        &connection,
-                        repo_id,
-                        base_revision,
-                        name,
-                    )?
-                    else {
+                    let (symbol, from_baseline) = if let Some(symbol) =
+                        live_symbols.values().find(|symbol| symbol.name == name)
+                    {
+                        (Some(symbol.clone()), false)
+                    } else {
+                        (
+                            query_revision_symbol_by_name(
+                                config,
+                                &connection,
+                                repo_id,
+                                base_revision,
+                                name,
+                            )?,
+                            true,
+                        )
+                    };
+                    let Some(symbol) = symbol else {
                         continue;
                     };
+                    if tombstones.contains(&symbol.path)
+                        || (from_baseline && analyzed_paths.contains(&symbol.path))
+                    {
+                        continue;
+                    }
                     base_symbols
                         .entry(symbol.symbol_key.clone())
                         .or_insert_with(|| symbol.clone());
@@ -904,23 +919,28 @@ fn code_graph_workspace_focused_overlay(
                     if symbols.contains_key(&neighbor) {
                         continue;
                     }
-                    let symbol = if let Some(symbol) = live_symbols.get(&neighbor) {
-                        Some(symbol.clone())
+                    let (symbol, from_baseline) = if let Some(symbol) = live_symbols.get(&neighbor) {
+                        (Some(symbol.clone()), false)
                     } else if let Some(symbol) = base_symbols.get(&neighbor) {
-                        Some(symbol.clone())
+                        (Some(symbol.clone()), true)
                     } else {
-                        query_revision_symbol_by_key(
-                            config,
-                            &connection,
-                            repo_id,
-                            base_revision,
-                            &neighbor,
-                        )?
+                        (
+                            query_revision_symbol_by_key(
+                                config,
+                                &connection,
+                                repo_id,
+                                base_revision,
+                                &neighbor,
+                            )?,
+                            true,
+                        )
                     };
                     let Some(symbol) = symbol else {
                         continue;
                     };
-                    if tombstones.contains(&symbol.path) {
+                    if tombstones.contains(&symbol.path)
+                        || (from_baseline && analyzed_paths.contains(&symbol.path))
+                    {
                         continue;
                     }
                     base_symbols
@@ -964,6 +984,7 @@ fn workspace_live_changed_records(
 ) -> Result<WorkspaceLiveChangedRecords, CodeGraphProjectionError> {
     let mut symbols = BTreeMap::new();
     let mut edges = BTreeMap::new();
+    let mut analyzed_paths = BTreeSet::new();
     let mut unanalyzed_files = BTreeSet::new();
     let mut remaining_files = config.code_intel.ast.max_files_per_request;
     for path in changed_paths {
@@ -982,6 +1003,7 @@ fn workspace_live_changed_records(
             unanalyzed_files.insert(path.clone());
             continue;
         };
+        analyzed_paths.insert(path.clone());
         remaining_files = remaining_files.saturating_sub(1);
         for symbol in records.symbols {
             symbols.insert(symbol.symbol_key.clone(), symbol);
@@ -990,7 +1012,12 @@ fn workspace_live_changed_records(
             edges.insert(edge.edge_id.clone(), edge);
         }
     }
-    Ok((symbols, edges, unanalyzed_files.into_iter().collect()))
+    Ok((
+        symbols,
+        edges,
+        analyzed_paths,
+        unanalyzed_files.into_iter().collect(),
+    ))
 }
 
 pub fn code_graph_workspace_diff_overlay(
@@ -5599,7 +5626,7 @@ mod code_graph_tests {
         .expect("workflow marker");
         fs::write(
             repo.path().join("src/lib.rs"),
-            "pub fn baseline() {}\npub fn caller() { baseline(); }\n",
+            "pub fn baseline() {}\npub fn removed_from_live() {}\npub fn caller() { baseline(); }\n",
         )
         .expect("baseline source");
         fs::write(repo.path().join("src/remove.rs"), "pub fn removed() {}\n")
@@ -5738,6 +5765,30 @@ mod code_graph_tests {
             .nodes
             .iter()
             .any(|node| node.label == "baseline"));
+        let removed_from_live_key = overlay
+            .base_symbols
+            .values()
+            .find(|symbol| symbol.name == "removed_from_live")
+            .map(|symbol| symbol.symbol_key.clone())
+            .expect("baseline-only symbol");
+        assert!(matches!(
+            code_graph_workspace_snapshot(
+                &limited_config,
+                "overlay-repo",
+                repo.path(),
+                "COE-543",
+                &base,
+                CodeGraphSnapshotOptions {
+                    mode: CodeGraphMode::Neighborhood,
+                    path: None,
+                    symbol_key: Some(removed_from_live_key),
+                    depth: 1,
+                    aggregate: None,
+                    include_stale: false,
+                },
+            ),
+            Err(CodeGraphProjectionError::SymbolNotFound(_))
+        ));
         let deleted_snapshot = code_graph_workspace_snapshot(
             &limited_config,
             "overlay-repo",

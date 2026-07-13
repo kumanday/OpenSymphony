@@ -3288,8 +3288,9 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
     run_git(&workspace, &["checkout", "-b", "main"]);
     run_git(&workspace, &["config", "user.email", "test@example.com"]);
     run_git(&workspace, &["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join(".gitignore"), "generated.rs\n").expect("gitignore");
     std::fs::write(workspace.join("src/lib.rs"), "pub fn base() {}\n").expect("base file");
-    run_git(&workspace, &["add", "src/lib.rs"]);
+    run_git(&workspace, &["add", ".gitignore", "src/lib.rs"]);
     run_git(&workspace, &["commit", "-m", "base"]);
     let base_revision = run_git(&workspace, &["rev-parse", "HEAD"]);
     run_git(&workspace, &["checkout", "-b", "feat/code-graph"]);
@@ -3320,6 +3321,30 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
             .await
             .expect("test gateway server should serve")
     });
+
+    std::fs::write(
+        workspace.join("generated.rs"),
+        "pub fn generated_outline() {}\n",
+    )
+    .expect("ignored generated file");
+    let generated_outline = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-533/code/outline?file_path=generated.rs&repo_id=opensymphony"
+        ))
+        .send()
+        .await
+        .expect("fetch ignored generated outline");
+    assert_eq!(generated_outline.status(), reqwest::StatusCode::OK);
+    let generated_outline = generated_outline
+        .json::<CodeFileOutline>()
+        .await
+        .expect("decode ignored generated outline");
+    assert!(
+        generated_outline
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "generated_outline")
+    );
 
     let overlay = reqwest::Client::new()
         .get(format!(
