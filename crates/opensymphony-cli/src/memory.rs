@@ -1963,7 +1963,7 @@ async fn call_code_graph_context_tool(
                 query: optional_string_arg(&arguments, "query"),
                 path: optional_string_arg(&arguments, "path"),
                 symbol: optional_string_arg(&arguments, "symbol"),
-                depth: usize_arg(&arguments, "depth", 1).min(8),
+                depth: usize_arg_allow_zero(&arguments, "depth", 1).min(8),
                 limit: usize_arg(&arguments, "limit", 20)
                     .min(config.code_intel.ast.max_matches_per_request.max(1)),
             },
@@ -3878,6 +3878,14 @@ fn usize_arg(arguments: &Value, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn usize_arg_allow_zero(arguments: &Value, key: &str, default: usize) -> usize {
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(default)
+}
+
 fn bool_arg(arguments: &Value, key: &str) -> bool {
     arguments.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
@@ -5117,7 +5125,7 @@ mod tests {
             &config,
             json!({
                 "name": "code.graph.context",
-                "arguments": { "repository": repo_id, "query": "answer", "limit": 1 }
+                "arguments": { "repository": repo_id, "query": "lib", "limit": 1 }
             }),
         )
         .await
@@ -5132,6 +5140,35 @@ mod tests {
         );
         assert_eq!(bounded["truncated"], true);
         assert!(bounded["dropped"].as_u64().expect("dropped count") > 0);
+
+        let caller_key = evidence
+            .iter()
+            .find(|item| item["kind"] == "symbol" && item["name"] == "caller")
+            .and_then(|item| item["symbolKey"].as_str())
+            .expect("caller symbol key");
+        assert!(
+            evidence
+                .iter()
+                .any(|item| { item["kind"] == "edge" && item["sourceSymbolKey"] == caller_key })
+        );
+
+        let zero_depth = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": repo_id, "symbol": "answer", "depth": 0, "limit": 10 }
+            }),
+        )
+        .await
+        .expect("zero-depth graph context");
+        assert_eq!(zero_depth["depth"], 0);
+        assert!(
+            zero_depth["evidence"]
+                .as_array()
+                .expect("zero-depth evidence")
+                .iter()
+                .all(|item| item["kind"] != "symbol" || item["relation"] != "caller")
+        );
 
         let outside = call_memory_tool(
             &config,
@@ -5187,7 +5224,7 @@ mod tests {
         .expect("workspace edit");
 
         let response = call_code_graph_context_tool(
-            config,
+            config.clone(),
             json!({
                 "repository": repo_id,
                 "symbol": "replacement",
@@ -5213,6 +5250,41 @@ mod tests {
                 && item["freshness"] == "current"
         }));
         assert!(evidence.iter().all(|item| item.get("snippet").is_none()));
+
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn stale_baseline_should_not_survive() {}\n".repeat(64),
+        )
+        .expect("oversized workspace edit");
+        let mut unanalyzed_config = config;
+        unanalyzed_config.code_intel.ast.max_file_bytes = 128;
+        let unanalyzed = call_code_graph_context_tool(
+            unanalyzed_config,
+            json!({
+                "repository": repo_id,
+                "symbol": "answer",
+                "runId": "COE-544",
+                "depth": 0,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("unanalyzed overlay graph context");
+        assert!(
+            unanalyzed["evidence"]
+                .as_array()
+                .expect("unanalyzed evidence")
+                .iter()
+                .all(|item| item["name"] != "answer")
+        );
+        assert!(
+            unanalyzed["unanalyzedFiles"]
+                .as_array()
+                .expect("unanalyzed files")
+                .iter()
+                .any(|path| path == "src/lib.rs")
+        );
     }
 
     #[tokio::test]

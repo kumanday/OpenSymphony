@@ -142,6 +142,7 @@ pub fn code_graph_context(
     let depth = options.depth.min(8);
     let limit = options.limit.clamp(1, CODE_GRAPH_MAX_RECORDS);
     let mut selected = BTreeMap::<String, (CodeSymbolRecord, &'static str)>::new();
+    let mut dropped_direct_matches = 0;
     for candidate in symbols.values().filter(|candidate| {
         let path_matches = path.as_deref().is_none_or(|path| {
             candidate.path == path || candidate.path.starts_with(&format!("{path}/"))
@@ -162,7 +163,8 @@ pub fn code_graph_context(
         path_matches && query_matches && symbol_matches
     }) {
         if selected.len() >= limit {
-            break;
+            dropped_direct_matches += 1;
+            continue;
         }
         selected.insert(candidate.symbol_key.clone(), (candidate.clone(), "match"));
     }
@@ -259,7 +261,14 @@ pub fn code_graph_context(
                 &base_revision,
                 overlay,
                 edge,
-                symbols.get(key),
+                edge.source_symbol_key
+                    .as_deref()
+                    .and_then(|source_key| symbols.get(source_key))
+                    .or_else(|| {
+                        edge.target_symbol_key
+                            .as_deref()
+                            .and_then(|target_key| symbols.get(target_key))
+                    }),
                 edge_relation,
             ));
         }
@@ -285,7 +294,7 @@ pub fn code_graph_context(
         }
     }
 
-    let dropped = dropped_neighbors + evidence.len().saturating_sub(limit);
+    let dropped = dropped_direct_matches + dropped_neighbors + evidence.len().saturating_sub(limit);
     evidence.truncate(limit);
     Ok(serde_json::json!({
         "repository": options.repo_id,
@@ -947,6 +956,9 @@ pub fn code_graph_workspace_overlay(
             continue;
         }
 
+        symbols.retain(|_, symbol| symbol.path != *path);
+        edges.retain(|_, edge| edge.path != *path);
+
         let Some(file_path) = workspace_file_path(workspace_path, path)? else {
             unanalyzed_files.insert(path.clone());
             continue;
@@ -967,8 +979,6 @@ pub fn code_graph_workspace_overlay(
             continue;
         };
         remaining_files = remaining_files.saturating_sub(1);
-        symbols.retain(|_, symbol| symbol.path != *path);
-        edges.retain(|_, edge| edge.path != *path);
         for symbol in records.symbols {
             symbols.insert(symbol.symbol_key.clone(), symbol);
         }
