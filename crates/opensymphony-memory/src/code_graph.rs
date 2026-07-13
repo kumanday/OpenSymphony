@@ -68,6 +68,980 @@ pub struct CodeWorkspaceOverlay {
     pub changed_paths: BTreeSet<String>,
     pub tombstones: BTreeSet<String>,
     pub unanalyzed_files: Vec<String>,
+    pub diagnostics: BTreeMap<String, Vec<CodeDiagnostic>>,
+    pub diagnostic_metadata: BTreeMap<String, (String, String)>,
+    pub retrieval_dropped: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeGraphContextQuery {
+    pub repo_id: String,
+    pub query: Option<String>,
+    pub path: Option<String>,
+    pub symbol: Option<String>,
+    pub depth: usize,
+    pub limit: usize,
+}
+
+/// Return bounded, source-cited discovery evidence from the indexed graph.
+///
+/// The optional overlay is already resolved by the caller so this read path
+/// cannot accept a client filesystem root or accidentally persist workspace
+/// text. Changed paths in the overlay replace the baseline maps before the
+/// selectors and neighborhood traversal run.
+pub fn code_graph_context(
+    config: &MemoryConfig,
+    options: CodeGraphContextQuery,
+    overlay: Option<&CodeWorkspaceOverlay>,
+) -> Result<serde_json::Value, CodeGraphProjectionError> {
+    if options.query.as_deref().is_none_or(|value| value.trim().is_empty())
+        && options.path.as_deref().is_none_or(|value| value.trim().is_empty())
+        && options
+            .symbol
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(CodeGraphProjectionError::InvalidRequest(
+            "code graph context requires query, path, or symbol".to_string(),
+        ));
+    }
+    ensure_code_repo(config, &options.repo_id, false)?;
+
+    let path = options
+        .path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_code_path)
+        .transpose()
+        .map_err(CodeGraphProjectionError::InvalidRequest)?;
+    let query = options
+        .query
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let symbol_selector = options
+        .symbol
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let base_revision = match overlay {
+        Some(overlay) => Some(overlay.base_revision.clone()),
+        None => code_graph_repos(config, false)?
+            .repos
+            .into_iter()
+            .find(|repo| repo.repo_id == options.repo_id)
+            .and_then(|repo| repo.head_revision),
+    }
+    .ok_or(CodeGraphProjectionError::IndexUnavailable)?;
+    let depth = options.depth.min(8);
+    let limit = options.limit.clamp(1, CODE_GRAPH_MAX_RECORDS);
+    let connection = open_existing_index_read_only(config)?;
+    let baseline_query = overlay.is_none();
+    let (mut symbols, mut edges, mut query_dropped) = if let Some(overlay) = overlay {
+        let mut symbols = overlay.symbols.clone();
+        let unavailable_paths = overlay
+            .unanalyzed_files
+            .iter()
+            .filter(|path| overlay.changed_paths.contains(*path))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let unavailable_keys = symbols
+            .values()
+            .filter(|symbol| unavailable_paths.contains(&symbol.path))
+            .map(|symbol| symbol.symbol_key.clone())
+            .collect::<BTreeSet<_>>();
+        symbols.retain(|_, symbol| !unavailable_paths.contains(&symbol.path));
+        let edges = overlay
+            .edges
+            .iter()
+            .filter(|edge| {
+                !unavailable_paths.contains(&edge.path)
+                    && edge
+                        .source_symbol_key
+                        .as_ref()
+                        .is_none_or(|key| !unavailable_keys.contains(key))
+                    && edge
+                        .target_symbol_key
+                        .as_ref()
+                        .is_none_or(|key| !unavailable_keys.contains(key))
+            })
+            .cloned()
+            .collect();
+        (symbols, edges, overlay.retrieval_dropped)
+    } else {
+        let Some(connection) = connection.as_ref() else {
+            return Err(CodeGraphProjectionError::IndexUnavailable);
+        };
+        let (symbols, dropped) = query_context_symbols_for_revision(
+            config,
+            connection,
+            &options.repo_id,
+            &base_revision,
+            CodeGraphContextSelectors {
+                path: path.as_deref(),
+                query: query.as_deref(),
+                symbol: symbol_selector.as_deref(),
+            },
+            limit,
+        )?;
+        (symbols, Vec::new(), dropped)
+    };
+    let mut selected = BTreeMap::<String, (CodeSymbolRecord, &'static str)>::new();
+    let mut dropped_direct_matches = 0;
+    for candidate in symbols.values().filter(|candidate| {
+        let path_matches = path.as_deref().is_none_or(|path| {
+            candidate.path == path || candidate.path.starts_with(&format!("{path}/"))
+        });
+        let query_matches = query.as_deref().is_none_or(|query| {
+            candidate.name.to_ascii_lowercase().contains(query)
+                || candidate.path.to_ascii_lowercase().contains(query)
+                || candidate
+                    .container_chain
+                    .iter()
+                    .any(|container| container.to_ascii_lowercase().contains(query))
+        });
+        let symbol_matches = symbol_selector.as_deref().is_none_or(|selector| {
+            candidate.symbol_key.to_ascii_lowercase() == selector
+                || candidate.name.to_ascii_lowercase() == selector
+                || candidate.name.to_ascii_lowercase().contains(selector)
+        });
+        path_matches && query_matches && symbol_matches
+    }) {
+        if selected.len() >= limit {
+            dropped_direct_matches += 1;
+            continue;
+        }
+        selected.insert(candidate.symbol_key.clone(), (candidate.clone(), "match"));
+    }
+
+    if baseline_query && !selected.is_empty() {
+        let Some(connection) = connection.as_ref() else {
+            return Err(CodeGraphProjectionError::IndexUnavailable);
+        };
+        let seed_keys = selected.keys().cloned().collect::<BTreeSet<_>>();
+        let (context_edges, dropped) = query_context_edges_and_neighbors(
+            config,
+            connection,
+            &options.repo_id,
+            &base_revision,
+            &mut symbols,
+            &seed_keys,
+            CodeGraphContextBounds { depth, limit },
+        )?;
+        edges = context_edges;
+        query_dropped = query_dropped.saturating_add(dropped);
+    }
+
+    let mut frontier = selected.keys().cloned().collect::<BTreeSet<_>>();
+    let mut dropped_neighbors = 0;
+    for _ in 0..depth {
+        let mut next_frontier = BTreeSet::new();
+        for edge in &edges {
+            let adjacent = if edge
+                .source_symbol_key
+                .as_deref()
+                .is_some_and(|key| frontier.contains(key))
+            {
+                edge.target_symbol_key.as_deref()
+            } else if edge
+                .target_symbol_key
+                .as_deref()
+                .is_some_and(|key| frontier.contains(key))
+            {
+                edge.source_symbol_key.as_deref()
+            } else {
+                None
+            };
+            let Some(adjacent) = adjacent else {
+                continue;
+            };
+            if selected.contains_key(adjacent) {
+                continue;
+            }
+            let Some(symbol) = symbols.get(adjacent) else {
+                continue;
+            };
+            if selected.len() >= limit {
+                dropped_neighbors += 1;
+                continue;
+            }
+            let relation = if is_test_code_symbol(symbol) {
+                "related_test"
+            } else if edge
+                .target_symbol_key
+                .as_deref()
+                .is_some_and(|key| frontier.contains(key))
+            {
+                "caller"
+            } else {
+                "reference"
+            };
+            selected.insert(adjacent.to_string(), (symbol.clone(), relation));
+            next_frontier.insert(adjacent.to_string());
+        }
+        if next_frontier.is_empty() {
+            break;
+        }
+        frontier = next_frontier;
+    }
+
+    let provenance = overlay
+        .map(|overlay| {
+            serde_json::json!({
+                "kind": "workspace_overlay",
+                "runId": overlay.run_id,
+                "baseRevision": overlay.base_revision,
+                "headRevision": overlay.head_revision,
+                "overlayDigest": overlay.workspace_content_digest
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "kind": "indexed_baseline",
+                "baseRevision": base_revision
+            })
+        });
+    let mut evidence = Vec::new();
+    for (key, (symbol, relation)) in &selected {
+        evidence.push(context_symbol_json(
+            &options.repo_id,
+            &base_revision,
+            overlay,
+            symbol,
+            relation,
+        ));
+        for edge in edges.iter().filter(|edge| {
+            edge.source_symbol_key.as_deref() == Some(key.as_str())
+                || edge.target_symbol_key.as_deref() == Some(key.as_str())
+        }) {
+            let edge_relation = if edge.target_symbol_key.as_deref() == Some(key.as_str()) {
+                "caller"
+            } else {
+                "reference"
+            };
+            evidence.push(context_edge_json(
+                &options.repo_id,
+                &base_revision,
+                overlay,
+                edge,
+                edge.source_symbol_key
+                    .as_deref()
+                    .and_then(|source_key| symbols.get(source_key))
+                    .or_else(|| {
+                        edge.target_symbol_key
+                            .as_deref()
+                            .and_then(|target_key| symbols.get(target_key))
+                    }),
+                edge_relation,
+            ));
+        }
+        let diagnostics = if let Some(overlay) = overlay {
+            if is_live_overlay_path(Some(overlay), &symbol.path) {
+                overlay
+                    .diagnostics
+                    .get(&symbol.path)
+                    .into_iter()
+                    .flatten()
+                    .filter(|diagnostic| {
+                        diagnostic.span.start_line <= symbol.end_line
+                            && diagnostic.span.end_line >= symbol.start_line
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else if let Some(connection) = connection.as_ref() {
+                query_symbol_diagnostics(connection, config, symbol, false)?
+            } else {
+                Vec::new()
+            }
+        } else if let Some(connection) = connection.as_ref() {
+            query_symbol_diagnostics(connection, config, symbol, false)?
+        } else {
+            Vec::new()
+        };
+        for diagnostic in diagnostics {
+            evidence.push(context_diagnostic_json(
+                &options.repo_id,
+                &base_revision,
+                overlay,
+                &symbol.path,
+                ContextDiagnosticMetadata {
+                    symbol_key: Some(&symbol.symbol_key),
+                    parser_version: &symbol.parser_version,
+                    query_pack_version: &symbol.query_pack_version,
+                    freshness: &symbol.freshness,
+                },
+                &diagnostic,
+            ));
+        }
+    }
+
+    if selected.is_empty() {
+        if let Some(overlay) = overlay {
+            for path in overlay.diagnostics.keys().filter(|candidate| {
+                path.as_deref().is_some_and(|path| {
+                    *candidate == path || candidate.starts_with(&format!("{path}/"))
+                }) || query.as_deref().is_some_and(|query| {
+                    candidate.to_ascii_lowercase().contains(query)
+                })
+            }) {
+                let (parser_version, query_pack_version) = overlay
+                    .diagnostic_metadata
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_default();
+                for diagnostic in overlay.diagnostics.get(path).into_iter().flatten() {
+                    evidence.push(context_diagnostic_json(
+                        &options.repo_id,
+                        &base_revision,
+                        Some(overlay),
+                        path,
+                        ContextDiagnosticMetadata {
+                            symbol_key: None,
+                            parser_version: &parser_version,
+                            query_pack_version: &query_pack_version,
+                            freshness: "current",
+                        },
+                        diagnostic,
+                    ));
+                }
+            }
+        } else if let (Some(connection), Some(path)) = (connection.as_ref(), path.as_deref()) {
+            let (diagnostics, dropped) = query_context_diagnostics_for_path(
+                config,
+                connection,
+                &options.repo_id,
+                &base_revision,
+                path,
+                limit,
+            )?;
+            query_dropped = query_dropped.saturating_add(usize::from(dropped));
+            for diagnostic in diagnostics {
+                evidence.push(context_diagnostic_json(
+                    &options.repo_id,
+                    &base_revision,
+                    None,
+                    &diagnostic.path,
+                    ContextDiagnosticMetadata {
+                        symbol_key: None,
+                        parser_version: &diagnostic.parser_version,
+                        query_pack_version: &diagnostic.query_pack_version,
+                        freshness: &diagnostic.freshness,
+                    },
+                    &diagnostic.diagnostic,
+                ));
+            }
+        }
+    }
+
+    let dropped = query_dropped
+        + dropped_direct_matches
+        + dropped_neighbors
+        + evidence.len().saturating_sub(limit);
+    evidence.truncate(limit);
+    Ok(serde_json::json!({
+        "repository": options.repo_id,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": provenance,
+        "depth": depth,
+        "limit": limit,
+        "truncated": dropped > 0,
+        "dropped": dropped,
+        "evidence": evidence,
+        "unanalyzedFiles": overlay.map(|overlay| overlay.unanalyzed_files.clone()).unwrap_or_default()
+    }))
+}
+
+fn context_diagnostic_json(
+    repo_id: &str,
+    base_revision: &str,
+    overlay: Option<&CodeWorkspaceOverlay>,
+    path: &str,
+    metadata: ContextDiagnosticMetadata<'_>,
+    diagnostic: &CodeDiagnostic,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "diagnostic",
+        "repository": repo_id,
+        "path": path,
+        "symbolKey": metadata.symbol_key,
+        "span": context_span_json(&diagnostic.span),
+        "message": diagnostic.message,
+        "diagnosticKind": diagnostic.kind,
+        "severity": diagnostic.severity,
+        "parserVersion": metadata.parser_version,
+        "queryPackVersion": metadata.query_pack_version,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": if is_live_overlay_path(overlay, path) {
+            "workspace_overlay"
+        } else {
+            "indexed_baseline"
+        },
+        "freshness": metadata.freshness,
+        "sourceRef": context_source_ref(
+            path,
+            diagnostic.span.start_line,
+            diagnostic.span.start_col,
+            diagnostic.span.end_line,
+            diagnostic.span.end_col,
+        )
+    })
+}
+
+struct CodeGraphContextSelectors<'a> {
+    path: Option<&'a str>,
+    query: Option<&'a str>,
+    symbol: Option<&'a str>,
+}
+
+struct CodeGraphContextBounds {
+    depth: usize,
+    limit: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ContextDiagnostic {
+    path: String,
+    diagnostic: CodeDiagnostic,
+    parser_version: String,
+    query_pack_version: String,
+    freshness: String,
+}
+
+struct ContextDiagnosticMetadata<'a> {
+    symbol_key: Option<&'a str>,
+    parser_version: &'a str,
+    query_pack_version: &'a str,
+    freshness: &'a str,
+}
+
+fn query_context_diagnostics_for_path(
+    config: &MemoryConfig,
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+    limit: usize,
+) -> Result<(Vec<ContextDiagnostic>, bool), MemoryError> {
+    let path_prefix = format!("{path}/%");
+    let fetch_limit = limit.saturating_add(1) as i64;
+    let rows = if code_diagnostic_revisions_read_model_ready(connection, &config.index_path)? {
+        let mut statement = connection
+            .prepare(
+                "SELECT path, kind, severity, message, start_line, start_col, end_line, end_col, parser_version, query_pack_version, freshness FROM code_diagnostic_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness = 'current' AND NOT worktree_dirty AND (path = ? OR path LIKE ?) ORDER BY path, start_line, start_col, diagnostic_id LIMIT ?",
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map(
+                params![repo_id, revision, path, path_prefix, fetch_limit],
+                |row| {
+                    Ok(ContextDiagnostic {
+                        path: row.get(0)?,
+                        diagnostic: CodeDiagnostic {
+                            kind: row.get(1)?,
+                            severity: row.get(2)?,
+                            message: row.get(3)?,
+                            span: CodeSpan {
+                                start_line: row.get::<_, i64>(4)? as usize,
+                                start_col: row.get::<_, i64>(5)? as usize,
+                                end_line: row.get::<_, i64>(6)? as usize,
+                                end_col: row.get::<_, i64>(7)? as usize,
+                            },
+                        },
+                        parser_version: row.get(8)?,
+                        query_pack_version: row.get(9)?,
+                        freshness: row.get(10)?,
+                    })
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    } else {
+        let mut statement = connection
+            .prepare(
+                "SELECT path, kind, severity, message, start_line, start_col, end_line, end_col, parser_version, query_pack_version, freshness FROM code_diagnostics WHERE repo_id = ? AND commit_sha = ? AND freshness = 'current' AND NOT worktree_dirty AND (path = ? OR path LIKE ?) ORDER BY path, start_line, start_col, diagnostic_id LIMIT ?",
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map(
+                params![repo_id, revision, path, path_prefix, fetch_limit],
+                |row| {
+                    Ok(ContextDiagnostic {
+                        path: row.get(0)?,
+                        diagnostic: CodeDiagnostic {
+                            kind: row.get(1)?,
+                            severity: row.get(2)?,
+                            message: row.get(3)?,
+                            span: CodeSpan {
+                                start_line: row.get::<_, i64>(4)? as usize,
+                                start_col: row.get::<_, i64>(5)? as usize,
+                                end_line: row.get::<_, i64>(6)? as usize,
+                                end_col: row.get::<_, i64>(7)? as usize,
+                            },
+                        },
+                        parser_version: row.get(8)?,
+                        query_pack_version: row.get(9)?,
+                        freshness: row.get(10)?,
+                    })
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    };
+    let dropped = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), dropped))
+}
+
+fn query_context_symbols_for_revision(
+    config: &MemoryConfig,
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+    selectors: CodeGraphContextSelectors<'_>,
+    limit: usize,
+) -> Result<(BTreeMap<String, CodeSymbolRecord>, usize), MemoryError> {
+    let membership_ready = matches!(
+        code_snapshot_status(connection, config, repo_id, revision)?.as_deref(),
+        None | Some("completed")
+    ) && code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+    let revision_predicate = if membership_ready {
+        "s.repo_id = ? AND s.symbol_key != '' AND s.freshness <> 'staged' AND NOT s.worktree_dirty AND (s.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = s.repo_id AND m.commit_sha = ? AND m.path = s.path AND m.content_sha256 = s.content_sha256 AND m.parser_version = s.parser_version AND m.query_pack_version = s.query_pack_version AND m.analyzed) )"
+    } else {
+        "s.repo_id = ? AND s.commit_sha = ? AND s.symbol_key != '' AND s.freshness <> 'staged' AND NOT s.worktree_dirty"
+    };
+    let selector_predicate = concat!(
+        "(? IS NULL OR s.path = ? OR s.path LIKE ?) ",
+        "AND (? IS NULL OR lower(s.name) LIKE ? OR lower(s.path) LIKE ? ",
+        "OR lower(s.container_chain) LIKE ?) ",
+        "AND (? IS NULL OR lower(s.symbol_key) = ? OR lower(s.name) = ? ",
+        "OR lower(s.name) LIKE ?)",
+    );
+    let from_where = format!(
+        "FROM code_symbols AS s WHERE {revision_predicate} AND {selector_predicate}"
+    );
+    let path_exact = selectors.path.map(str::to_string);
+    let path_prefix = selectors.path.map(|path| format!("{path}/%"));
+    let query_like = selectors.query.map(|query| format!("%{query}%"));
+    let symbol_exact = selectors.symbol.map(str::to_string);
+    let symbol_like = selectors.symbol.map(|selector| format!("%{selector}%"));
+    let count_query = format!("SELECT COUNT(DISTINCT s.symbol_key) {from_where}");
+    let total = if membership_ready {
+        connection.query_row(
+            &count_query,
+            params![
+                repo_id,
+                revision,
+                revision,
+                path_exact.as_deref(),
+                path_exact.as_deref(),
+                path_prefix.as_deref(),
+                query_like.as_deref(),
+                query_like.as_deref(),
+                query_like.as_deref(),
+                query_like.as_deref(),
+                symbol_exact.as_deref(),
+                symbol_exact.as_deref(),
+                symbol_exact.as_deref(),
+                symbol_like.as_deref(),
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+    } else {
+        connection.query_row(
+            &count_query,
+            params![
+                repo_id,
+                revision,
+                path_exact.as_deref(),
+                path_exact.as_deref(),
+                path_prefix.as_deref(),
+                query_like.as_deref(),
+                query_like.as_deref(),
+                query_like.as_deref(),
+                query_like.as_deref(),
+                symbol_exact.as_deref(),
+                symbol_exact.as_deref(),
+                symbol_exact.as_deref(),
+                symbol_like.as_deref(),
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?
+    } as usize;
+
+    let query = format!(
+        "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN s.worktree_dirty THEN 1 ELSE 0 END {from_where} QUALIFY ROW_NUMBER() OVER (PARTITION BY s.symbol_key ORDER BY s.indexed_at DESC, s.symbol_id) = 1 ORDER BY s.symbol_key, s.indexed_at DESC, s.symbol_id LIMIT ?"
+    );
+    let mut statement = connection.prepare(&query).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let rows = if membership_ready {
+        statement
+            .query_map(
+                params![
+                    repo_id,
+                    revision,
+                    revision,
+                    path_exact.as_deref(),
+                    path_exact.as_deref(),
+                    path_prefix.as_deref(),
+                    query_like.as_deref(),
+                    query_like.as_deref(),
+                    query_like.as_deref(),
+                    query_like.as_deref(),
+                    symbol_exact.as_deref(),
+                    symbol_exact.as_deref(),
+                    symbol_exact.as_deref(),
+                    symbol_like.as_deref(),
+                    limit as i64,
+                ],
+                |row| {
+                    let dirty = row.get::<_, i64>(25)?;
+                    if dirty != 0 {
+                        Ok(None)
+                    } else {
+                        code_symbol_from_row(row).map(Some)
+                    }
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })
+    } else {
+        statement
+            .query_map(
+                params![
+                    repo_id,
+                    revision,
+                    path_exact.as_deref(),
+                    path_exact.as_deref(),
+                    path_prefix.as_deref(),
+                    query_like.as_deref(),
+                    query_like.as_deref(),
+                    query_like.as_deref(),
+                    query_like.as_deref(),
+                    symbol_exact.as_deref(),
+                    symbol_exact.as_deref(),
+                    symbol_exact.as_deref(),
+                    symbol_like.as_deref(),
+                    limit as i64,
+                ],
+                |row| {
+                    let dirty = row.get::<_, i64>(25)?;
+                    if dirty != 0 {
+                        Ok(None)
+                    } else {
+                        code_symbol_from_row(row).map(Some)
+                    }
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })
+    }?;
+    let mut symbols = BTreeMap::new();
+    for row in rows {
+        let Some(mut symbol) = row else {
+            continue;
+        };
+        if symbol.commit_sha.as_deref() != Some(revision) {
+            symbol.commit_sha = Some(revision.to_string());
+        }
+        fill_container_chain(connection, &mut symbol)?;
+        symbols.insert(symbol.symbol_key.clone(), symbol);
+    }
+    Ok((symbols, total.saturating_sub(limit)))
+}
+
+fn query_context_edges_and_neighbors(
+    config: &MemoryConfig,
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+    symbols: &mut BTreeMap<String, CodeSymbolRecord>,
+    seed_keys: &BTreeSet<String>,
+    bounds: CodeGraphContextBounds,
+) -> Result<(Vec<CodeEdgeRecord>, usize), MemoryError> {
+    let max_edges = bounds
+        .limit
+        .saturating_mul(bounds.depth.saturating_add(1))
+        .max(bounds.limit);
+    let mut edges = BTreeMap::new();
+    let mut frontier = seed_keys.clone();
+    let mut dropped = 0;
+
+    for layer in 0..=bounds.depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut layer_edges = Vec::new();
+        let mut remaining_keys = frontier.len();
+        for key in &frontier {
+            let remaining_budget = max_edges.saturating_sub(edges.len());
+            if remaining_budget == 0 {
+                dropped += 1;
+                break;
+            }
+            let per_key_limit = remaining_budget
+                .div_ceil(remaining_keys.max(1))
+                .min(bounds.limit.max(1));
+            let (key_edges, truncated) = query_context_edges_for_key(
+                config,
+                connection,
+                repo_id,
+                revision,
+                key,
+                per_key_limit.min(bounds.limit.max(1)),
+            )?;
+            if truncated {
+                dropped += 1;
+            }
+            remaining_keys = remaining_keys.saturating_sub(1);
+            for edge in key_edges {
+                edges.insert(edge.edge_id.clone(), edge.clone());
+                layer_edges.push(edge);
+            }
+        }
+
+        let mut adjacent = BTreeSet::new();
+        for edge in layer_edges {
+            if edge
+                .source_symbol_key
+                .as_ref()
+                .is_some_and(|key| frontier.contains(key))
+                && let Some(key) = edge.target_symbol_key
+            {
+                adjacent.insert(key);
+            } else if edge
+                .target_symbol_key
+                .as_ref()
+                .is_some_and(|key| frontier.contains(key))
+                && let Some(key) = edge.source_symbol_key
+            {
+                adjacent.insert(key);
+            }
+        }
+        if adjacent.len() > bounds.limit {
+            dropped += adjacent.len() - bounds.limit;
+        }
+        let mut next_frontier = BTreeSet::new();
+        for key in adjacent.into_iter().take(bounds.limit) {
+            if !symbols.contains_key(&key)
+                && let Some(symbol) =
+                    query_revision_symbol_by_key(config, connection, repo_id, revision, &key)?
+            {
+                symbols.insert(key.clone(), symbol);
+            }
+            if symbols.contains_key(&key) {
+                next_frontier.insert(key);
+            }
+        }
+        if layer == bounds.depth {
+            break;
+        }
+        frontier = next_frontier;
+    }
+
+    Ok((edges.into_values().collect(), dropped))
+}
+
+fn query_context_edges_for_key(
+    config: &MemoryConfig,
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+    symbol_key: &str,
+    limit: usize,
+) -> Result<(Vec<CodeEdgeRecord>, bool), MemoryError> {
+    let membership_ready = matches!(
+        code_snapshot_status(connection, config, repo_id, revision)?.as_deref(),
+        None | Some("completed")
+    ) && code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
+    let query = if membership_ready {
+        "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges AS e WHERE e.repo_id = ? AND e.freshness <> 'staged' AND NOT e.worktree_dirty AND (e.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed)) AND (e.source_symbol_key = ? OR e.target_symbol_key = ?) ORDER BY e.path, e.start_line, e.start_col, e.edge_id LIMIT ?"
+    } else {
+        "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges AS e WHERE e.repo_id = ? AND e.commit_sha = ? AND e.freshness <> 'staged' AND NOT e.worktree_dirty AND (e.source_symbol_key = ? OR e.target_symbol_key = ?) ORDER BY e.path, e.start_line, e.start_col, e.edge_id LIMIT ?"
+    };
+    let mut statement = connection.prepare(query).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let fetch_limit = limit.saturating_add(1) as i64;
+    let rows = if membership_ready {
+        statement
+            .query_map(
+            params![repo_id, revision, revision, symbol_key, symbol_key, fetch_limit],
+            code_edge_from_row,
+        )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    } else {
+        statement
+            .query_map(
+            params![repo_id, revision, symbol_key, symbol_key, fetch_limit],
+            code_edge_from_row,
+        )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    }
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let truncated = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), truncated))
+}
+
+fn is_test_code_symbol(symbol: &CodeSymbolRecord) -> bool {
+    let path = symbol.path.to_ascii_lowercase();
+    path.contains("/test/")
+        || path.starts_with("test/")
+        || path.contains("/tests/")
+        || path.starts_with("tests/")
+        || symbol.name.to_ascii_lowercase().starts_with("test")
+        || symbol
+            .container_chain
+            .iter()
+            .any(|container| container.to_ascii_lowercase().starts_with("test"))
+}
+
+fn context_symbol_json(
+    repo_id: &str,
+    base_revision: &str,
+    overlay: Option<&CodeWorkspaceOverlay>,
+    symbol: &CodeSymbolRecord,
+    relation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "symbol",
+        "relation": relation,
+        "repository": repo_id,
+        "symbolKey": symbol.symbol_key,
+        "symbolId": symbol.symbol_id,
+        "name": symbol.name,
+        "symbolKind": symbol.kind,
+        "path": symbol.path,
+        "containerChain": symbol.container_chain,
+        "span": context_span_json_values(symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col),
+        "parserVersion": symbol.parser_version,
+        "queryPackVersion": symbol.query_pack_version,
+        "confidence": "exact",
+        "freshness": symbol.freshness,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": if is_live_overlay_path(overlay, &symbol.path) { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceRef": context_source_ref(&symbol.path, symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col)
+    })
+}
+
+fn context_edge_json(
+    repo_id: &str,
+    base_revision: &str,
+    overlay: Option<&CodeWorkspaceOverlay>,
+    edge: &CodeEdgeRecord,
+    related_symbol: Option<&CodeSymbolRecord>,
+    relation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "edge",
+        "relation": relation,
+        "repository": repo_id,
+        "edgeKind": edge.edge_kind,
+        "sourceSymbolKey": edge.source_symbol_key,
+        "targetSymbolKey": edge.target_symbol_key,
+        "targetHint": edge.target_hint,
+        "path": edge.path,
+        "span": context_span_json_values(edge.start_line, edge.start_col, edge.end_line, edge.end_col),
+        "parserVersion": related_symbol.map(|symbol| symbol.parser_version.clone()),
+        "queryPackVersion": related_symbol.map(|symbol| symbol.query_pack_version.clone()),
+        "confidence": edge.confidence,
+        "freshness": edge.freshness,
+        "baseRevision": base_revision,
+        "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
+        "provenance": if is_live_overlay_path(overlay, &edge.path) { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceRef": context_source_ref(&edge.path, edge.start_line, edge.start_col, edge.end_line, edge.end_col)
+    })
+}
+
+fn is_live_overlay_path(overlay: Option<&CodeWorkspaceOverlay>, path: &str) -> bool {
+    overlay.is_some_and(|overlay| {
+        overlay.changed_paths.contains(path)
+            && !overlay.unanalyzed_files.iter().any(|candidate| candidate == path)
+    })
+}
+
+fn context_span_json(span: &CodeSpan) -> serde_json::Value {
+    context_span_json_values(span.start_line, span.start_col, span.end_line, span.end_col)
+}
+
+fn context_span_json_values(
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "startLine": start_line,
+        "startColumn": start_col,
+        "endLine": end_line,
+        "endColumn": end_col
+    })
+}
+
+fn context_source_ref(
+    path: &str,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> String {
+    format!("{path}:{start_line}:{start_col}-{end_line}:{end_col}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -83,6 +1057,9 @@ struct WorkspaceDocumentCacheKey {
 struct WorkspaceDocumentRecords {
     symbols: Vec<CodeSymbolRecord>,
     edges: Vec<CodeEdgeRecord>,
+    diagnostics: Vec<CodeDiagnostic>,
+    parser_version: String,
+    query_pack_version: String,
 }
 
 type WorkspaceLiveChangedRecords = (
@@ -628,6 +1605,8 @@ pub fn code_graph_workspace_overlay(
         .into_iter()
         .map(|edge| (edge.edge_id.clone(), edge))
         .collect::<BTreeMap<_, _>>();
+    let mut diagnostics = BTreeMap::<String, Vec<CodeDiagnostic>>::new();
+    let mut diagnostic_metadata = BTreeMap::<String, (String, String)>::new();
     let mut unanalyzed_files = BTreeSet::new();
     let mut remaining_files = config.code_intel.ast.max_files_per_request;
 
@@ -663,6 +1642,11 @@ pub fn code_graph_workspace_overlay(
         remaining_files = remaining_files.saturating_sub(1);
         symbols.retain(|_, symbol| symbol.path != *path);
         edges.retain(|_, edge| edge.path != *path);
+        diagnostics.insert(path.clone(), records.diagnostics);
+        diagnostic_metadata.insert(
+            path.clone(),
+            (records.parser_version.clone(), records.query_pack_version.clone()),
+        );
         for symbol in records.symbols {
             symbols.insert(symbol.symbol_key.clone(), symbol);
         }
@@ -685,6 +1669,156 @@ pub fn code_graph_workspace_overlay(
         changed_paths,
         tombstones,
         unanalyzed_files: unanalyzed_files.into_iter().collect(),
+        diagnostics,
+        diagnostic_metadata,
+        retrieval_dropped: 0,
+    })
+}
+
+pub fn code_graph_workspace_context_overlay(
+    config: &MemoryConfig,
+    repo_id: &str,
+    workspace_path: &Path,
+    run_id: &str,
+    base_revision: &str,
+    options: &CodeGraphContextQuery,
+) -> Result<CodeWorkspaceOverlay, CodeGraphProjectionError> {
+    let connection = open_workspace_graph_connection(config, repo_id, workspace_path, base_revision)?;
+    let path = options
+        .path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_code_path)
+        .transpose()
+        .map_err(CodeGraphProjectionError::InvalidRequest)?;
+    let query = options
+        .query
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let symbol_selector = options
+        .symbol
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let depth = options.depth.min(8);
+    let limit = options.limit.clamp(1, CODE_GRAPH_MAX_RECORDS);
+    let (mut base_symbols, mut retrieval_dropped) = query_context_symbols_for_revision(
+        config,
+        &connection,
+        repo_id,
+        base_revision,
+        CodeGraphContextSelectors {
+            path: path.as_deref(),
+            query: query.as_deref(),
+            symbol: symbol_selector.as_deref(),
+        },
+        limit,
+    )?;
+    let seed_keys = base_symbols.keys().cloned().collect::<BTreeSet<_>>();
+    let (base_edges, dropped) = query_context_edges_and_neighbors(
+        config,
+        &connection,
+        repo_id,
+        base_revision,
+        &mut base_symbols,
+        &seed_keys,
+        CodeGraphContextBounds { depth, limit },
+    )?;
+    retrieval_dropped = retrieval_dropped.saturating_add(dropped);
+
+    let head_revision = workspace_head_revision(workspace_path)?;
+    let (changed_paths, tombstones, workspace_content_digest) = workspace_changed_paths(
+        workspace_path,
+        base_revision,
+        config.code_intel.ast.max_file_bytes,
+    )?;
+    let mut symbols = base_symbols.clone();
+    let mut edges = base_edges
+        .iter()
+        .cloned()
+        .map(|edge| (edge.edge_id.clone(), edge))
+        .collect::<BTreeMap<_, _>>();
+    let mut diagnostics = BTreeMap::<String, Vec<CodeDiagnostic>>::new();
+    let mut diagnostic_metadata = BTreeMap::<String, (String, String)>::new();
+    let mut unanalyzed_files = BTreeSet::new();
+    let mut remaining_files = config.code_intel.ast.max_files_per_request;
+    let path_matches = |candidate: &str| {
+        path.as_deref().is_none_or(|selector| {
+            candidate == selector || candidate.starts_with(&format!("{selector}/"))
+        })
+    };
+
+    for changed_path in changed_paths.iter().filter(|candidate| path_matches(candidate)) {
+        if tombstones.contains(changed_path) {
+            symbols.retain(|_, symbol| symbol.path != *changed_path);
+            edges.retain(|_, edge| edge.path != *changed_path);
+            continue;
+        }
+        let has_baseline_record = symbols.values().any(|symbol| symbol.path == *changed_path);
+        if remaining_files == 0 {
+            if has_baseline_record || path.is_some() {
+                unanalyzed_files.insert(changed_path.clone());
+            }
+            continue;
+        }
+        let Some(file_path) = workspace_file_path(workspace_path, changed_path)? else {
+            if has_baseline_record || path.is_some() {
+                unanalyzed_files.insert(changed_path.clone());
+            }
+            continue;
+        };
+        let Some(records) = workspace_document_records(
+            config,
+            repo_id,
+            changed_path,
+            &file_path,
+        )? else {
+            if has_baseline_record || path.is_some() {
+                unanalyzed_files.insert(changed_path.clone());
+            }
+            continue;
+        };
+        remaining_files = remaining_files.saturating_sub(1);
+        symbols.retain(|_, symbol| symbol.path != *changed_path);
+        edges.retain(|_, edge| edge.path != *changed_path);
+        let WorkspaceDocumentRecords {
+            symbols: live_symbols,
+            edges: live_edges,
+            diagnostics: live_diagnostics,
+            parser_version,
+            query_pack_version,
+        } = records;
+        diagnostics.insert(changed_path.clone(), live_diagnostics);
+        diagnostic_metadata.insert(
+            changed_path.clone(),
+            (parser_version, query_pack_version),
+        );
+        for symbol in live_symbols {
+            symbols.insert(symbol.symbol_key.clone(), symbol);
+        }
+        for edge in live_edges {
+            edges.insert(edge.edge_id.clone(), edge);
+        }
+    }
+
+    re_resolve_workspace_edges(&mut edges, &symbols);
+    Ok(CodeWorkspaceOverlay {
+        run_id: run_id.to_string(),
+        base_revision: base_revision.to_string(),
+        head_revision,
+        workspace_content_digest,
+        base_paths: base_symbols.values().map(|symbol| symbol.path.clone()).collect(),
+        base_symbols,
+        base_edges,
+        symbols,
+        edges: edges.into_values().collect(),
+        changed_paths,
+        tombstones,
+        unanalyzed_files: unanalyzed_files.into_iter().collect(),
+        diagnostics,
+        diagnostic_metadata,
+        retrieval_dropped,
     })
 }
 
@@ -811,6 +1945,9 @@ fn code_graph_workspace_focused_overlay(
                 changed_paths,
                 tombstones,
                 unanalyzed_files: unanalyzed_files.into_iter().collect(),
+                diagnostics: BTreeMap::new(),
+                diagnostic_metadata: BTreeMap::new(),
+                retrieval_dropped: 0,
             })
         }
         CodeGraphMode::Neighborhood => {
@@ -1005,6 +2142,9 @@ fn code_graph_workspace_focused_overlay(
                 changed_paths,
                 tombstones,
                 unanalyzed_files,
+                diagnostics: BTreeMap::new(),
+                diagnostic_metadata: BTreeMap::new(),
+                retrieval_dropped: 0,
             })
         }
         CodeGraphMode::Atlas => unreachable!("focused overlay only handles file and neighborhood modes"),
@@ -1657,7 +2797,28 @@ fn workspace_document_records(
         })
         .filter(|edge| edge.source_symbol_key.is_some())
         .collect::<Vec<_>>();
-    let records = WorkspaceDocumentRecords { symbols, edges };
+    let diagnostics = document
+        .diagnostics
+        .iter()
+        .map(|diagnostic| CodeDiagnostic {
+            kind: diagnostic.kind.clone(),
+            severity: diagnostic.severity.clone(),
+            message: diagnostic.message.clone(),
+            span: CodeSpan {
+                start_line: diagnostic.start_line,
+                start_col: diagnostic.start_col,
+                end_line: diagnostic.end_line,
+                end_col: diagnostic.end_col,
+            },
+        })
+        .collect();
+    let records = WorkspaceDocumentRecords {
+        symbols,
+        edges,
+        diagnostics,
+        parser_version: document.parser_version,
+        query_pack_version: document.query_pack_version,
+    };
     let mut cache = WORKSPACE_DOCUMENT_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()

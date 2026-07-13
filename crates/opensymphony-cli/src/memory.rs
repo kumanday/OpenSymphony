@@ -25,26 +25,31 @@ use crate::{
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
-        ArchivePlan, CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
-        CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput, CommentEvidence,
-        DocsSyncPlan, IssueEvidence, IssueLinkEvidence, IssueSelection, LintSeverity, MemoryConfig,
-        MemoryContextOptions, MemoryError, MemoryReindexReport, MemoryScopeFilter,
-        MemoryVisibility, SourceFile, archive_blocking_warning_count, brief,
-        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, persist_code_intel_documents, persist_code_intel_skipped_files,
-        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
-        refresh_memory_index_from_okf, related_by_area_with_scope, related_by_issue_with_scope,
-        related_by_paths_with_scope, render_archive_plan, render_capture_dry_run,
-        search_with_scope, sha256_bytes_hex, sha256_hex, status_with_scope, write_capture_plan,
-        write_docs_sync_plan, write_memory_init_plan,
+        ArchivePlan, CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
+        CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput,
+        CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
+        IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
+        MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
+        archive_blocking_warning_count, brief, code_graph_context,
+        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
+        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
+        lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
+        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, refresh_memory_index, refresh_memory_index_from_okf,
+        related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
+        render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
+        sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
+        write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
         OpenHandsConversationStorePaths,
     },
     opensymphony_workflow::WorkflowDefinition,
-    opensymphony_workspace::{CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig},
+    opensymphony_workspace::{
+        CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
+        workspace_path_for_root,
+    },
 };
 
 const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1401,6 +1406,7 @@ fn print_reindex_report(report: MemoryReindexReport) {
 struct MemoryServerState {
     config: MemoryConfig,
     auth: MemoryServerAuth,
+    workspace_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -1432,6 +1438,7 @@ async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryEr
             read_token: args.token,
             admin_token: args.admin_token,
         },
+        None,
     )
     .await?;
     println!(
@@ -1471,10 +1478,11 @@ impl MemoryServerHandle {
     }
 }
 
-pub(crate) async fn start_memory_server(
+pub(crate) async fn start_memory_server_with_workspace_root(
     config: MemoryConfig,
     addr: SocketAddr,
     token: Option<String>,
+    workspace_root: Option<PathBuf>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     start_memory_server_with_auth(
         config,
@@ -1483,6 +1491,7 @@ pub(crate) async fn start_memory_server(
             read_token: token,
             admin_token: None,
         },
+        workspace_root,
     )
     .await
 }
@@ -1491,6 +1500,7 @@ async fn start_memory_server_with_auth(
     config: MemoryConfig,
     addr: SocketAddr,
     auth: MemoryServerAuth,
+    workspace_root: Option<PathBuf>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
         MemoryError::InvalidInput(format!("failed to bind memory server {addr}: {error}"))
@@ -1498,7 +1508,11 @@ async fn start_memory_server_with_auth(
     let local_addr = listener.local_addr().map_err(|error| {
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
-    let state = MemoryServerState { config, auth };
+    let state = MemoryServerState {
+        config,
+        auth,
+        workspace_root,
+    };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
         .route("/mcp", axum::routing::post(memory_server_mcp))
@@ -1554,7 +1568,11 @@ async fn memory_server_mcp(
         })),
         "tools/call" => match tokio::time::timeout(
             MEMORY_MCP_TOOL_TIMEOUT,
-            call_memory_tool(&state.config, request.params),
+            call_memory_tool_with_workspace(
+                &state.config,
+                request.params,
+                state.workspace_root.as_deref(),
+            ),
         )
         .await
         {
@@ -1618,6 +1636,26 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
         json!({ "name": "memory.import_okf", "description": "Import an OKF memory bundle", "access": "admin" }),
         json!({ "name": "memory.ingest_code_intel", "description": "Generate code-intelligence artifacts for future ingestion", "access": "admin" }),
     ];
+    if config.code_intel.enabled {
+        tools.push(json!({
+            "name": "code.graph.context",
+            "description": "Bounded read-only indexed code discovery with optional workspace overlay",
+            "access": "read",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "repository": { "type": "string", "description": "Indexed repository id" },
+                    "query": { "type": "string", "description": "Case-insensitive symbol/path search" },
+                    "path": { "type": "string", "description": "Repository-relative path or directory" },
+                    "symbol": { "type": "string", "description": "Symbol name or stable symbol key" },
+                    "runId": { "type": "string", "description": "Optional issue run identity for workspace overlay reads" },
+                    "depth": { "type": "integer", "minimum": 0, "maximum": 8, "default": 1 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 20 }
+                }
+            }
+        }));
+    }
     if ast_tools_enabled(config) {
         tools.extend(AST_MCP_TOOL_NAMES.iter().map(|name| {
             json!({
@@ -1744,7 +1782,16 @@ fn origin_is_localhost(origin: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
+    call_memory_tool_with_workspace(config, params, None).await
+}
+
+async fn call_memory_tool_with_workspace(
+    config: &MemoryConfig,
+    params: Value,
+    workspace_root: Option<&Path>,
+) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -1753,6 +1800,11 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
         return Err(MemoryError::InvalidInput(
             "AST code-intelligence tools are disabled".to_string(),
+        ));
+    }
+    if name == "code.graph.context" && !config.code_intel.enabled {
+        return Err(MemoryError::InvalidInput(
+            "indexed code graph tools are disabled".to_string(),
         ));
     }
     match name {
@@ -1850,6 +1902,14 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
                 })).collect::<Vec<_>>()
             }))
         }
+        "code.graph.context" => {
+            call_code_graph_context_tool(
+                config.clone(),
+                arguments.clone(),
+                workspace_root.map(Path::to_path_buf),
+            )
+            .await
+        }
         "code.ast.status" => call_code_ast_status_tool(config),
         "code.ast.outline" => call_code_ast_outline_tool(config.clone(), arguments.clone()).await,
         "code.ast.symbols" => call_code_ast_symbols_tool(config.clone(), arguments.clone()).await,
@@ -1872,6 +1932,167 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
             "unsupported memory tool `{other}`"
         ))),
     }
+}
+
+async fn call_code_graph_context_tool(
+    config: MemoryConfig,
+    arguments: Value,
+    workspace_root: Option<PathBuf>,
+) -> Result<Value, MemoryError> {
+    ast_mcp_tool_blocking("code.graph.context", move || {
+        let repo_id = optional_string_arg(&arguments, "repository")
+            .or_else(|| optional_string_arg(&arguments, "repo"))
+            .unwrap_or_else(|| {
+                config
+                    .repo_root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("repo")
+                    .to_string()
+            });
+        let context_query = CodeGraphContextQuery {
+            repo_id: repo_id.clone(),
+            query: optional_string_arg(&arguments, "query"),
+            path: optional_string_arg(&arguments, "path"),
+            symbol: optional_string_arg(&arguments, "symbol"),
+            depth: usize_arg_allow_zero(&arguments, "depth", 1).min(8),
+            limit: usize_arg(&arguments, "limit", 20)
+                .min(config.code_intel.ast.max_matches_per_request.max(1)),
+        };
+        let overlay = optional_string_arg(&arguments, "runId")
+            .or_else(|| optional_string_arg(&arguments, "run"))
+            .map(|run_id| {
+                resolve_code_graph_overlay(
+                    &config,
+                    workspace_root.as_deref(),
+                    &repo_id,
+                    &run_id,
+                    &context_query,
+                )
+            })
+            .transpose()?;
+        code_graph_context(&config, context_query, overlay.as_ref())
+            .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+    })
+    .await
+}
+
+fn resolve_code_graph_overlay(
+    config: &MemoryConfig,
+    workspace_root: Option<&Path>,
+    repo_id: &str,
+    run_id: &str,
+    context_query: &CodeGraphContextQuery,
+) -> Result<CodeWorkspaceOverlay, MemoryError> {
+    let workspace_root = workspace_root.ok_or_else(|| {
+        MemoryError::InvalidInput(
+            "run-scoped code graph context requires a configured workspace root".to_string(),
+        )
+    })?;
+    let workspace_root =
+        workspace_root
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: workspace_root.to_path_buf(),
+                source,
+            })?;
+    let workspace_candidate = workspace_path_for_root(&workspace_root, run_id)
+        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+    if let Ok(metadata) = fs::symlink_metadata(&workspace_candidate)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace root must not be a symlink".to_string(),
+        ));
+    }
+    let workspace_path =
+        workspace_candidate
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: workspace_candidate.clone(),
+                source,
+            })?;
+    if !workspace_path.starts_with(&workspace_root) {
+        return Err(MemoryError::PathOutsideRepo {
+            path: workspace_path,
+            repo_root: workspace_root,
+        });
+    }
+    let manifest_path = workspace_path.join(".opensymphony/issue.json");
+    let manifest = fs::read_to_string(&manifest_path).map_err(|source| MemoryError::ReadFile {
+        path: manifest_path.clone(),
+        source,
+    })?;
+    let manifest: IssueManifest = serde_json::from_str(&manifest).map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "invalid run workspace ownership manifest: {source}"
+        ))
+    })?;
+    let workspace_key = workspace_candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let manifest_workspace_path =
+        manifest
+            .workspace_path
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: manifest.workspace_path.clone(),
+                source,
+            })?;
+    if (manifest.identifier != run_id && manifest.issue_id != run_id)
+        || manifest.sanitized_workspace_key != workspace_key
+        || manifest_workspace_path != workspace_path
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace ownership manifest does not match the requested run".to_string(),
+        ));
+    }
+    let branch = code_index_branch(&config.repo_root)
+        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+    let base_revision = workspace_merge_base(&workspace_path, &branch)?;
+    code_graph_workspace_context_overlay(
+        config,
+        repo_id,
+        &workspace_path,
+        run_id,
+        &base_revision,
+        context_query,
+    )
+    .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+}
+
+fn workspace_merge_base(workspace_path: &Path, branch: &str) -> Result<String, MemoryError> {
+    for reference in [format!("origin/{branch}"), branch.to_string()] {
+        let verified = process::Command::new("git")
+            .current_dir(workspace_path)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(&reference)
+            .output()
+            .map_err(|source| {
+                MemoryError::InvalidInput(format!("failed to inspect git workspace: {source}"))
+            })?;
+        if !verified.status.success() {
+            continue;
+        }
+        let output = process::Command::new("git")
+            .current_dir(workspace_path)
+            .args(["merge-base", "HEAD"])
+            .arg(&reference)
+            .output()
+            .map_err(|source| {
+                MemoryError::InvalidInput(format!("failed to resolve git merge base: {source}"))
+            })?;
+        if output.status.success() {
+            let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !revision.is_empty() {
+                return Ok(revision);
+            }
+        }
+    }
+    Err(MemoryError::InvalidInput(format!(
+        "no usable git comparison base found for branch `{branch}`"
+    )))
 }
 
 struct AstDocument {
@@ -3707,6 +3928,14 @@ fn usize_arg(arguments: &Value, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn usize_arg_allow_zero(arguments: &Value, key: &str, default: usize) -> usize {
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(default)
+}
+
 fn bool_arg(arguments: &Value, key: &str) -> bool {
     arguments.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
@@ -4779,18 +5008,21 @@ mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, RUST_QUERY_PACK_VERSION, authorize_memory_request,
-        call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
-        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
+        call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
+        context_source_from_mcp, memory_server_health_payload, memory_tool_descriptors,
+        origin_is_localhost, parse_remote_memory_response, remote_memory_tool_token,
+        replace_or_append_managed_section, required_access_for_request, resolve_code_graph_overlay,
+        resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
-        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
-        CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus, MemoryConfig,
-        MemoryError, code_symbol_detail, code_symbol_neighborhood, code_symbols_containing_span,
-        compare_code_symbols, persist_code_intel_documents,
+        CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
+        CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
+        MemoryConfig, MemoryError, code_symbol_detail, code_symbol_neighborhood,
+        code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
     };
+    use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
+    use chrono::Utc;
     use duckdb::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
@@ -4814,6 +5046,27 @@ mod tests {
         assert!(names.contains(&"memory.reindex".to_string()));
         assert!(names.contains(&"memory.export_okf".to_string()));
         assert!(names.contains(&"memory.import_okf".to_string()));
+        let graph_tool = memory_tool_descriptors(&config, &MemoryServerAuth::default())
+            .into_iter()
+            .find(|tool| tool["name"] == "code.graph.context")
+            .expect("indexed graph context tool");
+        assert_eq!(graph_tool["access"], "read");
+        assert_eq!(graph_tool["inputSchema"]["additionalProperties"], false);
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("visibility")
+                .is_none()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("snippet")
+                .is_none()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("repoRoot")
+                .is_none()
+        );
         assert!(names.contains(&"code.ast.status".to_string()));
         assert!(names.contains(&"code.ast.outline".to_string()));
         assert!(names.contains(&"code.ast.symbols".to_string()));
@@ -4843,6 +5096,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names.contains(&"memory.context".to_string()));
+        assert!(!names.contains(&"code.graph.context".to_string()));
         assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
 
         std::fs::write(
@@ -4862,6 +5116,493 @@ mod tests {
 
         assert!(names.contains(&"memory.context".to_string()));
         assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
+    }
+
+    #[tokio::test]
+    async fn code_graph_context_finds_symbols_callers_and_bounds_evidence() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\nfn caller() -> u8 { answer() }\n",
+        )
+        .expect("source");
+        init_test_git_repo(repo.path(), "develop");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({ "paths": ["src/lib.rs"], "persist": true, "limit": 20 }),
+        )
+        .await
+        .expect("persist indexed source");
+        let repo_id = repo
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("repo id")
+            .to_string();
+
+        let response = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": {
+                    "repository": repo_id,
+                    "symbol": "answer",
+                    "depth": 1,
+                    "limit": 10
+                }
+            }),
+        )
+        .await
+        .expect("graph context");
+        let evidence = response["evidence"].as_array().expect("evidence array");
+        assert!(evidence.iter().any(|item| {
+            item["kind"] == "symbol"
+                && item["name"] == "answer"
+                && item["provenance"] == "indexed_baseline"
+        }));
+        assert!(evidence.iter().any(|item| item["relation"] == "caller"));
+        assert!(evidence.iter().all(|item| item.get("snippet").is_none()));
+        assert!(evidence.iter().all(|item| {
+            item["path"].is_string()
+                && item["span"].is_object()
+                && item["parserVersion"].is_string()
+                && item["queryPackVersion"].is_string()
+                && item["freshness"].is_string()
+                && item["sourceRef"].is_string()
+        }));
+
+        let bounded = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": repo_id, "query": "lib", "limit": 1 }
+            }),
+        )
+        .await
+        .expect("bounded graph context");
+        assert_eq!(bounded["limit"], 1);
+        assert_eq!(
+            bounded["evidence"]
+                .as_array()
+                .expect("bounded evidence")
+                .len(),
+            1
+        );
+        assert_eq!(bounded["truncated"], true);
+        assert!(bounded["dropped"].as_u64().expect("dropped count") > 0);
+
+        let caller_key = evidence
+            .iter()
+            .find(|item| item["kind"] == "symbol" && item["name"] == "caller")
+            .and_then(|item| item["symbolKey"].as_str())
+            .expect("caller symbol key");
+        assert!(
+            evidence
+                .iter()
+                .any(|item| { item["kind"] == "edge" && item["sourceSymbolKey"] == caller_key })
+        );
+
+        let zero_depth = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": repo_id, "symbol": "answer", "depth": 0, "limit": 10 }
+            }),
+        )
+        .await
+        .expect("zero-depth graph context");
+        assert_eq!(zero_depth["depth"], 0);
+        assert!(
+            zero_depth["evidence"]
+                .as_array()
+                .expect("zero-depth evidence")
+                .iter()
+                .all(|item| item["kind"] != "symbol" || item["relation"] != "caller")
+        );
+
+        let outside = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": repo_id, "path": "../outside" }
+            }),
+        )
+        .await
+        .expect_err("path traversal must be rejected");
+        assert!(outside.to_string().contains("parent traversal"));
+    }
+
+    #[tokio::test]
+    async fn code_graph_context_replaces_baseline_records_with_run_overlay() {
+        let target = TempDir::new().expect("target repo");
+        std::fs::create_dir_all(target.path().join("src")).expect("src dir");
+        std::fs::write(
+            target.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("baseline source");
+        init_test_git_repo(target.path(), "develop");
+        let config = MemoryConfig::load(target.path(), None).expect("memory config");
+        call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({ "paths": ["src/lib.rs"], "persist": true, "limit": 20 }),
+        )
+        .await
+        .expect("persist baseline");
+        let repo_id = target
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("repo id")
+            .to_string();
+
+        let workspaces = TempDir::new().expect("workspace root");
+        let workspace = workspaces.path().join("COE-544");
+        assert!(
+            std::process::Command::new("git")
+                .args(["clone", "--quiet"])
+                .arg(target.path())
+                .arg(&workspace)
+                .status()
+                .expect("git clone")
+                .success()
+        );
+        std::fs::create_dir_all(workspace.join(".opensymphony")).expect("workspace metadata");
+        let now = Utc::now();
+        std::fs::write(
+            workspace.join(".opensymphony/issue.json"),
+            serde_json::to_vec(&IssueManifest {
+                issue_id: "issue-544".to_string(),
+                identifier: "COE-544".to_string(),
+                title: "Indexed Agent Code Context And Retrieval".to_string(),
+                current_state: "started".to_string(),
+                sanitized_workspace_key: "COE-544".to_string(),
+                workspace_path: workspace.clone(),
+                created_at: now,
+                updated_at: now,
+                last_seen_tracker_refresh_at: None,
+            })
+            .expect("workspace manifest json"),
+        )
+        .expect("workspace manifest");
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn replacement() -> u8 { 43 }\n",
+        )
+        .expect("workspace edit");
+
+        let response = call_code_graph_context_tool(
+            config.clone(),
+            json!({
+                "repository": repo_id,
+                "symbol": "replacement",
+                "runId": "COE-544",
+                "depth": 1,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("overlay graph context");
+        assert_eq!(response["provenance"]["kind"], "workspace_overlay");
+        assert!(
+            response["overlayDigest"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        let evidence = response["evidence"].as_array().expect("overlay evidence");
+        assert!(evidence.iter().any(|item| {
+            item["kind"] == "symbol"
+                && item["name"] == "replacement"
+                && item["provenance"] == "workspace_overlay"
+                && item["freshness"] == "current"
+        }));
+        assert!(evidence.iter().all(|item| item.get("snippet").is_none()));
+
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn replacement() -> u8 { let = ; 43 }\n",
+        )
+        .expect("workspace diagnostic edit");
+        let diagnostics = call_code_graph_context_tool(
+            config.clone(),
+            json!({
+                "repository": repo_id,
+                "symbol": "replacement",
+                "runId": "COE-544",
+                "depth": 0,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("overlay diagnostic graph context");
+        assert!(
+            diagnostics["evidence"]
+                .as_array()
+                .expect("diagnostic evidence")
+                .iter()
+                .any(|item| item["kind"] == "diagnostic"
+                    && item["provenance"] == "workspace_overlay"
+                    && item["parserVersion"].is_string()
+                    && item["queryPackVersion"].is_string()
+                    && item["overlayDigest"].is_string())
+        );
+
+        std::fs::write(workspace.join("src/lib.rs"), "let = ;\n")
+            .expect("workspace diagnostic-only edit");
+        let diagnostic_only = call_code_graph_context_tool(
+            config.clone(),
+            json!({
+                "repository": repo_id,
+                "path": "src/lib.rs",
+                "runId": "COE-544",
+                "depth": 0,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("diagnostic-only overlay graph context");
+        assert!(
+            diagnostic_only["evidence"]
+                .as_array()
+                .expect("diagnostic-only evidence")
+                .iter()
+                .any(|item| {
+                    item["kind"] == "diagnostic"
+                        && item["path"] == "src/lib.rs"
+                        && item["symbolKey"].is_null()
+                        && item["provenance"] == "workspace_overlay"
+                        && item["parserVersion"].is_string()
+                        && item["queryPackVersion"].is_string()
+                })
+        );
+
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn stale_baseline_should_not_survive() {}\n".repeat(64),
+        )
+        .expect("oversized workspace edit");
+        let mut unanalyzed_config = config;
+        unanalyzed_config.code_intel.ast.max_file_bytes = 128;
+        let unanalyzed = call_code_graph_context_tool(
+            unanalyzed_config,
+            json!({
+                "repository": repo_id,
+                "symbol": "answer",
+                "runId": "COE-544",
+                "depth": 0,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("unanalyzed overlay graph context");
+        assert!(
+            unanalyzed["evidence"]
+                .as_array()
+                .expect("unanalyzed evidence")
+                .iter()
+                .all(|item| !(item["kind"] == "symbol" && item["name"] == "answer"))
+        );
+        assert!(
+            unanalyzed["unanalyzedFiles"]
+                .as_array()
+                .expect("unanalyzed files")
+                .iter()
+                .any(|path| path == "src/lib.rs")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_graph_context_rejects_foreign_and_symlinked_workspaces() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let context_query = CodeGraphContextQuery {
+            repo_id: "repo".to_string(),
+            query: Some("answer".to_string()),
+            path: None,
+            symbol: None,
+            depth: 0,
+            limit: 1,
+        };
+        let workspace_root = TempDir::new().expect("workspace root");
+        let workspace = workspace_root.path().join("COE-544");
+        std::fs::create_dir_all(workspace.join(".opensymphony")).expect("metadata");
+        let now = Utc::now();
+        std::fs::write(
+            workspace.join(".opensymphony/issue.json"),
+            serde_json::to_vec(&IssueManifest {
+                issue_id: "issue-544".to_string(),
+                identifier: "COE-545".to_string(),
+                title: "foreign".to_string(),
+                current_state: "started".to_string(),
+                sanitized_workspace_key: "COE-544".to_string(),
+                workspace_path: workspace.clone(),
+                created_at: now,
+                updated_at: now,
+                last_seen_tracker_refresh_at: None,
+            })
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+        let foreign = resolve_code_graph_overlay(
+            &config,
+            Some(workspace_root.path()),
+            "repo",
+            "COE-544",
+            &context_query,
+        )
+        .expect_err("foreign workspace must be rejected");
+        assert!(foreign.to_string().contains("ownership"));
+
+        std::fs::remove_dir_all(&workspace).expect("remove foreign workspace");
+        let symlink_target = TempDir::new().expect("symlink target");
+        std::fs::create_dir_all(symlink_target.path()).expect("symlink target directory");
+        std::os::unix::fs::symlink(symlink_target.path(), &workspace).expect("workspace symlink");
+        let symlinked = resolve_code_graph_overlay(
+            &config,
+            Some(workspace_root.path()),
+            "repo",
+            "COE-544",
+            &context_query,
+        )
+        .expect_err("symlinked workspace must be rejected");
+        assert!(symlinked.to_string().contains("symlink"));
+    }
+
+    #[tokio::test]
+    async fn live_memory_context_revalidates_source_after_indexed_discovery() {
+        let repo = TempDir::new().expect("repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("baseline source");
+        init_test_git_repo(repo.path(), "develop");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({ "paths": ["src/lib.rs"], "persist": true, "limit": 20 }),
+        )
+        .await
+        .expect("persist baseline");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn replacement() -> u8 { 43 }\n",
+        )
+        .expect("edited source");
+
+        let context = call_memory_tool(
+            &config,
+            json!({
+                "name": "memory.context",
+                "arguments": {
+                    "issue": "COE-544",
+                    "paths": ["src/lib.rs"],
+                    "includeCodeIntel": true
+                }
+            }),
+        )
+        .await
+        .expect("live context");
+        let text = context["content"][0]["text"]
+            .as_str()
+            .expect("context text");
+        assert!(text.contains("function `replacement`"));
+        assert!(!text.contains("function `answer`"));
+    }
+
+    #[tokio::test]
+    async fn memory_server_http_exposes_graph_discovery_and_live_ast_context() {
+        let repo = TempDir::new().expect("repo");
+        std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        init_test_git_repo(repo.path(), "develop");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({ "paths": ["src/lib.rs"], "persist": true, "limit": 20 }),
+        )
+        .await
+        .expect("persist baseline");
+        let repo_id = repo
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("repo id")
+            .to_string();
+        let handle = super::start_memory_server_with_workspace_root(
+            config,
+            "127.0.0.1:0".parse().expect("address"),
+            None,
+            None,
+        )
+        .await
+        .expect("start memory server");
+        let client = reqwest::Client::new();
+        let list = client
+            .post(handle.endpoint())
+            .json(&json!({ "id": 1, "method": "tools/list", "params": {} }))
+            .send()
+            .await
+            .expect("tools list request")
+            .json::<serde_json::Value>()
+            .await
+            .expect("tools list response");
+        let tools = list["result"]["tools"].as_array().expect("tools");
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "code.graph.context")
+        );
+        assert!(tools.iter().any(|tool| tool["name"] == "code.ast.context"));
+
+        let graph = client
+            .post(handle.endpoint())
+            .json(&json!({
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "code.graph.context",
+                    "arguments": { "repository": repo_id, "symbol": "answer", "limit": 5 }
+                }
+            }))
+            .send()
+            .await
+            .expect("graph request")
+            .json::<serde_json::Value>()
+            .await
+            .expect("graph response");
+        assert!(graph["result"]["evidence"].as_array().is_some());
+
+        let ast = client
+            .post(handle.endpoint())
+            .json(&json!({
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "code.ast.context",
+                    "arguments": { "paths": ["src/lib.rs"], "limit": 5 }
+                }
+            }))
+            .send()
+            .await
+            .expect("AST request")
+            .json::<serde_json::Value>()
+            .await
+            .expect("AST response");
+        assert!(ast["result"]["markdown"].as_str().is_some());
+        handle.abort();
     }
 
     #[test]
@@ -4886,6 +5627,22 @@ mod tests {
 
         assert_eq!(query_tool["access"], "admin");
         assert_eq!(outline_tool["access"], "read");
+    }
+
+    #[test]
+    fn workflow_guidance_discovers_from_index_before_live_revalidation() {
+        let workflow = include_str!("../../../WORKFLOW.md");
+        let indexed = workflow
+            .find("code.graph.context")
+            .expect("indexed discovery guidance");
+        let live = workflow
+            .find("--include-code-intel")
+            .expect("live revalidation guidance");
+        assert!(
+            indexed < live,
+            "indexed discovery must precede live AST guidance"
+        );
+        assert!(workflow.contains("before edits and after every touched-file change"));
     }
 
     #[test]
@@ -4944,12 +5701,31 @@ mod tests {
             method: "tools/call".to_string(),
             params: json!({ "name": "code.ast.query" }),
         };
+        let graph_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "code.graph.context" }),
+        };
         assert_eq!(
             required_access_for_request(&ast_outline_request, &MemoryServerAuth::default()),
             MemoryServerAccess::Read
         );
         assert_eq!(
             required_access_for_request(&ast_query_request, &MemoryServerAuth::default()),
+            MemoryServerAccess::Read
+        );
+        assert_eq!(
+            required_access_for_request(&graph_request, &MemoryServerAuth::default()),
+            MemoryServerAccess::Read
+        );
+        assert_eq!(
+            required_access_for_request(
+                &graph_request,
+                &MemoryServerAuth {
+                    read_token: Some("read-token".to_string()),
+                    admin_token: Some("admin-token".to_string()),
+                },
+            ),
             MemoryServerAccess::Read
         );
         assert_eq!(
@@ -6219,6 +6995,43 @@ CREATE TABLE code_edges (
                 end_byte: 6,
             }],
         }
+    }
+
+    fn init_test_git_repo(root: &std::path::Path, branch: &str) {
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-b", branch])
+                .current_dir(root)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        for (key, value) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["config", key, value])
+                    .current_dir(root)
+                    .status()
+                    .expect("git config")
+                    .success()
+            );
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "."])
+                .current_dir(root)
+                .status()
+                .expect("git add")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "-m", "baseline"])
+                .current_dir(root)
+                .status()
+                .expect("git commit")
+                .success()
+        );
     }
 
     fn count_rows(connection: &Connection, table: &str, freshness: &str) -> i64 {
