@@ -792,7 +792,7 @@ fn code_graph_workspace_focused_overlay(
                     "neighborhood mode requires `symbol_key`".to_string(),
                 )
             })?;
-            let (live_symbols, live_edges, analyzed_paths, unanalyzed_files) =
+            let (live_symbols, mut live_edges, analyzed_paths, unanalyzed_files) =
                 workspace_live_changed_records(config, repo_id, workspace_path, &changed_paths, &tombstones)?;
             let mut symbols = BTreeMap::new();
             let mut base_symbols = BTreeMap::new();
@@ -813,6 +813,10 @@ fn code_graph_workspace_focused_overlay(
             } else {
                 return Err(CodeGraphProjectionError::SymbolNotFound(center.to_string()));
             }
+
+            let mut live_edge_resolution_symbols = live_symbols.clone();
+            live_edge_resolution_symbols.extend(symbols.clone());
+            re_resolve_workspace_edges(&mut live_edges, &live_edge_resolution_symbols);
 
             let mut edges = BTreeMap::new();
             let mut base_edges = BTreeMap::new();
@@ -1488,7 +1492,7 @@ fn render_workspace_graph_snapshot(
         mode,
         nodes,
         edges,
-        false,
+        options.include_stale,
         options.aggregate,
         truncation(
             dropped_paths + dropped_symbols,
@@ -5721,6 +5725,8 @@ mod code_graph_tests {
             "pub fn baseline() {}\npub fn removed_from_live() {}\npub fn caller() { baseline(); }\n",
         )
         .expect("baseline source");
+        fs::write(repo.path().join("src/target.rs"), "pub fn target() {}\n")
+            .expect("unchanged target source");
         fs::write(repo.path().join("src/remove.rs"), "pub fn removed() {}\n")
             .expect("removed source");
         fs::write(repo.path().join("src/delete_empty.rs"), "").expect("empty deleted source");
@@ -5746,7 +5752,7 @@ mod code_graph_tests {
 
         fs::write(
             repo.path().join("src/lib.rs"),
-            "pub fn baseline() { changed(); }\npub fn changed() {}\npub fn caller() { baseline(); }\n",
+            "pub fn baseline() { changed(); }\npub fn changed() {}\npub fn caller() { baseline(); }\npub fn changed_caller() { target(); }\n",
         )
         .expect("modified source");
         fs::remove_file(repo.path().join("src/remove.rs")).expect("deleted source");
@@ -5859,6 +5865,32 @@ mod code_graph_tests {
             .nodes
             .iter()
             .any(|node| node.label == "baseline"));
+        let target_key = overlay
+            .base_symbols
+            .values()
+            .find(|symbol| symbol.name == "target")
+            .map(|symbol| symbol.symbol_key.clone())
+            .expect("unchanged baseline target symbol");
+        let target_neighborhood = code_graph_workspace_snapshot(
+            &limited_config,
+            "overlay-repo",
+            repo.path(),
+            "COE-543",
+            &base,
+            CodeGraphSnapshotOptions {
+                mode: CodeGraphMode::Neighborhood,
+                path: None,
+                symbol_key: Some(target_key),
+                depth: 1,
+                aggregate: None,
+                include_stale: false,
+            },
+        )
+        .expect("focused neighborhood should include changed caller edges");
+        assert!(target_neighborhood
+            .nodes
+            .iter()
+            .any(|node| node.label == "changed_caller"));
         let removed_from_live_key = overlay
             .base_symbols
             .values()

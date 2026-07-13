@@ -3426,7 +3426,7 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
     );
     let diagnostic_response = reqwest::Client::new()
         .get(format!(
-            "http://{address}/api/v1/runs/COE-533/code/graph?repo_id=opensymphony&mode=atlas"
+            "http://{address}/api/v1/runs/COE-533/code/graph?repo_id=opensymphony&mode=atlas&include_stale=true"
         ))
         .send()
         .await
@@ -3436,6 +3436,11 @@ async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
         .json::<CodeGraphSnapshot>()
         .await
         .expect("decode unchanged diagnostic graph");
+    assert!(
+        diagnostic_graph
+            .filters_applied
+            .contains(&"include_stale:true".to_string())
+    );
     let diagnostic_node = diagnostic_graph
         .nodes
         .iter()

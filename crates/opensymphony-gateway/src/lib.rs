@@ -2199,7 +2199,7 @@ async fn get_run_code_graph(
         symbol_key: params.symbol_key,
         depth: params.depth.unwrap_or(1).clamp(1, 8),
         aggregate: parse_code_graph_aggregate(params.aggregate.as_deref())?,
-        include_stale: false,
+        include_stale: params.include_stale.unwrap_or(false),
     };
     let comparison_bases = state.comparison_bases.clone();
     let snapshot = tokio::task::spawn_blocking(move || {
