@@ -66,6 +66,8 @@ pub struct CodeWorkspaceOverlay {
     pub tombstones: BTreeSet<String>,
     pub unanalyzed_files: Vec<String>,
     pub diagnostics: BTreeMap<String, Vec<CodeDiagnostic>>,
+    pub diagnostic_metadata: BTreeMap<String, (String, String)>,
+    pub retrieval_dropped: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +164,7 @@ pub fn code_graph_context(
             })
             .cloned()
             .collect();
-        (symbols, edges, 0)
+        (symbols, edges, overlay.retrieval_dropped)
     } else {
         let Some(connection) = connection.as_ref() else {
             return Err(CodeGraphProjectionError::IndexUnavailable);
@@ -358,9 +360,73 @@ pub fn code_graph_context(
                 &options.repo_id,
                 &base_revision,
                 overlay,
-                symbol,
+                &symbol.path,
+                ContextDiagnosticMetadata {
+                    symbol_key: Some(&symbol.symbol_key),
+                    parser_version: &symbol.parser_version,
+                    query_pack_version: &symbol.query_pack_version,
+                    freshness: &symbol.freshness,
+                },
                 &diagnostic,
             ));
+        }
+    }
+
+    if selected.is_empty() {
+        if let Some(overlay) = overlay {
+            for path in overlay.diagnostics.keys().filter(|candidate| {
+                path.as_deref().is_some_and(|path| {
+                    *candidate == path || candidate.starts_with(&format!("{path}/"))
+                }) || query.as_deref().is_some_and(|query| {
+                    candidate.to_ascii_lowercase().contains(query)
+                })
+            }) {
+                let (parser_version, query_pack_version) = overlay
+                    .diagnostic_metadata
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_default();
+                for diagnostic in overlay.diagnostics.get(path).into_iter().flatten() {
+                    evidence.push(context_diagnostic_json(
+                        &options.repo_id,
+                        &base_revision,
+                        Some(overlay),
+                        path,
+                        ContextDiagnosticMetadata {
+                            symbol_key: None,
+                            parser_version: &parser_version,
+                            query_pack_version: &query_pack_version,
+                            freshness: "current",
+                        },
+                        diagnostic,
+                    ));
+                }
+            }
+        } else if let (Some(connection), Some(path)) = (connection.as_ref(), path.as_deref()) {
+            let (diagnostics, dropped) = query_context_diagnostics_for_path(
+                config,
+                connection,
+                &options.repo_id,
+                &base_revision,
+                path,
+                limit,
+            )?;
+            query_dropped = query_dropped.saturating_add(usize::from(dropped));
+            for diagnostic in diagnostics {
+                evidence.push(context_diagnostic_json(
+                    &options.repo_id,
+                    &base_revision,
+                    None,
+                    &diagnostic.path,
+                    ContextDiagnosticMetadata {
+                        symbol_key: None,
+                        parser_version: &diagnostic.parser_version,
+                        query_pack_version: &diagnostic.query_pack_version,
+                        freshness: &diagnostic.freshness,
+                    },
+                    &diagnostic.diagnostic,
+                ));
+            }
         }
     }
 
@@ -387,23 +453,31 @@ fn context_diagnostic_json(
     repo_id: &str,
     base_revision: &str,
     overlay: Option<&CodeWorkspaceOverlay>,
-    symbol: &CodeSymbolRecord,
+    path: &str,
+    metadata: ContextDiagnosticMetadata<'_>,
     diagnostic: &CodeDiagnostic,
 ) -> serde_json::Value {
     serde_json::json!({
         "kind": "diagnostic",
         "repository": repo_id,
-        "path": symbol.path,
-        "symbolKey": symbol.symbol_key,
+        "path": path,
+        "symbolKey": metadata.symbol_key,
         "span": context_span_json(&diagnostic.span),
         "message": diagnostic.message,
         "diagnosticKind": diagnostic.kind,
         "severity": diagnostic.severity,
+        "parserVersion": metadata.parser_version,
+        "queryPackVersion": metadata.query_pack_version,
         "baseRevision": base_revision,
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
-        "freshness": symbol.freshness,
+        "provenance": if is_live_overlay_path(overlay, path) {
+            "workspace_overlay"
+        } else {
+            "indexed_baseline"
+        },
+        "freshness": metadata.freshness,
         "sourceRef": context_source_ref(
-            &symbol.path,
+            path,
             diagnostic.span.start_line,
             diagnostic.span.start_col,
             diagnostic.span.end_line,
@@ -421,6 +495,119 @@ struct CodeGraphContextSelectors<'a> {
 struct CodeGraphContextBounds {
     depth: usize,
     limit: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ContextDiagnostic {
+    path: String,
+    diagnostic: CodeDiagnostic,
+    parser_version: String,
+    query_pack_version: String,
+    freshness: String,
+}
+
+struct ContextDiagnosticMetadata<'a> {
+    symbol_key: Option<&'a str>,
+    parser_version: &'a str,
+    query_pack_version: &'a str,
+    freshness: &'a str,
+}
+
+fn query_context_diagnostics_for_path(
+    config: &MemoryConfig,
+    connection: &Connection,
+    repo_id: &str,
+    revision: &str,
+    path: &str,
+    limit: usize,
+) -> Result<(Vec<ContextDiagnostic>, bool), MemoryError> {
+    let path_prefix = format!("{path}/%");
+    let fetch_limit = limit.saturating_add(1) as i64;
+    let rows = if code_diagnostic_revisions_read_model_ready(connection, &config.index_path)? {
+        let mut statement = connection
+            .prepare(
+                "SELECT path, kind, severity, message, start_line, start_col, end_line, end_col, parser_version, query_pack_version, freshness FROM code_diagnostic_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness = 'current' AND NOT worktree_dirty AND (path = ? OR path LIKE ?) ORDER BY path, start_line, start_col, diagnostic_id LIMIT ?",
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map(
+                params![repo_id, revision, path, path_prefix, fetch_limit],
+                |row| {
+                    Ok(ContextDiagnostic {
+                        path: row.get(0)?,
+                        diagnostic: CodeDiagnostic {
+                            kind: row.get(1)?,
+                            severity: row.get(2)?,
+                            message: row.get(3)?,
+                            span: CodeSpan {
+                                start_line: row.get::<_, i64>(4)? as usize,
+                                start_col: row.get::<_, i64>(5)? as usize,
+                                end_line: row.get::<_, i64>(6)? as usize,
+                                end_col: row.get::<_, i64>(7)? as usize,
+                            },
+                        },
+                        parser_version: row.get(8)?,
+                        query_pack_version: row.get(9)?,
+                        freshness: row.get(10)?,
+                    })
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    } else {
+        let mut statement = connection
+            .prepare(
+                "SELECT path, kind, severity, message, start_line, start_col, end_line, end_col, parser_version, query_pack_version, freshness FROM code_diagnostics WHERE repo_id = ? AND commit_sha = ? AND freshness = 'current' AND NOT worktree_dirty AND (path = ? OR path LIKE ?) ORDER BY path, start_line, start_col, diagnostic_id LIMIT ?",
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map(
+                params![repo_id, revision, path, path_prefix, fetch_limit],
+                |row| {
+                    Ok(ContextDiagnostic {
+                        path: row.get(0)?,
+                        diagnostic: CodeDiagnostic {
+                            kind: row.get(1)?,
+                            severity: row.get(2)?,
+                            message: row.get(3)?,
+                            span: CodeSpan {
+                                start_line: row.get::<_, i64>(4)? as usize,
+                                start_col: row.get::<_, i64>(5)? as usize,
+                                end_line: row.get::<_, i64>(6)? as usize,
+                                end_col: row.get::<_, i64>(7)? as usize,
+                            },
+                        },
+                        parser_version: row.get(8)?,
+                        query_pack_version: row.get(9)?,
+                        freshness: row.get(10)?,
+                    })
+                },
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    };
+    let dropped = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), dropped))
 }
 
 fn query_context_symbols_for_revision(
@@ -868,6 +1055,8 @@ struct WorkspaceDocumentRecords {
     symbols: Vec<CodeSymbolRecord>,
     edges: Vec<CodeEdgeRecord>,
     diagnostics: Vec<CodeDiagnostic>,
+    parser_version: String,
+    query_pack_version: String,
 }
 
 type WorkspaceLiveChangedRecords = (
@@ -1390,6 +1579,7 @@ pub fn code_graph_workspace_overlay(
         .map(|edge| (edge.edge_id.clone(), edge))
         .collect::<BTreeMap<_, _>>();
     let mut diagnostics = BTreeMap::<String, Vec<CodeDiagnostic>>::new();
+    let mut diagnostic_metadata = BTreeMap::<String, (String, String)>::new();
     let mut unanalyzed_files = BTreeSet::new();
     let mut remaining_files = config.code_intel.ast.max_files_per_request;
 
@@ -1426,6 +1616,10 @@ pub fn code_graph_workspace_overlay(
         symbols.retain(|_, symbol| symbol.path != *path);
         edges.retain(|_, edge| edge.path != *path);
         diagnostics.insert(path.clone(), records.diagnostics);
+        diagnostic_metadata.insert(
+            path.clone(),
+            (records.parser_version.clone(), records.query_pack_version.clone()),
+        );
         for symbol in records.symbols {
             symbols.insert(symbol.symbol_key.clone(), symbol);
         }
@@ -1449,6 +1643,155 @@ pub fn code_graph_workspace_overlay(
         tombstones,
         unanalyzed_files: unanalyzed_files.into_iter().collect(),
         diagnostics,
+        diagnostic_metadata,
+        retrieval_dropped: 0,
+    })
+}
+
+pub fn code_graph_workspace_context_overlay(
+    config: &MemoryConfig,
+    repo_id: &str,
+    workspace_path: &Path,
+    run_id: &str,
+    base_revision: &str,
+    options: &CodeGraphContextQuery,
+) -> Result<CodeWorkspaceOverlay, CodeGraphProjectionError> {
+    let connection = open_workspace_graph_connection(config, repo_id, workspace_path, base_revision)?;
+    let path = options
+        .path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_code_path)
+        .transpose()
+        .map_err(CodeGraphProjectionError::InvalidRequest)?;
+    let query = options
+        .query
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let symbol_selector = options
+        .symbol
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let depth = options.depth.min(8);
+    let limit = options.limit.clamp(1, CODE_GRAPH_MAX_RECORDS);
+    let (mut base_symbols, mut retrieval_dropped) = query_context_symbols_for_revision(
+        config,
+        &connection,
+        repo_id,
+        base_revision,
+        CodeGraphContextSelectors {
+            path: path.as_deref(),
+            query: query.as_deref(),
+            symbol: symbol_selector.as_deref(),
+        },
+        limit,
+    )?;
+    let seed_keys = base_symbols.keys().cloned().collect::<BTreeSet<_>>();
+    let (base_edges, dropped) = query_context_edges_and_neighbors(
+        config,
+        &connection,
+        repo_id,
+        base_revision,
+        &mut base_symbols,
+        &seed_keys,
+        CodeGraphContextBounds { depth, limit },
+    )?;
+    retrieval_dropped = retrieval_dropped.saturating_add(dropped);
+
+    let head_revision = workspace_head_revision(workspace_path)?;
+    let (changed_paths, tombstones, workspace_content_digest) = workspace_changed_paths(
+        workspace_path,
+        base_revision,
+        config.code_intel.ast.max_file_bytes,
+    )?;
+    let mut symbols = base_symbols.clone();
+    let mut edges = base_edges
+        .iter()
+        .cloned()
+        .map(|edge| (edge.edge_id.clone(), edge))
+        .collect::<BTreeMap<_, _>>();
+    let mut diagnostics = BTreeMap::<String, Vec<CodeDiagnostic>>::new();
+    let mut diagnostic_metadata = BTreeMap::<String, (String, String)>::new();
+    let mut unanalyzed_files = BTreeSet::new();
+    let mut remaining_files = config.code_intel.ast.max_files_per_request;
+    let path_matches = |candidate: &str| {
+        path.as_deref().is_none_or(|selector| {
+            candidate == selector || candidate.starts_with(&format!("{selector}/"))
+        })
+    };
+
+    for changed_path in changed_paths.iter().filter(|candidate| path_matches(candidate)) {
+        if tombstones.contains(changed_path) {
+            symbols.retain(|_, symbol| symbol.path != *changed_path);
+            edges.retain(|_, edge| edge.path != *changed_path);
+            continue;
+        }
+        let has_baseline_record = symbols.values().any(|symbol| symbol.path == *changed_path);
+        if remaining_files == 0 {
+            if has_baseline_record || path.is_some() {
+                unanalyzed_files.insert(changed_path.clone());
+            }
+            continue;
+        }
+        let Some(file_path) = workspace_file_path(workspace_path, changed_path)? else {
+            if has_baseline_record || path.is_some() {
+                unanalyzed_files.insert(changed_path.clone());
+            }
+            continue;
+        };
+        let Some(records) = workspace_document_records(
+            config,
+            repo_id,
+            changed_path,
+            &file_path,
+        )? else {
+            if has_baseline_record || path.is_some() {
+                unanalyzed_files.insert(changed_path.clone());
+            }
+            continue;
+        };
+        remaining_files = remaining_files.saturating_sub(1);
+        symbols.retain(|_, symbol| symbol.path != *changed_path);
+        edges.retain(|_, edge| edge.path != *changed_path);
+        let WorkspaceDocumentRecords {
+            symbols: live_symbols,
+            edges: live_edges,
+            diagnostics: live_diagnostics,
+            parser_version,
+            query_pack_version,
+        } = records;
+        diagnostics.insert(changed_path.clone(), live_diagnostics);
+        diagnostic_metadata.insert(
+            changed_path.clone(),
+            (parser_version, query_pack_version),
+        );
+        for symbol in live_symbols {
+            symbols.insert(symbol.symbol_key.clone(), symbol);
+        }
+        for edge in live_edges {
+            edges.insert(edge.edge_id.clone(), edge);
+        }
+    }
+
+    re_resolve_workspace_edges(&mut edges, &symbols);
+    Ok(CodeWorkspaceOverlay {
+        run_id: run_id.to_string(),
+        base_revision: base_revision.to_string(),
+        head_revision,
+        workspace_content_digest,
+        base_paths: base_symbols.values().map(|symbol| symbol.path.clone()).collect(),
+        base_symbols,
+        base_edges,
+        symbols,
+        edges: edges.into_values().collect(),
+        changed_paths,
+        tombstones,
+        unanalyzed_files: unanalyzed_files.into_iter().collect(),
+        diagnostics,
+        diagnostic_metadata,
+        retrieval_dropped,
     })
 }
 
@@ -1576,6 +1919,8 @@ fn code_graph_workspace_focused_overlay(
                 tombstones,
                 unanalyzed_files: unanalyzed_files.into_iter().collect(),
                 diagnostics: BTreeMap::new(),
+                diagnostic_metadata: BTreeMap::new(),
+                retrieval_dropped: 0,
             })
         }
         CodeGraphMode::Neighborhood => {
@@ -1771,6 +2116,8 @@ fn code_graph_workspace_focused_overlay(
                 tombstones,
                 unanalyzed_files,
                 diagnostics: BTreeMap::new(),
+                diagnostic_metadata: BTreeMap::new(),
+                retrieval_dropped: 0,
             })
         }
         CodeGraphMode::Atlas => unreachable!("focused overlay only handles file and neighborhood modes"),
@@ -2452,6 +2799,8 @@ fn workspace_document_records(
         symbols,
         edges,
         diagnostics,
+        parser_version: document.parser_version,
+        query_pack_version: document.query_pack_version,
     };
     let mut cache = WORKSPACE_DOCUMENT_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))

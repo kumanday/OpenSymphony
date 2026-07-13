@@ -30,10 +30,10 @@ use crate::{
         CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
         MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
-        archive_blocking_warning_count, brief, code_graph_context, code_graph_workspace_overlay,
-        code_index_branch, context_for_issue_with_options, docs_for_area_with_scope,
-        expand_issue_range, export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle,
-        load_source_file, mark_archived, persist_code_intel_documents,
+        archive_blocking_warning_count, brief, code_graph_context,
+        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
+        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
+        lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
         persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
         plan_memory_init, refresh_memory_index, refresh_memory_index_from_okf,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
@@ -1950,26 +1950,29 @@ async fn call_code_graph_context_tool(
                     .unwrap_or("repo")
                     .to_string()
             });
+        let context_query = CodeGraphContextQuery {
+            repo_id: repo_id.clone(),
+            query: optional_string_arg(&arguments, "query"),
+            path: optional_string_arg(&arguments, "path"),
+            symbol: optional_string_arg(&arguments, "symbol"),
+            depth: usize_arg_allow_zero(&arguments, "depth", 1).min(8),
+            limit: usize_arg(&arguments, "limit", 20)
+                .min(config.code_intel.ast.max_matches_per_request.max(1)),
+        };
         let overlay = optional_string_arg(&arguments, "runId")
             .or_else(|| optional_string_arg(&arguments, "run"))
             .map(|run_id| {
-                resolve_code_graph_overlay(&config, workspace_root.as_deref(), &repo_id, &run_id)
+                resolve_code_graph_overlay(
+                    &config,
+                    workspace_root.as_deref(),
+                    &repo_id,
+                    &run_id,
+                    &context_query,
+                )
             })
             .transpose()?;
-        code_graph_context(
-            &config,
-            CodeGraphContextQuery {
-                repo_id,
-                query: optional_string_arg(&arguments, "query"),
-                path: optional_string_arg(&arguments, "path"),
-                symbol: optional_string_arg(&arguments, "symbol"),
-                depth: usize_arg_allow_zero(&arguments, "depth", 1).min(8),
-                limit: usize_arg(&arguments, "limit", 20)
-                    .min(config.code_intel.ast.max_matches_per_request.max(1)),
-            },
-            overlay.as_ref(),
-        )
-        .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+        code_graph_context(&config, context_query, overlay.as_ref())
+            .map_err(|error| MemoryError::InvalidInput(error.to_string()))
     })
     .await
 }
@@ -1979,6 +1982,7 @@ fn resolve_code_graph_overlay(
     workspace_root: Option<&Path>,
     repo_id: &str,
     run_id: &str,
+    context_query: &CodeGraphContextQuery,
 ) -> Result<CodeWorkspaceOverlay, MemoryError> {
     let workspace_root = workspace_root.ok_or_else(|| {
         MemoryError::InvalidInput(
@@ -2047,8 +2051,15 @@ fn resolve_code_graph_overlay(
     let branch = code_index_branch(&config.repo_root)
         .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
     let base_revision = workspace_merge_base(&workspace_path, &branch)?;
-    code_graph_workspace_overlay(config, repo_id, &workspace_path, run_id, &base_revision)
-        .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+    code_graph_workspace_context_overlay(
+        config,
+        repo_id,
+        &workspace_path,
+        run_id,
+        &base_revision,
+        context_query,
+    )
+    .map_err(|error| MemoryError::InvalidInput(error.to_string()))
 }
 
 fn workspace_merge_base(workspace_path: &Path, branch: &str) -> Result<String, MemoryError> {
@@ -5004,10 +5015,10 @@ mod tests {
         resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
-        CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
-        CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus, MemoryConfig,
-        MemoryError, code_symbol_detail, code_symbol_neighborhood, code_symbols_containing_span,
-        compare_code_symbols, persist_code_intel_documents,
+        CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
+        CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
+        MemoryConfig, MemoryError, code_symbol_detail, code_symbol_neighborhood,
+        code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
     };
     use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -5334,8 +5345,40 @@ mod tests {
                 .expect("diagnostic evidence")
                 .iter()
                 .any(|item| item["kind"] == "diagnostic"
-                    && item["provenance"].is_null()
+                    && item["provenance"] == "workspace_overlay"
+                    && item["parserVersion"].is_string()
+                    && item["queryPackVersion"].is_string()
                     && item["overlayDigest"].is_string())
+        );
+
+        std::fs::write(workspace.join("src/lib.rs"), "let = ;\n")
+            .expect("workspace diagnostic-only edit");
+        let diagnostic_only = call_code_graph_context_tool(
+            config.clone(),
+            json!({
+                "repository": repo_id,
+                "path": "src/lib.rs",
+                "runId": "COE-544",
+                "depth": 0,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("diagnostic-only overlay graph context");
+        assert!(
+            diagnostic_only["evidence"]
+                .as_array()
+                .expect("diagnostic-only evidence")
+                .iter()
+                .any(|item| {
+                    item["kind"] == "diagnostic"
+                        && item["path"] == "src/lib.rs"
+                        && item["symbolKey"].is_null()
+                        && item["provenance"] == "workspace_overlay"
+                        && item["parserVersion"].is_string()
+                        && item["queryPackVersion"].is_string()
+                })
         );
 
         std::fs::write(
@@ -5374,10 +5417,19 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn code_graph_context_rejects_foreign_and_symlinked_workspaces() {
         let repo = TempDir::new().expect("repo");
         let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let context_query = CodeGraphContextQuery {
+            repo_id: "repo".to_string(),
+            query: Some("answer".to_string()),
+            path: None,
+            symbol: None,
+            depth: 0,
+            limit: 1,
+        };
         let workspace_root = TempDir::new().expect("workspace root");
         let workspace = workspace_root.path().join("COE-544");
         std::fs::create_dir_all(workspace.join(".opensymphony")).expect("metadata");
@@ -5398,18 +5450,28 @@ mod tests {
             .expect("manifest json"),
         )
         .expect("manifest");
-        let foreign =
-            resolve_code_graph_overlay(&config, Some(workspace_root.path()), "repo", "COE-544")
-                .expect_err("foreign workspace must be rejected");
+        let foreign = resolve_code_graph_overlay(
+            &config,
+            Some(workspace_root.path()),
+            "repo",
+            "COE-544",
+            &context_query,
+        )
+        .expect_err("foreign workspace must be rejected");
         assert!(foreign.to_string().contains("ownership"));
 
         std::fs::remove_dir_all(&workspace).expect("remove foreign workspace");
         let symlink_target = TempDir::new().expect("symlink target");
         std::fs::create_dir_all(symlink_target.path()).expect("symlink target directory");
         std::os::unix::fs::symlink(symlink_target.path(), &workspace).expect("workspace symlink");
-        let symlinked =
-            resolve_code_graph_overlay(&config, Some(workspace_root.path()), "repo", "COE-544")
-                .expect_err("symlinked workspace must be rejected");
+        let symlinked = resolve_code_graph_overlay(
+            &config,
+            Some(workspace_root.path()),
+            "repo",
+            "COE-544",
+            &context_query,
+        )
+        .expect_err("symlinked workspace must be rejected");
         assert!(symlinked.to_string().contains("symlink"));
     }
 
