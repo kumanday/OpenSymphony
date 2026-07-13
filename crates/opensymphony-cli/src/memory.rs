@@ -47,7 +47,7 @@ use crate::{
     },
     opensymphony_workflow::WorkflowDefinition,
     opensymphony_workspace::{
-        CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig,
+        CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
         workspace_path_for_root,
     },
 };
@@ -1992,18 +1992,57 @@ fn resolve_code_graph_overlay(
                 path: workspace_root.to_path_buf(),
                 source,
             })?;
-    let workspace_path = workspace_path_for_root(&workspace_root, run_id)
-        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?
-        .canonicalize()
-        .map_err(|source| MemoryError::ResolvePath {
-            path: workspace_root.join(run_id),
-            source,
-        })?;
+    let workspace_candidate = workspace_path_for_root(&workspace_root, run_id)
+        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+    if let Ok(metadata) = fs::symlink_metadata(&workspace_candidate)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace root must not be a symlink".to_string(),
+        ));
+    }
+    let workspace_path =
+        workspace_candidate
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: workspace_candidate.clone(),
+                source,
+            })?;
     if !workspace_path.starts_with(&workspace_root) {
         return Err(MemoryError::PathOutsideRepo {
             path: workspace_path,
             repo_root: workspace_root,
         });
+    }
+    let manifest_path = workspace_path.join(".opensymphony/issue.json");
+    let manifest = fs::read_to_string(&manifest_path).map_err(|source| MemoryError::ReadFile {
+        path: manifest_path.clone(),
+        source,
+    })?;
+    let manifest: IssueManifest = serde_json::from_str(&manifest).map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "invalid run workspace ownership manifest: {source}"
+        ))
+    })?;
+    let workspace_key = workspace_candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let manifest_workspace_path =
+        manifest
+            .workspace_path
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: manifest.workspace_path.clone(),
+                source,
+            })?;
+    if (manifest.identifier != run_id && manifest.issue_id != run_id)
+        || manifest.sanitized_workspace_key != workspace_key
+        || manifest_workspace_path != workspace_path
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace ownership manifest does not match the requested run".to_string(),
+        ));
     }
     let branch = code_index_branch(&config.repo_root)
         .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
@@ -4961,8 +5000,8 @@ mod tests {
         call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
         context_source_from_mcp, memory_server_health_payload, memory_tool_descriptors,
         origin_is_localhost, parse_remote_memory_response, remote_memory_tool_token,
-        replace_or_append_managed_section, required_access_for_request, resolve_code_intel_repo,
-        trim_auto_memory_status_log,
+        replace_or_append_managed_section, required_access_for_request, resolve_code_graph_overlay,
+        resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
@@ -4970,7 +5009,9 @@ mod tests {
         MemoryError, code_symbol_detail, code_symbol_neighborhood, code_symbols_containing_span,
         compare_code_symbols, persist_code_intel_documents,
     };
+    use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
+    use chrono::Utc;
     use duckdb::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
@@ -5217,6 +5258,24 @@ mod tests {
                 .expect("git clone")
                 .success()
         );
+        std::fs::create_dir_all(workspace.join(".opensymphony")).expect("workspace metadata");
+        let now = Utc::now();
+        std::fs::write(
+            workspace.join(".opensymphony/issue.json"),
+            serde_json::to_vec(&IssueManifest {
+                issue_id: "issue-544".to_string(),
+                identifier: "COE-544".to_string(),
+                title: "Indexed Agent Code Context And Retrieval".to_string(),
+                current_state: "started".to_string(),
+                sanitized_workspace_key: "COE-544".to_string(),
+                workspace_path: workspace.clone(),
+                created_at: now,
+                updated_at: now,
+                last_seen_tracker_refresh_at: None,
+            })
+            .expect("workspace manifest json"),
+        )
+        .expect("workspace manifest");
         std::fs::write(
             workspace.join("src/lib.rs"),
             "pub fn replacement() -> u8 { 43 }\n",
@@ -5253,6 +5312,34 @@ mod tests {
 
         std::fs::write(
             workspace.join("src/lib.rs"),
+            "pub fn replacement() -> u8 { let = ; 43 }\n",
+        )
+        .expect("workspace diagnostic edit");
+        let diagnostics = call_code_graph_context_tool(
+            config.clone(),
+            json!({
+                "repository": repo_id,
+                "symbol": "replacement",
+                "runId": "COE-544",
+                "depth": 0,
+                "limit": 10
+            }),
+            Some(workspaces.path().to_path_buf()),
+        )
+        .await
+        .expect("overlay diagnostic graph context");
+        assert!(
+            diagnostics["evidence"]
+                .as_array()
+                .expect("diagnostic evidence")
+                .iter()
+                .any(|item| item["kind"] == "diagnostic"
+                    && item["provenance"].is_null()
+                    && item["overlayDigest"].is_string())
+        );
+
+        std::fs::write(
+            workspace.join("src/lib.rs"),
             "pub fn stale_baseline_should_not_survive() {}\n".repeat(64),
         )
         .expect("oversized workspace edit");
@@ -5276,11 +5363,7 @@ mod tests {
                 .as_array()
                 .expect("unanalyzed evidence")
                 .iter()
-                .any(|item| {
-                    item["kind"] == "symbol"
-                        && item["name"] == "answer"
-                        && item["provenance"] == "indexed_baseline"
-                })
+                .all(|item| !(item["kind"] == "symbol" && item["name"] == "answer"))
         );
         assert!(
             unanalyzed["unanalyzedFiles"]
@@ -5289,6 +5372,45 @@ mod tests {
                 .iter()
                 .any(|path| path == "src/lib.rs")
         );
+    }
+
+    #[test]
+    fn code_graph_context_rejects_foreign_and_symlinked_workspaces() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let workspace_root = TempDir::new().expect("workspace root");
+        let workspace = workspace_root.path().join("COE-544");
+        std::fs::create_dir_all(workspace.join(".opensymphony")).expect("metadata");
+        let now = Utc::now();
+        std::fs::write(
+            workspace.join(".opensymphony/issue.json"),
+            serde_json::to_vec(&IssueManifest {
+                issue_id: "issue-544".to_string(),
+                identifier: "COE-545".to_string(),
+                title: "foreign".to_string(),
+                current_state: "started".to_string(),
+                sanitized_workspace_key: "COE-544".to_string(),
+                workspace_path: workspace.clone(),
+                created_at: now,
+                updated_at: now,
+                last_seen_tracker_refresh_at: None,
+            })
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+        let foreign =
+            resolve_code_graph_overlay(&config, Some(workspace_root.path()), "repo", "COE-544")
+                .expect_err("foreign workspace must be rejected");
+        assert!(foreign.to_string().contains("ownership"));
+
+        std::fs::remove_dir_all(&workspace).expect("remove foreign workspace");
+        let symlink_target = TempDir::new().expect("symlink target");
+        std::fs::create_dir_all(symlink_target.path()).expect("symlink target directory");
+        std::os::unix::fs::symlink(symlink_target.path(), &workspace).expect("workspace symlink");
+        let symlinked =
+            resolve_code_graph_overlay(&config, Some(workspace_root.path()), "repo", "COE-544")
+                .expect_err("symlinked workspace must be rejected");
+        assert!(symlinked.to_string().contains("symlink"));
     }
 
     #[tokio::test]
