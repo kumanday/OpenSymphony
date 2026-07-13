@@ -624,6 +624,9 @@ pub fn index_code_repository(
     config: &MemoryConfig,
     repo_id: &str,
 ) -> Result<CodeIndexReport, CodeGraphProjectionError> {
+    if !config.enabled {
+        return index_code_repository_at(config, repo_id, None);
+    }
     let target = code_index_target(config)?;
     index_code_repository_at(config, repo_id, target)
 }
@@ -633,6 +636,25 @@ pub fn index_code_repository_at(
     repo_id: &str,
     target: Option<(String, String)>,
 ) -> Result<CodeIndexReport, CodeGraphProjectionError> {
+    if !config.enabled {
+        let indexed_at = Utc::now();
+        return Ok(CodeIndexReport {
+            schema_version: SchemaVersion::v1(),
+            repo_id: repo_id.to_string(),
+            status: CodeIndexStatus::Unavailable,
+            head_revision: None,
+            parsed_files: 0,
+            persisted_documents: 0,
+            persisted_symbols: 0,
+            persisted_edges: 0,
+            persisted_diagnostics: 0,
+            stale_rows: 0,
+            skipped_files: Vec::new(),
+            diagnostics: vec!["memory is disabled in configuration".to_string()],
+            cursor: code_graph_cursor(repo_id, indexed_at),
+            indexed_at,
+        });
+    }
     let _guard = CODE_INDEX_WRITE_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -708,6 +730,7 @@ pub fn index_code_repository_at(
     let mut stale_rows = 0;
     let mut deleted_files = 0;
     let mut deleted_paths = Vec::new();
+    let mut edge_refresh_paths = Vec::new();
 
     for (path, mode, blob_id) in paths {
         let skipped_directory = path.components().any(|component| {
@@ -817,6 +840,16 @@ pub fn index_code_repository_at(
         let content_sha256 = sha256_bytes_hex(&bytes);
         let versions = current_parser_versions(language);
         let current_parser_version = format!("{}:{}", versions.grammar, versions.tree_sitter);
+        let edge_limit_reparse = previous_files
+            .get(&relative_display)
+            .is_some_and(|previous_file| {
+                previous_file.analyzed
+                    && previous_file.content_sha256 == content_sha256
+                    && previous_file.language == language_id
+                    && previous_file.parser_version == current_parser_version
+                    && previous_file.query_pack_version == versions.query_pack
+                    && !reuse_edge_limits
+            });
         if let Some(previous_file) = previous_files.get(&relative_display)
             && previous_file.content_sha256 == content_sha256
             && previous_file.language == language_id
@@ -968,7 +1001,7 @@ pub fn index_code_repository_at(
             format!("{relative_display}: {} at {}", diagnostic.node_kind, diagnostic.rendered_span)
         }));
         current_files.insert(
-            relative_display,
+            relative_display.clone(),
             CodeSnapshotFile {
                 language: language_id.clone(),
                 content_sha256: content_sha256.clone(),
@@ -988,6 +1021,9 @@ pub fn index_code_repository_at(
             skip_reason: None,
         });
         documents.push(document);
+        if edge_limit_reparse {
+            edge_refresh_paths.push(relative_display.clone());
+        }
         parsed_files += 1;
     }
 
@@ -1018,11 +1054,15 @@ pub fn index_code_repository_at(
             false,
         )?;
     }
-    persist_code_snapshot_membership(config, repo_id, &commit_sha, &memberships)?;
+    let run_id = indexed_at.to_rfc3339();
+    persist_code_snapshot_membership(config, repo_id, &commit_sha, &run_id, &memberships)?;
     let mut promotion_paths = Vec::new();
     for file in &memberships {
-        if !current_code_snapshot_file_matches(config, repo_id, file)? {
-            promotion_paths.push(file.path.to_string_lossy().to_string());
+        let path = file.path.to_string_lossy().to_string();
+        if !edge_refresh_paths.iter().any(|candidate| candidate == &path)
+            && !current_code_snapshot_file_matches(config, repo_id, file)?
+        {
+            promotion_paths.push(path);
         }
     }
     for path in deleted_paths {
@@ -1045,6 +1085,7 @@ pub fn index_code_repository_at(
         repo_id,
         &commit_sha,
         &promotion_paths,
+        &edge_refresh_paths,
         completed_state,
     )?;
     let analyzed_documents = memberships.iter().filter(|file| file.analyzed).count();
@@ -1449,6 +1490,15 @@ fn discard_staged_code_index_rows(
                 source,
             }))?;
     }
+    transaction
+        .execute(
+            "DELETE FROM code_snapshot_membership_staging WHERE repo_id = ?",
+            params![repo_id],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
     transaction.commit().map_err(|source| {
         CodeGraphProjectionError::Memory(MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -1462,6 +1512,7 @@ fn persist_code_snapshot_membership(
     config: &MemoryConfig,
     repo_id: &str,
     commit_sha: &str,
+    run_id: &str,
     files: &[CodeSnapshotMembershipInput],
 ) -> Result<(), CodeGraphProjectionError> {
     for batch in files.chunks(256) {
@@ -1481,8 +1532,9 @@ fn persist_code_snapshot_membership(
         for file in batch {
             transaction
                 .execute(
-                    "INSERT OR REPLACE INTO code_snapshot_membership (repo_id, commit_sha, path, language, content_sha256, parser_version, query_pack_version, analyzed, skip_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO code_snapshot_membership_staging (run_id, repo_id, commit_sha, path, language, content_sha256, parser_version, query_pack_version, analyzed, skip_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
+                        run_id,
                         repo_id,
                         commit_sha,
                         file.path.to_string_lossy().to_string(),
@@ -1514,6 +1566,7 @@ fn promote_staged_code_snapshot(
     repo_id: &str,
     commit_sha: &str,
     changed_paths: &[String],
+    edge_refresh_paths: &[String],
     completed_state: CodeSnapshotState<'_>,
 ) -> Result<usize, CodeGraphProjectionError> {
     let mut connection = open_index(config)?;
@@ -1569,6 +1622,21 @@ fn promote_staged_code_snapshot(
                 }))?;
         }
     }
+    for path in edge_refresh_paths {
+        for table in ["code_edges", "code_diagnostics"] {
+            stale_rows += transaction
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'"
+                    ),
+                    params![repo_id, path],
+                )
+                .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                }))?;
+        }
+    }
     for table in [
         "code_documents",
         "code_document_revisions",
@@ -1591,6 +1659,34 @@ fn promote_staged_code_snapshot(
                 source,
             }))?;
     }
+    let run_id = completed_state.indexed_at.to_rfc3339();
+    transaction
+        .execute(
+            "DELETE FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ?",
+            params![repo_id, commit_sha],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
+    transaction
+        .execute(
+            "INSERT INTO code_snapshot_membership (repo_id, commit_sha, path, language, content_sha256, parser_version, query_pack_version, analyzed, skip_reason) SELECT repo_id, commit_sha, path, language, content_sha256, parser_version, query_pack_version, analyzed, skip_reason FROM code_snapshot_membership_staging WHERE run_id = ? AND repo_id = ? AND commit_sha = ?",
+            params![&run_id, repo_id, commit_sha],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
+    transaction
+        .execute(
+            "DELETE FROM code_snapshot_membership_staging WHERE run_id = ?",
+            params![&run_id],
+        )
+        .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }))?;
     transaction
         .execute(
             "UPDATE code_index_snapshots SET target_branch = ?, status = ?, total_files = ?, parsed_files = ?, skipped_files = ?, deleted_files = ?, config_fingerprint = ?, indexed_at = ? WHERE repo_id = ? AND commit_sha = ?",
@@ -3570,6 +3666,7 @@ mod code_graph_tests {
     use super::{
         code_citation_matches_symbol, code_graph_diff_overlay, code_graph_repos,
         code_index_document, code_symbol_span_matches, has_work_item_scope,
+        CodeSnapshotMembershipInput,
         index_code_repository, index_code_repository_at, open_existing_index_read_only,
         repository_scope_matches,
     };
@@ -3676,6 +3773,52 @@ mod code_graph_tests {
             )
             .expect("target snapshot edge should be current");
         assert_eq!(current_edge_commit, baseline);
+        drop(connection);
+
+        let current_membership_parser: String = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist")
+            .query_row(
+                "SELECT parser_version FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? AND path = ?",
+                duckdb::params!["fixture-repo", baseline, "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("current membership should persist");
+        super::persist_code_snapshot_membership(
+            &config,
+            "fixture-repo",
+            &baseline,
+            "interrupted-membership-run",
+            &[CodeSnapshotMembershipInput {
+                path: PathBuf::from("src/lib.rs"),
+                language: "rust".to_string(),
+                content_sha256: "replacement-hash".to_string(),
+                parser_version: "replacement-parser".to_string(),
+                query_pack_version: "replacement-query-pack".to_string(),
+                analyzed: true,
+                skip_reason: None,
+            }],
+        )
+        .expect("membership should stage separately from the completed snapshot");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should open")
+            .expect("index should exist");
+        let preserved_membership_parser: String = connection
+            .query_row(
+                "SELECT parser_version FROM code_snapshot_membership WHERE repo_id = ? AND commit_sha = ? AND path = ?",
+                duckdb::params!["fixture-repo", baseline, "src/lib.rs"],
+                |row| row.get(0),
+            )
+            .expect("completed membership should remain readable");
+        let staged_membership_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_snapshot_membership_staging WHERE run_id = ?",
+                duckdb::params!["interrupted-membership-run"],
+                |row| row.get(0),
+            )
+            .expect("staged membership should be isolated");
+        assert_eq!(preserved_membership_parser, current_membership_parser);
+        assert_eq!(staged_membership_count, 1);
         drop(connection);
 
         persist_code_intel_documents(
@@ -4116,12 +4259,12 @@ mod code_graph_tests {
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-m", "bounded edges"]);
         let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
-        config.code_intel.ast.max_matches_per_request = 0;
-        let first = index_code_repository(&config, "edge-limit-repo").expect("limited index");
-
-        git(repo.path(), &["commit", "--allow-empty", "-m", "raise edge limit"]);
         config.code_intel.ast.max_matches_per_request = 100;
-        let second = index_code_repository(&config, "edge-limit-repo").expect("expanded index");
+        let first = index_code_repository(&config, "edge-limit-repo").expect("expanded index");
+
+        git(repo.path(), &["commit", "--allow-empty", "-m", "lower edge limit"]);
+        config.code_intel.ast.max_matches_per_request = 0;
+        let second = index_code_repository(&config, "edge-limit-repo").expect("limited index");
         assert!(
             first.parsed_files > 0,
             "first parsed {}",
@@ -4138,7 +4281,39 @@ mod code_graph_tests {
                 |row| row.get(0),
             )
             .expect("edge count should be readable");
-        assert!(current_edges > 0);
+        assert_eq!(current_edges, 0);
+        let stale_edges: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE repo_id = ? AND path = ? AND freshness = 'stale'",
+                duckdb::params!["edge-limit-repo", "src.rs"],
+                |row| row.get(0),
+            )
+            .expect("stale edge count should be readable");
+        assert!(stale_edges > 0);
+    }
+
+    #[test]
+    fn code_index_is_unavailable_without_opening_disabled_memory() {
+        let repo = TempDir::new().expect("repository tempdir");
+        fs::write(repo.path().join("src.rs"), "pub fn source() {}\n").expect("source");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.enabled = false;
+
+        let report = index_code_repository_at(
+            &config,
+            "disabled-memory-repo",
+            Some(("develop".to_string(), "commit".to_string())),
+        )
+        .expect("disabled memory should return an unavailable report");
+        assert_eq!(
+            report.status,
+            crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Unavailable
+        );
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("memory is disabled")));
+        assert!(!config.index_path.exists());
     }
 
     #[test]

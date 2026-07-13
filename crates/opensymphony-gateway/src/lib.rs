@@ -48,8 +48,8 @@ use crate::opensymphony_memory::{
     MemoryGraphProjectionError, code_file_outline_from_source, code_graph_diff_overlay,
     code_graph_index_report, code_graph_repos, code_graph_snapshot, code_graph_symbol_detail,
     code_graph_updated_event, code_index_repository_is_git, code_index_target,
-    index_code_repository, index_code_repository_at, memory_completed_task_rows,
-    memory_concept_detail, memory_graph_bundles, memory_graph_communities_with_options,
+    index_code_repository_at, memory_completed_task_rows, memory_concept_detail,
+    memory_graph_bundles, memory_graph_communities_with_options,
     memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
@@ -1682,11 +1682,50 @@ async fn index_code_repo(
     AxumPath(repo_id): AxumPath<String>,
 ) -> Result<Json<CodeIndexReport>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_code_memory(&state)?.clone();
-    let Some((target_branch, head_revision)) =
-        code_index_target(&config).map_err(code_graph_error)?
-    else {
-        if code_index_repository_is_git(&config) {
-            let report = index_code_repository(&config, &repo_id).map_err(code_graph_error)?;
+    if !config.enabled {
+        let report = index_code_repository_at(&config, &repo_id, None).map_err(code_graph_error)?;
+        append_code_index_status_event(&state.journal, &repo_id, &report)
+            .await
+            .map_err(|_| {
+                code_graph_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "event_journal_error",
+                    "failed to append code index unavailable event",
+                )
+            })?;
+        return Ok(Json(report));
+    }
+    let preflight_config = config.clone();
+    let (target, repository_is_git) = tokio::task::spawn_blocking(move || {
+        let target = code_index_target(&preflight_config)?;
+        let repository_is_git = code_index_repository_is_git(&preflight_config);
+        Ok::<_, CodeGraphProjectionError>((target, repository_is_git))
+    })
+    .await
+    .map_err(|error| {
+        code_graph_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "code_index_preflight_failed",
+            &format!("code index preflight task failed: {error}"),
+        )
+    })?
+    .map_err(code_graph_error)?;
+    let Some((target_branch, head_revision)) = target else {
+        if repository_is_git {
+            let report_config = config.clone();
+            let report_repo_id = repo_id.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                index_code_repository_at(&report_config, &report_repo_id, None)
+            })
+            .await
+            .map_err(|error| {
+                code_graph_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "code_index_task_failed",
+                    &format!("code index task failed: {error}"),
+                )
+            })?
+            .map_err(code_graph_error)?;
             append_code_index_status_event(&state.journal, &repo_id, &report)
                 .await
                 .map_err(|_| {
@@ -1698,7 +1737,20 @@ async fn index_code_repo(
                 })?;
             return Ok(Json(report));
         }
-        let report = code_graph_index_report(&config, &repo_id).map_err(code_graph_error)?;
+        let report_config = config.clone();
+        let report_repo_id = repo_id.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            code_graph_index_report(&report_config, &report_repo_id)
+        })
+        .await
+        .map_err(|error| {
+            code_graph_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "code_index_report_failed",
+                &format!("code index report task failed: {error}"),
+            )
+        })?
+        .map_err(code_graph_error)?;
         if matches!(
             report.status,
             crate::opensymphony_gateway_schema::code_graph::CodeIndexStatus::Completed

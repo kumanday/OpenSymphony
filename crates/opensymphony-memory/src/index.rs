@@ -642,6 +642,19 @@ CREATE TABLE IF NOT EXISTS code_snapshot_membership (
   skip_reason TEXT,
   PRIMARY KEY (repo_id, commit_sha, path)
 );
+CREATE TABLE IF NOT EXISTS code_snapshot_membership_staging (
+  run_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  analyzed BOOLEAN NOT NULL,
+  skip_reason TEXT,
+  PRIMARY KEY (run_id, repo_id, commit_sha, path)
+);
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS symbol_key TEXT DEFAULT '';
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS container_chain TEXT DEFAULT '';
 UPDATE code_symbols SET container_chain = '' WHERE container_chain IS NULL;
@@ -682,6 +695,7 @@ CREATE INDEX IF NOT EXISTS idx_code_edge_revisions_target_key ON code_edge_revis
 CREATE INDEX IF NOT EXISTS idx_code_skipped_files_revision ON code_skipped_files(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostic_revisions_path ON code_diagnostic_revisions(repo_id, commit_sha, path);
+CREATE INDEX IF NOT EXISTS idx_code_snapshot_membership_staging_repo ON code_snapshot_membership_staging(repo_id, run_id);
 "#,
     ))?;
     for table in [
@@ -1038,28 +1052,20 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                 &diagnostic.start_byte.to_string(),
                 &diagnostic.end_byte.to_string(),
             ]);
-            let current_diagnostic_exists = if freshness == "staged" {
-                transaction
-                    .query_row(
-                        "SELECT 1 FROM code_diagnostics WHERE diagnostic_id = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
-                        params![&diagnostic_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?
-                    .is_some()
+            let read_model_diagnostic_id = if freshness == "staged" {
+                code_row_id(&[
+                    &diagnostic_id,
+                    batch.commit_sha.as_deref().unwrap_or(""),
+                    &indexed_at,
+                ])
             } else {
-                false
+                diagnostic_id.clone()
             };
-            if !current_diagnostic_exists {
-                transaction
+            transaction
                     .execute(
                         "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         params![
-                            &diagnostic_id,
+                            &read_model_diagnostic_id,
                             batch.repo_id,
                             batch.commit_sha.clone(),
                             worktree_dirty,
@@ -1081,11 +1087,10 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                             freshness,
                         ],
                     )
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?;
-            }
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
             if !batch.worktree_dirty
                 && let Some(commit_sha) = batch.commit_sha.as_deref()
             {
@@ -3284,13 +3289,21 @@ mod index_tests {
         assert_eq!(freshness, "current");
         let (commit_sha, freshness): (String, String) = connection
             .query_row(
-                "SELECT commit_sha, freshness FROM code_diagnostics WHERE repo_id = ? AND path = ?",
+                "SELECT commit_sha, freshness FROM code_diagnostics WHERE repo_id = ? AND path = ? AND freshness = 'current'",
                 params!["fixture-repo", "src/reused.rs"],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("current diagnostic should remain queryable");
         assert_eq!(commit_sha, "base-commit");
         assert_eq!(freshness, "current");
+        let staged_diagnostics: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_diagnostics WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'staged'",
+                params!["fixture-repo", "src/reused.rs", "next-commit"],
+                |row| row.get(0),
+            )
+            .expect("staged diagnostic should remain visible to promotion");
+        assert_eq!(staged_diagnostics, 1);
         drop(connection);
 
         persist_code_intel_documents_with_freshness(
