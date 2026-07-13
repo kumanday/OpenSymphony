@@ -1077,16 +1077,10 @@ pub fn code_graph_repos(
     include_stale: bool,
 ) -> Result<CodeRepoList, CodeGraphProjectionError> {
     let Some(connection) = open_existing_index_read_only(config)? else {
-        return Ok(CodeRepoList {
-            schema_version: SchemaVersion::v1(),
-            repos: Vec::new(),
-        });
+        return Ok(unindexed_code_repo_list(config));
     };
     if !code_documents_read_model_ready(&connection, &config.index_path)? {
-        return Ok(CodeRepoList {
-            schema_version: SchemaVersion::v1(),
-            repos: Vec::new(),
-        });
+        return Ok(unindexed_code_repo_list(config));
     }
 
     let freshness = code_freshness_filter(include_stale);
@@ -1239,10 +1233,43 @@ pub fn code_graph_repos(
         summaries.push(entry.into_summary());
     }
 
+    if summaries.is_empty() {
+        summaries.push(unindexed_code_repo_summary(config));
+    }
+
     Ok(CodeRepoList {
         schema_version: SchemaVersion::v1(),
         repos: summaries,
     })
+}
+
+fn unindexed_code_repo_list(config: &MemoryConfig) -> CodeRepoList {
+    CodeRepoList {
+        schema_version: SchemaVersion::v1(),
+        repos: vec![unindexed_code_repo_summary(config)],
+    }
+}
+
+fn unindexed_code_repo_summary(config: &MemoryConfig) -> CodeRepoSummary {
+    let repo_id = config
+        .repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repository")
+        .to_string();
+    CodeRepoSummary {
+        repo_id: repo_id.clone(),
+        display_root: repo_id,
+        languages: Vec::new(),
+        document_count: 0,
+        symbol_count: 0,
+        edge_count: 0,
+        freshness: CodeGraphFreshness::Unknown,
+        indexed_at: None,
+        head_revision: None,
+        worktree_dirty: false,
+    }
 }
 
 pub fn code_graph_snapshot(

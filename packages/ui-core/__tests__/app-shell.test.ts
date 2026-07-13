@@ -1576,6 +1576,118 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("indexes an empty repository from the Code Graph surface and refreshes on events", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+    const fixtureAdapter = createFixtureCodeGraphAdapter();
+    const indexedRepos = await fixtureAdapter.listRepos();
+    const emptyRepos: CodeRepoList = {
+      ...indexedRepos,
+      repos: indexedRepos.repos.map((repo) => ({
+        ...repo,
+        document_count: 0,
+        symbol_count: 0,
+        edge_count: 0,
+        freshness: "unknown" as const,
+        indexed_at: null,
+        head_revision: null,
+      })),
+    };
+    let indexed = false;
+    let indexCalls = 0;
+    const codeGraphAdapter = {
+      ...fixtureAdapter,
+      async listRepos() {
+        return indexed ? indexedRepos : emptyRepos;
+      },
+      async indexRepo(repoId: string) {
+        indexCalls += 1;
+        expect(repoId).toBe("opensymphony");
+        return {
+          schema_version: schemaVersionV1(),
+          repo_id: repoId,
+          status: "accepted" as const,
+          head_revision: "head-rev",
+          parsed_files: 0,
+          persisted_documents: 0,
+          persisted_symbols: 0,
+          persisted_edges: 0,
+          persisted_diagnostics: 0,
+          stale_rows: 0,
+          skipped_files: [],
+          diagnostics: ["index accepted"],
+          cursor: { sequence: 1, partition: "code-graph:opensymphony" },
+          indexed_at: "2026-07-13T00:00:00Z",
+        };
+      },
+    };
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport, codeGraphAdapter });
+
+    try {
+      await flushUntil(() => root.querySelector("[data-graph-view='code']") !== null);
+      (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-index']") !== null);
+      (root.querySelector("[data-testid='code-graph-index']") as HTMLButtonElement).click();
+      await flushUntil(() => indexCalls === 1);
+      const app = handle as unknown as { state: { codeGraph: { indexing: boolean; indexReport: { status: string } | null } } };
+      await flushUntil(() => app.state.codeGraph.indexReport?.status === "accepted");
+      expect(root.querySelector("[data-testid='code-graph-index-empty']")?.textContent).toContain("Indexing repository");
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 91, partition: "events" },
+        entity_ref: { kind: "repository", id: "opensymphony" },
+        event_kind: "code_index_progress",
+        emitted_at: "2026-07-13T19:10:00Z",
+        payload: {
+          schema_version: schemaVersionV1(),
+          repo_id: "opensymphony",
+          status: "progress",
+          head_revision: "head-rev",
+          parsed_files: 4,
+          persisted_documents: 4,
+          persisted_symbols: 8,
+          persisted_edges: 6,
+          persisted_diagnostics: 0,
+          stale_rows: 0,
+          skipped_files: ["src/generated.rs"],
+          diagnostics: ["one generated file skipped"],
+          cursor: { sequence: 2, partition: "code-graph:opensymphony" },
+          indexed_at: "2026-07-13T19:10:00Z",
+        },
+      });
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-index-coverage']")?.textContent?.includes("4 files") ?? false);
+      indexed = true;
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 92, partition: "events" },
+        entity_ref: { kind: "repository", id: "opensymphony" },
+        event_kind: "code_graph_updated",
+        emitted_at: "2026-07-13T19:11:00Z",
+        payload: {
+          schema_version: schemaVersionV1(),
+          repo_id: "opensymphony",
+          head_revision: "head-rev",
+          topology_delta_available: true,
+          cursor: { sequence: 3, partition: "code-graph:opensymphony" },
+          updated_at: "2026-07-13T19:11:00Z",
+        },
+      });
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-canvas']") !== null);
+      expect(indexCalls).toBe(1);
+      expect(app.state.codeGraph.stale).toBe(false);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
   it("recomputes Code Graph layout after the stage resizes", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

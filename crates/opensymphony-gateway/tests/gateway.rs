@@ -38,9 +38,10 @@ use opensymphony::opensymphony_gateway_schema::model_settings::{
 use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
 use opensymphony::opensymphony_memory::{
-    CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput, CodeIntelPersistBatch,
-    CodeIntelSkippedFileInput, CodeIntelSymbolInput, MemoryConfig, persist_code_intel_documents,
-    persist_code_intel_skipped_files, refresh_memory_index_from_okf,
+    CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput, CodeIntelEdgeInput,
+    CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput, MemoryConfig,
+    code_graph_context, code_graph_workspace_context_overlay, code_graph_workspace_diff_overlay,
+    persist_code_intel_documents, persist_code_intel_skipped_files, refresh_memory_index_from_okf,
 };
 use tokio::net::TcpListener;
 use url::Url;
@@ -2410,6 +2411,232 @@ async fn gateway_index_starts_target_branch_job_and_journals_completion() {
             .and_then(|payload| payload.get("status"))
             == Some(&serde_json::json!("completed"))
     }));
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_code_graph_bootstraps_empty_store_and_dirty_workspace_flow() {
+    let repo = tempfile::tempdir().expect("target repository");
+    std::fs::create_dir_all(repo.path().join("src/services")).expect("source directories");
+    std::fs::write(
+        repo.path().join("WORKFLOW.md"),
+        "## Branch target\n\nTarget branch: `develop`\n",
+    )
+    .expect("workflow marker");
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub mod app;\npub mod services { pub mod shared; }\n",
+    )
+    .expect("module root");
+    std::fs::write(repo.path().join("src/app.rs"), "pub fn run() {}\n")
+        .expect("application source");
+    std::fs::write(
+        repo.path().join("src/services/shared.rs"),
+        "pub fn helper() {}\n",
+    )
+    .expect("shared source");
+    run_git(repo.path(), &["init", "-b", "develop"]);
+    run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test User"]);
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "code graph baseline"]);
+    let base_revision = run_git(repo.path(), &["rev-parse", "HEAD"]);
+    let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+    let repo_id = repo
+        .path()
+        .file_name()
+        .expect("repository id")
+        .to_string_lossy()
+        .to_string();
+
+    let journal = opensymphony::opensymphony_domain::InMemoryEventJournal::new(100, 32);
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = GatewayServer::with_journal(
+        SnapshotStore::new(fixture_snapshot(0)),
+        journal.clone(),
+        broker,
+    )
+    .with_memory_config(Some(config.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server_task = tokio::spawn(async move {
+        server.serve(listener).await.expect("gateway should serve");
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}/api/v1/code");
+
+    let empty_repos = client
+        .get(format!("{base}/repos"))
+        .send()
+        .await
+        .expect("fetch empty code repos")
+        .json::<CodeRepoList>()
+        .await
+        .expect("decode empty code repos");
+    let empty_repo = empty_repos
+        .repos
+        .iter()
+        .find(|summary| summary.repo_id == repo_id)
+        .expect("configured repository should be discoverable before indexing");
+    assert_eq!(empty_repo.document_count, 0);
+
+    let accepted = client
+        .post(format!("{base}/repos/{repo_id}/index"))
+        .send()
+        .await
+        .expect("index empty code repo")
+        .json::<CodeIndexReport>()
+        .await
+        .expect("decode accepted index report");
+    assert_eq!(accepted.status, CodeIndexStatus::Accepted);
+    assert_eq!(accepted.repo_id, repo_id);
+
+    let mut completed = false;
+    for _ in 0..200 {
+        let events = journal.all_events().await;
+        completed = events.iter().any(|event| {
+            matches!(
+                event.kind,
+                opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeGraphUpdated { .. }
+            )
+        });
+        if completed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(completed, "index completion should refresh the code graph");
+    let events = journal.all_events().await;
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.kind,
+            opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeIndexProgress { .. }
+        ) && event
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("status"))
+            == Some(&serde_json::json!("progress"))
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.kind,
+            opensymphony::opensymphony_gateway_schema::event_journal::EventKind::CodeIndexProgress { .. }
+        ) && event
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("status"))
+            == Some(&serde_json::json!("completed"))
+    }));
+
+    let indexed_repos = client
+        .get(format!("{base}/repos"))
+        .send()
+        .await
+        .expect("refresh indexed code repos")
+        .json::<CodeRepoList>()
+        .await
+        .expect("decode indexed code repos");
+    let indexed_repo = indexed_repos
+        .repos
+        .iter()
+        .find(|summary| summary.repo_id == repo_id)
+        .expect("indexed repository should remain discoverable");
+    assert_eq!(
+        indexed_repo.head_revision.as_deref(),
+        Some(base_revision.as_str())
+    );
+    assert!(indexed_repo.document_count > 0);
+
+    let snapshot = client
+        .get(format!("{base}/repos/{repo_id}/graph?mode=atlas"))
+        .send()
+        .await
+        .expect("fetch indexed graph")
+        .json::<CodeGraphSnapshot>()
+        .await
+        .expect("decode indexed graph");
+    assert!(
+        !snapshot.nodes.is_empty(),
+        "indexed graph should be nonempty"
+    );
+
+    let context_query = CodeGraphContextQuery {
+        repo_id: repo_id.clone(),
+        query: Some("run".to_string()),
+        path: None,
+        symbol: None,
+        depth: 1,
+        limit: 20,
+    };
+    let baseline_context = code_graph_context(&config, context_query.clone(), None)
+        .expect("indexed baseline should be available");
+    assert_eq!(
+        baseline_context.pointer("/provenance/kind"),
+        Some(&serde_json::json!("indexed_baseline"))
+    );
+    assert!(
+        baseline_context
+            .pointer("/evidence")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|evidence| !evidence.is_empty())
+    );
+
+    std::fs::write(
+        repo.path().join("src/app.rs"),
+        "pub fn run() { crate::services::shared::helper(); }\n",
+    )
+    .expect("dirty cross-module edit");
+    let overlay = code_graph_workspace_context_overlay(
+        &config,
+        &repo_id,
+        repo.path(),
+        "COE-546",
+        &base_revision,
+        &context_query,
+    )
+    .expect("workspace context overlay");
+    let overlay_context = code_graph_context(&config, context_query, Some(&overlay))
+        .expect("dirty workspace context should be available");
+    assert_eq!(
+        overlay_context.pointer("/provenance/kind"),
+        Some(&serde_json::json!("workspace_overlay"))
+    );
+    assert!(
+        overlay_context
+            .pointer("/evidence")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|evidence| evidence.iter().any(|entry| {
+                entry.pointer("/provenance") == Some(&serde_json::json!("workspace_overlay"))
+            }))
+    );
+
+    let diff = code_graph_workspace_diff_overlay(
+        &config,
+        &repo_id,
+        repo.path(),
+        "COE-546",
+        &base_revision,
+        500,
+    )
+    .expect("workspace topology diff");
+    assert!(
+        diff.modified_symbols
+            .iter()
+            .any(|symbol| symbol.after.as_ref().is_some_and(|side| side.name == "run"))
+    );
+    assert!(
+        diff.edge_deltas
+            .iter()
+            .any(|edge| edge.status == CodeDiffEdgeStatus::Added)
+    );
+    assert!(
+        diff.module_connection_deltas
+            .iter()
+            .any(|connection| connection.status == CodeDiffEdgeStatus::Added)
+    );
+
     server_task.abort();
 }
 

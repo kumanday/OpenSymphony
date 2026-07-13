@@ -274,6 +274,16 @@ gateway-schema DTOs as HTTP, including the hosted default-deny snippet policy;
 paths exposed to clients remain workspace-relative and stale/unsupported
 records stay visible only when explicitly requested.
 
+When the configured repository has no indexed rows, the surface lists it as an
+empty target instead of showing a dead-end placeholder. `Index repository`
+starts the target-branch job; accepted/progress reports update the accessible
+status and coverage counts, failed or unavailable reports show diagnostics and
+enable `Retry indexing`, and the completed `code_graph_updated` event refreshes
+the graph. The provenance strip identifies the target revision and labels the
+current view as baseline, workspace-composed, stale, truncated, or partially
+covered. Web uses the production HTTP adapter and packaged Tauri uses the
+production native command; `?fixtures` remains a deterministic workbench only.
+
 ### Tests that gate this area
 
 - `packages/ui-core/__tests__/knowledge-graph-scene.test.ts` — projector ↔

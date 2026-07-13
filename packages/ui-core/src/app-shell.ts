@@ -23,6 +23,7 @@ import type {
   ModelCredentialMode,
   MemoryGraphUpdatedEvent,
   CodeGraphUpdatedEvent,
+  CodeIndexReport,
   CodeGraphNode,
   CodeGraphSnapshot,
   CodeDiffOverlay,
@@ -1134,6 +1135,34 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     return completion;
   }
 
+  private async startCodeGraphIndex(): Promise<void> {
+    const adapter = this.codeGraphAdapter;
+    const repoId = this.state.codeGraph.repoId
+      ?? this.state.codeGraph.repos?.repos[0]?.repo_id
+      ?? null;
+    if (!adapter || !repoId || this.state.codeGraph.indexing) return;
+    this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "INDEX_STARTED", repoId });
+    this.render();
+    try {
+      const report = await adapter.indexRepo(repoId);
+      if (this.destroyed) return;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "INDEX_REPORT", report });
+      this.render();
+      if (report.status === "completed") {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPOS_INVALIDATED" });
+        await this.loadCodeGraph();
+      }
+    } catch (error) {
+      if (this.destroyed) return;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "INDEX_REQUEST_FAILED",
+        repoId,
+        error: errorMessage(error),
+      });
+      this.render();
+    }
+  }
+
   private async loadCodeGraphOnce(): Promise<void> {
     const navigationVersion = this.codeGraphNavigationVersion;
     let requestKey: string | null = null;
@@ -1160,6 +1189,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }
       if (this.state.codeGraph.repoId !== repoId) {
         this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "REPO_SELECTED", repoId });
+      }
+      const repo = this.state.codeGraph.repos?.repos.find((candidate) => candidate.repo_id === repoId);
+      const hasIndexedBaseline = Boolean(
+        repo?.indexed_at
+          || repo?.head_revision
+          || (this.state.codeGraph.indexReport?.repo_id === repoId
+            && this.state.codeGraph.indexReport.status === "completed"),
+      );
+      if (repo && repo.document_count === 0 && !hasIndexedBaseline) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "LAYOUT_STATUS_SET", status: "ready" });
+        this.render();
+        return;
       }
       requestKey = this.codeGraphRequestKey();
       await this.refreshCodeGraphSnapshot(repoId, requestKey, navigationVersion);
@@ -1560,6 +1601,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private async onGatewayEvent(envelope: GatewayEnvelope): Promise<void> {
     let handledMemoryGraphUpdate = false;
     let handledCodeGraphUpdate = false;
+    let handledCodeIndexStatus = false;
     if (envelope.event_kind === "memory_graph_updated") {
       if (isMemoryGraphUpdatedEvent(envelope.payload)) {
         handledMemoryGraphUpdate = true;
@@ -1597,9 +1639,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }
       this.render();
     }
+    if ((envelope.event_kind === "code_index_progress" || envelope.event_kind === "code_index_failed")
+      && isCodeIndexReport(envelope.payload)) {
+      handledCodeIndexStatus = true;
+      this.state.codeGraph = codeGraphReducer(this.state.codeGraph, {
+        type: "INDEX_REPORT",
+        report: envelope.payload,
+      });
+      this.render();
+    }
     if (!handledMemoryGraphUpdate && !handledCodeGraphUpdate && !this.eventAffectsCurrentView(envelope)) {
+      if (handledCodeIndexStatus) return;
       return;
     }
+    if (handledCodeIndexStatus && !handledMemoryGraphUpdate && !handledCodeGraphUpdate) return;
     await this.requestLiveRefresh();
   }
 
@@ -4450,6 +4503,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
+    this.listen(this.options.root.querySelector("[data-code-index]"), "code-index", "click", () => {
+      void this.startCodeGraphIndex();
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-code-filter]").forEach((control) => {
       const eventType = control instanceof HTMLInputElement && control.type === "text" ? "input" : "change";
       this.listen(control, "code-filter", eventType, () => this.onCodeGraphFilterChange(control));
@@ -5532,6 +5588,27 @@ function isCodeGraphUpdatedEvent(value: unknown): value is CodeGraphUpdatedEvent
     && typeof candidate.updated_at === "string"
     && typeof candidate.cursor?.sequence === "number"
     && typeof candidate.cursor.partition === "string";
+}
+
+function isCodeIndexReport(value: unknown): value is CodeIndexReport {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<CodeIndexReport>;
+  const cursor = candidate.cursor as { sequence?: unknown; partition?: unknown } | undefined;
+  return typeof candidate.repo_id === "string"
+    && (candidate.status === "accepted"
+      || candidate.status === "progress"
+      || candidate.status === "completed"
+      || candidate.status === "unavailable"
+      || candidate.status === "failed")
+    && typeof candidate.parsed_files === "number"
+    && typeof candidate.persisted_documents === "number"
+    && typeof candidate.persisted_symbols === "number"
+    && typeof candidate.persisted_edges === "number"
+    && Array.isArray(candidate.skipped_files)
+    && Array.isArray(candidate.diagnostics)
+    && !!cursor
+    && typeof cursor.sequence === "number"
+    && typeof cursor.partition === "string";
 }
 
 function sameCodeGraphTopology(a: CodeGraphSnapshot, b: CodeGraphSnapshot): boolean {
@@ -7034,6 +7111,18 @@ function appShellStyles(): string {
     .os-knowledge-toolbar span { color: #667788; font-size: 12px; }
     .os-kg-reset { flex: 0 0 auto; border-color: #39708f; color: #23566f; background: #e7f1f5; font-weight: 600; }
     .os-kg-status { flex: 0 0 auto; border: 1px solid #cbd5df; border-radius: 999px; padding: 3px 8px; color: #23566f; background: #e7f1f5; font-size: 11px; }
+    .os-code-provenance { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 7px 9px; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; font-size: 11px; }
+    .os-code-provenance div { display: flex; gap: 5px; min-width: 0; }
+    .os-code-provenance dt { color: #667788; font-weight: 700; }
+    .os-code-provenance dd { margin: 0; color: #23566f; overflow-wrap: anywhere; }
+    .os-code-index-empty { display: grid; gap: 8px; padding: 18px; border: 1px dashed #cbd5df; border-radius: 8px; background: #f8fafc; }
+    .os-code-index-empty h3, .os-code-index-empty p { margin: 0; }
+    .os-code-index-empty h3 { color: #23566f; font-size: 15px; }
+    .os-code-index-empty p { color: #536170; font-size: 12px; }
+    .os-code-index-coverage { font-variant-numeric: tabular-nums; }
+    .os-code-index-diagnostics { padding: 8px 10px; border: 1px solid #fecaca; border-radius: 6px; background: #fef2f2; color: #991b1b; font-size: 12px; }
+    .os-code-index-diagnostics strong { display: block; margin-bottom: 4px; }
+    .os-code-index-diagnostics ul { margin: 0; padding-left: 18px; }
     .os-kg-status-failed { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
     .os-code-filters { border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 8px; background: #f8fafc; }
     .os-code-filters summary { cursor: pointer; color: #23566f; font-size: 11px; font-weight: 700; }

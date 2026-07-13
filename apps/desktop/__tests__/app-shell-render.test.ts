@@ -61,6 +61,11 @@ describe("desktop app shell render", () => {
       command: "code_symbol_detail",
       args: { repoId: "repo", symbolKey: "symbol", includeStale: null, visibility: "public" },
     });
+    await adapter.indexRepo("repo");
+    expect(calls[1]).toEqual({
+      command: "code_index_repo",
+      args: { repoId: "repo" },
+    });
     expect(() => adapter.getSymbolDetail("repo", "symbol", { visibility: "all_accessible" }))
       .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
   });

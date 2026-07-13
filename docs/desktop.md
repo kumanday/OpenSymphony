@@ -99,6 +99,24 @@ in one terminal and `cargo run` from `apps/desktop/src-tauri` in another.
 Plain `cargo run` rebuilds and reads the current `apps/desktop/dist` bundle; it
 does not start Vite.
 
+## Code Graph production smoke
+
+For an empty Code Graph store, launch the normal desktop shell, open Graph, and
+choose the configured repository's `Index repository` action. The status panel
+shows target-branch progress, parsed/persisted coverage, skipped files, and
+retry diagnostics; completion is driven by `code_graph_updated`. This path
+uses the production Tauri command, not fixture data. The equivalent web smoke
+uses the production HTTP adapter. A packaged parity check is:
+
+```bash
+npm run build --workspace=@opensymphony/desktop
+npm run package:release --workspace=@opensymphony/desktop -- --dry-run
+```
+
+The installed bundle must contain the same shared shell and production adapter
+selection as the local Tauri launch; `?fixtures` is reserved for the graph
+visualization workbench.
+
 ## Release Bundle
 
 The first release asset format is a tarball consumed by the lazy CLI launcher.

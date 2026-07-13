@@ -80,6 +80,14 @@ after completion. This shared target-branch baseline is not the live truth for
 an issue workspace; workspace-specific code belongs to the overlay/composite
 graph path.
 
+The web and desktop Code Graph surfaces expose this operation for an empty
+store. The configured repository is discoverable before the first index, so an
+operator can choose `Index repository` without an admin MCP call. Progress
+reports include parsed and persisted coverage; skipped files and diagnostics
+remain visible in the empty-state panel; failures are retryable. After
+`code_graph_updated`, the client reloads the repository summary and baseline
+snapshot, retaining the selected target revision in the provenance strip.
+
 ## Workspace overlays
 
 Run-scoped code reads compose the pinned target-branch merge-base snapshot with

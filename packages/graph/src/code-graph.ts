@@ -11,6 +11,7 @@ import type {
   CodeGraphMode as SnapshotMode,
   CodeGraphNode,
   CodeGraphSnapshot,
+  CodeIndexReport,
   CodeRepoList,
   CodeSymbolDetail,
   MemoryGraphEdgeKind,
@@ -97,6 +98,7 @@ export interface CodeGraphAdapterPolicy {
 
 export interface CodeGraphAdapter {
   listRepos(options?: CodeRepoListRequestOptions): Promise<CodeRepoList>;
+  indexRepo(repoId: string): Promise<CodeIndexReport>;
   getGraphSnapshot(repoId: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
   getRunGraphSnapshot?(runId: string, repoId?: string, options?: CodeGraphRequestOptions): Promise<CodeGraphSnapshot>;
   getSymbolDetail(repoId: string, symbolKey: string, options?: CodeSymbolDetailRequestOptions): Promise<CodeSymbolDetail>;
@@ -136,6 +138,9 @@ export interface CodeGraphHistoryState {
 
 export interface CodeGraphState extends CodeGraphHistoryState {
   repos: CodeRepoList | null;
+  indexReport: CodeIndexReport | null;
+  indexing: boolean;
+  indexError: string | null;
   snapshot: CodeGraphSnapshot | null;
   symbolDetails: Record<string, CodeSymbolDetail>;
   diffOverlay: CodeDiffOverlay | null;
@@ -149,6 +154,9 @@ export interface CodeGraphState extends CodeGraphHistoryState {
 export type CodeGraphAction =
   | { type: "REPOS_LOADED"; repos: CodeRepoList }
   | { type: "REPOS_INVALIDATED" }
+  | { type: "INDEX_STARTED"; repoId: string }
+  | { type: "INDEX_REPORT"; report: CodeIndexReport }
+  | { type: "INDEX_REQUEST_FAILED"; repoId: string; error: string }
   | { type: "LOAD_FAILED"; error: string }
   | { type: "SNAPSHOT_LOADED"; snapshot: CodeGraphSnapshot }
   | { type: "SYMBOL_DETAIL_LOADED"; detail: CodeSymbolDetail }
@@ -197,6 +205,9 @@ export const initialCodeGraphFilters = createInitialCodeGraphFilters();
 export function createInitialCodeGraphState(): CodeGraphState {
   return {
     repos: null,
+    indexReport: null,
+    indexing: false,
+    indexError: null,
     snapshot: null,
     symbolDetails: {},
     diffOverlay: null,
@@ -243,6 +254,25 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
     }
     case "REPOS_INVALIDATED":
       return { ...state, repos: null };
+    case "INDEX_STARTED":
+      return state.repoId === action.repoId
+        ? { ...state, indexing: true, indexError: null }
+        : state;
+    case "INDEX_REPORT":
+      return state.repoId === action.report.repo_id
+        ? {
+            ...state,
+            indexReport: action.report,
+            indexing: action.report.status === "accepted" || action.report.status === "progress",
+            indexError: action.report.status === "failed" || action.report.status === "unavailable"
+              ? action.report.diagnostics[0] ?? `Code Graph index ${action.report.status}`
+              : null,
+          }
+        : state;
+    case "INDEX_REQUEST_FAILED":
+      return state.repoId === action.repoId
+        ? { ...state, indexing: false, indexError: action.error }
+        : state;
     case "LOAD_FAILED":
       return {
         ...state,
@@ -413,6 +443,9 @@ function selectCodeGraphRepo(state: CodeGraphState, repoId: string | null): Code
   return {
     ...state,
     repoId,
+    indexReport: null,
+    indexing: false,
+    indexError: null,
     mode: "atlas",
     snapshot: repoId === state.snapshot?.repo_id ? state.snapshot : null,
     symbolKey: null,
@@ -681,6 +714,13 @@ export function createHttpCodeGraphAdapter(
       if (options?.includeStale !== undefined) params.set("include_stale", String(options.includeStale));
       return read<CodeRepoList>("/api/v1/code/repos", params);
     },
+    indexRepo: async (repoId) => {
+      const response = await fetchFn(`${base}/api/v1/code/repos/${encodeURIComponent(repoId)}/index`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(`Code graph request failed: HTTP ${response.status}`);
+      return await response.json() as CodeIndexReport;
+    },
     getGraphSnapshot: (repoId, options) => {
       const params = codeGraphRequestParams(options);
       return read<CodeGraphSnapshot>(`/api/v1/code/repos/${encodeURIComponent(repoId)}/graph`, params);
@@ -753,6 +793,8 @@ export function createTauriNativeCodeGraphAdapter(
 
 export interface CodeGraphFixtures {
   repos?: CodeRepoList;
+  indexReports?: readonly CodeIndexReport[];
+  indexRepo?: (repoId: string) => Promise<CodeIndexReport>;
   snapshots?: CodeGraphSnapshot | readonly CodeGraphSnapshot[];
   symbolDetails?: readonly CodeSymbolDetail[];
   fileOutlines?: readonly CodeFileOutline[];
@@ -761,6 +803,7 @@ export interface CodeGraphFixtures {
 
 export function createFixtureCodeGraphAdapter(fixtures: CodeGraphFixtures = {}): CodeGraphAdapter {
   const repos = fixtures.repos ?? codeGraphFixtureRepos;
+  const indexReports = fixtures.indexReports ?? [];
   const snapshots: readonly CodeGraphSnapshot[] = Array.isArray(fixtures.snapshots)
     ? fixtures.snapshots
     : fixtures.snapshots
@@ -771,6 +814,29 @@ export function createFixtureCodeGraphAdapter(fixtures: CodeGraphFixtures = {}):
   const overlays = fixtures.diffOverlays ?? codeGraphFixtureDiffOverlays;
   return {
     listRepos: async () => repos,
+    indexRepo: async (repoId) => {
+      if (fixtures.indexRepo) return fixtures.indexRepo(repoId);
+      const report = indexReports.find((candidate) => candidate.repo_id === repoId)
+        ?? repos.repos.find((candidate) => candidate.repo_id === repoId);
+      if (!report) throw new Error(`Code graph index target not found: ${repoId}`);
+      if ("status" in report) return report;
+      return {
+        schema_version: { major: 1, minor: 0, patch: 0 },
+        repo_id: repoId,
+        status: "completed",
+        head_revision: report.head_revision ?? null,
+        parsed_files: report.document_count,
+        persisted_documents: report.document_count,
+        persisted_symbols: report.symbol_count,
+        persisted_edges: report.edge_count,
+        persisted_diagnostics: 0,
+        stale_rows: 0,
+        skipped_files: [],
+        diagnostics: [],
+        cursor: { sequence: 1, partition: `code-graph:${repoId}` },
+        indexed_at: report.indexed_at ?? new Date().toISOString(),
+      };
+    },
     getGraphSnapshot: async (repoId, options) => {
       const mode = options?.mode ?? "atlas";
       const snapshot = snapshots.find((candidate) =>
