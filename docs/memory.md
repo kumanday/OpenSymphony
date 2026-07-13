@@ -232,6 +232,26 @@ ephemeral loopback port, and workers receive the resulting MCP endpoint through
 `OPENSYMPHONY_MEMORY_ENDPOINT`. Workers receive only the normal read token;
 admin tools require a separate `OPENSYMPHONY_MEMORY_ADMIN_TOKEN`.
 
+### Persistent Code Graph indexing
+
+`POST /api/v1/code/repos/{repo_id}/index` and the native `code_index_repo`
+command build a bounded repository snapshot for the target branch recorded in
+`WORKFLOW.md` (default `develop`). The server resolves the repository root and
+commit; clients cannot provide arbitrary roots. Files are read from Git tree and
+blob objects, so indexing does not execute target-repository code.
+
+Snapshot membership is immutable and keyed by repository, commit, and path.
+Documents, symbols, edges, diagnostics, and skipped coverage are persisted in
+batches. A later commit reuses unchanged membership, parses changed or added
+paths, and marks deleted current rows stale without rewriting older revisions.
+One process-wide index writer lock serializes concurrent indexing requests while
+DuckDB read paths remain usable. The gateway journals accepted/progress,
+completed, unavailable, and failed outcomes; `code_graph_updated` is emitted
+only after a completed snapshot is available.
+
+This index is a shared target-branch baseline. It must not be treated as the
+live code state of an issue workspace; workspace overlays provide that view.
+
 Initialize the shared memory policy and learned ontology file once:
 
 ```bash

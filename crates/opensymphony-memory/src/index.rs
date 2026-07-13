@@ -63,7 +63,6 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 path: config.index_path.clone(),
                 source,
             })?;
-
         transaction
             .execute(
                 "DELETE FROM issue_areas WHERE issue_key = ?",
@@ -467,6 +466,21 @@ CREATE TABLE IF NOT EXISTS code_documents (
   freshness TEXT NOT NULL,
   PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
 );
+CREATE TABLE IF NOT EXISTS code_documents_staging (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_id TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  byte_len BIGINT NOT NULL,
+  line_count BIGINT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, parser_version, query_pack_version)
+);
 CREATE TABLE IF NOT EXISTS code_document_revisions (
   repo_id TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
@@ -573,6 +587,15 @@ CREATE TABLE IF NOT EXISTS code_skipped_files (
   freshness TEXT NOT NULL,
   PRIMARY KEY (repo_id, commit_sha, path, content_sha256)
 );
+CREATE TABLE IF NOT EXISTS code_skipped_files_staging (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, path, content_sha256)
+);
 CREATE TABLE IF NOT EXISTS code_diagnostics (
   diagnostic_id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
@@ -594,6 +617,67 @@ CREATE TABLE IF NOT EXISTS code_diagnostics (
   query_pack_version TEXT NOT NULL,
   indexed_at TEXT NOT NULL,
   freshness TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS code_diagnostic_revisions (
+  diagnostic_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  worktree_dirty BOOLEAN NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  message TEXT NOT NULL,
+  start_line BIGINT NOT NULL,
+  start_col BIGINT NOT NULL,
+  end_line BIGINT NOT NULL,
+  end_col BIGINT NOT NULL,
+  start_byte BIGINT NOT NULL,
+  end_byte BIGINT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  indexed_at TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha, diagnostic_id)
+);
+CREATE TABLE IF NOT EXISTS code_index_snapshots (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  target_branch TEXT NOT NULL,
+  status TEXT NOT NULL,
+  total_files BIGINT NOT NULL,
+  parsed_files BIGINT NOT NULL,
+  skipped_files BIGINT NOT NULL,
+  deleted_files BIGINT NOT NULL,
+  config_fingerprint TEXT NOT NULL DEFAULT '',
+  indexed_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, commit_sha)
+);
+CREATE TABLE IF NOT EXISTS code_snapshot_membership (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  analyzed BOOLEAN NOT NULL,
+  skip_reason TEXT,
+  PRIMARY KEY (repo_id, commit_sha, path)
+);
+CREATE TABLE IF NOT EXISTS code_snapshot_membership_staging (
+  run_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  query_pack_version TEXT NOT NULL,
+  analyzed BOOLEAN NOT NULL,
+  skip_reason TEXT,
+  PRIMARY KEY (run_id, repo_id, commit_sha, path)
 );
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS symbol_key TEXT DEFAULT '';
 ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS container_chain TEXT DEFAULT '';
@@ -622,6 +706,7 @@ ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS end_byte BIGINT DEFAULT 0;
 UPDATE code_diagnostics SET end_byte = 0 WHERE end_byte IS NULL;
 ALTER TABLE code_diagnostics ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT '';
 UPDATE code_diagnostics SET parser_version = '' WHERE parser_version IS NULL;
+ALTER TABLE code_index_snapshots ADD COLUMN IF NOT EXISTS config_fingerprint TEXT DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_key ON code_symbols(symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_path ON code_symbols(path);
@@ -633,6 +718,10 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_target_key ON code_edges(target_symbol
 CREATE INDEX IF NOT EXISTS idx_code_edge_revisions_target_key ON code_edge_revisions(target_symbol_key);
 CREATE INDEX IF NOT EXISTS idx_code_skipped_files_revision ON code_skipped_files(repo_id, commit_sha, path);
 CREATE INDEX IF NOT EXISTS idx_code_diagnostics_path ON code_diagnostics(path);
+CREATE INDEX IF NOT EXISTS idx_code_diagnostic_revisions_path ON code_diagnostic_revisions(repo_id, commit_sha, path);
+CREATE INDEX IF NOT EXISTS idx_code_snapshot_membership_staging_repo ON code_snapshot_membership_staging(repo_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_code_documents_staging_repo ON code_documents_staging(repo_id, commit_sha);
+CREATE INDEX IF NOT EXISTS idx_code_skipped_files_staging_repo ON code_skipped_files_staging(repo_id, commit_sha);
 "#,
     ))?;
     for table in [
@@ -669,6 +758,15 @@ pub fn persist_code_intel_documents(
     config: &MemoryConfig,
     batch: CodeIntelPersistBatch,
 ) -> Result<CodeIntelPersistReport, MemoryError> {
+    persist_code_intel_documents_with_freshness(config, batch, "current", true)
+}
+
+pub(crate) fn persist_code_intel_documents_with_freshness(
+    config: &MemoryConfig,
+    batch: CodeIntelPersistBatch,
+    freshness: &str,
+    stale_existing: bool,
+) -> Result<CodeIntelPersistReport, MemoryError> {
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
@@ -694,45 +792,79 @@ pub fn persist_code_intel_documents(
     let worktree_dirty = if batch.worktree_dirty { 1_i64 } else { 0_i64 };
     for document in batch.documents {
         let path = document.path.to_string_lossy().to_string();
-        report.stale_rows += stale_code_rows(
-            &transaction,
-            &CodeFreshnessKey {
-                repo_id: &batch.repo_id,
-                path: &path,
-                content_sha256: &document.content_sha256,
-                parser_version: &document.parser_version,
-                query_pack_version: &document.query_pack_version,
-            },
-        )
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-        })?;
-
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        batch.repo_id,
-                    batch.commit_sha.clone(),
-                        worktree_dirty,
-                    path,
-                    document.language,
-                    document.content_sha256,
-                    document.parser_id,
-                    document.parser_version,
-                    document.query_pack_version,
-                    document.byte_len as i64,
-                    document.line_count as i64,
-                    indexed_at,
-                    MemoryFreshness::Current.as_str(),
-                ],
+        if stale_existing {
+            report.stale_rows += stale_code_rows(
+                &transaction,
+                &CodeFreshnessKey {
+                    repo_id: &batch.repo_id,
+                    path: &path,
+                    commit_sha: batch.commit_sha.as_deref(),
+                    content_sha256: &document.content_sha256,
+                    parser_version: &document.parser_version,
+                    query_pack_version: &document.query_pack_version,
+                },
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
-        })?;
-        report.persisted_documents += 1;
+            })?;
+        }
+
+        if freshness == "staged" {
+            let Some(commit_sha) = batch.commit_sha.as_deref() else {
+                return Err(MemoryError::InvalidInput(
+                    "staged code documents require a commit revision".to_string(),
+                ));
+            };
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_documents_staging (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        batch.repo_id,
+                        commit_sha,
+                        worktree_dirty,
+                        path,
+                        document.language,
+                        document.content_sha256,
+                        document.parser_id,
+                        document.parser_version,
+                        document.query_pack_version,
+                        document.byte_len as i64,
+                        document.line_count as i64,
+                        indexed_at,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            report.persisted_documents += 1;
+        } else {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        batch.repo_id,
+                        batch.commit_sha.clone(),
+                        worktree_dirty,
+                        path,
+                        document.language,
+                        document.content_sha256,
+                        document.parser_id,
+                        document.parser_version,
+                        document.query_pack_version,
+                        document.byte_len as i64,
+                        document.line_count as i64,
+                        indexed_at,
+                        freshness,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            report.persisted_documents += 1;
+        }
         if !batch.worktree_dirty
             && let Some(commit_sha) = batch.commit_sha.as_deref()
         {
@@ -750,7 +882,7 @@ pub fn persist_code_intel_documents(
                         document.parser_version,
                         document.query_pack_version,
                         indexed_at,
-                        MemoryFreshness::Current.as_str(),
+                        freshness,
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -768,43 +900,61 @@ pub fn persist_code_intel_documents(
         );
         for prepared in &prepared_symbols {
             let symbol = prepared.symbol;
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        prepared.symbol_id,
-                        prepared.symbol_key,
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        symbol.kind,
-                        symbol.name,
-                        prepared.container_symbol_id,
-                        symbol.container_chain.join("\u{1f}"),
-                        symbol.signature,
-                        symbol.start_line as i64,
-                        symbol.start_col as i64,
-                        symbol.end_line as i64,
-                        symbol.end_col as i64,
-                        symbol.start_byte as i64,
-                        symbol.end_byte as i64,
-                        symbol.selection_start_line as i64,
-                        symbol.selection_end_line as i64,
-                        document.content_sha256,
-                        symbol.snippet_sha256,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        MemoryFreshness::Current.as_str(),
-                    ],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
-            report.persisted_symbols += 1;
+            let current_symbol_exists = if freshness == "staged" {
+                transaction
+                    .query_row(
+                        "SELECT 1 FROM code_symbols WHERE symbol_id = ? AND freshness = 'current' LIMIT 1",
+                        params![prepared.symbol_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?
+                    .is_some()
+            } else {
+                false
+            };
+            if !current_symbol_exists {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            prepared.symbol_id,
+                            prepared.symbol_key,
+                            batch.repo_id,
+                            batch.commit_sha.clone(),
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            symbol.kind,
+                            symbol.name,
+                            prepared.container_symbol_id,
+                            symbol.container_chain.join("\u{1f}"),
+                            symbol.signature,
+                            symbol.start_line as i64,
+                            symbol.start_col as i64,
+                            symbol.end_line as i64,
+                            symbol.end_col as i64,
+                            symbol.start_byte as i64,
+                            symbol.end_byte as i64,
+                            symbol.selection_start_line as i64,
+                            symbol.selection_end_line as i64,
+                            document.content_sha256,
+                            symbol.snippet_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                report.persisted_symbols += 1;
+            }
         }
 
         for edge in &document.edges {
@@ -826,40 +976,58 @@ pub fn persist_code_intel_documents(
                 &edge.start_byte.to_string(),
                 &edge.end_byte.to_string(),
             ]);
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        edge_id,
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        edge.edge_kind,
-                        resolved.source_symbol_id,
-                        resolved.source_symbol_key,
-                        resolved.target_symbol_id,
-                        resolved.target_symbol_key,
-                        edge.target_hint,
-                        normalized_confidence,
-                        edge.start_line as i64,
-                        edge.start_col as i64,
-                        edge.end_line as i64,
-                        edge.end_col as i64,
-                        edge.start_byte as i64,
-                        edge.end_byte as i64,
-                        document.content_sha256,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        MemoryFreshness::Current.as_str(),
-                    ],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
+            let current_edge_exists = if freshness == "staged" {
+                transaction
+                    .query_row(
+                        "SELECT 1 FROM code_edges WHERE edge_id = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
+                        params![edge_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?
+                    .is_some()
+            } else {
+                false
+            };
+            if !current_edge_exists {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            edge_id,
+                            batch.repo_id,
+                            batch.commit_sha.clone(),
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            edge.edge_kind,
+                            resolved.source_symbol_id,
+                            resolved.source_symbol_key,
+                            resolved.target_symbol_id,
+                            resolved.target_symbol_key,
+                            edge.target_hint,
+                            normalized_confidence,
+                            edge.start_line as i64,
+                            edge.start_col as i64,
+                            edge.end_line as i64,
+                            edge.end_col as i64,
+                            edge.start_byte as i64,
+                            edge.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             if !batch.worktree_dirty
                 && let Some(commit_sha) = batch.commit_sha.as_deref()
             {
@@ -890,7 +1058,7 @@ pub fn persist_code_intel_documents(
                             document.parser_version,
                             document.query_pack_version,
                             indexed_at,
-                            MemoryFreshness::Current.as_str(),
+                            freshness,
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -917,36 +1085,79 @@ pub fn persist_code_intel_documents(
                 &diagnostic.start_byte.to_string(),
                 &diagnostic.end_byte.to_string(),
             ]);
+            let read_model_diagnostic_id = if freshness == "staged" {
+                code_row_id(&[
+                    &diagnostic_id,
+                    batch.commit_sha.as_deref().unwrap_or(""),
+                    &indexed_at,
+                ])
+            } else {
+                diagnostic_id.clone()
+            };
             transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        diagnostic_id,
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        diagnostic.kind,
-                        diagnostic.severity,
-                        diagnostic.message,
-                        diagnostic.start_line as i64,
-                        diagnostic.start_col as i64,
-                        diagnostic.end_line as i64,
-                        diagnostic.end_col as i64,
-                        diagnostic.start_byte as i64,
-                        diagnostic.end_byte as i64,
-                        document.content_sha256,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        MemoryFreshness::Current.as_str(),
-                    ],
-                )
+                    .execute(
+                        "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            &read_model_diagnostic_id,
+                            batch.repo_id,
+                            batch.commit_sha.clone(),
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            diagnostic.kind,
+                            diagnostic.severity,
+                            diagnostic.message,
+                            diagnostic.start_line as i64,
+                            diagnostic.start_col as i64,
+                            diagnostic.end_line as i64,
+                            diagnostic.end_col as i64,
+                            diagnostic.start_byte as i64,
+                            diagnostic.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
                     source,
                 })?;
+            if !batch.worktree_dirty
+                && let Some(commit_sha) = batch.commit_sha.as_deref()
+            {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO code_diagnostic_revisions (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            &diagnostic_id,
+                            batch.repo_id,
+                            commit_sha,
+                            worktree_dirty,
+                            path,
+                            document.language,
+                            diagnostic.kind,
+                            diagnostic.severity,
+                            diagnostic.message,
+                            diagnostic.start_line as i64,
+                            diagnostic.start_col as i64,
+                            diagnostic.end_line as i64,
+                            diagnostic.end_col as i64,
+                            diagnostic.start_byte as i64,
+                            diagnostic.end_byte as i64,
+                            document.content_sha256,
+                            document.parser_version,
+                            document.query_pack_version,
+                            indexed_at,
+                            freshness,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             report.persisted_diagnostics += 1;
         }
     }
@@ -966,6 +1177,26 @@ pub fn persist_code_intel_skipped_files(
     commit_sha: Option<&str>,
     worktree_dirty: bool,
     skipped_files: &[CodeIntelSkippedFileInput],
+) -> Result<usize, MemoryError> {
+    persist_code_intel_skipped_files_with_freshness(
+        config,
+        repo_id,
+        commit_sha,
+        worktree_dirty,
+        skipped_files,
+        "current",
+        true,
+    )
+}
+
+pub(crate) fn persist_code_intel_skipped_files_with_freshness(
+    config: &MemoryConfig,
+    repo_id: &str,
+    commit_sha: Option<&str>,
+    worktree_dirty: bool,
+    skipped_files: &[CodeIntelSkippedFileInput],
+    freshness: &str,
+    stale_existing: bool,
 ) -> Result<usize, MemoryError> {
     let Some(commit_sha) = commit_sha.filter(|_| !worktree_dirty) else {
         return Ok(0);
@@ -987,24 +1218,45 @@ pub fn persist_code_intel_skipped_files(
     let indexed_at = Utc::now().to_rfc3339();
     for skipped in skipped_files {
         let path = skipped.path.to_string_lossy().to_string();
-        stale_code_rows_for_skipped_file(&transaction, repo_id, &path).map_err(|source| {
-            MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            }
-        })?;
-        transaction
-            .execute(
-                "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
-                params![repo_id, path, commit_sha, skipped.content_sha256],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
+        if stale_existing {
+            stale_code_rows_for_skipped_file(&transaction, repo_id, &path).map_err(|source| {
+                MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                }
             })?;
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO code_skipped_files (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            transaction
+                .execute(
+                    "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current' AND content_sha256 != ?",
+                    params![repo_id, path, commit_sha, skipped.content_sha256],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        let table = if freshness == "staged" {
+            "code_skipped_files_staging"
+        } else {
+            "code_skipped_files"
+        };
+        let query = if freshness == "staged" {
+            format!(
+                "INSERT OR REPLACE INTO {table} (repo_id, commit_sha, path, reason, content_sha256, indexed_at) VALUES (?, ?, ?, ?, ?, ?)"
+            )
+        } else {
+            format!(
+                "INSERT OR REPLACE INTO {table} (repo_id, commit_sha, worktree_dirty, path, reason, content_sha256, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+        };
+        let result = if freshness == "staged" {
+            transaction.execute(
+                &query,
+                params![repo_id, commit_sha, path, skipped.reason, skipped.content_sha256, indexed_at],
+            )
+        } else {
+            transaction.execute(
+                &query,
                 params![
                     repo_id,
                     commit_sha,
@@ -1013,9 +1265,11 @@ pub fn persist_code_intel_skipped_files(
                     skipped.reason,
                     skipped.content_sha256,
                     indexed_at,
-                    MemoryFreshness::Current.as_str(),
+                    freshness,
                 ],
             )
+        };
+        result
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -1494,8 +1748,8 @@ pub fn compare_code_symbols(
             dropped_records: 0,
         });
     }
-    let base = query_symbols_for_revision(&connection, repo_id, base_revision)?;
-    let head = query_symbols_for_revision(&connection, repo_id, head_revision)?;
+    let base = query_symbols_for_revision(config, &connection, repo_id, base_revision)?;
+    let head = query_symbols_for_revision(config, &connection, repo_id, head_revision)?;
     let mut keys = base.keys().cloned().collect::<BTreeSet<_>>();
     keys.extend(head.keys().cloned());
     let mut diffs = Vec::new();
@@ -1551,15 +1805,14 @@ fn query_code_symbol_by_key(
     symbol_key: &str,
     current_only: bool,
 ) -> Result<Option<CodeSymbolRecord>, MemoryError> {
-    let sql = if current_only {
-        format!(
-            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND freshness = 'current' ORDER BY indexed_at DESC, symbol_id LIMIT 1"
-        )
+    let freshness = if current_only {
+        "freshness = 'current'"
     } else {
-        format!(
-            "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, symbol_id LIMIT 1"
-        )
+        code_freshness_filter(true)
     };
+    let sql = format!(
+        "SELECT {CODE_SYMBOL_SELECT} FROM code_symbols WHERE symbol_key = ? AND {freshness} ORDER BY CASE WHEN freshness = 'current' THEN 0 ELSE 1 END, indexed_at DESC, symbol_id LIMIT 1"
+    );
     let mut statement = connection
         .prepare(&sql)
         .map_err(|source| MemoryError::DuckDb {
@@ -1628,41 +1881,73 @@ fn query_code_symbol_for_edge(
 }
 
 fn query_symbols_for_revision(
+    config: &MemoryConfig,
     connection: &Connection,
     repo_id: &str,
     revision: &str,
 ) -> Result<BTreeMap<String, CodeSymbolRecord>, MemoryError> {
-    let mut statement = connection
-        .prepare(
-            &format!("SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' ORDER BY symbol_key, indexed_at DESC, symbol_id"),
+    let snapshot_status = code_snapshot_status(connection, config, repo_id, revision)?;
+    let membership_ready =
+        code_snapshot_membership_read_model_ready(connection, &config.index_path)?
+            && matches!(snapshot_status.as_deref(), None | Some("completed"));
+    let query = if membership_ready {
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN s.worktree_dirty THEN 1 ELSE 0 END FROM code_symbols AS s WHERE s.repo_id = ? AND s.symbol_key != '' AND s.freshness <> 'staged' AND NOT s.worktree_dirty AND (s.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = s.repo_id AND m.commit_sha = ? AND m.path = s.path AND m.content_sha256 = s.content_sha256 AND m.parser_version = s.parser_version AND m.query_pack_version = s.query_pack_version AND m.analyzed)) ORDER BY s.symbol_key, s.indexed_at DESC, s.symbol_id"
         )
+    } else {
+        format!(
+            "SELECT {CODE_SYMBOL_SELECT}, CASE WHEN worktree_dirty THEN 1 ELSE 0 END FROM code_symbols WHERE repo_id = ? AND commit_sha = ? AND symbol_key != '' AND freshness <> 'staged' ORDER BY symbol_key, indexed_at DESC, symbol_id"
+        )
+    };
+    let mut statement = connection
+        .prepare(&query)
         .map_err(|source| MemoryError::DuckDb {
             path: PathBuf::from("<memory-index>"),
             source,
         })?;
-    let rows = statement
-        .query_map(params![repo_id, revision], |row| {
-            let dirty = row.get::<_, i64>(25)?;
-            if dirty != 0 {
-                Ok(None)
-            } else {
-                code_symbol_from_row(row).map(Some)
-            }
-        })
-        .map_err(|source| MemoryError::DuckDb {
-            path: PathBuf::from("<memory-index>"),
-            source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| MemoryError::DuckDb {
-            path: PathBuf::from("<memory-index>"),
-            source,
-        })?;
+    let rows = if membership_ready {
+        statement
+            .query_map(params![repo_id, revision, revision], |row| {
+                let dirty = row.get::<_, i64>(25)?;
+                if dirty != 0 {
+                    Ok(None)
+                } else {
+                    code_symbol_from_row(row).map(Some)
+                }
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    } else {
+        statement
+            .query_map(params![repo_id, revision], |row| {
+                let dirty = row.get::<_, i64>(25)?;
+                if dirty != 0 {
+                    Ok(None)
+                } else {
+                    code_symbol_from_row(row).map(Some)
+                }
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: PathBuf::from("<memory-index>"),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+    }
+    .map_err(|source| MemoryError::DuckDb {
+        path: PathBuf::from("<memory-index>"),
+        source,
+    })?;
     let mut symbols = BTreeMap::new();
     for row in rows {
         let Some(mut symbol) = row else {
             continue;
         };
+        if symbol.commit_sha.as_deref() != Some(revision) {
+            symbol.commit_sha = Some(revision.to_string());
+        }
         if !symbols.contains_key(&symbol.symbol_key) {
             fill_container_chain(connection, &mut symbol)?;
             symbols.insert(symbol.symbol_key.clone(), symbol);
@@ -1676,11 +1961,7 @@ fn query_edges_for_symbol_key_with_stale(
     symbol_key: &str,
     include_stale: bool,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
-    let freshness = if include_stale {
-        "1 = 1"
-    } else {
-        "freshness = 'current'"
-    };
+    let freshness = code_freshness_filter(include_stale);
     let mut statement = connection
         .prepare(&format!(
             "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges WHERE {freshness} AND (source_symbol_key = ? OR target_symbol_key = ?) ORDER BY edge_kind, path, start_line, start_col, edge_id"
@@ -1815,6 +2096,7 @@ fn symbol_contains_point(symbol: &CodeSymbolRecord, line: usize, column: usize) 
 struct CodeFreshnessKey<'a> {
     repo_id: &'a str,
     path: &'a str,
+    commit_sha: Option<&'a str>,
     content_sha256: &'a str,
     parser_version: &'a str,
     query_pack_version: &'a str,
@@ -1830,10 +2112,6 @@ fn stale_code_rows(
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
-        params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
-    )?;
-    stale_rows += connection.execute(
         "UPDATE code_symbols SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
@@ -1842,13 +2120,15 @@ fn stale_code_rows(
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
     stale_rows += connection.execute(
-        "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
-        params![key.repo_id, key.path],
-    )?;
-    stale_rows += connection.execute(
         "UPDATE code_diagnostics SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current' AND NOT (content_sha256 = ? AND parser_version = ? AND query_pack_version = ?)",
         params![key.repo_id, key.path, key.content_sha256, key.parser_version, key.query_pack_version],
     )?;
+    if let Some(commit_sha) = key.commit_sha {
+        stale_rows += connection.execute(
+            "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'current'",
+            params![key.repo_id, key.path, commit_sha],
+        )?;
+    }
     Ok(stale_rows)
 }
 
@@ -1860,10 +2140,6 @@ fn stale_code_rows_for_skipped_file(
     let mut stale_rows = 0;
     stale_rows += connection.execute(
         "UPDATE code_documents SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
-        params![repo_id, path],
-    )?;
-    stale_rows += connection.execute(
-        "UPDATE code_document_revisions SET freshness = 'stale' WHERE repo_id = ? AND path = ? AND freshness = 'current'",
         params![repo_id, path],
     )?;
     stale_rows += connection.execute(
@@ -2934,6 +3210,52 @@ fn all_known_areas(config: &MemoryConfig, issues: &[IndexedIssue]) -> Vec<AreaCo
 mod index_tests {
     use super::*;
 
+    fn test_code_document(path: &str, content_sha256: &str) -> CodeIntelDocumentInput {
+        CodeIntelDocumentInput {
+            path: PathBuf::from(path),
+            language: "rust".to_string(),
+            content_sha256: content_sha256.to_string(),
+            parser_id: "tree-sitter".to_string(),
+            parser_version: "test-parser".to_string(),
+            query_pack_version: "test-query-pack".to_string(),
+            byte_len: 1,
+            line_count: 1,
+            symbols: Vec::new(),
+            edges: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn test_code_document_with_edges_and_diagnostics(
+        path: &str,
+        content_sha256: &str,
+    ) -> CodeIntelDocumentInput {
+        let mut document = test_code_document(path, content_sha256);
+        document.edges.push(CodeIntelEdgeInput {
+            edge_kind: "reference".to_string(),
+            target_hint: Some("helper".to_string()),
+            confidence: "exact".to_string(),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 7,
+            start_byte: 0,
+            end_byte: 6,
+        });
+        document.diagnostics.push(CodeIntelDiagnosticInput {
+            kind: "syntax".to_string(),
+            severity: "warning".to_string(),
+            message: "test diagnostic".to_string(),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 2,
+            start_byte: 0,
+            end_byte: 1,
+        });
+        document
+    }
+
     #[test]
     fn issue_log_date_uses_stable_sentinel_for_malformed_timestamps() {
         let issue = IndexedIssue {
@@ -2965,5 +3287,228 @@ mod index_tests {
         };
 
         assert_eq!(issue_log_date(&issue), UNDATED_LOG_DATE);
+    }
+
+    #[test]
+    fn staged_code_rows_are_hidden_and_parsed_files_stale_same_revision_skips() {
+        let repo = tempfile::TempDir::new().expect("repository tempdir");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("base-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
+            },
+        )
+        .expect("current document should persist");
+        persist_code_intel_documents_with_freshness(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("next-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
+            },
+            "staged",
+            false,
+        )
+        .expect("staged reuse should persist revision rows");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (commit_sha, freshness): (String, String) = connection
+            .query_row(
+                "SELECT commit_sha, freshness FROM code_documents WHERE repo_id = ? AND path = ?",
+                params!["fixture-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current document should remain queryable");
+        assert_eq!(commit_sha, "base-commit");
+        assert_eq!(freshness, "current");
+        let (commit_sha, freshness): (String, String) = connection
+            .query_row(
+                "SELECT commit_sha, freshness FROM code_edges WHERE repo_id = ? AND path = ?",
+                params!["fixture-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current edge should remain queryable");
+        assert_eq!(commit_sha, "base-commit");
+        assert_eq!(freshness, "current");
+        let (commit_sha, freshness): (String, String) = connection
+            .query_row(
+                "SELECT commit_sha, freshness FROM code_diagnostics WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                params!["fixture-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("current diagnostic should remain queryable");
+        assert_eq!(commit_sha, "base-commit");
+        assert_eq!(freshness, "current");
+        let staged_diagnostics: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_diagnostics WHERE repo_id = ? AND path = ? AND commit_sha = ? AND freshness = 'staged'",
+                params!["fixture-repo", "src/reused.rs", "next-commit"],
+                |row| row.get(0),
+            )
+            .expect("staged diagnostic should remain visible to promotion");
+        assert_eq!(staged_diagnostics, 1);
+        drop(connection);
+
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "dirty-repo".to_string(),
+                commit_sha: Some("workspace-commit".to_string()),
+                worktree_dirty: true,
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
+            },
+        )
+        .expect("dirty current document should persist");
+        persist_code_intel_documents_with_freshness(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "dirty-repo".to_string(),
+                commit_sha: Some("next-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document_with_edges_and_diagnostics(
+                    "src/reused.rs",
+                    "same-hash",
+                )],
+            },
+            "staged",
+            false,
+        )
+        .expect("staged document should not replace a dirty current row");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (commit_sha, worktree_dirty): (String, bool) = connection
+            .query_row(
+                "SELECT commit_sha, worktree_dirty FROM code_documents WHERE repo_id = ? AND path = ? AND freshness = 'current'",
+                params!["dirty-repo", "src/reused.rs"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("dirty current document should remain queryable");
+        assert_eq!(commit_sha, "workspace-commit");
+        assert!(worktree_dirty);
+        drop(connection);
+
+        persist_code_intel_skipped_files(
+            &config,
+            "dirty-skipped-repo",
+            Some("workspace-commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/skipped.rs"),
+                reason: "unsupported".to_string(),
+                content_sha256: "skipped-hash".to_string(),
+            }],
+        )
+        .expect("current skipped row should persist");
+        persist_code_intel_skipped_files_with_freshness(
+            &config,
+            "dirty-skipped-repo",
+            Some("workspace-commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/skipped.rs"),
+                reason: "unsupported".to_string(),
+                content_sha256: "skipped-hash".to_string(),
+            }],
+            "staged",
+            false,
+        )
+        .expect("staged skipped row should not replace current coverage");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (freshness, staged_count): (String, i64) = connection
+            .query_row(
+                "SELECT (SELECT freshness FROM code_skipped_files WHERE repo_id = ? AND path = ?), (SELECT COUNT(*) FROM code_skipped_files_staging WHERE repo_id = ? AND path = ?)",
+                params![
+                    "dirty-skipped-repo",
+                    "src/skipped.rs",
+                    "dirty-skipped-repo",
+                    "src/skipped.rs"
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("skipped staging rows should be readable");
+        assert_eq!(freshness, "current");
+        assert_eq!(staged_count, 1);
+        drop(connection);
+
+        persist_code_intel_documents_with_freshness(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "staged-repo".to_string(),
+                commit_sha: Some("staged-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/staged.rs", "staged-hash")],
+            },
+            "staged",
+            false,
+        )
+        .expect("staged document should persist");
+        assert!(!code_graph_repos(&config, true)
+            .expect("staged rows should be hidden")
+            .repos
+            .iter()
+            .any(|repo| repo.repo_id == "staged-repo"));
+
+        persist_code_intel_skipped_files(
+            &config,
+            "fixture-repo",
+            Some("commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/lib.rs"),
+                reason: "oversized".to_string(),
+                content_sha256: "skipped-hash".to_string(),
+            }],
+        )
+        .expect("skip coverage should persist");
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "fixture-repo".to_string(),
+                commit_sha: Some("commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/lib.rs", "parsed-hash")],
+            },
+        )
+        .expect("parsed document should persist");
+
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let freshness: String = connection
+            .query_row(
+                "SELECT freshness FROM code_skipped_files WHERE repo_id = ? AND path = ? AND commit_sha = ?",
+                params!["fixture-repo", "src/lib.rs", "commit"],
+                |row| row.get(0),
+            )
+            .expect("skip coverage should remain queryable");
+        assert_eq!(freshness, "stale");
+    }
+
+    #[test]
+    fn configured_target_branch_rejects_invalid_git_branch_marker() {
+        let repo = tempfile::TempDir::new().expect("repository tempdir");
+        fs::write(
+            repo.path().join("WORKFLOW.md"),
+            "## Branch target\n\nTarget branch: `HEAD`\n",
+        )
+        .expect("workflow marker");
+
+        let result = configured_code_index_branch(repo.path());
+        assert!(matches!(
+            result,
+            Err(CodeGraphProjectionError::InvalidRequest(message))
+                if message == "configured target branch is invalid"
+        ));
     }
 }

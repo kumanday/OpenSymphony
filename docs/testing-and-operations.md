@@ -196,6 +196,22 @@ and login -> Enable device code authorization for Codex before retrying.
 - preserve the Markdown body exactly after the front matter terminator
 - treat whitespace-only prompt bodies as absent so `DEFAULT_PROMPT_TEMPLATE` still applies
 
+## 3.1.1 Code Graph repository indexing
+
+- bootstrap an empty DuckDB index from the configured target branch and assert
+  nonzero documents, symbols, and edges for supported source
+- keep base and later commits independently queryable, including identical
+  content hashes
+- re-index a changed and deleted path incrementally and verify deletion/stale
+  membership plus skipped-directory, unsupported-language, and size coverage
+- verify target-branch selection when `develop` and `main` point to different
+  commits; reject client filesystem roots and never execute target-repository
+  code
+- serialize concurrent index requests through one writer and keep reads
+  available during a background job
+- cover gateway and native-command parity for accepted, progress, completed,
+  unavailable, and failed reports/events
+
 ## 3.2 Workspace manager
 
 - sanitize issue identifiers
