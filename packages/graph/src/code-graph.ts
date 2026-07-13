@@ -1,4 +1,5 @@
 import type {
+  CodeDiffBlastRadius,
   CodeDiffEdge,
   CodeDiffEdgeSide,
   CodeDiffOverlay,
@@ -56,8 +57,12 @@ type CodeDiffOverlayArrayField =
   | "blast_radius"
   | "unanalyzed_files";
 
+type CodeDiffBlastRadiusPayload = Omit<CodeDiffBlastRadius, "inbound" | "outbound">
+  & Partial<Pick<CodeDiffBlastRadius, "inbound" | "outbound">>;
+
 type CodeDiffOverlayPayload = Omit<CodeDiffOverlay, CodeDiffOverlayArrayField>
-  & Partial<Pick<CodeDiffOverlay, CodeDiffOverlayArrayField>>;
+  & Partial<Pick<CodeDiffOverlay, Exclude<CodeDiffOverlayArrayField, "blast_radius">>>
+  & { blast_radius?: CodeDiffBlastRadiusPayload[] };
 
 export function normalizeCodeDiffOverlay(overlay: CodeDiffOverlayPayload): CodeDiffOverlay {
   return {
@@ -67,7 +72,11 @@ export function normalizeCodeDiffOverlay(overlay: CodeDiffOverlayPayload): CodeD
     modified_symbols: overlay.modified_symbols ?? [],
     edge_deltas: overlay.edge_deltas ?? [],
     module_connection_deltas: overlay.module_connection_deltas ?? [],
-    blast_radius: overlay.blast_radius ?? [],
+    blast_radius: (overlay.blast_radius ?? []).map((entry) => ({
+      ...entry,
+      inbound: entry.inbound ?? [],
+      outbound: entry.outbound ?? [],
+    })),
     unanalyzed_files: overlay.unanalyzed_files ?? [],
   };
 }

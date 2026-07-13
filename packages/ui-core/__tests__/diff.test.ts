@@ -145,11 +145,12 @@ describe("diff symbol navigation", () => {
       added_symbols: [],
       removed_symbols: [],
       modified_symbols: [],
+      blast_radius: [{ symbol_key: "legacyCaller", inbound_count: 1, outbound_count: 1 }],
       unanalyzed_files: [],
       truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
       generated_at: "2026-07-12T00:00:00Z",
     } as unknown as CodeDiffOverlay;
     expect(renderCodeDiffSummary(legacyOverlay)).toContain("0 topology edges");
-    expect(renderCodeDiffDeltaList(legacyOverlay)).toContain("No analyzed symbol changes");
+    expect(renderCodeDiffDeltaList(legacyOverlay)).toContain("legacyCaller");
   });
 });

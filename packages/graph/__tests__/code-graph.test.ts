@@ -530,6 +530,7 @@ describe("Code Graph adapters and state", () => {
         added_symbols: [],
         removed_symbols: [],
         modified_symbols: [],
+        blast_radius: [{ symbol_key: "legacyCaller", inbound_count: 1, outbound_count: 1 }],
         unanalyzed_files: [],
         truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
         generated_at: "2026-07-13T00:00:00Z",
@@ -539,7 +540,13 @@ describe("Code Graph adapters and state", () => {
     const overlay = await adapter.getDiffOverlay("opensymphony", "base", "head");
     expect(overlay.edge_deltas).toEqual([]);
     expect(overlay.module_connection_deltas).toEqual([]);
-    expect(overlay.blast_radius).toEqual([]);
+    expect(overlay.blast_radius).toEqual([{
+      symbol_key: "legacyCaller",
+      inbound_count: 1,
+      outbound_count: 1,
+      inbound: [],
+      outbound: [],
+    }]);
     expect(() => codeGraphSnapshotForRendering(codeGraphFixtureDiffBaseSnapshot, overlay)).not.toThrow();
   });
 
