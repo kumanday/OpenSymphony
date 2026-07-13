@@ -6,6 +6,7 @@ import {
   codeEdgeVisualStyle,
   codeGraphNodeDeltaStatus,
   codeGraphSnapshotForRendering,
+  normalizeCodeDiffOverlay,
   codeNodeVisualStyle,
   formatMemoryDeepLink,
   type GraphLayoutEdge,
@@ -130,6 +131,9 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
 
 export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
   const { snapshot, state } = surface;
+  const diffOverlay = state.mode === "diff" && state.diffOverlay
+    ? normalizeCodeDiffOverlay(state.diffOverlay)
+    : null;
   const formatCount = (value: number) => value.toLocaleString("en-US");
   const snapshotTruncation = snapshot?.truncation;
   const diffTruncation = state.mode === "diff" ? state.diffOverlay?.truncation : null;
@@ -146,7 +150,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
     ? `${formatCount(snapshot.nodes.length)} nodes / ${formatCount(snapshot.edges.length)} edges${hasTruncation ? ` / ${formatCount(truncation.nodes_dropped)} nodes + ${formatCount(truncation.edges_dropped)} edges truncated${truncation.reason ? `: ${truncation.reason}` : ""}` : ""}`
     : "No code graph snapshot";
   const accessibleSummary = snapshot
-    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${state.stale ? "Refreshing." : ""}`
+    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${diffOverlay ? `${diffOverlay.edge_deltas.length} topology edge changes and ${diffOverlay.module_connection_deltas.length} module connection changes. ${diffOverlay.blast_radius.reduce((count, entry) => count + entry.inbound.length + entry.outbound.length, 0)} detailed blast-radius relationships. ` : ""}${state.stale ? "Refreshing." : ""}`
     : "Code Graph has no loaded snapshot.";
   const narrowed = state.mode !== "atlas" || state.selectedNodeIds.length > 0 || state.path !== null || state.symbolKey !== null;
   const diffUnavailable = !state.baseRevision || !state.headRevision;
@@ -166,6 +170,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
       </div>
       ${renderCodeGraphFilters(surface)}
       ${renderCodeBreadcrumb(state)}
+      ${renderCodeGraphTopologySummary(state)}
       <p id="code-graph-screen-reader-summary" class="os-sr-only" data-testid="code-graph-screen-reader-summary" role="status" aria-live="polite">${escapeHtml(accessibleSummary)}</p>
       <div class="os-knowledge-stage" data-kg-stage>
         <canvas class="os-knowledge-canvas os-code-graph-canvas" data-testid="code-graph-canvas" role="img" aria-label="Code Graph canvas" aria-describedby="code-graph-screen-reader-summary"></canvas>
@@ -243,6 +248,37 @@ function renderCodeBreadcrumb(state: CodeGraphState): string {
   return `<nav class="os-kg-breadcrumb os-code-breadcrumb" data-testid="code-graph-breadcrumb" aria-label="Code Graph drill path">${crumbs.join(`<span class="os-kg-crumb-sep" aria-hidden="true">&rsaquo;</span>`)}</nav>`;
 }
 
+function renderCodeGraphTopologySummary(state: CodeGraphState): string {
+  const overlay = state.mode === "diff" && state.diffOverlay
+    ? normalizeCodeDiffOverlay(state.diffOverlay)
+    : null;
+  if (!overlay) return "";
+  const edgeItems = overlay.edge_deltas.map((delta) => {
+    const side = delta.after ?? delta.before;
+    const target = side?.target_symbol_key ?? side?.target_hint ?? "unresolved";
+    return `<li data-code-topology-status="${escapeAttr(delta.status)}"><strong>${escapeHtml(delta.status)}</strong> edge · ${escapeHtml(side?.kind ?? "unknown")} · ${escapeHtml(target)} · confidence ${escapeHtml(side?.confidence ?? "unknown")}${side?.unresolved ? " · unresolved" : ""}</li>`;
+  });
+  const connectionItems = overlay.module_connection_deltas.map((delta) => {
+    const side = delta.after ?? delta.before;
+    return `<li data-code-connection-status="${escapeAttr(delta.status)}"><strong>${escapeHtml(delta.status)}</strong> ${escapeHtml(delta.scope)} connection · ${escapeHtml(delta.source)} → ${escapeHtml(delta.target)} · ${side?.edge_count ?? 0} edge${side?.edge_count === 1 ? "" : "s"}</li>`;
+  });
+  const radiusItems = overlay.blast_radius.flatMap((entry) => [
+    ...entry.inbound.map((relationship) => `<li><strong>inbound</strong> ${escapeHtml(entry.symbol_key)} ← ${escapeHtml(relationship.symbol_key ?? "unresolved")} · ${escapeHtml(relationship.path)} · ${escapeHtml(relationship.confidence)} · distance ${relationship.distance}</li>`),
+    ...entry.outbound.map((relationship) => `<li><strong>outbound</strong> ${escapeHtml(entry.symbol_key)} → ${escapeHtml(relationship.symbol_key ?? "unresolved")} · ${escapeHtml(relationship.path)} · ${escapeHtml(relationship.confidence)} · distance ${relationship.distance}</li>`),
+  ]);
+  const relationshipCount = overlay.blast_radius.reduce((count, entry) => count + entry.inbound.length + entry.outbound.length, 0);
+  if (edgeItems.length === 0 && connectionItems.length === 0 && relationshipCount === 0) return "";
+  return `
+    <section class="os-code-topology-summary" data-testid="code-graph-topology-summary" aria-label="Code Graph topology changes">
+      <h3>Topology changes</h3>
+      <p>${edgeItems.length} edge changes, ${connectionItems.length} module connection changes, and ${relationshipCount} detailed blast-radius relationships.</p>
+      ${edgeItems.length > 0 ? `<h4>Edges</h4><ul class="os-code-topology-list" data-testid="code-graph-topology-edge-list">${edgeItems.join("")}</ul>` : ""}
+      ${connectionItems.length > 0 ? `<h4>Module connections</h4><ul class="os-code-topology-list" data-testid="code-graph-topology-connection-list">${connectionItems.join("")}</ul>` : ""}
+      ${radiusItems.length > 0 ? `<h4>Blast-radius relationships</h4><ul class="os-code-topology-list" data-testid="code-graph-blast-radius-list">${radiusItems.join("")}</ul>` : ""}
+    </section>
+  `;
+}
+
 export function renderCodeGraphNodeList(
   snapshot: CodeGraphSnapshot | null,
   selectedNodeIds: readonly string[],
@@ -295,9 +331,43 @@ export function renderCodeGraphInspector(surface: CodeGraphSurface): string {
         : node.kind === "symbol" && deltaStatus !== "removed" && !surface.detailError
           ? `<p data-testid="code-graph-detail-loading">Loading symbol detail…</p>`
           : renderCodeNodeFallback(node, surface.detailError)}
+      ${renderCodeGraphSelectedTopology(surface, node.symbol_key)}
       ${detail ? renderCodeCrossGraphChips(detail) : ""}
       <button type="button" data-code-raw-toggle>${surface.rawRecord ? "Hide raw record" : "Show raw record"}</button>
       ${surface.rawRecord ? `<pre data-testid="code-graph-raw-record">${escapeHtml(raw)}</pre>` : ""}
+    </section>
+  `;
+}
+
+function renderCodeGraphSelectedTopology(surface: CodeGraphSurface, symbolKey: string | null | undefined): string {
+  const overlay = surface.state.mode === "diff" && surface.state.diffOverlay
+    ? normalizeCodeDiffOverlay(surface.state.diffOverlay)
+    : null;
+  if (!overlay || !symbolKey) return "";
+  const edgeItems = overlay.edge_deltas.flatMap((delta) => {
+    const sides = delta.status === "retargeted" ? [delta.before, delta.after] : [delta.after ?? delta.before];
+    return sides.flatMap((side, index) => {
+      if (!side || (side.source_symbol_key !== symbolKey && side.target_symbol_key !== symbolKey)) return [];
+      const target = side.target_symbol_key ?? side.target_hint ?? "unresolved";
+      const sideLabel = delta.status === "retargeted" ? ` ${index === 0 ? "before" : "after"}` : "";
+      return [`<li><strong>${escapeHtml(delta.status)}${sideLabel}</strong> ${escapeHtml(side.kind)} → ${escapeHtml(target)} · confidence ${escapeHtml(side.confidence)}${side.unresolved ? " · unresolved" : ""}</li>`];
+    });
+  });
+  const connectionItems = overlay.module_connection_deltas.filter((delta) => {
+    return delta.source.includes(symbolKey) || delta.target.includes(symbolKey);
+  }).map((delta) => `<li><strong>${escapeHtml(delta.status)}</strong> ${escapeHtml(delta.scope)} connection · ${escapeHtml(delta.source)} → ${escapeHtml(delta.target)}</li>`);
+  const radiusItems = overlay.blast_radius.flatMap((entry) => {
+    if (entry.symbol_key !== symbolKey) return [];
+    return [
+      ...entry.inbound.map((relationship) => `<li><strong>inbound</strong> ${escapeHtml(relationship.symbol_key ?? "unresolved")} · ${escapeHtml(relationship.path)} · ${escapeHtml(relationship.confidence)} · distance ${relationship.distance}</li>`),
+      ...entry.outbound.map((relationship) => `<li><strong>outbound</strong> ${escapeHtml(relationship.symbol_key ?? "unresolved")} · ${escapeHtml(relationship.path)} · ${escapeHtml(relationship.confidence)} · distance ${relationship.distance}</li>`),
+    ];
+  });
+  if (edgeItems.length === 0 && connectionItems.length === 0 && radiusItems.length === 0) return "";
+  return `
+    <section data-testid="code-graph-selected-topology">
+      <h4>Topology details</h4>
+      <ul>${[...edgeItems, ...connectionItems, ...radiusItems].join("")}</ul>
     </section>
   `;
 }

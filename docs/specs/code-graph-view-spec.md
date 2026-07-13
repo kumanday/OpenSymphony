@@ -434,6 +434,8 @@ Computed server-side in the code-intel layer (it owns both revisions' records), 
 - Base snapshot: symbols/edges indexed at the run's comparison base — the same `git merge-base` the diff pane already uses (`workspace_comparison_base`).
 - Head snapshot: symbols/edges parsed from the run worktree (content-hash cached, batch mode).
 - Per `symbol_key`: `added` (head only), `removed` (base only), `modified` (both, differing snippet hash). `moved` detection is deferred with rename detection (7.3).
+- Per logical edge: `edge_key` is derived from edge kind, stable source/target identity (or a normalized unresolved hint), and a deterministic duplicate ordinal. Revision-bound `edge_id` and source spans remain available as provenance, but line-only shifts do not create topology deltas. Edge changes are classified as `added`, `removed`, `retargeted`, or `confidence_changed`.
+- Symbol-edge deltas aggregate into directory, module, and community connection deltas with edge-kind, confidence, and unresolved counts. These are structural facts only; they are not architecture policy results.
 
 ### 10.2 Blast radius
 
@@ -474,6 +476,8 @@ GET /api/v1/runs/{run_id}/code/diff-overlay
 
 - **Run Detail summary strip**: one line above the changed-file list — `5 symbols modified · +2 / −0 · blast radius 9 · 0 new diagnostics` — the recurring-value artifact. Clicking it opens the Code Graph in Diff mode. Degrades gracefully (strip absent) when code intel is disabled or the run has no worktree.
 - **Graph overlay**: status coloring/badging on nodes (added/removed/modified), halo or badge on blast-radius nodes with distance and confidence, in Neighborhood and File views. Removed symbols render as ghosts from the base snapshot.
+- **Topology overlay**: `edge_deltas` render added, removed, retargeted, and confidence-changed relationships using their stable logical keys. `module_connection_deltas` render directory, module, and community aggregates with edge-kind, confidence, and unresolved counts. Unresolved targets remain visible as explicitly labeled hint nodes.
+- **Accessible details**: the list fallback and inspector repeat status, edge kind, confidence, unresolved state, module scope, aggregate counts, source paths, and distance in text so confidence never depends on color. Deep links continue to carry the repository, mode, symbol key, and revision pair; topology deltas do not introduce line-bound links.
 - The delta computation is independent of the git-diff trigger (input: two revision snapshots), so a future watch service can replay deltas without rework. Attaching overlay numbers to workpads or PR bodies is out of scope for this spec.
 
 ## 11. Interaction Requirements

@@ -23,8 +23,8 @@ use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
 use opensymphony::opensymphony_gateway_schema::code_graph::{
-    CodeDiffOverlay, CodeFileOutline, CodeGraphFreshness, CodeGraphNodeKind, CodeGraphSnapshot,
-    CodeIndexReport, CodeIndexStatus, CodeRepoList, CodeSymbolDetail,
+    CodeDiffEdgeStatus, CodeDiffOverlay, CodeFileOutline, CodeGraphFreshness, CodeGraphNodeKind,
+    CodeGraphSnapshot, CodeIndexReport, CodeIndexStatus, CodeRepoList, CodeSymbolDetail,
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
 use opensymphony::opensymphony_gateway_schema::memory_graph::{
@@ -2715,12 +2715,28 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             .iter()
             .any(|symbol| { symbol.after.as_ref().is_some_and(|side| side.name == "run") })
     );
+    assert!(
+        !diff.edge_deltas.is_empty(),
+        "edge topology deltas should be exposed"
+    );
+    assert!(
+        diff.edge_deltas
+            .iter()
+            .any(|delta| delta.status == CodeDiffEdgeStatus::Added)
+    );
+    assert!(
+        !diff.module_connection_deltas.is_empty(),
+        "module topology deltas should be exposed"
+    );
     let run_radius = diff
         .blast_radius
         .iter()
         .find(|radius| radius.symbol_key == run_symbol_key)
         .expect("modified run symbol should have inbound blast radius");
     assert!(run_radius.inbound_count > 0);
+    assert!(run_radius.inbound.iter().all(|entry| {
+        !entry.path.is_empty() && entry.distance == 1 && entry.symbol_key.is_some()
+    }));
     assert_eq!(run_radius.outbound_count, 0);
     let legacy_radius = diff
         .blast_radius
@@ -2884,6 +2900,10 @@ async fn gateway_serves_code_graph_contract_endpoints() {
     assert_eq!(
         payload.pointer("/cursor/partition"),
         Some(&serde_json::json!("code-graph:opensymphony"))
+    );
+    assert_eq!(
+        payload.pointer("/topology_delta_available"),
+        Some(&serde_json::json!(true))
     );
 
     persist_code_intel_documents(

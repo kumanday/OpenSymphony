@@ -181,6 +181,55 @@ export interface CodeOutlineSymbol {
 }
 
 export type CodeDiffSymbolStatus = "added" | "removed" | "modified";
+export type CodeDiffEdgeStatus = "added" | "removed" | "retargeted" | "confidence_changed" | "changed";
+
+export interface CodeDiffEdge {
+  edge_key: string;
+  status: CodeDiffEdgeStatus;
+  before?: CodeDiffEdgeSide | null;
+  after?: CodeDiffEdgeSide | null;
+}
+
+export interface CodeDiffEdgeSide {
+  edge_id: string;
+  kind: string;
+  source_symbol_key?: string | null;
+  target_symbol_key?: string | null;
+  target_hint?: string | null;
+  confidence: CodeGraphConfidence;
+  unresolved: boolean;
+  path: string;
+  span: CodeSpan;
+}
+
+export type CodeDiffConnectionScope = "directory" | "module" | "community";
+
+export interface CodeDiffModuleConnection {
+  connection_key: string;
+  scope: CodeDiffConnectionScope;
+  source: string;
+  target: string;
+  status: CodeDiffEdgeStatus;
+  before?: CodeDiffModuleConnectionSide | null;
+  after?: CodeDiffModuleConnectionSide | null;
+}
+
+export interface CodeDiffModuleConnectionSide {
+  edge_count: number;
+  edge_kind_counts: CodeDiffCountByKind[];
+  confidence_counts: CodeDiffCountByConfidence[];
+  unresolved_count: number;
+}
+
+export interface CodeDiffCountByKind {
+  kind: string;
+  count: number;
+}
+
+export interface CodeDiffCountByConfidence {
+  confidence: CodeGraphConfidence;
+  count: number;
+}
 
 export interface CodeDiffOverlay {
   schema_version: SchemaVersion;
@@ -190,6 +239,8 @@ export interface CodeDiffOverlay {
   added_symbols: CodeDiffSymbol[];
   removed_symbols: CodeDiffSymbol[];
   modified_symbols: CodeDiffSymbol[];
+  edge_deltas: CodeDiffEdge[];
+  module_connection_deltas: CodeDiffModuleConnection[];
   blast_radius: CodeDiffBlastRadius[];
   unanalyzed_files: string[];
   truncation: CodeGraphTruncation;
@@ -217,6 +268,17 @@ export interface CodeDiffBlastRadius {
   symbol_key: string;
   inbound_count: number;
   outbound_count: number;
+  inbound: CodeDiffBlastRadiusEntry[];
+  outbound: CodeDiffBlastRadiusEntry[];
+}
+
+export interface CodeDiffBlastRadiusEntry {
+  edge_key: string;
+  symbol_key?: string | null;
+  path: string;
+  edge_kind: string;
+  confidence: CodeGraphConfidence;
+  distance: number;
 }
 
 export interface CodeIndexReport {
@@ -240,6 +302,7 @@ export interface CodeGraphUpdatedEvent {
   schema_version: SchemaVersion;
   repo_id: string;
   head_revision?: string | null;
+  topology_delta_available?: boolean;
   cursor: StreamCursor;
   updated_at: string;
 }

@@ -5,6 +5,7 @@ import type {
   CodeOutlineSymbol,
   FileDiffPage,
 } from "@opensymphony/gateway-schema";
+import { normalizeCodeDiffOverlay } from "@opensymphony/graph";
 import { escapeHtml, escapeAttr } from "./html.js";
 
 export interface DiffSymbolRegion {
@@ -179,17 +180,21 @@ function renderDiffSymbolGlyph(symbol: CodeOutlineSymbol, deepLink: string | nul
 
 export function renderCodeDiffSummary(overlay: CodeDiffOverlay | null | undefined): string {
   if (!overlay) return "";
-  const counts = [
-    `${overlay.added_symbols.length} added`,
-    `${overlay.removed_symbols.length} removed`,
-    `${overlay.modified_symbols.length} modified`,
-    `${overlay.blast_radius.length} blast radius`,
-  ];
+  overlay = normalizeCodeDiffOverlay(overlay);
+ const counts = [
+   `${overlay.added_symbols.length} added`,
+   `${overlay.removed_symbols.length} removed`,
+   `${overlay.modified_symbols.length} modified`,
+    `${overlay.edge_deltas.length} topology edges`,
+    `${overlay.module_connection_deltas.length} module connections`,
+   `${overlay.blast_radius.length} blast radius`,
+ ];
   return `<button type="button" class="os-run-code-summary" data-testid="run-code-summary" data-run-code-summary aria-label="Open code diff summary in Code Graph">${counts.map((value) => `<span>${escapeHtml(value)}</span>`).join(" · ")}</button>`;
 }
 
 export function renderCodeDiffDeltaList(overlay: CodeDiffOverlay | null | undefined): string {
   if (!overlay) return "";
+  overlay = normalizeCodeDiffOverlay(overlay);
   const symbols = [...overlay.added_symbols, ...overlay.removed_symbols, ...overlay.modified_symbols];
   const changedKeys = new Set(symbols.map((symbol) => symbol.symbol_key));
   const rows = symbols.map((symbol) => {
@@ -199,10 +204,25 @@ export function renderCodeDiffDeltaList(overlay: CodeDiffOverlay | null | undefi
   }).join("");
   const radiusOnlyRows = overlay.blast_radius
     .filter((entry) => !changedKeys.has(entry.symbol_key))
-    .map((entry) => `<li><span data-code-delta-status="blast-radius">blast radius</span> <strong>${escapeHtml(entry.symbol_key)}</strong> <code>unknown path</code> <span>(${entry.inbound_count} inbound)</span></li>`)
+    .map((entry) => `<li><span data-code-delta-status="blast-radius">blast radius</span> <strong>${escapeHtml(entry.symbol_key)}</strong> <code>${escapeHtml(entry.inbound[0]?.path ?? "unknown path")}</code> <span>(${entry.inbound_count} inbound, ${entry.outbound_count} outbound)</span></li>`)
     .join("");
+  const radiusDetailRows = overlay.blast_radius.flatMap((entry) => [
+    ...entry.inbound.map((relationship) => `<li data-testid="code-blast-radius-entry"><span data-code-delta-status="blast-radius">inbound</span> <strong>${escapeHtml(entry.symbol_key)}</strong> ← <code>${escapeHtml(relationship.symbol_key ?? "unresolved")}</code> <code>${escapeHtml(relationship.path)}</code> <span>${escapeHtml(relationship.edge_kind)} · ${escapeHtml(relationship.confidence)} · distance ${relationship.distance}</span></li>`),
+    ...entry.outbound.map((relationship) => `<li data-testid="code-blast-radius-entry"><span data-code-delta-status="blast-radius">outbound</span> <strong>${escapeHtml(entry.symbol_key)}</strong> → <code>${escapeHtml(relationship.symbol_key ?? "unresolved")}</code> <code>${escapeHtml(relationship.path)}</code> <span>${escapeHtml(relationship.edge_kind)} · ${escapeHtml(relationship.confidence)} · distance ${relationship.distance}</span></li>`),
+  ]).join("");
+  const edgeRows = overlay.edge_deltas.map((delta) => {
+    const side = delta.after ?? delta.before;
+    const target = side?.target_symbol_key ?? side?.target_hint ?? "unresolved";
+    const confidence = side?.confidence ?? "unknown";
+    return `<li data-testid="code-edge-delta"><span data-code-delta-status="${escapeAttr(delta.status)}">${escapeHtml(delta.status)}</span> <strong>${escapeHtml(side?.kind ?? "edge")}</strong> <code>${escapeHtml(target)}</code> <span>confidence: ${escapeHtml(confidence)}${side?.unresolved ? " · unresolved" : ""}</span></li>`;
+  }).join("");
+  const connectionRows = overlay.module_connection_deltas.map((delta) => {
+    const side = delta.after ?? delta.before;
+    return `<li data-testid="code-module-connection-delta"><span data-code-delta-status="${escapeAttr(delta.status)}">${escapeHtml(delta.status)}</span> <strong>${escapeHtml(delta.scope)}</strong> <code>${escapeHtml(delta.source)} → ${escapeHtml(delta.target)}</code> <span>(${side?.edge_count ?? 0} edges)</span></li>`;
+  }).join("");
   const files = overlay.unanalyzed_files.map((path) => `<li><span>unanalyzed</span> <code>${escapeHtml(path)}</code></li>`).join("");
-  return `<details class="os-run-code-delta-list" data-testid="run-code-delta-list"><summary>Code delta details</summary><ul>${rows || radiusOnlyRows ? `${rows}${radiusOnlyRows}` : "<li>No analyzed symbol changes</li>"}${files}</ul></details>`;
+  const details = `${rows}${radiusOnlyRows}${radiusDetailRows}${edgeRows}${connectionRows}${files}`;
+  return `<details class="os-run-code-delta-list" data-testid="run-code-delta-list"><summary>Code delta details</summary><ul>${details || "<li>No analyzed symbol changes</li>"}</ul></details>`;
 }
 
 function renderLineStats(added: number, removed: number): string {

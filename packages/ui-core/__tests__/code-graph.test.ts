@@ -202,6 +202,64 @@ describe("Code Graph renderer surface", () => {
     expect(diffRoot.querySelector("[data-code-filter='deltaStatuses']")).not.toBeNull();
   });
 
+  it("renders topology deltas and selected relationship details accessibly", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay: codeGraphFixtureDiffOverlays[0] });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot, layout: null, state });
+    root.insertAdjacentHTML("beforeend", renderCodeGraphInspector({ snapshot, layout: null, state, rawRecord: false }));
+
+    expect(root.querySelector("[data-testid='code-graph-topology-summary']")?.textContent).toContain("confidence exact");
+    expect(root.querySelector("[data-testid='code-graph-topology-edge-list']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='code-graph-topology-connection-list']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='code-graph-selected-topology']")?.textContent).toContain("added");
+    expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("topology edge changes");
+  });
+
+  it("shows both sides of a selected retargeted topology edge", () => {
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      edge_deltas: [{
+        edge_key: "selected-retarget",
+        status: "retargeted" as const,
+        before: {
+          edge_id: "selected-retarget-before",
+          kind: "call",
+          source_symbol_key: "codeGraphReducer",
+          target_symbol_key: "oldTarget",
+          target_hint: null,
+          confidence: "exact" as const,
+          unresolved: false,
+          path: "src/old.ts",
+          span: { start_line: 1, start_col: 1, end_line: 1, end_col: 8 },
+        },
+        after: {
+          edge_id: "selected-retarget-after",
+          kind: "call",
+          source_symbol_key: "codeGraphReducer",
+          target_symbol_key: "newTarget",
+          target_hint: null,
+          confidence: "exact" as const,
+          unresolved: false,
+          path: "src/new.ts",
+          span: { start_line: 2, start_col: 1, end_line: 2, end_col: 8 },
+        },
+      }],
+    };
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphInspector({ snapshot, layout: null, state, rawRecord: false });
+
+    const details = root.querySelector("[data-testid='code-graph-selected-topology']")?.textContent;
+    expect(details).toContain("retargeted before");
+    expect(details).toContain("oldTarget");
+    expect(details).toContain("retargeted after");
+    expect(details).toContain("newTarget");
+  });
+
   it("announces diff truncation and its reason in the toolbar", () => {
     const diffOverlay = {
       ...codeGraphFixtureDiffOverlays[0],
