@@ -591,10 +591,15 @@ async fn start_runtime_memory_server(
         return Ok(None);
     };
     let config = crate::opensymphony_memory::MemoryConfig::load(&runtime.target_repo, None)?;
-    super::memory::start_memory_server(config, server.bind, server.token.clone())
-        .await
-        .map(Some)
-        .map_err(RunCommandError::MemoryServer)
+    super::memory::start_memory_server_with_workspace_root(
+        config,
+        server.bind,
+        server.token.clone(),
+        Some(runtime.workflow.config.workspace.root.clone()),
+    )
+    .await
+    .map(Some)
+    .map_err(RunCommandError::MemoryServer)
 }
 
 async fn publish_auto_capture_event(

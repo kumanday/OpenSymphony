@@ -1,9 +1,12 @@
 # Code Intelligence
 
-OpenSymphony code intelligence is local, read-only context for agents. It parses
-current source files with pinned Tree-sitter grammars, extracts symbols,
-diagnostics, references, and source-cited spans, then renders that evidence
-through `memory.context` and the read-only `code.ast.*` MCP tools.
+OpenSymphony code intelligence is local, read-only context for agents. The
+persistent code graph provides bounded discovery over the target-branch
+baseline and, for a run, its workspace overlay. Targeted current-file parsing
+with pinned Tree-sitter grammars remains the revalidation source of truth. The
+system extracts symbols, diagnostics, references, and source-cited spans, then
+renders that evidence through `memory.context`, `code.graph.context`, and the
+read-only `code.ast.*` MCP tools.
 
 Code intelligence does not replace source inspection or tests. Current files,
 repository docs, and test results remain authoritative.
@@ -103,17 +106,26 @@ watcher or second per-workspace DuckDB index.
 
 ## Agent Workflow
 
-Use memory first, then code-intelligence context after file discovery:
+Use memory first, indexed discovery when the exact files are not known, and
+live AST revalidation before edits:
 
 ```bash
 opensymphony memory context --issue COE-123
+# MCP: code.graph.context({repository, query|path|symbol, runId?, depth?, limit?})
 opensymphony memory context --issue COE-123 \
   --paths crates/opensymphony-cli/src/memory.rs \
   --include-code-intel
 ```
 
-Use the output to find likely symbols, diagnostics, and related tests. Then
-read the cited files and run the relevant tests before changing behavior.
+Use `code.graph.context` to find likely symbols, callers, references, related
+tests, and diagnostics without injecting the full repository graph into a
+prompt. It returns bounded source citations and provenance for either the
+indexed baseline or the supplied run's workspace overlay. The server resolves
+the repository and workspace; tool arguments cannot widen filesystem,
+visibility, or snippet policies. Then read the cited files and run targeted
+`memory.context --include-code-intel --paths ...` live scanning before changing
+behavior and again after touched-file changes. Current source files and tests
+remain authoritative over indexed evidence.
 
 Generated, vendor, build, and cache directories such as `node_modules`,
 `target`, `dist`, `build`, `.venv`, `.next`, `.turbo`, `vendor`, and
@@ -124,8 +136,9 @@ skipped with trace warnings rather than failing the whole request.
 
 ## MCP Tools
 
-When `code_intel.ast.enabled` is true, `tools/list` exposes these read-only
-tools:
+When `code_intel.enabled` is true, `tools/list` exposes the read-only
+`code.graph.context` indexed discovery tool. When `code_intel.ast.enabled` is
+also true, it exposes these AST tools:
 
 - `code.ast.status`
 - `code.ast.outline`
@@ -138,7 +151,9 @@ tools:
 `code.ast.query` accepts ad hoc Tree-sitter query text for local trusted use.
 When an admin token is configured, it is admin-gated. All tools enforce the
 configured file, match, and capture limits and run AST work off the async server
-thread.
+thread. `code.graph.context` is always read-only, bounded by depth and result
+limits, returns parser/query-pack and freshness metadata with source
+references, and never returns source snippets.
 
 ## Security
 

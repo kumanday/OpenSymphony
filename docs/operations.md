@@ -506,8 +506,12 @@ pass `--token` to require bearer-token access for read tools. Admin tools
 `memory.export_okf`, `memory.import_okf`, and `memory.ingest_code_intel`)
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token`. When only the
 admin token is configured, it also gates read tools; do not inject that token
-into ordinary worker environments. When `code_intel.ast.enabled` is true,
-`tools/list` also exposes read-only `code.ast.*` inspection tools. The ad hoc
+into ordinary worker environments. When `code_intel.enabled` is true,
+`tools/list` exposes the read-only `code.graph.context` indexed discovery tool;
+when `code_intel.ast.enabled` is true, it also exposes `code.ast.*` inspection
+tools. The graph tool is bounded and can use the
+server-resolved run workspace overlay; it never accepts a client filesystem
+root or source-snippet override. The ad hoc
 `code.ast.query` tool is available for local trusted use without tokens, and is
 admin-gated when an admin token is configured. AST work runs off the async
 server thread, enforces configured file/match/capture limits, rejects paths and
