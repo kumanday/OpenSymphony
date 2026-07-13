@@ -125,9 +125,11 @@ describe("diff symbol navigation", () => {
       added_symbols: [],
       removed_symbols: [],
       modified_symbols: [],
-      blast_radius: [{ symbol_key: "caller", inbound_count: 2 }],
+      edge_deltas: [],
+      module_connection_deltas: [],
+      blast_radius: [{ symbol_key: "caller", inbound_count: 2, outbound_count: 0, inbound: [], outbound: [] }],
       unanalyzed_files: [],
-      truncation: { truncated: false, reason: null },
+      truncation: { nodes_dropped: 0, edges_dropped: 0, reason: null },
       generated_at: "2026-07-12T00:00:00Z",
     } satisfies CodeDiffOverlay;
     expect(renderCodeDiffSummary(overlay)).toContain("data-run-code-summary");

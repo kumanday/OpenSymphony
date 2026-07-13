@@ -202,6 +202,21 @@ describe("Code Graph renderer surface", () => {
     expect(diffRoot.querySelector("[data-code-filter='deltaStatuses']")).not.toBeNull();
   });
 
+  it("renders topology deltas and selected relationship details accessibly", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay: codeGraphFixtureDiffOverlays[0] });
+    state = codeGraphReducer(state, { type: "NODE_SELECTED", nodeId: "symbol:codeGraphReducer" });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot, layout: null, state });
+    root.insertAdjacentHTML("beforeend", renderCodeGraphInspector({ snapshot, layout: null, state, rawRecord: false }));
+
+    expect(root.querySelector("[data-testid='code-graph-topology-summary']")?.textContent).toContain("confidence exact");
+    expect(root.querySelector("[data-testid='code-graph-topology-edge-list']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='code-graph-topology-connection-list']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='code-graph-selected-topology']")?.textContent).toContain("added");
+    expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("topology edge changes");
+  });
+
   it("announces diff truncation and its reason in the toolbar", () => {
     const diffOverlay = {
       ...codeGraphFixtureDiffOverlays[0],

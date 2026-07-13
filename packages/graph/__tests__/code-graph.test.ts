@@ -207,7 +207,7 @@ describe("Code Graph adapters and state", () => {
       added_symbols: [],
       removed_symbols: [],
       modified_symbols: [],
-      blast_radius: [{ symbol_key: "unchangedCaller", inbound_count: 3, outbound_count: 4 }],
+      blast_radius: [{ symbol_key: "unchangedCaller", inbound_count: 3, outbound_count: 4, inbound: [], outbound: [] }],
     };
     const rendered = codeGraphSnapshotForRendering(snapshot, overlay);
     expect(rendered.nodes).toEqual(expect.arrayContaining([
@@ -216,6 +216,49 @@ describe("Code Graph adapters and state", () => {
         concept_type: "blast_radius",
         metrics: expect.objectContaining({ indegree: 3, outdegree: 4 }),
       }),
+    ]));
+  });
+
+  it("materializes topology edge deltas with stable endpoints and unresolved hints", async () => {
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "atlas" });
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      edge_deltas: [
+        ...codeGraphFixtureDiffOverlays[0].edge_deltas,
+        {
+          edge_key: "fixture-edge-unresolved",
+          status: "added" as const,
+          before: null,
+          after: {
+            edge_id: "fixture-edge-unresolved-head",
+            kind: "import",
+            source_symbol_key: "codeGraphReducer",
+            target_symbol_key: null,
+            target_hint: "missing::helper",
+            confidence: "heuristic" as const,
+            unresolved: true,
+            path: "packages/graph/src/code-graph.ts",
+            span: { start_line: 92, start_col: 2, end_line: 92, end_col: 16 },
+          },
+        },
+      ],
+    };
+    const rendered = codeGraphSnapshotForRendering(snapshot, overlay);
+    expect(rendered.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "fixture-edge-added",
+        source_id: "symbol:codeGraphReducer",
+        target_id: "symbol:newSymbol",
+      }),
+      expect.objectContaining({
+        id: "fixture-edge-unresolved",
+        target_id: "hint:fixture-edge-unresolved",
+        unresolved: true,
+        metadata: expect.objectContaining({ target_hint: "missing::helper", confidence: "heuristic" }),
+      }),
+    ]));
+    expect(rendered.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "hint:fixture-edge-unresolved", label: "missing::helper" }),
     ]));
   });
 

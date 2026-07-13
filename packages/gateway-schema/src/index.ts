@@ -57,7 +57,16 @@ export type {
 // code graph
 export type {
   CodeDiagnostic,
+  CodeDiffBlastRadiusEntry,
   CodeDiffBlastRadius,
+  CodeDiffConnectionScope,
+  CodeDiffCountByConfidence,
+  CodeDiffCountByKind,
+  CodeDiffEdge,
+  CodeDiffEdgeSide,
+  CodeDiffEdgeStatus,
+  CodeDiffModuleConnection,
+  CodeDiffModuleConnectionSide,
   CodeDiffOverlay,
   CodeDiffSymbol,
   CodeDiffSymbolSide,

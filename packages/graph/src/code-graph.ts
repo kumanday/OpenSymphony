@@ -812,8 +812,74 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
       diagnostic_severity: null,
       metrics: { in_degree: entry.inbound_count, out_degree: entry.outbound_count, community_id: null },
     }));
-  if (syntheticNodes.length === 0 && radiusNodes.length === 0) return snapshot;
-  return { ...snapshot, nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes] };
+  const topologySymbolKeys = new Set<string>();
+  for (const delta of overlay.edge_deltas) {
+    const side = delta.after ?? delta.before;
+    for (const symbolKey of [side?.source_symbol_key, side?.target_symbol_key]) {
+      if (symbolKey && !existingKeys.has(symbolKey) && !syntheticSides.has(symbolKey)) topologySymbolKeys.add(symbolKey);
+    }
+  }
+  const topologySymbolNodes: CodeGraphNode[] = [...topologySymbolKeys].map((symbolKey) => ({
+    id: `symbol:${symbolKey}`,
+    kind: "symbol",
+    label: symbolKey,
+    symbol_kind: "topology",
+    symbol_key: symbolKey,
+    symbol_id: null,
+    path_display: null,
+    language: null,
+    container_chain: [],
+    signature: null,
+    span: null,
+    selection_span: null,
+    freshness: "unknown",
+    diagnostic_count: 0,
+    diagnostic_severity: null,
+    metrics: { in_degree: 0, out_degree: 0, community_id: null },
+  }));
+  const topologyHintNodes = overlay.edge_deltas.flatMap((delta) => {
+    const side = delta.after ?? delta.before;
+    if (!side?.target_symbol_key && !side?.target_hint) return [];
+    if (side.target_symbol_key || !side.target_hint) return [];
+    return [{
+      id: `hint:${delta.edge_key}`,
+      kind: "symbol" as const,
+      label: side.target_hint ?? "unresolved",
+      symbol_kind: null,
+      symbol_key: null,
+      symbol_id: null,
+      path_display: null,
+      language: null,
+      container_chain: [],
+      signature: null,
+      span: null,
+      selection_span: null,
+      freshness: "unknown" as const,
+      diagnostic_count: 0,
+      diagnostic_severity: null,
+      metrics: { in_degree: 0, out_degree: 0, community_id: null },
+    }];
+  });
+  const topologyEdges = overlay.edge_deltas.flatMap((delta) => {
+    const side = delta.after ?? delta.before;
+    if (!side?.source_symbol_key) return [];
+    const targetId = side.target_symbol_key ? `symbol:${side.target_symbol_key}` : `hint:${delta.edge_key}`;
+    return [{
+      id: delta.edge_key,
+      kind: side.kind as CodeGraphEdge["kind"],
+      source_id: `symbol:${side.source_symbol_key}`,
+      target_id: targetId,
+      confidence: side.confidence,
+      unresolved: side.unresolved,
+      target_hint: side.target_hint ?? null,
+    }];
+  });
+  if (syntheticNodes.length === 0 && radiusNodes.length === 0 && topologySymbolNodes.length === 0 && topologyHintNodes.length === 0 && topologyEdges.length === 0) return snapshot;
+  return {
+    ...snapshot,
+    nodes: [...snapshot.nodes, ...syntheticNodes, ...radiusNodes, ...topologySymbolNodes, ...topologyHintNodes.filter((node, index, nodes) => nodes.findIndex((candidate) => candidate.id === node.id) === index)],
+    edges: [...snapshot.edges, ...topologyEdges],
+  };
 }
 
 function matchesCodeNode(
