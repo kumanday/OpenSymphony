@@ -181,7 +181,7 @@ export interface CodeOutlineSymbol {
 }
 
 export type CodeDiffSymbolStatus = "added" | "removed" | "modified";
-export type CodeDiffEdgeStatus = "added" | "removed" | "retargeted" | "confidence_changed";
+export type CodeDiffEdgeStatus = "added" | "removed" | "retargeted" | "confidence_changed" | "changed";
 
 export interface CodeDiffEdge {
   edge_key: string;

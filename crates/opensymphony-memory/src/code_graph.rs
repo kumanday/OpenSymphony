@@ -543,8 +543,13 @@ pub fn code_graph_diff_overlay(
     let head_edges = query_code_edges_for_revision(&connection, config, repo_id, head_revision)?;
     let (edge_deltas, dropped_edges) =
         compare_code_edges(base_edges.clone(), head_edges.clone(), max_records.max(1));
-    let module_connection_deltas =
-        module_connection_deltas(&base_edges, &head_edges, &base_symbols, &head_symbols);
+    let (module_connection_deltas, dropped_connections) = module_connection_deltas(
+        &base_edges,
+        &head_edges,
+        &base_symbols,
+        &head_symbols,
+        max_records,
+    );
     let unanalyzed_files =
         query_unanalyzed_diff_files(&connection, config, repo_id, base_revision, head_revision)?;
     let mut added_symbols = Vec::new();
@@ -570,7 +575,8 @@ pub fn code_graph_diff_overlay(
             DtoDiffStatus::Modified => modified_symbols.push(dto),
         }
     }
-    let blast_radius = detailed_blast_radius(&diff_dtos, &base_edges, &head_edges);
+    let (blast_radius, dropped_blast_radius) =
+        detailed_blast_radius(&diff_dtos, &base_edges, &head_edges, max_records.max(1));
 
     Ok(CodeDiffOverlay {
         schema_version: SchemaVersion::v1(),
@@ -586,7 +592,9 @@ pub fn code_graph_diff_overlay(
         unanalyzed_files,
         truncation: truncation(
             comparison.dropped_records,
-            dropped_edges,
+            dropped_edges
+                .saturating_add(dropped_blast_radius)
+                .saturating_add(dropped_connections),
             "diff symbols or edges capped",
         ),
         generated_at: Utc::now(),
@@ -1120,12 +1128,18 @@ pub fn code_graph_workspace_diff_overlay(
         overlay.edges.clone(),
         max_records,
     );
-    let blast_radius = detailed_blast_radius(&diffs, &overlay.base_edges, &overlay.edges);
-    let module_connection_deltas = module_connection_deltas(
+    let (blast_radius, dropped_blast_radius) = detailed_blast_radius(
+        &diffs,
+        &overlay.base_edges,
+        &overlay.edges,
+        max_records,
+    );
+    let (module_connection_deltas, dropped_connections) = module_connection_deltas(
         &overlay.base_edges,
         &overlay.edges,
         &overlay.base_symbols,
         &overlay.symbols,
+        max_records,
     );
 
     Ok(CodeDiffOverlay {
@@ -1154,7 +1168,9 @@ pub fn code_graph_workspace_diff_overlay(
         unanalyzed_files: overlay.unanalyzed_files,
         truncation: truncation(
             dropped_records,
-            dropped_edges,
+            dropped_edges
+                .saturating_add(dropped_blast_radius)
+                .saturating_add(dropped_connections),
             "workspace overlay symbols or edges capped",
         ),
         generated_at: Utc::now(),
@@ -2160,7 +2176,8 @@ fn detailed_blast_radius(
     diffs: &[CodeDiffSymbol],
     base_edges: &[CodeEdgeRecord],
     head_edges: &[CodeEdgeRecord],
-) -> Vec<CodeDiffBlastRadius> {
+    max_records: usize,
+) -> (Vec<CodeDiffBlastRadius>, usize) {
     let changed_keys = diffs
         .iter()
         .map(|diff| diff.symbol_key.as_str())
@@ -2170,6 +2187,9 @@ fn detailed_blast_radius(
     assign_edge_keys(&mut base_edges);
     assign_edge_keys(&mut head_edges);
     let mut radius = Vec::new();
+    let mut kept_entries = 0;
+    let mut dropped_entries = 0;
+    let max_entries = max_records.max(1);
     for diff in diffs {
         let edges = if diff.status == DtoDiffStatus::Removed {
             &base_edges
@@ -2204,17 +2224,27 @@ fn detailed_blast_radius(
             (left.path.as_str(), left.edge_key.as_str())
                 .cmp(&(right.path.as_str(), right.edge_key.as_str()))
         });
-        if !inbound.is_empty() || !outbound.is_empty() {
+        let inbound_count = inbound.len();
+        let outbound_count = outbound.len();
+        let total_entries = inbound_count + outbound_count;
+        let remaining = max_entries.saturating_sub(kept_entries);
+        let keep_inbound = inbound.len().min(remaining);
+        let keep_outbound = outbound.len().min(remaining.saturating_sub(keep_inbound));
+        dropped_entries += total_entries.saturating_sub(keep_inbound + keep_outbound);
+        kept_entries += keep_inbound + keep_outbound;
+        inbound.truncate(keep_inbound);
+        outbound.truncate(keep_outbound);
+        if total_entries > 0 {
             radius.push(CodeDiffBlastRadius {
                 symbol_key: diff.symbol_key.clone(),
-                inbound_count: inbound.len(),
-                outbound_count: outbound.len(),
+                inbound_count,
+                outbound_count,
                 inbound,
                 outbound,
             });
         }
     }
-    radius
+    (radius, dropped_entries)
 }
 
 #[derive(Clone, Default)]
@@ -2333,14 +2363,17 @@ fn module_connection_deltas(
     head_edges: &[CodeEdgeRecord],
     base_symbols: &BTreeMap<String, CodeSymbolRecord>,
     head_symbols: &BTreeMap<String, CodeSymbolRecord>,
-) -> Vec<CodeDiffModuleConnection> {
+    max_records: usize,
+) -> (Vec<CodeDiffModuleConnection>, usize) {
     let base = aggregate_module_connections(base_edges, base_symbols);
     let head = aggregate_module_connections(head_edges, head_symbols);
     let mut keys = BTreeSet::new();
     keys.extend(base.keys().cloned());
     keys.extend(head.keys().cloned());
-    keys.into_iter()
-        .filter_map(|(scope, source, target)| {
+    let mut dropped = 0;
+    let mut deltas = Vec::new();
+    for (scope, source, target) in keys {
+        let delta = (|| {
             let before = base
                 .get(&(scope, source.clone(), target.clone()))
                 .map(|aggregate| module_connection_side(aggregate.clone()));
@@ -2353,7 +2386,10 @@ fn module_connection_deltas(
             let status = match (&before, &after) {
                 (None, Some(_)) => CodeDiffEdgeStatus::Added,
                 (Some(_), None) => CodeDiffEdgeStatus::Removed,
-                (Some(_), Some(_)) => CodeDiffEdgeStatus::ConfidenceChanged,
+                (Some(before), Some(after)) if before.confidence_counts != after.confidence_counts => {
+                    CodeDiffEdgeStatus::ConfidenceChanged
+                }
+                (Some(_), Some(_)) => CodeDiffEdgeStatus::Changed,
                 (None, None) => unreachable!(),
             };
             Some(CodeDiffModuleConnection {
@@ -2370,8 +2406,17 @@ fn module_connection_deltas(
                 before,
                 after,
             })
-        })
-        .collect()
+        })();
+        let Some(delta) = delta else {
+            continue;
+        };
+        if deltas.len() >= max_records.max(1) {
+            dropped += 1;
+        } else {
+            deltas.push(delta);
+        }
+    }
+    (deltas, dropped)
 }
 
 fn query_code_edges_for_revision(
@@ -2380,16 +2425,16 @@ fn query_code_edges_for_revision(
     repo_id: &str,
     revision: &str,
 ) -> Result<Vec<CodeEdgeRecord>, MemoryError> {
-    let revision_rows = code_edge_revisions_read_model_ready(connection, &config.index_path)?
-        && code_edge_revision_rows_available(connection, config, repo_id, revision)?;
     let membership_ready = matches!(
         code_snapshot_status(connection, config, repo_id, revision)?.as_deref(),
         None | Some("completed")
     ) && code_snapshot_membership_read_model_ready(connection, &config.index_path)?;
-    let query = if revision_rows {
-        "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, start_line, start_col, edge_id"
-    } else if membership_ready {
+    let revision_rows = code_edge_revisions_read_model_ready(connection, &config.index_path)?
+        && code_edge_revision_rows_available(connection, config, repo_id, revision)?;
+    let query = if membership_ready {
         "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges AS e WHERE e.repo_id = ? AND e.freshness <> 'staged' AND NOT e.worktree_dirty AND (e.commit_sha = ? OR EXISTS (SELECT 1 FROM code_snapshot_membership AS m WHERE m.repo_id = e.repo_id AND m.commit_sha = ? AND m.path = e.path AND m.content_sha256 = e.content_sha256 AND m.parser_version = e.parser_version AND m.query_pack_version = e.query_pack_version AND m.analyzed)) ORDER BY e.path, e.start_line, e.start_col, e.edge_id"
+    } else if revision_rows {
+        "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, start_line, start_col, edge_id"
     } else {
         "SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edges WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, start_line, start_col, edge_id"
     };
@@ -2397,17 +2442,17 @@ fn query_code_edges_for_revision(
         path: config.index_path.clone(),
         source,
     })?;
-    let rows = if revision_rows {
+    let rows = if membership_ready {
         statement
-            .query_map(params![repo_id, revision], code_edge_from_row)
+            .query_map(params![repo_id, revision, revision], code_edge_from_row)
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?
             .collect::<Result<Vec<_>, _>>()
-    } else if membership_ready {
+    } else if revision_rows {
         statement
-            .query_map(params![repo_id, revision, revision], code_edge_from_row)
+            .query_map(params![repo_id, revision], code_edge_from_row)
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -2422,10 +2467,30 @@ fn query_code_edges_for_revision(
             })?
             .collect::<Result<Vec<_>, _>>()
     };
-    rows.map_err(|source| MemoryError::DuckDb {
+    let mut edges = rows.map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
         source,
-    })
+    })?;
+    if edges.is_empty() && membership_ready && revision_rows {
+        let mut fallback = connection
+            .prepare("SELECT edge_id, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, path, commit_sha, freshness, start_line, start_col, end_line, end_col FROM code_edge_revisions WHERE repo_id = ? AND commit_sha = ? AND freshness <> 'staged' AND NOT worktree_dirty ORDER BY path, start_line, start_col, edge_id")
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        edges = fallback
+            .query_map(params![repo_id, revision], code_edge_from_row)
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    Ok(edges)
 }
 
 fn code_edge_revision_rows_available(
@@ -6268,7 +6333,9 @@ mod code_graph_tests {
             "heuristic",
             false,
         )];
-        let deltas = module_connection_deltas(&[], &edges, &BTreeMap::new(), &symbols);
+        let (deltas, dropped) =
+            module_connection_deltas(&[], &edges, &BTreeMap::new(), &symbols, 20);
+        assert_eq!(dropped, 0);
         assert_eq!(deltas.len(), 3);
         assert!(deltas.iter().all(|delta| delta.status == CodeDiffEdgeStatus::Added));
         let directory = deltas
@@ -6321,7 +6388,8 @@ mod code_graph_tests {
                 false,
             ),
         ];
-        let radius = detailed_blast_radius(&diffs, &base, &head);
+        let (radius, dropped) = detailed_blast_radius(&diffs, &base, &head, 20);
+        assert_eq!(dropped, 0);
         assert_eq!(radius.len(), 1);
         assert_eq!(radius[0].inbound[0].path, "src/caller.rs");
         assert_eq!(radius[0].inbound[0].symbol_key.as_deref(), Some("caller"));

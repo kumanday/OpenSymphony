@@ -290,6 +290,7 @@ pub enum CodeDiffEdgeStatus {
     Removed,
     Retargeted,
     ConfidenceChanged,
+    Changed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

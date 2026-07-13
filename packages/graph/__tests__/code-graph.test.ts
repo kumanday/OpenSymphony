@@ -201,7 +201,7 @@ describe("Code Graph adapters and state", () => {
   });
 
   it("materializes blast-radius-only symbols for graph styling", async () => {
-    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "atlas" });
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "file" });
     const overlay = {
       ...codeGraphFixtureDiffOverlays[0],
       added_symbols: [],
@@ -259,6 +259,58 @@ describe("Code Graph adapters and state", () => {
     ]));
     expect(rendered.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "hint:fixture-edge-unresolved", label: "missing::helper" }),
+    ]));
+  });
+
+  it("renders both endpoints for retargeted topology edges and preserves real symbol ids", async () => {
+    const snapshot = await createFixtureCodeGraphAdapter().getGraphSnapshot("opensymphony", { mode: "file" });
+    const realIdSnapshot = {
+      ...snapshot,
+      nodes: snapshot.nodes.map((node) => node.symbol_key === "codeGraphReducer"
+        ? { ...node, id: "sym:codeGraphReducer" }
+        : node),
+    };
+    const overlay = {
+      ...codeGraphFixtureDiffOverlays[0],
+      edge_deltas: [{
+        edge_key: "fixture-edge-retargeted",
+        status: "retargeted" as const,
+        before: {
+          edge_id: "fixture-edge-retargeted-before",
+          kind: "call",
+          source_symbol_key: "codeGraphReducer",
+          target_symbol_key: "legacySymbol",
+          target_hint: null,
+          confidence: "exact" as const,
+          unresolved: false,
+          path: "packages/graph/src/code-graph.ts",
+          span: { start_line: 20, start_col: 1, end_line: 20, end_col: 8 },
+        },
+        after: {
+          edge_id: "fixture-edge-retargeted-after",
+          kind: "call",
+          source_symbol_key: "codeGraphReducer",
+          target_symbol_key: "newRetargetedSymbol",
+          target_hint: null,
+          confidence: "exact" as const,
+          unresolved: false,
+          path: "packages/graph/src/code-graph.ts",
+          span: { start_line: 21, start_col: 1, end_line: 21, end_col: 8 },
+        },
+      }],
+    };
+    const rendered = codeGraphSnapshotForRendering(realIdSnapshot, overlay);
+    expect(rendered.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "fixture-edge-retargeted:before",
+        source_id: "sym:codeGraphReducer",
+        target_id: "symbol:legacySymbol",
+      }),
+      expect.objectContaining({
+        id: "fixture-edge-retargeted:after",
+        source_id: "sym:codeGraphReducer",
+        target_id: "symbol:newRetargetedSymbol",
+      }),
     ]));
   });
 

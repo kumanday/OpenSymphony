@@ -1,4 +1,6 @@
 import type {
+  CodeDiffEdge,
+  CodeDiffEdgeSide,
   CodeDiffOverlay,
   CodeDiffSymbolSide,
   CodeFileOutline,
@@ -812,9 +814,21 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
       diagnostic_severity: null,
       metrics: { in_degree: entry.inbound_count, out_degree: entry.outbound_count, community_id: null },
     }));
-  const topologySymbolKeys = new Set<string>();
-  for (const delta of overlay.edge_deltas) {
+  const symbolNodeIds = new Map<string, string>();
+  for (const node of [...snapshot.nodes, ...syntheticNodes, ...radiusNodes]) {
+    if (node.symbol_key && !symbolNodeIds.has(node.symbol_key)) symbolNodeIds.set(node.symbol_key, node.id);
+  }
+  const topologySides = (delta: CodeDiffEdge): Array<{ side: CodeDiffEdgeSide; suffix: string }> => {
+    if (delta.status === "retargeted" && delta.before && delta.after) {
+      return [{ side: delta.before, suffix: ":before" }, { side: delta.after, suffix: ":after" }];
+    }
     const side = delta.after ?? delta.before;
+    return side ? [{ side, suffix: "" }] : [];
+  };
+  const topologyEntries = overlay.edge_deltas.flatMap((delta) =>
+    topologySides(delta).map(({ side, suffix }) => ({ delta, side, suffix })));
+  const topologySymbolKeys = new Set<string>();
+  for (const { side } of topologyEntries) {
     for (const symbolKey of [side?.source_symbol_key, side?.target_symbol_key]) {
       if (symbolKey && !existingKeys.has(symbolKey) && !syntheticSides.has(symbolKey)) topologySymbolKeys.add(symbolKey);
     }
@@ -837,12 +851,15 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
     diagnostic_severity: null,
     metrics: { in_degree: 0, out_degree: 0, community_id: null },
   }));
-  const topologyHintNodes = overlay.edge_deltas.flatMap((delta) => {
-    const side = delta.after ?? delta.before;
+  for (const node of topologySymbolNodes) {
+    if (node.symbol_key && !symbolNodeIds.has(node.symbol_key)) symbolNodeIds.set(node.symbol_key, node.id);
+  }
+  const symbolNodeId = (symbolKey: string): string => symbolNodeIds.get(symbolKey) ?? `symbol:${symbolKey}`;
+  const topologyHintNodes = topologyEntries.flatMap(({ delta, side, suffix }) => {
     if (!side?.target_symbol_key && !side?.target_hint) return [];
     if (side.target_symbol_key || !side.target_hint) return [];
     return [{
-      id: `hint:${delta.edge_key}`,
+      id: `hint:${delta.edge_key}${suffix}`,
       kind: "symbol" as const,
       label: side.target_hint ?? "unresolved",
       symbol_kind: null,
@@ -860,14 +877,13 @@ function withCodeDiffNodes(snapshot: CodeGraphSnapshot, overlay?: CodeDiffOverla
       metrics: { in_degree: 0, out_degree: 0, community_id: null },
     }];
   });
-  const topologyEdges = overlay.edge_deltas.flatMap((delta) => {
-    const side = delta.after ?? delta.before;
+  const topologyEdges = topologyEntries.flatMap(({ delta, side, suffix }) => {
     if (!side?.source_symbol_key) return [];
-    const targetId = side.target_symbol_key ? `symbol:${side.target_symbol_key}` : `hint:${delta.edge_key}`;
+    const targetId = side.target_symbol_key ? symbolNodeId(side.target_symbol_key) : `hint:${delta.edge_key}${suffix}`;
     return [{
-      id: delta.edge_key,
+      id: `${delta.edge_key}${suffix}`,
       kind: side.kind as CodeGraphEdge["kind"],
-      source_id: `symbol:${side.source_symbol_key}`,
+      source_id: symbolNodeId(side.source_symbol_key),
       target_id: targetId,
       confidence: side.confidence,
       unresolved: side.unresolved,
