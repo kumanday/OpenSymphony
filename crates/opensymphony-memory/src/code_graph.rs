@@ -7420,6 +7420,7 @@ mod code_graph_tests {
         persist_code_intel_documents,
     };
     use chrono::Utc;
+    use duckdb::Connection;
     use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command, sync::Arc};
     use tempfile::TempDir;
 
@@ -9144,6 +9145,33 @@ mod code_graph_tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("has not been indexed")));
+    }
+
+    #[test]
+    fn repo_discovery_tolerates_legacy_index_without_snapshot_tables() {
+        let repo = TempDir::new().expect("repository tempdir");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        fs::create_dir_all(config.index_path.parent().expect("index parent"))
+            .expect("index directory");
+        let connection = Connection::open(&config.index_path).expect("legacy index");
+        connection
+            .execute_batch(
+                "CREATE TABLE code_documents (
+                    repo_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    freshness TEXT NOT NULL,
+                    commit_sha TEXT,
+                    worktree_dirty BOOLEAN NOT NULL
+                );",
+            )
+            .expect("legacy code documents table");
+        drop(connection);
+
+        let repos = code_graph_repos(&config, false).expect("legacy repo discovery");
+        assert_eq!(repos.repos.len(), 1);
+        assert!(!repos.repos[0].indexed);
     }
 
     #[test]

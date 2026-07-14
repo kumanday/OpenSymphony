@@ -261,13 +261,15 @@ fn table_has_columns(
     columns: &[&str],
 ) -> Result<bool, MemoryError> {
     let mut statement = connection
-        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .prepare(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?",
+        )
         .map_err(|source| MemoryError::DuckDb {
             path: path.to_path_buf(),
             source,
         })?;
     let existing = statement
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map(params![table], |row| row.get::<_, String>(0))
         .map_err(|source| MemoryError::DuckDb {
             path: path.to_path_buf(),
             source,
