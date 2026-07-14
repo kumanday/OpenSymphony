@@ -2370,7 +2370,9 @@ async fn gateway_index_starts_target_branch_job_and_journals_completion() {
     assert_eq!(report.status, CodeIndexStatus::Accepted);
 
     let mut completed = false;
-    for _ in 0..200 {
+    // Target-branch indexing runs in a blocking worker; allow slower CI
+    // runners to finish the same deterministic completion assertion.
+    for _ in 0..600 {
         let events = journal.all_events().await;
         completed = events.iter().any(|event| {
             matches!(
