@@ -44,6 +44,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:security
@@ -100,6 +101,7 @@ areas:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -268,6 +270,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -307,10 +310,13 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:mcp
       - area:memory
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:template
@@ -440,6 +446,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -570,12 +577,18 @@ areas:
       - area:codex-runtime
       - area:debugging
       - area:desktop
+      - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
+      - area:mcp
       - area:memory
+      - area:orchestrator
+      - area:release
       - area:run-detail
       - area:testing
       - area:web
+      - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
@@ -751,6 +764,7 @@ areas:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.9: Code Graph View'
       - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -852,11 +866,14 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:target-repo-bootstrap
@@ -976,6 +993,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1089,6 +1107,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1746,6 +1765,7 @@ areas:
       - area:memory
       - area:openhands-runtime
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1952,6 +1972,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1988,14 +2009,18 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:mcp
       - area:memory
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:testing
       - area:web
+      - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
@@ -2035,12 +2060,18 @@ areas:
       - area:codex-runtime
       - area:debugging
       - area:desktop
+      - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
+      - area:mcp
       - area:memory
+      - area:orchestrator
+      - area:release
       - area:run-detail
       - area:testing
       - area:web
+      - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
@@ -2138,6 +2169,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2277,10 +2309,13 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:mcp
       - area:memory
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:target-repo-bootstrap
@@ -2311,10 +2346,13 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:mcp
       - area:memory
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:template
@@ -2450,6 +2488,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:security
@@ -2495,6 +2534,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:release
       - area:run-detail
       - area:security
@@ -2674,12 +2714,18 @@ areas:
       - area:codex-runtime
       - area:debugging
       - area:desktop
+      - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
+      - area:mcp
       - area:memory
+      - area:orchestrator
+      - area:release
       - area:run-detail
       - area:testing
       - area:web
+      - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
@@ -2725,6 +2771,7 @@ areas:
       - area:mcp
       - area:memory
       - area:operations
+      - area:orchestrator
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2776,12 +2823,18 @@ areas:
       - area:codex-runtime
       - area:debugging
       - area:desktop
+      - area:documentation
+      - area:frontend
       - area:gateway
       - area:graph-view
+      - area:mcp
       - area:memory
+      - area:orchestrator
+      - area:release
       - area:run-detail
       - area:testing
       - area:web
+      - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'

@@ -366,7 +366,7 @@ Breaking changes in this line include:
 
 ## Current model
 
-- COE-530 contributed: PR #193: docs(installer): document desktop installer validation (merge `7588cc7`)
+- COE-546 contributed: PR #217: Code Graph bootstrap indexing UX and E2E validation (merge `5cc1e83`)
 
 ## Important invariants
 
@@ -383,10 +383,10 @@ Breaking changes in this line include:
 
 ## Recent changes
 
-- COE-530: Installer Docs And End-To-End Validation
+- COE-546: Code Graph Bootstrap UX And End-To-End Validation
 
 ## Source refs
 
-- COE-530
+- COE-546
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
