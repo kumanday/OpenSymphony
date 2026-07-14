@@ -2383,6 +2383,13 @@ fn code_repo_id_for_workspace(workspace_path: &StdPath) -> Option<String> {
         .ok()
         .as_deref()
         .and_then(repo_id_from_remote_url)
+        .or_else(|| {
+            workspace_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
 }
 
 fn repo_id_from_remote_url(url: &str) -> Option<String> {

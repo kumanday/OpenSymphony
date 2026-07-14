@@ -131,6 +131,8 @@ export function renderKnowledgeGraphSurface(surface: KnowledgeGraphSurface): str
 
 export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
   const { snapshot, state } = surface;
+  const selectedRepo = state.repos?.repos.find((repo) => repo.repo_id === state.repoId) ?? null;
+  const indexReport = state.indexReport?.repo_id === state.repoId ? state.indexReport : null;
   const diffOverlay = state.mode === "diff" && state.diffOverlay
     ? normalizeCodeDiffOverlay(state.diffOverlay)
     : null;
@@ -143,6 +145,16 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
     reason: [snapshotTruncation?.reason, diffTruncation?.reason].filter((reason): reason is string => Boolean(reason)).join("; ") || null,
   };
   const hasTruncation = truncation.nodes_dropped > 0 || truncation.edges_dropped > 0;
+  const hasPartialCoverage = Boolean(
+    indexReport?.skipped_files.length
+      || diffOverlay?.unanalyzed_files.length,
+  );
+  const repositoryHasNoBaseline = !selectedRepo
+    || (selectedRepo.indexed !== true
+      && selectedRepo.document_count === 0
+      && !selectedRepo.indexed_at
+      && !selectedRepo.head_revision);
+  const emptySnapshot = repositoryHasNoBaseline && (!snapshot || snapshot.nodes.length === 0);
   const truncationSummary = hasTruncation
     ? ` Truncated ${formatCount(truncation.nodes_dropped)} nodes and ${formatCount(truncation.edges_dropped)} edges${truncation.reason ? `: ${truncation.reason}` : "."}`
     : " No records were truncated.";
@@ -150,8 +162,8 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
     ? `${formatCount(snapshot.nodes.length)} nodes / ${formatCount(snapshot.edges.length)} edges${hasTruncation ? ` / ${formatCount(truncation.nodes_dropped)} nodes + ${formatCount(truncation.edges_dropped)} edges truncated${truncation.reason ? `: ${truncation.reason}` : ""}` : ""}`
     : "No code graph snapshot";
   const accessibleSummary = snapshot
-    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${diffOverlay ? `${diffOverlay.edge_deltas.length} topology edge changes and ${diffOverlay.module_connection_deltas.length} module connection changes. ${diffOverlay.blast_radius.reduce((count, entry) => count + entry.inbound.length + entry.outbound.length, 0)} detailed blast-radius relationships. ` : ""}${state.stale ? "Refreshing." : ""}`
-    : "Code Graph has no loaded snapshot.";
+    ? `Code Graph ${state.mode} mode for ${snapshot.repo_id}: ${snapshot.nodes.length} nodes and ${snapshot.edges.length} edges.${truncationSummary} ${diffOverlay ? `${diffOverlay.edge_deltas.length} topology edge changes and ${diffOverlay.module_connection_deltas.length} module connection changes. ${diffOverlay.blast_radius.reduce((count, entry) => count + entry.inbound.length + entry.outbound.length, 0)} detailed blast-radius relationships. ` : ""}${state.runId ? "Workspace-composed view. " : "Baseline view. "}${hasPartialCoverage ? "Partial coverage. " : ""}${state.stale ? "Refreshing." : ""}`
+    : `Code Graph has no loaded snapshot. ${state.repoId ? "Index the configured repository to begin." : "No configured repository is available."}`;
   const narrowed = state.mode !== "atlas" || state.selectedNodeIds.length > 0 || state.path !== null || state.symbolKey !== null;
   const diffUnavailable = !state.baseRevision || !state.headRevision;
   return `
@@ -163,22 +175,77 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
         </div>
         <div class="os-segmented" data-testid="code-graph-mode-toggle">
           ${(["atlas", "file", "neighborhood", "diff"] as const).map((mode) =>
-            `<button type="button" class="${state.mode === mode ? "is-selected" : ""}" data-code-mode="${mode}"${mode === "diff" && diffUnavailable ? " disabled" : ""}>${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}
+            `<button type="button" class="${state.mode === mode ? "is-selected" : ""}" data-code-mode="${mode}"${(mode === "diff" && diffUnavailable) || emptySnapshot ? " disabled" : ""}>${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}
         </div>
         ${narrowed ? `<button type="button" class="os-icon-button os-kg-reset" data-code-reset data-testid="code-graph-reset">Show full graph</button>` : ""}
         <span class="os-kg-status" data-testid="code-graph-status">${escapeHtml(state.layoutStatus === "failed" ? state.layoutError ?? "Unavailable" : state.stale ? "Refreshing" : state.layoutStatus === "ready" ? "Ready" : "Idle")}</span>
       </div>
-      ${renderCodeGraphFilters(surface)}
+      ${renderCodeGraphProvenance(surface, hasTruncation, hasPartialCoverage)}
+      ${emptySnapshot ? renderCodeGraphIndexState(surface) : renderCodeGraphFilters(surface)}
       ${renderCodeBreadcrumb(state)}
-      ${renderCodeGraphTopologySummary(state)}
+      ${emptySnapshot ? "" : renderCodeGraphTopologySummary(state)}
       <p id="code-graph-screen-reader-summary" class="os-sr-only" data-testid="code-graph-screen-reader-summary" role="status" aria-live="polite">${escapeHtml(accessibleSummary)}</p>
-      <div class="os-knowledge-stage" data-kg-stage>
+      ${emptySnapshot ? "" : `<div class="os-knowledge-stage" data-kg-stage>
         <canvas class="os-knowledge-canvas os-code-graph-canvas" data-testid="code-graph-canvas" role="img" aria-label="Code Graph canvas" aria-describedby="code-graph-screen-reader-summary"></canvas>
         <div class="os-knowledge-labels" data-kg-labels data-morph-ignore-children></div>
         <span class="os-kg-controls-hint" aria-hidden="true">drag pan &middot; &#8997;-drag orbit &middot; scroll zoom &middot; double-click neighborhood &middot; esc to back out</span>
-      </div>
+      </div>`}
     </div>
   `;
+}
+
+function renderCodeGraphProvenance(
+  surface: CodeGraphSurface,
+  hasTruncation: boolean,
+  hasPartialCoverage: boolean,
+): string {
+  const { state } = surface;
+  const repo = state.repos?.repos.find((candidate) => candidate.repo_id === state.repoId);
+  const revision = state.indexReport?.head_revision
+    ?? state.headRevision
+    ?? repo?.head_revision
+    ?? "Not indexed";
+  const statuses = [
+    state.runId ? "Workspace-composed" : "Baseline",
+    state.stale ? "Stale" : null,
+    hasTruncation ? "Truncated" : null,
+    hasPartialCoverage ? "Partial coverage" : null,
+  ].filter((value): value is string => Boolean(value));
+  return `<dl class="os-code-provenance" data-testid="code-graph-provenance">
+    <div><dt>Target revision</dt><dd data-testid="code-graph-target-revision">${escapeHtml(revision)}</dd></div>
+    <div><dt>View</dt><dd data-testid="code-graph-view-provenance">${escapeHtml(statuses.join(" · "))}</dd></div>
+  </dl>`;
+}
+
+function renderCodeGraphIndexState(surface: CodeGraphSurface): string {
+  const { state } = surface;
+  const report = state.indexReport?.repo_id === state.repoId ? state.indexReport : null;
+  const repo = state.repos?.repos.find((candidate) => candidate.repo_id === state.repoId);
+  const repoLabel = repo?.display_root ?? state.repoId ?? "configured repository";
+  const running = state.indexing || report?.status === "accepted" || report?.status === "progress";
+  const failed = report?.status === "failed" || report?.status === "unavailable" || Boolean(state.indexError);
+  const coverage = report
+    ? `${report.parsed_files.toLocaleString("en-US")} files parsed · ${report.persisted_documents.toLocaleString("en-US")} documents · ${report.persisted_symbols.toLocaleString("en-US")} symbols · ${report.persisted_edges.toLocaleString("en-US")} edges`
+    : "No indexed files yet";
+  const diagnostics = [...new Set([
+    ...(state.indexError ? [state.indexError] : []),
+    ...(report?.diagnostics ?? []),
+  ])];
+  const skipped = report?.skipped_files ?? [];
+  const status = running
+    ? "Indexing repository…"
+    : failed
+      ? "Indexing failed"
+      : report?.status === "completed"
+        ? skipped.length > 0 ? "Indexed with partial coverage" : "Index complete; refresh the graph"
+        : "Repository is not indexed";
+  return `<section class="os-code-index-empty" data-testid="code-graph-index-empty" aria-labelledby="code-graph-index-title">
+    <h3 id="code-graph-index-title">${escapeHtml(status)}</h3>
+    <p>Build the target-branch Code Graph for <strong>${escapeHtml(repoLabel)}</strong>.</p>
+    <p class="os-code-index-coverage" data-testid="code-graph-index-coverage">${escapeHtml(coverage)}${skipped.length > 0 ? ` · ${skipped.length.toLocaleString("en-US")} skipped` : ""}</p>
+    ${diagnostics.length > 0 ? `<div class="os-code-index-diagnostics" role="alert"><strong>Diagnostics</strong><ul data-testid="code-graph-index-diagnostics">${diagnostics.map((diagnostic) => `<li>${escapeHtml(diagnostic)}</li>`).join("")}</ul></div>` : ""}
+    <button type="button" data-code-index data-testid="code-graph-index"${running ? " disabled aria-busy=\"true\"" : ""}>${failed ? "Retry indexing" : "Index repository"}</button>
+  </section>`;
 }
 
 export function renderCodeGraphFilters(surface: CodeGraphSurface): string {

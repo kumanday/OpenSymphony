@@ -3,6 +3,7 @@
 import {
   codeEdgeVisualStyle,
   codeGraphFixtureSnapshots,
+  codeGraphFixtureRepos,
   codeGraphFixtureSymbolDetails,
   codeGraphFixtureDiffOverlays,
   codeGraphReducer,
@@ -26,6 +27,97 @@ import { createKnowledgeGraphViewState } from "../src/knowledge-graph-scene.js";
 
 describe("Code Graph renderer surface", () => {
   const snapshot = codeGraphFixtureSnapshots.find((candidate) => candidate.mode === "file")!;
+
+  it("renders an accessible empty-state index action with progress and retry diagnostics", () => {
+    const repo = {
+      ...codeGraphFixtureRepos.repos[0],
+      document_count: 0,
+      symbol_count: 0,
+      edge_count: 0,
+      freshness: "unknown" as const,
+      indexed_at: null,
+      head_revision: null,
+    };
+    let state = codeGraphReducer(createInitialCodeGraphState(), {
+      type: "REPOS_LOADED",
+      repos: { ...codeGraphFixtureRepos, repos: [repo] },
+    });
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot: null, layout: null, state });
+    expect(root.querySelector("[data-testid='code-graph-index']")?.textContent).toContain("Index repository");
+    expect(root.querySelector("[data-testid='code-graph-index']")?.getAttribute("type")).toBe("button");
+    expect(root.querySelector("[data-testid='code-graph-index-empty']")?.textContent).toContain("Repository is not indexed");
+
+    state = codeGraphReducer(state, { type: "INDEX_STARTED", repoId: "opensymphony" });
+    root.innerHTML = renderCodeGraphSurface({ snapshot: null, layout: null, state });
+    expect(root.querySelector("[data-testid='code-graph-index']")?.hasAttribute("disabled")).toBe(true);
+    expect(root.querySelector("[data-testid='code-graph-index-empty']")?.textContent).toContain("Indexing repository");
+
+    state = codeGraphReducer(state, {
+      type: "INDEX_REPORT",
+      report: {
+        schema_version: { major: 1, minor: 0, patch: 0 },
+        repo_id: "opensymphony",
+        status: "failed",
+        head_revision: null,
+        parsed_files: 2,
+        persisted_documents: 1,
+        persisted_symbols: 3,
+        persisted_edges: 1,
+        persisted_diagnostics: 1,
+        stale_rows: 0,
+        skipped_files: ["vendor/generated.rs"],
+        diagnostics: ["parser limit reached"],
+        cursor: { sequence: 2, partition: "code-graph:opensymphony" },
+        indexed_at: "2026-07-13T00:00:00Z",
+      },
+    });
+    root.innerHTML = renderCodeGraphSurface({ snapshot: null, layout: null, state });
+    expect(root.querySelector("[data-testid='code-graph-index']")?.textContent).toContain("Retry indexing");
+    expect(root.querySelector("[data-testid='code-graph-index-diagnostics']")?.textContent).toContain("parser limit reached");
+    expect(root.querySelector("[data-testid='code-graph-index-coverage']")?.textContent).toContain("1 skipped");
+  });
+
+  it("shows revision, workspace provenance, stale, truncated, and partial coverage status", () => {
+    let state = codeGraphReducer(createInitialCodeGraphState(), {
+      type: "REPOS_LOADED",
+      repos: codeGraphFixtureRepos,
+    });
+    state = codeGraphReducer(state, { type: "SNAPSHOT_LOADED", snapshot });
+    state = codeGraphReducer(state, { type: "TARGET_SET", runId: "COE-546" });
+    state = codeGraphReducer(state, { type: "GRAPH_UPDATED", repoId: "opensymphony", updatedAt: "2026-07-13T00:00:00Z" });
+    state = codeGraphReducer(state, {
+      type: "INDEX_REPORT",
+      report: {
+        schema_version: { major: 1, minor: 0, patch: 0 },
+        repo_id: "opensymphony",
+        status: "completed",
+        head_revision: "target-revision",
+        parsed_files: 4,
+        persisted_documents: 4,
+        persisted_symbols: 8,
+        persisted_edges: 6,
+        persisted_diagnostics: 0,
+        stale_rows: 0,
+        skipped_files: ["src/generated.rs"],
+        diagnostics: [],
+        cursor: { sequence: 3, partition: "code-graph:opensymphony" },
+        indexed_at: "2026-07-13T00:00:00Z",
+      },
+    });
+    const truncated = { ...snapshot, truncation: { nodes_dropped: 2, edges_dropped: 1, reason: "bounded" } };
+    const root = document.createElement("div");
+    root.innerHTML = renderCodeGraphSurface({ snapshot: truncated, layout: null, state });
+    expect(root.querySelector("[data-testid='code-graph-target-revision']")?.textContent).toBe("target-revision");
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent)
+      .toContain("Workspace-composed");
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent)
+      .toContain("Stale");
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent)
+      .toContain("Truncated");
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent)
+      .toContain("Partial coverage");
+  });
 
   it("renders modes, structure fallback, freshness, diagnostics, and raw detail", () => {
     let state = codeGraphReducer(createInitialCodeGraphState(), { type: "SNAPSHOT_LOADED", snapshot });

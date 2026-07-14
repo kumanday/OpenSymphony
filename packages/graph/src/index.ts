@@ -29,6 +29,7 @@ export type {
   CodeFileOutline,
   CodeGraphNode,
   CodeGraphSnapshot,
+  CodeIndexReport,
   CodeRepoList,
   CodeSymbolDetail,
   MemoryBundleList,

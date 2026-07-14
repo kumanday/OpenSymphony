@@ -318,6 +318,26 @@ removing older revisions. Requests return an accepted report; inspect the event
 journal for progress and the terminal completion/failure event. Concurrent
 requests are serialized by the index writer.
 
+The operator-facing equivalent is the Code Graph empty state: select the
+configured repository and choose `Index repository`. It is safe to start from
+an empty `.opensymphony/memory/memory.duckdb`; the repository row is exposed
+with zero counts until the job begins. `accepted` and `progress` reports show
+coverage, `failed` and `unavailable` reports show diagnostics with a retry
+action, and `code_graph_updated` causes the shell to refresh the baseline. If
+the event stream is silent during an accepted/progress job, the shell polls the
+repository summary and refreshes as soon as an indexed baseline is visible.
+The provenance strip should show the configured target revision and whether a
+view is baseline, workspace-composed, stale, truncated, or partially analyzed.
+
+For a production transport smoke, use the gateway endpoint rather than the
+fixture workbench:
+
+```bash
+curl http://127.0.0.1:2468/api/v1/code/repos
+curl -X POST http://127.0.0.1:2468/api/v1/code/repos/<repo-id>/index
+curl 'http://127.0.0.1:2468/api/v1/code/repos/<repo-id>/graph?mode=atlas'
+```
+
 ## 4.1 Subscription Credential Operations
 
 OpenAI ChatGPT/Codex subscription mode is explicit and feature-gated. Build or

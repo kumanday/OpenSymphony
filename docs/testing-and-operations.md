@@ -198,6 +198,13 @@ and login -> Enable device code authorization for Codex before retrying.
 
 ## 3.1.1 Code Graph repository indexing
 
+- exercise the empty-DuckDB gateway flow: repository discovery, target-branch
+  index, accepted/progress/completed events, nonempty snapshot, baseline
+  `code.graph.context`, dirty workspace overlay, and cleanup
+- verify a dirty cross-module call produces an added edge and module-connection
+  delta against the configured target branch
+- assert the fixture, production HTTP, and Tauri-native adapters return the same
+  index-report and graph DTO shapes
 - bootstrap an empty DuckDB index from the configured target branch and assert
   nonzero documents, symbols, and edges for supported source
 - keep base and later commits independently queryable, including identical
@@ -320,6 +327,24 @@ The web and desktop clients both mount the shared `OpenSymphonyApp` shell from `
 - auth-aware placeholder states (`packages/ui-core/__tests__/auth-states.test.ts`): unauthenticated (sign-in), unauthorized (access denied), forbidden (access forbidden), organization/project selection placeholders, and local `auth_modes:["none"]` gateways rendering the dashboard with no login gate; recovery when the gateway later permits a read
 - remote web/desktop parity (`packages/ui-core/__tests__/remote-parity.test.ts`): the shell renders the same core dashboard metrics, task graph nodes, run detail, planning workspace, and stream events in both `mode:"web"` and `mode:"desktop"` against an identical fixture transport
 - gateway error classification (`packages/api-client/__tests__/gateway-errors.test.ts`): `HttpGatewayTransport` maps HTTP 401/403 (including a 403 with an explicit `error_code:"unauthorized"` body signal) to a classified `GatewayRequestError`, and `authStateFromError` maps it to an `AuthState` from `@opensymphony/gateway-schema`
+
+Code Graph UI validation also covers the real empty-state interaction: the
+keyboard-accessible index button, disabled progress state, skipped-file
+coverage, retry diagnostics, target-revision/provenance labels, stale and
+truncated status, refresh after `code_graph_updated`, and recovery when an
+accepted/progress job completes without event delivery. The packaged desktop
+smoke must use production adapters; passing only `?fixtures` is insufficient.
+
+Release-sensitive evidence for this surface includes:
+
+```bash
+cargo clippy-system-duckdb
+npm run type-check
+npm run package:release --workspace=@opensymphony/desktop -- --dry-run
+```
+
+Run the corresponding bundled-mode `cargo clippy --all-targets -- -D warnings`
+and `cargo test` checks before publishing a release bundle.
 
 ### Evidence for UI/shell changes
 

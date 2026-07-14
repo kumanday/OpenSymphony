@@ -491,6 +491,11 @@ describe("Code Graph adapters and state", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos");
     await http.listRepos({ includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos?include_stale=true");
+    await http.indexRepo("opensymphony");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:2468/api/v1/code/repos/opensymphony/index",
+      { method: "POST" },
+    );
     await http.getGraphSnapshot("opensymphony", { mode: "atlas", includeStale: true });
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:2468/api/v1/code/repos/opensymphony/graph?mode=atlas&include_stale=true");
     await http.getRunGraphSnapshot!("COE-543", "opensymphony", { mode: "file", path: "src/lib.rs", depth: 1 });
@@ -515,7 +520,48 @@ describe("Code Graph adapters and state", () => {
     expect(() => publicNative.getSymbolDetail("opensymphony", "privateSymbol", { visibility: "all_accessible" }))
       .toThrow('Code graph visibility "all_accessible" exceeds adapter policy "public"');
     await native.listRepos();
-    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(fetchMock).toHaveBeenCalledTimes(9);
+  });
+
+  it("ignores stale index reports while allowing terminal status at a shared cursor", () => {
+    const repos = {
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      repos: [{
+        repo_id: "opensymphony",
+        display_root: "OpenSymphony",
+        languages: [],
+        document_count: 0,
+        symbol_count: 0,
+        edge_count: 0,
+        freshness: "unknown" as const,
+        indexed_at: null,
+        head_revision: null,
+      }],
+    };
+    const report = (status: "accepted" | "progress" | "failed", sequence = 7) => ({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      repo_id: "opensymphony",
+      status,
+      head_revision: null,
+      parsed_files: 0,
+      persisted_documents: 0,
+      persisted_symbols: 0,
+      persisted_edges: 0,
+      persisted_diagnostics: status === "failed" ? 1 : 0,
+      stale_rows: 0,
+      skipped_files: [],
+      diagnostics: status === "failed" ? ["failed"] : [],
+      cursor: { sequence, partition: "code-graph:opensymphony" },
+      indexed_at: "2026-07-13T00:00:00Z",
+    });
+    let state = codeGraphReducer(createInitialCodeGraphState(), { type: "REPOS_LOADED", repos });
+    state = codeGraphReducer(state, { type: "INDEX_REPORT", report: report("accepted") });
+    state = codeGraphReducer(state, { type: "INDEX_REPORT", report: report("progress") });
+    state = codeGraphReducer(state, { type: "INDEX_REPORT", report: report("failed") });
+    expect(state.indexReport?.status).toBe("failed");
+    state = codeGraphReducer(state, { type: "INDEX_REPORT", report: report("accepted", 6) });
+    expect(state.indexReport?.status).toBe("failed");
+    expect(state.indexError).toBe("failed");
   });
 
   it("normalizes legacy diff payloads before graph materialization", async () => {
@@ -577,6 +623,8 @@ describe("Code Graph adapters and state", () => {
       .resolves.toEqual(await fixture.getGraphSnapshot("opensymphony", { mode: "neighborhood" }));
     await expect(native.getDiffOverlay("opensymphony", "base-rev", "head-rev"))
       .resolves.toEqual(await fixture.getDiffOverlay("opensymphony", "base-rev", "head-rev"));
+    await expect(native.indexRepo("opensymphony"))
+      .resolves.toEqual(await fixture.indexRepo("opensymphony"));
   });
 
   it("keeps base/head diff fixtures aligned for ghosts and blast radius", () => {

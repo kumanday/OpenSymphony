@@ -66,6 +66,8 @@ pub struct CodeRepoSummary {
     pub symbol_count: usize,
     pub edge_count: usize,
     pub freshness: CodeGraphFreshness,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub indexed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
