@@ -49,8 +49,8 @@ import {
 export { createKnowledgeGraphViewState } from "./knowledge-graph-scene.js";
 export type { KnowledgeGraphViewState } from "./knowledge-graph-scene.js";
 
-const graphSurfaceColor = "#eef1f4";
-const graphSurfaceColorInt = 0xeef1f4;
+const knowledgeGraphSurfaceColor = "#eef1f4";
+const codeGraphSurfaceColor = "#0f151b";
 
 export interface KnowledgeGraphSurface {
   snapshot: MemoryGraphSnapshot | null;
@@ -1128,11 +1128,13 @@ function syncOverlay(
       container.appendChild(label);
       bindNodeButton(root, label, state.options);
     }
-    const text = shortLabel(node.labelText);
+    const text = node.labelText;
     if (label.textContent !== text) label.textContent = text;
+    label.title = node.labelText;
     label.style.left = `${node.x.toFixed(1)}px`;
-    label.style.top = `${(node.y + node.screenRadius + 3).toFixed(1)}px`;
+    label.style.top = `${(node.y + 2 + node.screenRadius * node.labelAlpha).toFixed(1)}px`;
     label.style.opacity = node.labelAlpha.toFixed(2);
+    label.style.setProperty("--os-kg-label-scale", (0.2 + node.labelAlpha * 0.8).toFixed(2));
     label.classList.toggle("is-selected", node.emphasis === "selected");
     label.classList.toggle("is-hovered", node.emphasis === "hovered");
     if (node.freshnessLabel) label.dataset.freshness = node.freshnessLabel;
@@ -1241,7 +1243,7 @@ function drawThree(
       three.viewportKey = viewportKey;
     }
     syncThreeScene(three, scene);
-    three.renderer.setClearColor(graphSurfaceColorInt, 1);
+    three.renderer.setClearColor(surfaceColor(canvas), 1);
     three.renderer.clear(true, true, true);
     three.renderer.render(three.scene, three.camera);
     return true;
@@ -1363,6 +1365,7 @@ function syncThreeScene(three: ThreeCanvasState, scene: GraphScene): void {
       transparent: group.alpha < 1,
       opacity: group.alpha,
       depthWrite: false,
+      side: THREE.DoubleSide,
     });
     const mesh = new THREE.InstancedMesh(geometry, material, group.nodes.length);
     const matrix = new THREE.Matrix4();
@@ -1458,7 +1461,7 @@ function drawCanvas2d(canvas: HTMLCanvasElement, scene: GraphScene): void {
   if (!ctx) return;
   const ratio = canvas.width / Number.parseFloat(canvas.style.width || String(canvas.width));
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.fillStyle = graphSurfaceColor;
+  ctx.fillStyle = surfaceColor(canvas);
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   for (const hull of scene.hulls) {
@@ -1502,6 +1505,12 @@ function drawCanvas2d(canvas: HTMLCanvasElement, scene: GraphScene): void {
   }
   ctx.setLineDash?.([]);
   ctx.globalAlpha = 1;
+}
+
+function surfaceColor(canvas: HTMLCanvasElement): string {
+  return canvas.dataset.testid === "code-graph-canvas"
+    ? codeGraphSurfaceColor
+    : knowledgeGraphSurfaceColor;
 }
 
 // ─── Shared helpers ─────────────────────────────────────────────────────────
@@ -1766,10 +1775,6 @@ function canvasViewport(stage: HTMLElement | null): { width: number; height: num
 
 function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
-}
-
-function shortLabel(label: string): string {
-  return label.length > 34 ? `${label.slice(0, 31)}...` : label;
 }
 
 function matchesFocusVisible(element: Element): boolean {

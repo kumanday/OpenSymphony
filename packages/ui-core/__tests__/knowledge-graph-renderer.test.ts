@@ -71,6 +71,43 @@ describe("Knowledge Graph renderer", () => {
           const canvas = document.querySelector("[data-testid='code-graph-canvas']");
           return canvas instanceof HTMLCanvasElement && canvas.dataset.nonblank === "true";
         });
+        const codePixels = await page.$eval(
+          "[data-testid='code-graph-canvas']",
+          (canvasElement) => {
+            const canvas = canvasElement as HTMLCanvasElement & {
+              __kgDebug?: { scene: { nodes: Array<{ x: number; y: number }> } };
+            };
+            const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+            const node = canvas.__kgDebug?.scene.nodes[0];
+            if (!gl || !node) return { backgroundDelta: 0, nodeDelta: 0 };
+            const ratio = canvas.width / canvas.getBoundingClientRect().width;
+            const pixel = (x: number, y: number) => {
+              const rgba = new Uint8Array(4);
+              gl.readPixels(
+                Math.round(x * ratio),
+                Math.round(canvas.height - y * ratio),
+                1,
+                1,
+                gl.RGBA,
+                gl.UNSIGNED_BYTE,
+                rgba,
+              );
+              return rgba;
+            };
+            const background = pixel(2, 2);
+            const nodeCenter = pixel(node.x, node.y);
+            return {
+              backgroundDelta: Math.abs(background[0] - 15)
+                + Math.abs(background[1] - 21)
+                + Math.abs(background[2] - 27),
+              nodeDelta: Math.abs(nodeCenter[0] - background[0])
+                + Math.abs(nodeCenter[1] - background[1])
+                + Math.abs(nodeCenter[2] - background[2]),
+            };
+          },
+        );
+        expect(codePixels.backgroundDelta).toBeLessThan(12);
+        expect(codePixels.nodeDelta).toBeGreaterThan(80);
         expect(await page.locator("[data-testid='code-graph-screen-reader-summary']").textContent()).toContain("Code Graph");
         await page.close();
       }

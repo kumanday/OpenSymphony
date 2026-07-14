@@ -7238,15 +7238,25 @@ function appShellStyles(): string {
     .os-knowledge-canvas[data-kg-pointer="pan"], .os-knowledge-canvas[data-kg-pointer="orbit"] { cursor: grabbing; }
     .os-knowledge-canvas[data-kg-pointer="drag-node"] { cursor: move; }
     .os-knowledge-labels { position: absolute; inset: 0; pointer-events: none; }
-    .os-kg-label { position: absolute; transform: translate(-50%, 0); max-width: min(200px, 46%); min-height: 22px; padding: 2px 7px; border: 1px solid rgba(57, 112, 143, 0.24); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); transition: opacity 0.16s ease; }
+    .os-kg-label { --os-kg-label-scale: 1; position: absolute; transform: translate(-50%, 0) scale(var(--os-kg-label-scale)); transform-origin: top center; max-width: min(420px, 70%); min-height: 22px; padding: 2px 7px; border: 1px solid rgba(57, 112, 143, 0.24); border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #17202a; font-size: 11px; line-height: 1.25; overflow-wrap: anywhere; white-space: normal; pointer-events: auto; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); transition: opacity 0.16s ease, transform 0.16s ease; }
     .os-kg-label.is-selected { border-color: #c2410c; color: #9a3412; background: #fff7ed; }
     .os-kg-label.is-hovered { border-color: #c2410c; color: #9a3412; }
+    .os-code-graph .os-knowledge-stage { background: #0f151b; border-color: #344454; box-shadow: inset 0 0 0 1px rgba(139, 208, 230, 0.08); }
+    .os-code-graph .os-kg-status { background: #18303a; color: #dff7ff; border-color: #5ca0b8; }
+    .os-code-graph .os-kg-label { background: rgba(24, 34, 44, 0.96); color: #f2f7fb; border-color: #526579; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); }
+    .os-code-graph .os-kg-label.is-selected { background: rgba(47, 32, 23, 0.98); color: #ffedd5; border-color: #fb923c; }
+    .os-code-graph .os-kg-label.is-hovered { color: #ffffff; border-color: #8bd0e6; }
+    .os-code-graph .os-kg-tooltip { background: rgba(17, 24, 32, 0.98); color: #f2f7fb; border-color: #526579; box-shadow: 0 10px 26px rgba(0, 0, 0, 0.48); }
+    .os-code-graph .os-kg-tooltip span { color: #cbd5e1; }
+    .os-code-graph .os-kg-tooltip em { color: #8bd0e6; }
+    .os-code-graph .os-kg-controls-hint { color: #a8b3bf; }
     .os-kg-area-label { position: absolute; transform: translate(-50%, -50%); font-size: 17px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.75); transition: opacity 0.18s ease; pointer-events: none; white-space: nowrap; }
     .os-kg-tooltip { position: absolute; transform: translate(-50%, -100%); display: grid; gap: 2px; max-width: 260px; padding: 8px 10px; border: 1px solid #cbd5df; border-radius: 8px; background: rgba(255, 255, 255, 0.97); box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16); pointer-events: none; z-index: 3; }
     .os-kg-tooltip strong { font-size: 12px; line-height: 1.25; white-space: normal; }
     .os-kg-tooltip span { color: #536170; font-size: 11px; }
     .os-kg-tooltip em { color: #23566f; font-size: 11px; font-style: normal; }
     .os-kg-controls-hint { position: absolute; right: 8px; bottom: 6px; color: #8a97a3; font-size: 10.5px; letter-spacing: 0.02em; pointer-events: none; user-select: none; }
+    @media (prefers-reduced-motion: reduce) { .os-kg-label { transition: none; } }
     .os-kg-list { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; max-height: 160px; overflow: auto; }
     .os-kg-list li { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #d8dee4; border-radius: 6px; padding: 5px 8px; background: #ffffff; }
     .os-kg-list li.is-selected { border-color: #c2410c; background: #fff7ed; }
@@ -7566,6 +7576,15 @@ function appShellStyles(): string {
       .os-surface-list li { background: #171d23; border-color: #2a3440; }
       .os-surface-list li.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-knowledge-stage { background: #e7ebef; border-color: #2a3440; }
+      .os-code-provenance, .os-code-filters, .os-code-index-empty { background: #111820; border-color: #344454; }
+      .os-code-provenance dt, .os-code-filter-group legend { color: #b8c6d2; }
+      .os-code-provenance dd, .os-code-filters summary, .os-code-index-empty h3 { color: #8bd0e6; }
+      .os-code-filter-group { background: #171d23; border-color: #344454; color-scheme: dark; }
+      .os-code-filter-group label, .os-code-filter-path, .os-code-filter-diagnostics, .os-code-index-empty p { color: #cbd5e1; }
+      .os-code-filter-path input, .os-code-filter-diagnostics select { background: #0f151b; color: #f2f7fb; border-color: #526579; }
+      .os-code-filter-group input[type="checkbox"] { accent-color: #5ca0b8; }
+      .os-code-index-diagnostics { background: #3a1717; border-color: #7f1d1d; color: #fecaca; }
+      .os-code-delta-badge { color: #fbbf24; }
       .os-kg-list li, .os-kg-inspector { background: #111820; border-color: #2a3440; }
       .os-kg-label { background: rgba(17, 24, 32, 0.92); color: #d9e2ea; border-color: #2a3440; }
       .os-kg-label.is-selected { background: rgba(47, 32, 23, 0.95); color: #fed7aa; border-color: #fb923c; box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.22), 0 8px 18px rgba(0, 0, 0, 0.2); }

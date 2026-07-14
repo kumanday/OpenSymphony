@@ -687,11 +687,13 @@ export function buildGraphScene(input: SceneBuildInput): GraphScene {
             : "none";
     const fog = depthFog(point.depth, input.camera.distance);
     const style = input.nodeStyle?.(node);
-    const alpha = (emphasis === "dimmed" ? 0.18 : fog) * (style?.opacity ?? 1);
+    const alpha = emphasis === "hovered" || emphasis === "selected"
+      ? 1
+      : (emphasis === "dimmed" ? 0.18 : Math.max(0.82, fog)) * (style?.opacity ?? 1);
     // Degree feeds size so well-connected concepts read as landmarks at a
     // glance, mirroring Obsidian's graph view.
     const worldRadius = node.radius + Math.min(10, node.degree * 1.1);
-    const screenRadius = Math.max(3, worldRadius * point.pixelsPerWorldUnit * 1.45);
+    const screenRadius = Math.max(5, worldRadius * point.pixelsPerWorldUnit * 1.45);
     const labelEligible = nodeLabelBudget.has(node.nodeId) || emphasis === "hovered" || emphasis === "selected" || emphasis === "neighbor";
     const labelAlpha = emphasis === "hovered" || emphasis === "selected"
       ? 1
@@ -700,7 +702,7 @@ export function buildGraphScene(input: SceneBuildInput): GraphScene {
         : hoverActive
           ? 0
           : labelEligible
-            ? nodeLabelFade * fog
+            ? nodeLabelFade
             : 0;
     nodes.push({
       nodeId: node.nodeId,
@@ -807,7 +809,7 @@ export function hitTestScene(scene: GraphScene, x: number, y: number): string | 
   let best: { nodeId: string; distance: number; depth: number } | null = null;
   for (const node of scene.nodes) {
     const distance = Math.hypot(node.x - x, node.y - y);
-    const hitRadius = Math.max(9, node.screenRadius + 5);
+    const hitRadius = Math.max(12, node.screenRadius + 5);
     if (distance > hitRadius) continue;
     if (!best || distance < best.distance - 2 || (Math.abs(distance - best.distance) <= 2 && node.depth < best.depth)) {
       best = { nodeId: node.nodeId, distance, depth: node.depth };

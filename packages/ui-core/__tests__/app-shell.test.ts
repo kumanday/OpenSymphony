@@ -709,6 +709,7 @@ describe("OpenSymphonyApp mount", () => {
       mode: "desktop",
       transport: buildTransport(),
       graphAdapter: createFixtureGraphAdapter(),
+      codeGraphAdapter: createFixtureCodeGraphAdapter(),
     });
 
     await flushUntil(
@@ -896,8 +897,10 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-kg-raw-toggle]")).toBeNull();
       expect(root.querySelector(".os-run-evidence-panel [data-testid='knowledge-graph-renderer']")).toBeNull();
       (root.querySelector("[data-graph-view='code']") as HTMLButtonElement).click();
-      await flushUntil(() => root.querySelector("[data-testid='code-graph-renderer']") !== null);
+      await flushUntil(() => root.querySelector("[data-testid='code-graph-renderer']")?.getAttribute("data-layout-status") === "ready");
       expect(root.querySelector("[data-testid='workspace-pane-shell']")?.getAttribute("data-graph-surface")).toBe("code");
+      expect(root.querySelector("[data-testid='code-graph-canvas']")?.getAttribute("data-nonblank")).toBe("true");
+      expect(fillStyles).toContain("#0f151b");
       expect(root.querySelector("[data-testid='code-graph-structure-list']")).not.toBeNull();
       expect(root.querySelector("[data-testid='code-graph-detail']")).not.toBeNull();
       expect(root.querySelector("[data-testid='code-graph-screen-reader-summary']")?.textContent).toContain("Code Graph");

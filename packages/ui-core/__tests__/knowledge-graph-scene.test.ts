@@ -271,17 +271,21 @@ describe("scene assembly on the viz fixture", () => {
     });
   }
 
-  it("shows area labels and hides node labels at the framed overview", () => {
+  it("shows visible node dots and hides full node titles at the framed overview", () => {
     const scene = buildScene();
     expect(scene.hulls.length).toBe(graphVizFixtureSnapshot.communities.length);
     expect(scene.hulls.every((hull) => hull.labelAlpha > 0.5)).toBe(true);
+    expect(scene.nodes.every((node) => node.screenRadius >= 5 && node.alpha >= 0.82)).toBe(true);
     expect(scene.nodes.every((node) => node.labelAlpha < 0.05)).toBe(true);
   });
 
-  it("fades node labels in and area labels out when zoomed in", () => {
+  it("expands node dots into full titles and fades area labels out when zoomed in", () => {
     const overview = defaultCameraForLayout(layout, viewport);
     const scene = buildScene({ camera: { ...overview, distance: overview.distance / 3 } });
-    expect(scene.nodes.some((node) => node.labelAlpha > 0.5)).toBe(true);
+    const visibleTitles = scene.nodes.filter((node) => node.labelAlpha > 0.05);
+    expect(visibleTitles.length).toBeGreaterThan(0);
+    expect(visibleTitles.length).toBeLessThanOrEqual(80);
+    expect(visibleTitles.every((node) => node.labelAlpha > 0.95)).toBe(true);
     expect(scene.hulls.every((hull) => hull.labelAlpha < 0.05)).toBe(true);
   });
 

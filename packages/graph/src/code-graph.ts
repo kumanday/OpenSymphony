@@ -675,20 +675,20 @@ export function codeNodeVisualStyle(
   blastRadius = false,
 ): CodeNodeVisualStyle {
   const color = deltaStatus === "added"
-    ? "#15803d"
+    ? "#4ade80"
     : deltaStatus === "removed"
-      ? "#64748b"
+      ? "#94a3b8"
       : deltaStatus === "modified"
-        ? "#b45309"
+        ? "#fbbf24"
         : node.kind === "directory"
-    ? "#475569"
+    ? "#a8b3bf"
     : node.kind === "file"
-      ? "#2563eb"
+      ? "#60a5fa"
       : node.kind === "community"
-        ? "#7c3aed"
+        ? "#c084fc"
         : node.symbol_kind?.startsWith("test")
-          ? "#0f766e"
-          : "#0f766e";
+          ? "#5eead4"
+          : "#2dd4bf";
   const freshness = node.freshness === "current"
     ? { opacity: 1, borderStyle: "solid" as const, label: "current" }
     : node.freshness === "stale"
@@ -707,11 +707,11 @@ export function codeNodeVisualStyle(
 export function codeEdgeVisualStyle(edge: Pick<CodeGraphEdge, "confidence">): CodeEdgeVisualStyle {
   switch (edge.confidence) {
     case "exact":
-      return { color: "#2563eb", opacity: 0.9, lineStyle: "solid" };
+      return { color: "#60a5fa", opacity: 0.9, lineStyle: "solid" };
     case "syntactic":
-      return { color: "#7c3aed", opacity: 0.68, lineStyle: "dashed" };
+      return { color: "#c084fc", opacity: 0.72, lineStyle: "dashed" };
     default:
-      return { color: "#64748b", opacity: 0.48, lineStyle: "dotted" };
+      return { color: "#cbd5e1", opacity: 0.58, lineStyle: "dotted" };
   }
 }
 

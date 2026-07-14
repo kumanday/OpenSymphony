@@ -180,6 +180,9 @@ describe("Code Graph renderer surface", () => {
     const stale = scene.nodes.find((node) => node.nodeId === "symbol:codeGraphReducer")!;
     expect(stale.alpha).toBeLessThan(current.alpha);
     expect(stale.borderStyle).toBe("dashed");
+    expect(scene.nodes.every((node) => node.screenRadius >= 5)).toBe(true);
+    expect(current.color).toBe("#2dd4bf");
+    expect(scene.edges.find((edge) => edge.lineStyle === "solid")?.color).toBe("#60a5fa");
   });
 
   it("keeps symbol deep links valid from File mode", () => {
