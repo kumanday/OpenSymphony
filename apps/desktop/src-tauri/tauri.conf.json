@@ -1,7 +1,7 @@
 {
   "productName": "OpenSymphony",
   "mainBinaryName": "OpenSymphony",
-  "version": "2.9.5",
+  "version": "2.10.0",
   "identifier": "dev.opensymphony.app",
   "build": {
     "beforeDevCommand": "npm run dev",
