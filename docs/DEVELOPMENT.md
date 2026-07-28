@@ -4,6 +4,10 @@ This document is for contributors working on OpenSymphony itself. For user
 setup and operator flows, start with the [README](../README.md) and the docs
 linked there.
 
+The repository pins Rust 1.97.1 and Cargo Resolver 3. Install the pinned
+toolchain with `rustup toolchain install 1.97.1`; Cargo selects it automatically
+inside the checkout.
+
 If you are developing OpenSymphony itself, clone the repository and install from the checkout instead:
 
 ```bash

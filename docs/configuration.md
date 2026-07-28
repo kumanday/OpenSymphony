@@ -45,6 +45,9 @@ published `opensymphony` release and only runs `cargo install opensymphony --loc
 when it actually needs to. If the current directory already looks like an
 OpenSymphony target repo because it has both `WORKFLOW.md` and `config.yaml`,
 the command then refreshes changed or new files under `.agents/skills/`.
+Upgrades from a CLI older than 2.11 must first satisfy the Rust 1.97.1 minimum;
+the one-time `cargo +stable` recovery command is documented in
+[Operations](operations.md).
 
 When `--target-branch` or `--code-review` is present, `update` uses workflow
 settings mode instead of the normal maintenance path. It requires `WORKFLOW.md`

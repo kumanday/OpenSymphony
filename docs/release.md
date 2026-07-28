@@ -36,6 +36,20 @@ last_memory_sync: 2026-07-04T03:35:18.210566+00:00
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
 
+## 2.11 Rust toolchain boundary
+
+OpenSymphony 2.11.0 requires Rust 1.97.1 for the root CLI and desktop crate and
+uses Cargo Resolver 3. The repository toolchain, package `rust-version`, Clippy
+MSRV, CI toolchain, and desktop metadata must remain aligned.
+
+Users upgrading from a CLI older than 2.11 may need to bypass an older
+checkout-local toolchain override:
+
+```bash
+rustup update stable
+cargo +stable install opensymphony --locked
+```
+
 ## M12.9 Code Graph desktop release gate
 
 The Code Graph follow-on is release-ready only when the web and packaged

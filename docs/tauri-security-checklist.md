@@ -31,7 +31,7 @@
 ## Build & Runtime
 
 - [x] No `unsafe` blocks in `apps/desktop/src-tauri/`.
-- [x] `rust-version = "1.93"` enforced in `Cargo.toml`.
+- [x] `rust-version = "1.97.1"` enforced in `Cargo.toml`.
 - [x] Workspace lints forbid `unsafe_code`, warn on `unwrap_used` and `todo`.
 - [x] Placeholder icons are present; real icons will replace before release.
 - [x] `beforeDevCommand` and `beforeBuildCommand` point to the shared frontend workspace.

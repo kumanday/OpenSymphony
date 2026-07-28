@@ -38,7 +38,7 @@ not separately published crates.
 
 ### Prerequisites
 
-- Rust toolchain (stable)
+- Rust 1.97.1 or newer
 - Linear API key (for tracker integration)
 - For OpenHands: Python 3.13.12 with `uv`, plus an LLM API key for an OpenAI-compatible/LiteLLM provider
 - For Codex: the [Codex CLI](https://developers.openai.com/codex/cli) with a working ChatGPT login
@@ -64,6 +64,14 @@ To refresh the installed CLI later, run:
 
 ```bash
 opensymphony update
+```
+
+OpenSymphony 2.11.0 raises the minimum supported Rust version to 1.97.1. When
+upgrading an older CLI, bypass any checkout-local toolchain override with:
+
+```bash
+rustup update stable
+cargo +stable install opensymphony --locked
 ```
 
 When you run `opensymphony update` from a target-repo root that already has
@@ -533,7 +541,7 @@ OpenSymphony pins exact versions for reproducibility:
 - `openhands-agent-server==1.24.0`
 - `openhands-sdk==1.24.0`
 - Python `3.13.12`
-- Rust stable toolchain
+- Rust `1.97.1`
 
 The managed local OpenHands bundle is sourced from `tools/openhands-server/`
 and provisioned with `opensymphony install openhands`.

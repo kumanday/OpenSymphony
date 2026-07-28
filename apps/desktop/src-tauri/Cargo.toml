@@ -1,13 +1,13 @@
 [package]
 name = "opensymphony-desktop"
-version = "2.10.2"
+version = "2.11.0"
 description = "OpenSymphony Tauri desktop application shell"
 license = "MIT"
 homepage = "https://opensymphony.dev"
 repository = "https://github.com/kumanday/OpenSymphony"
 authors = ["OpenSymphony Contributors"]
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97.1"
 
 [[bin]]
 name = "OpenSymphony"

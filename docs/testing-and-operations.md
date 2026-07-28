@@ -77,6 +77,8 @@ Suggested gates:
 
 Current implementation:
 
+- the repository, CI, Clippy MSRV checks, root package, and desktop package all
+  use Rust 1.97.1; the Edition 2024 workspace uses Cargo Resolver 3
 - `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev` are repository
   aliases for iterative OpenSymphony development. The aliases set
   `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and build with
@@ -448,7 +450,7 @@ Implemented entrypoints:
 
 Required machine inputs:
 
-- `uv`, `git`, `curl`, and the Rust toolchain
+- `uv`, `git`, `curl`, and Rust 1.97.1 or newer
 - `OPENSYMPHONY_OPENHANDS_MODEL`
 - `OPENSYMPHONY_OPENHANDS_API_KEY` for the live `doctor` probe
 - the provider environment expected by the pinned OpenHands server for normal

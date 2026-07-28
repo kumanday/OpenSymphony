@@ -1137,6 +1137,10 @@ pub async fn code_repos(
 }
 
 /// Get a code graph snapshot through the active gateway.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri invoke parameters are the public command contract"
+)]
 #[command(rename_all = "camelCase")]
 pub async fn code_graph(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
@@ -1156,16 +1160,17 @@ pub async fn code_graph(
     push_query_param(&mut params, "aggregate", aggregate.as_deref());
     push_query_param_value(&mut params, "include_stale", include_stale);
     let path = path_with_query(
-        &format!(
-            "/api/v1/code/repos/{}/graph",
-            urlencoding::encode(&repo_id)
-        ),
+        &format!("/api/v1/code/repos/{}/graph", urlencoding::encode(&repo_id)),
         &params,
     );
     gateway_get_json(state, &path).await
 }
 
 /// Get a run-scoped code graph snapshot through the active gateway.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri invoke parameters are the public command contract"
+)]
 #[command(rename_all = "camelCase")]
 pub async fn run_code_graph(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
@@ -1251,10 +1256,7 @@ pub async fn run_code_outline(
     push_query_param(&mut params, "file_path", Some(&file_path));
     push_query_param(&mut params, "repo_id", repo_id.as_deref());
     let path = path_with_query(
-        &format!(
-            "/api/v1/runs/{}/code/outline",
-            urlencoding::encode(&run_id)
-        ),
+        &format!("/api/v1/runs/{}/code/outline", urlencoding::encode(&run_id)),
         &params,
     );
     gateway_get_json(state, &path).await
@@ -1289,10 +1291,7 @@ pub async fn code_index_repo(
 ) -> CommandResult<serde_json::Value> {
     gateway_post_json(
         state,
-        &format!(
-            "/api/v1/code/repos/{}/index",
-            urlencoding::encode(&repo_id)
-        ),
+        &format!("/api/v1/code/repos/{}/index", urlencoding::encode(&repo_id)),
     )
     .await
 }

@@ -1537,7 +1537,7 @@ where
             .await;
 
         for ((issue_id, mut execution, claimed_run, start_request), result) in
-            pending_launches.into_iter().zip(start_results.into_iter())
+            pending_launches.into_iter().zip(start_results)
         {
             match result {
                 Ok(launch) => {

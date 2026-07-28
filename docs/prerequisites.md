@@ -1,22 +1,26 @@
 ### Prerequisites
 
-#### Rust toolchain (stable)
+#### Rust 1.97.1 or newer
 
 **macOS / Linux**
 1. Visit [rustup.rs](https://rustup.rs/).
 2. Copy the install command shown on that page.
 3. Run it in Terminal and follow the prompts.
-4. Open a new terminal window after installation.
-5. Verify the installation with `rustc --version`.
+4. Run `rustup update stable`.
+5. Open a new terminal window after installation.
+6. Verify the installation with `rustc +stable --version`.
 
 **Windows**
 1. Visit [rustup.rs](https://rustup.rs/).
 2. Download the Windows installer shown there.
 3. Run it and follow the prompts.
-4. Open a new PowerShell or Command Prompt window after installation.
-5. Verify the installation with `rustc --version`.
+4. Run `rustup update stable`.
+5. Open a new PowerShell or Command Prompt window after installation.
+6. Verify the installation with `rustc +stable --version`.
 
-Rust installed via `rustup` uses the stable toolchain by default, which is what OpenSymphony expects.
+OpenSymphony 2.11.0 and newer require Rust 1.97.1. The repository pins that
+toolchain in `rust-toolchain.toml`, and published packages declare the same
+minimum through `rust-version`.
 
 ---
 

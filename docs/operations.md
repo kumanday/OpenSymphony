@@ -152,6 +152,15 @@ maintenance path:
 - leaves `WORKFLOW.md`, `AGENTS.md`, `.github/*`, and repo-local extra skills
   alone
 
+OpenSymphony 2.11.0 raises the minimum supported Rust version to 1.97.1. An
+older CLI may invoke Cargo through a checkout-local toolchain override, so use
+this one-time upgrade path when moving from a release before 2.11:
+
+```bash
+rustup update stable
+cargo +stable install opensymphony --locked
+```
+
 Use workflow settings mode when only the managed branch or review-provider
 markers need to change:
 

@@ -233,7 +233,7 @@ The local MVP is a trusted-environment mode.
 
 ## Coding standards
 
-- Rust stable toolchain
+- Rust 1.97.1 toolchain
 - `cargo fmt` clean
 - `clippy` clean under repo lints
 - explicit error enums with context

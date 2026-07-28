@@ -16,7 +16,10 @@ acceleration path, or a future managed installer/update path.
 
 Keep `cargo install opensymphony` turnkey for normal users. The CLI package uses
 bundled DuckDB by default so first-time users do not need to install a native
-DuckDB library or configure dynamic loader paths.
+DuckDB library or configure dynamic loader paths. OpenSymphony 2.11.0 and newer
+require Rust 1.97.1; older CLI installations can cross that toolchain boundary
+with `rustup update stable` followed by
+`cargo +stable install opensymphony --locked`.
 
 Keep system-linked or downloaded DuckDB as an optimization path:
 
