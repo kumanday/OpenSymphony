@@ -104,7 +104,7 @@ async fn update_skips_reinstall_when_current_matches_latest_and_refreshes_skills
         "update should not copy .github bootstrap files",
     );
     assert!(
-        stdout.contains("skipping `cargo install opensymphony`"),
+        stdout.contains("skipping `cargo install opensymphony --locked`"),
         "stdout should explain the skipped reinstall: {stdout}",
     );
     assert!(
@@ -150,8 +150,8 @@ async fn update_installs_when_latest_is_newer_and_skips_skill_refresh_outside_ta
     );
     let cargo_log = fs::read_to_string(&cargo_log).expect("cargo log should exist");
     assert!(
-        cargo_log.contains("ARGS=install opensymphony"),
-        "cargo install should use the requested command: {cargo_log}",
+        cargo_log.contains("ARGS=install opensymphony --locked"),
+        "cargo install should use the published lockfile: {cargo_log}",
     );
     assert!(
         stdout.contains("Skipped template skill refresh because this directory is missing `WORKFLOW.md` and `config.yaml`."),

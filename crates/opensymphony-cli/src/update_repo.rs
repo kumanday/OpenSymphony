@@ -90,9 +90,9 @@ enum UpdateCommandError {
         #[source]
         source: reqwest::Error,
     },
-    #[error("failed to run `cargo install opensymphony`: {0}")]
+    #[error("failed to run `cargo install opensymphony --locked`: {0}")]
     CargoInstall(#[source] io::Error),
-    #[error("`cargo install opensymphony` exited with {status}")]
+    #[error("`cargo install opensymphony --locked` exited with {status}")]
     CargoInstallFailed { status: String },
     #[error("{0}")]
     Template(#[from] InitCommandError),
@@ -586,20 +586,20 @@ async fn run_self_update(plan: &SelfUpdatePlan) -> Result<(), UpdateCommandError
     match plan.action {
         SelfUpdateAction::SkipUpToDate => {
             println!(
-                "Current version matches the latest published release; skipping `cargo install opensymphony`."
+                "Current version matches the latest published release; skipping `cargo install opensymphony --locked`."
             );
             Ok(())
         }
         SelfUpdateAction::SkipCurrentNewer => {
             println!(
-                "Current version is newer than the latest published release; skipping `cargo install opensymphony`."
+                "Current version is newer than the latest published release; skipping `cargo install opensymphony --locked`."
             );
             Ok(())
         }
         SelfUpdateAction::Install => {
-            println!("Running `cargo install opensymphony`...");
+            println!("Running `cargo install opensymphony --locked`...");
             let status = Command::new("cargo")
-                .args(["install", "opensymphony"])
+                .args(["install", "opensymphony", "--locked"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
