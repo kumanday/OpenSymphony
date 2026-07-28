@@ -147,7 +147,7 @@ For already-initialized repositories, `opensymphony update` is the fast
 maintenance path:
 
 - checks the latest published `opensymphony` version and skips
-  `cargo install opensymphony` when the running CLI is already current
+  `cargo install opensymphony --locked` when the running CLI is already current
 - refreshes changed or new template-managed files under `.agents/skills/`
 - leaves `WORKFLOW.md`, `AGENTS.md`, `.github/*`, and repo-local extra skills
   alone

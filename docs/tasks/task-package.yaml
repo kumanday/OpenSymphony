@@ -1,15 +1,31 @@
-planningWave: code-graph-operational-indexing-and-overlays
+planningWave: multi-repository-orchestration
 tasksDir: docs/tasks
 milestones:
-  - "M12.9: Code Graph View"
+  - "M12.95: Multi-Repository Foundations"
+  - "M12.96: Parent Integration Lifecycle"
+  - "M12.97: Multi-Repository Operations And Rollout"
 tasks:
-  - id: OSYM-879
-    file: docs/tasks/osym-879-target-branch-code-index-and-revision-snapshots.md
-  - id: OSYM-880
-    file: docs/tasks/osym-880-workspace-code-overlay-and-composite-graph.md
-  - id: OSYM-881
-    file: docs/tasks/osym-881-indexed-agent-code-context-and-retrieval.md
-  - id: OSYM-882
-    file: docs/tasks/osym-882-edge-delta-and-module-topology-diff.md
-  - id: OSYM-883
-    file: docs/tasks/osym-883-code-graph-bootstrap-ux-and-end-to-end-validation.md
+  - id: OSYM-884
+    file: docs/tasks/osym-884-central-multi-repository-config-and-safe-migration.md
+  - id: OSYM-885
+    file: docs/tasks/osym-885-canonical-repository-binding-and-task-propagation.md
+  - id: OSYM-886
+    file: docs/tasks/osym-886-verified-checkouts-instructions-and-harness-envelopes.md
+  - id: OSYM-887
+    file: docs/tasks/osym-887-per-instance-memory-catalog-and-source-migration.md
+  - id: OSYM-888
+    file: docs/tasks/osym-888-scoped-cross-repository-memory-and-leaf-overlays.md
+  - id: OSYM-889
+    file: docs/tasks/osym-889-hierarchy-generations-and-ancestor-workspace-leases.md
+  - id: OSYM-890
+    file: docs/tasks/osym-890-parent-execution-roots-and-child-workspace-reuse.md
+  - id: OSYM-891
+    file: docs/tasks/osym-891-restart-safe-parent-integration-controller.md
+  - id: OSYM-892
+    file: docs/tasks/osym-892-parent-repair-review-and-merge-lifecycle.md
+  - id: OSYM-893
+    file: docs/tasks/osym-893-bottom-up-subtree-cleanup-and-recovery.md
+  - id: OSYM-894
+    file: docs/tasks/osym-894-multi-repository-control-plane-and-operator-surfaces.md
+  - id: OSYM-895
+    file: docs/tasks/osym-895-hermetic-lifecycle-validation-and-isolated-rollout.md

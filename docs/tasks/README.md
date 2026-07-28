@@ -31,7 +31,10 @@ Rich client, hosted mode, collaborative planning, subscription-auth, and future 
 - OSYM-860 Desktop app installer and auto-update
 - OSYM-870 Code Graph View
 - OSYM-877 Codex thread lifecycle
+- OSYM-884 Multi-repository orchestration
 
-See `milestones.md` for the new task set and `../host-client-implementation_plan.md` for the source implementation strategy.
+See `milestones.md` for the task set and
+`../specs/multi-repo-orchestration-spec.md` for the active planning wave's
+source architecture.
 
 See `../implementation-plan.md` for milestone sequencing and dependency guidance.

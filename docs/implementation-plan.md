@@ -202,6 +202,9 @@ of broadening the existing hardening milestone:
 | M12.8 Desktop App Installer And Auto-Update | after M12.7 workflow target branch configuration, before M15 release hardening | lazy desktop installer/launcher, verified release bundles, source-build fallback, auto-update prompts, and installer docs |
 | M12.85 Codex Thread Lifecycle | after M10.3 Codex production harness, before M15 release hardening | manifest-backed per-issue thread reuse, retained terminal workspaces, durable archive transitions, and debug/reopen recovery |
 | M12.9 Code Graph View | after M12.8 desktop installer and after M12.6 code-intelligence foundations, before M15 release hardening | graph-hero shell, stable symbol identity, code graph DTOs, shared frontend surface, run-diff overlays, cross-graph chips, and hardening |
+| M12.95 Multi-Repository Foundations | after M12.9 target snapshots/overlays and completed COE-448 memory-server foundations | central instance config, canonical task binding, verified per-repository checkouts/instructions, per-instance memory catalog, and scoped leaf memory |
+| M12.96 Parent Integration Lifecycle | after M12.95 foundations, before multi-repository operator rollout | hierarchy generations, durable leases, retained-child worktree reuse, restart-safe parent integration, repair PRs, and bottom-up cleanup |
+| M12.97 Multi-Repository Operations And Rollout | after M12.96 parent lifecycle, before M15 release hardening | cross-client operator truth, hermetic lifecycle/fault validation, migration rollback, and isolated non-production activation |
 
 M10.3 pulls the shared harness adapter, model/credential settings, OpenHands
 subscription credential adapter, model configuration UI metadata, Codex
@@ -247,8 +250,16 @@ workspace shell geometry first, stable symbol identity and code read contracts,
 shared frontend adapters, run-diff symbol navigation, cross-graph chips, and
 scale/accessibility hardening.
 
+M12.95 through M12.97 follow the multi-repository orchestration specification.
+They first replace implicit repository scope with central config, canonical task
+bindings, verified checkouts, and one per-instance memory service; then add
+durable parent leases, child-storage reuse, integration, repair, and cleanup;
+finally they expose truthful operator state and gate activation on deterministic
+fault-injected validation. The wave reuses completed COE-448 memory-server work
+and M12.9 code snapshots/overlays instead of creating parallel implementations.
+
 The current default planning source is `docs/tasks/task-package.yaml` for the
-M12.85 codex-thread-lifecycle wave. The ACP debugging wave remains in
+`multi-repository-orchestration` wave. The ACP debugging wave remains in
 `docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
 `docs/tasks/linear-publish.yaml` records the latest published planning wave.
 

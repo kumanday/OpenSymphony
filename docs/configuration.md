@@ -41,7 +41,7 @@ opensymphony update
 ```
 
 The command first checks whether the installed CLI is older than the newest
-published `opensymphony` release and only runs `cargo install opensymphony`
+published `opensymphony` release and only runs `cargo install opensymphony --locked`
 when it actually needs to. If the current directory already looks like an
 OpenSymphony target repo because it has both `WORKFLOW.md` and `config.yaml`,
 the command then refreshes changed or new files under `.agents/skills/`.

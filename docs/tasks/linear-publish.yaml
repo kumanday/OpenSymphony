@@ -1,33 +1,74 @@
-planningWave: code-graph-operational-indexing-and-overlays
+planningWave: multi-repository-orchestration
 linearProject: opensymphony-bootstrap-e7b957855cb7
-publishedAt: '2026-07-12T18:03:02.108095+00:00'
+publishedAt: '2026-07-28T21:38:04.701401+00:00'
 milestones:
-  'M12.9: Code Graph View':
-    milestoneId: b6d6eb2b-bbf9-4960-965d-3ad57e424507
-    name: 'M12.9: Code Graph View'
+  'M12.95: Multi-Repository Foundations':
+    milestoneId: 726d60e9-9887-4745-ad05-dc78c1f1847f
+    name: 'M12.95: Multi-Repository Foundations'
+  'M12.96: Parent Integration Lifecycle':
+    milestoneId: 9555dcc5-1437-4fff-96c7-2eea4bcaee9b
+    name: 'M12.96: Parent Integration Lifecycle'
+  'M12.97: Multi-Repository Operations And Rollout':
+    milestoneId: 8d6ce63e-9e2c-43a2-9e55-7b3911ff4af9
+    name: 'M12.97: Multi-Repository Operations And Rollout'
 tasks:
-  OSYM-879:
-    issue: COE-542
-    issueId: 8a385e1c-fe71-42a5-a162-34a976a6ab34
-    url: https://linear.app/trilogy-ai-coe/issue/COE-542/target-branch-code-index-and-revision-snapshots
-    file: docs/tasks/osym-879-target-branch-code-index-and-revision-snapshots.md
-  OSYM-880:
-    issue: COE-543
-    issueId: 7aba69d0-10de-42d5-a853-d51c26d0c878
-    url: https://linear.app/trilogy-ai-coe/issue/COE-543/workspace-code-overlay-and-composite-graph
-    file: docs/tasks/osym-880-workspace-code-overlay-and-composite-graph.md
-  OSYM-881:
-    issue: COE-544
-    issueId: c2131af3-23cc-4fb4-956b-b6abbacda586
-    url: https://linear.app/trilogy-ai-coe/issue/COE-544/indexed-agent-code-context-and-retrieval
-    file: docs/tasks/osym-881-indexed-agent-code-context-and-retrieval.md
-  OSYM-882:
-    issue: COE-545
-    issueId: 2db8072d-c710-436c-b3ee-97f61c439985
-    url: https://linear.app/trilogy-ai-coe/issue/COE-545/edge-delta-and-module-topology-diff
-    file: docs/tasks/osym-882-edge-delta-and-module-topology-diff.md
-  OSYM-883:
-    issue: COE-546
-    issueId: ca2b222d-20b2-4ef2-8c61-99d129c45db3
-    url: https://linear.app/trilogy-ai-coe/issue/COE-546/code-graph-bootstrap-ux-and-end-to-end-validation
-    file: docs/tasks/osym-883-code-graph-bootstrap-ux-and-end-to-end-validation.md
+  OSYM-884:
+    issue: COE-547
+    issueId: 388bfdef-b845-4bce-a263-4c020a8ffe55
+    url: https://linear.app/trilogy-ai-coe/issue/COE-547/central-multi-repository-config-and-safe-migration
+    file: docs/tasks/osym-884-central-multi-repository-config-and-safe-migration.md
+  OSYM-885:
+    issue: COE-548
+    issueId: 8dd1217e-45ec-4b82-88dc-e295fbfacd90
+    url: https://linear.app/trilogy-ai-coe/issue/COE-548/canonical-repository-binding-and-task-propagation
+    file: docs/tasks/osym-885-canonical-repository-binding-and-task-propagation.md
+  OSYM-886:
+    issue: COE-549
+    issueId: 0a1924ea-8af5-41c9-ba90-427a306d0ef9
+    url: https://linear.app/trilogy-ai-coe/issue/COE-549/verified-checkouts-instructions-and-harness-envelopes
+    file: docs/tasks/osym-886-verified-checkouts-instructions-and-harness-envelopes.md
+  OSYM-887:
+    issue: COE-550
+    issueId: f73ecd1e-fcee-4a9d-b691-b8ca42bf576f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-550/per-instance-memory-catalog-and-source-migration
+    file: docs/tasks/osym-887-per-instance-memory-catalog-and-source-migration.md
+  OSYM-888:
+    issue: COE-551
+    issueId: 436f2462-a507-451b-91fb-a3295a12fefb
+    url: https://linear.app/trilogy-ai-coe/issue/COE-551/scoped-cross-repository-memory-and-leaf-overlays
+    file: docs/tasks/osym-888-scoped-cross-repository-memory-and-leaf-overlays.md
+  OSYM-889:
+    issue: COE-552
+    issueId: 407cfa91-0b3c-41e9-81ab-cc6a82caece1
+    url: https://linear.app/trilogy-ai-coe/issue/COE-552/hierarchy-generations-and-ancestor-workspace-leases
+    file: docs/tasks/osym-889-hierarchy-generations-and-ancestor-workspace-leases.md
+  OSYM-890:
+    issue: COE-553
+    issueId: 6c00933e-1f71-45ef-b7a1-fef25c649f3b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-553/parent-execution-roots-and-child-workspace-reuse
+    file: docs/tasks/osym-890-parent-execution-roots-and-child-workspace-reuse.md
+  OSYM-891:
+    issue: COE-554
+    issueId: a89c5d1c-e52d-428d-8484-50d655256bc4
+    url: https://linear.app/trilogy-ai-coe/issue/COE-554/restart-safe-parent-integration-controller
+    file: docs/tasks/osym-891-restart-safe-parent-integration-controller.md
+  OSYM-892:
+    issue: COE-555
+    issueId: 06cca8ff-a169-47bd-a5ef-17733ad02026
+    url: https://linear.app/trilogy-ai-coe/issue/COE-555/parent-repair-review-and-merge-lifecycle
+    file: docs/tasks/osym-892-parent-repair-review-and-merge-lifecycle.md
+  OSYM-893:
+    issue: COE-556
+    issueId: 2fc04f66-3a85-44e6-8a74-cde69d2a9b4e
+    url: https://linear.app/trilogy-ai-coe/issue/COE-556/bottom-up-subtree-cleanup-and-recovery
+    file: docs/tasks/osym-893-bottom-up-subtree-cleanup-and-recovery.md
+  OSYM-894:
+    issue: COE-557
+    issueId: 6803a25c-6031-4bc4-a382-69dbc39d09fa
+    url: https://linear.app/trilogy-ai-coe/issue/COE-557/multi-repository-control-plane-and-operator-surfaces
+    file: docs/tasks/osym-894-multi-repository-control-plane-and-operator-surfaces.md
+  OSYM-895:
+    issue: COE-558
+    issueId: f870536b-2d4d-4a9f-b718-7f98d7cc4437
+    url: https://linear.app/trilogy-ai-coe/issue/COE-558/hermetic-lifecycle-validation-and-isolated-rollout
+    file: docs/tasks/osym-895-hermetic-lifecycle-validation-and-isolated-rollout.md

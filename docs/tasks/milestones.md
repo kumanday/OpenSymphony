@@ -1,6 +1,8 @@
 # Project Milestones
 
-This milestone index covers the new rich client, hosted mode, collaborative planning, subscription-auth, and future harness work defined in:
+This milestone index covers rich client, hosted mode, collaborative planning,
+subscription-auth, future harness, and multi-repository orchestration work
+defined in:
 
 - `PRODUCT.md`
 - `docs/hosted-client-PRD.md`
@@ -15,6 +17,7 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/specs/desktop-app-installer-auto-update-spec.md`
 - `docs/specs/codex-thread-lifecycle-spec.md`
 - `docs/specs/code-graph-view-spec.md`
+- `docs/specs/multi-repo-orchestration-spec.md`
 
 ## M6: Gateway And Stream Contract
 
@@ -274,6 +277,45 @@ Tasks:
 - OSYM-881 Indexed Agent Code Context And Retrieval
 - OSYM-882 Edge Delta And Module Topology Diff
 - OSYM-883 Code Graph Bootstrap UX And End-To-End Validation
+
+## M12.95: Multi-Repository Foundations
+
+Goal: Establish central instance configuration, canonical terminal-task routing,
+verified repository-specific execution, and one scoped per-instance memory
+service without changing legacy single-repository behavior by default.
+
+Tasks:
+
+- OSYM-884 Central Multi-Repository Config And Safe Migration
+- OSYM-885 Canonical Repository Binding And Task Propagation
+- OSYM-886 Verified Checkouts Instructions And Harness Envelopes
+- OSYM-887 Per-Instance Memory Catalog And Source Migration
+- OSYM-888 Scoped Cross-Repository Memory And Leaf Overlays
+
+## M12.96: Parent Integration Lifecycle
+
+Goal: Retain terminal child evidence and let repository-neutral parents reuse
+verified child storage for restart-safe integration, repairs, and lease-aware
+bottom-up cleanup.
+
+Tasks:
+
+- OSYM-889 Hierarchy Generations And Ancestor Workspace Leases
+- OSYM-890 Parent Execution Roots And Child Workspace Reuse
+- OSYM-891 Restart-Safe Parent Integration Controller
+- OSYM-892 Parent Repair Review And Merge Lifecycle
+- OSYM-893 Bottom-Up Subtree Cleanup And Recovery
+
+## M12.97: Multi-Repository Operations And Rollout
+
+Goal: Make multi-repository state truthful across operator surfaces and prove
+the entire lifecycle through hermetic fault injection before isolated
+activation.
+
+Tasks:
+
+- OSYM-894 Multi-Repository Control Plane And Operator Surfaces
+- OSYM-895 Hermetic Lifecycle Validation And Isolated Rollout
 
 ## M15: Hardening And Release Quality
 
