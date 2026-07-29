@@ -915,7 +915,12 @@ fn resolve_central_config(
             })?;
         }
         if let Some(reference) = credential.reference.as_deref() {
-            required_literal(reference, "credentials.reference")?;
+            let reference = required_literal(reference, "credentials.reference")?;
+            if !is_typed_credential_reference(&reference) {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("credentials.{credential_id}.reference"),
+                });
+            }
         }
     }
     for (profile_id, profile) in &config.review_profiles {
@@ -1651,6 +1656,23 @@ fn is_central_credential_reference(value: &str) -> bool {
     })
 }
 
+fn is_typed_credential_reference(value: &str) -> bool {
+    let Some((scheme, locator)) = value.split_once(':') else {
+        return false;
+    };
+    if !matches!(
+        scheme,
+        "broker" | "codex-cli" | "keychain" | "openhands-auth" | "secret-manager" | "vault"
+    ) {
+        return false;
+    }
+    !locator.is_empty()
+        && locator.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '/' | '_' | '-' | '@')
+        })
+        && locator.len() <= 128
+}
+
 fn validate_central_env_name(value: &str) -> Result<(), ()> {
     let valid = !value.is_empty()
         && value.chars().all(|character| {
@@ -2292,6 +2314,36 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("tracker credentials without a variable should fail");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_raw_credential_references() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path()).replace(
+            "    variable: LINEAR_API_KEY\n",
+            "    variable: LINEAR_API_KEY\n    reference: sk-raw-oauth-token\n",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("raw credential references should fail");
+        assert!(matches!(
+            &error,
+            CentralConfigError::InvalidReference { field }
+                if field == "credentials.linear-key.reference"
+        ));
+        assert!(!error.to_string().contains("sk-raw-oauth-token"));
+    }
+
+    #[test]
+    fn central_config_accepts_typed_credential_references() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent\n",
+            "  github-ssh:\n    kind: codex_cli_login\n    reference: codex-cli:chatgpt-login\n",
+        );
+        resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("typed credential references should resolve");
     }
 
     #[test]

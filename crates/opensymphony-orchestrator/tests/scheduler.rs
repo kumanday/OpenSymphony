@@ -1890,11 +1890,18 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
         ..Default::default()
     };
     let workspace = FakeWorkspace {
-        cleanup_results: VecDeque::from([Err(FakeError {
-            message: "failed cleanup should retry".to_string(),
-            category: None,
-            retry_after: None,
-        })]),
+        cleanup_results: VecDeque::from([
+            Err(FakeError {
+                message: "failed cleanup should retry".to_string(),
+                category: None,
+                retry_after: None,
+            }),
+            Err(FakeError {
+                message: "terminal cleanup should retry".to_string(),
+                category: None,
+                retry_after: None,
+            }),
+        ]),
         ..Default::default()
     };
     let worker = FakeWorker::default();
@@ -1952,6 +1959,25 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
     assert_eq!(
         scheduler.workspace().failed_cleaned,
         vec!["COE-542", "COE-542"]
+    );
+    assert!(matches!(
+        scheduler
+            .execution(&IssueId::new("lin-542").expect("issue id should be valid"))
+            .expect("execution should remain recorded")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+
+    scheduler
+        .tick(ts(600_300))
+        .await
+        .expect("terminal reconciliation should retry forced cleanup");
+    assert_eq!(
+        scheduler.workspace().cleared_retry_exhaustion,
+        vec!["COE-542".to_string()]
     );
     assert!(matches!(
         scheduler

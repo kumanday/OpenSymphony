@@ -1156,12 +1156,6 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
-                self.workspace
-                    .clear_retry_exhaustion(record.issue.identifier.as_str())
-                    .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
                 let retain_failed = !record.successful_run
                     && !record.cancelled_run
                     && self.retry_limit_reached(record.normal_retry_count)
@@ -1180,9 +1174,19 @@ where
                         .cleanup_workspace(&record.workspace, true)
                         .await
                 };
-                if let Err(error) = cleanup_result {
-                    tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
-                    retry_records.push(record);
+                match cleanup_result {
+                    Ok(()) => {
+                        self.workspace
+                            .clear_retry_exhaustion(record.issue.identifier.as_str())
+                            .await
+                            .map_err(|error| SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            })?;
+                    }
+                    Err(error) => {
+                        tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
+                        retry_records.push(record);
+                    }
                 }
                 continue;
             }
@@ -1270,13 +1274,6 @@ where
                 let Some(existing) = self.executions.get(&issue_id) else {
                     continue;
                 };
-                let identifier = existing.issue().identifier.clone();
-                self.workspace
-                    .clear_retry_exhaustion(identifier.as_str())
-                    .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
                 let mut normalized = existing.issue().clone();
                 normalized.state = issue_state_from_name(terminal_state_name, &self.config);
                 self.release_issue(
@@ -2168,12 +2165,22 @@ where
             return Ok(());
         }
         let was_retry_exhausted = retry_exhausted_release(&execution);
+        let retain_failed = was_retry_exhausted && self.workspace.retain_failed_workspaces();
         if execution.status() == SchedulerStatus::Released
             && reason == ReleaseReason::TrackerTerminal
+            && !was_retry_exhausted
         {
             execution = execution.replace_release_reason(observed_at, reason)?;
         } else if execution.status() != SchedulerStatus::Released {
-            execution = execution.release(observed_at, reason, None)?;
+            execution = execution.release(
+                observed_at,
+                if was_retry_exhausted {
+                    ReleaseReason::RetryExhausted
+                } else {
+                    reason
+                },
+                None,
+            )?;
         }
         // A retry-exhausted release can be reconciled after the tracker moves
         // to a terminal state. Preserve its failed-cleanup policy even though
@@ -2183,23 +2190,41 @@ where
         } else {
             reason
         };
-        let retain_failed = cleanup_reason == ReleaseReason::RetryExhausted
-            && self.workspace.retain_failed_workspaces();
+        let mut retry_cleanup_succeeded = retain_failed;
         if cleanup_terminal
             && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
-            && let Err(error) = if cleanup_reason == ReleaseReason::RetryExhausted {
+        {
+            match if cleanup_reason == ReleaseReason::RetryExhausted {
                 self.workspace.cleanup_failed_workspace(&workspace).await
             } else {
                 self.workspace.cleanup_workspace(&workspace, true).await
+            } {
+                Ok(()) => retry_cleanup_succeeded = true,
+                Err(error) => {
+                    tracing::warn!(
+                        issue = %issue_id,
+                        %error,
+                        "retaining released execution while terminal workspace cleanup retries"
+                    );
+                }
             }
-        {
-            tracing::warn!(
-                issue = %issue_id,
-                %error,
-                "retaining released execution while terminal workspace cleanup retries"
-            );
+        } else if was_retry_exhausted && (!cleanup_terminal || execution.workspace().is_none()) {
+            retry_cleanup_succeeded = true;
+        }
+        if was_retry_exhausted && retry_cleanup_succeeded {
+            if let Err(error) = self
+                .workspace
+                .clear_retry_exhaustion(execution.issue().identifier.as_str())
+                .await
+            {
+                self.insert_execution(issue_id, execution);
+                return Err(SchedulerError::Workspace {
+                    detail: error.to_string(),
+                });
+            }
+            execution = execution.replace_release_reason(observed_at, reason)?;
         }
         self.insert_execution(issue_id, execution);
         Ok(())

@@ -569,6 +569,7 @@ fn resume_partial_apply(
         if marker.workflow_generation.is_empty()
             || sha256(&staged_workflow) != marker.workflow_generation
         {
+            let _memory_locks = acquire_partial_apply_catalog_guard(&marker)?;
             restore_or_remove_after_failed_apply(
                 &marker.config_path,
                 &marker.backup_dir.join("config.yaml"),
@@ -606,6 +607,7 @@ fn resume_partial_apply(
         return Ok(ActiveMigrationResolution::Complete);
     }
 
+    let _memory_locks = acquire_partial_apply_catalog_guard(&marker)?;
     restore_or_remove_after_failed_apply(
         &marker.config_path,
         &marker.backup_dir.join("config.yaml"),
@@ -623,6 +625,24 @@ fn resume_partial_apply(
         source,
     })?;
     Ok(ActiveMigrationResolution::Restored)
+}
+
+fn acquire_partial_apply_catalog_guard(
+    marker: &ActivationMarker,
+) -> Result<MemoryMigrationLock, MigrationError> {
+    let mut memory_locks = acquire_memory_migration_lock(&marker.target_repo())?;
+    memory_locks
+        .acquire_catalog_lock(&marker.target_repo(), marker.memory_catalog_root.as_deref())?;
+    if let (Some(root), Some(expected)) = (
+        marker.memory_catalog_root.as_deref(),
+        marker.memory_catalog_generation.as_deref(),
+    ) && memory_catalog_generation(root)? != expected
+    {
+        return Err(MigrationError::MemoryCatalogChanged {
+            path: root.to_path_buf(),
+        });
+    }
+    Ok(memory_locks)
 }
 
 fn verify_partial_apply_inputs(marker: &ActivationMarker) -> Result<(), MigrationError> {
@@ -1039,13 +1059,16 @@ fn verify_activated_file(
     backup_path: &Path,
     had_original: bool,
 ) -> Result<(), MigrationError> {
-    let Ok(contents) = fs::read(path) else {
-        if !had_original {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if !had_original && error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(());
         }
-        return Err(MigrationError::ActivatedFileChanged {
-            path: path.to_path_buf(),
-        });
+        Err(_) => {
+            return Err(MigrationError::ActivatedFileChanged {
+                path: path.to_path_buf(),
+            });
+        }
     };
     let current_generation = sha256(&contents);
     if current_generation == generation {
@@ -2754,6 +2777,49 @@ mod tests {
         assert!(matches!(
             verify_activated_file(&current, &sha256(b"central\n"), &backup, true),
             Err(MigrationError::ActivatedFileChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn rollback_verification_rejects_unreadable_new_activated_files() {
+        let root = tempfile::tempdir().expect("verification root should exist");
+        let current = root.path().join("config.yaml");
+        let backup = root.path().join("backup.yaml");
+        fs::create_dir(&current).expect("an unreadable file fixture should exist");
+        assert!(matches!(
+            verify_activated_file(&current, &sha256(b"central\n"), &backup, false),
+            Err(MigrationError::ActivatedFileChanged { path }) if path == current
+        ));
+    }
+
+    #[test]
+    fn partial_apply_catalog_guard_rejects_post_migration_captures() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let catalog = root.path().join("catalog");
+        fs::create_dir_all(&repo).expect("repository root should exist");
+        let expected = memory_catalog_generation(&catalog).expect("absent catalog should hash");
+        fs::create_dir_all(&catalog).expect("catalog should exist");
+        fs::write(catalog.join("capture.md"), "post-migration capture\n")
+            .expect("capture should be written");
+        let marker = ActivationMarker {
+            source_config: repo.join("legacy.yaml"),
+            config_path: repo.join("config.yaml"),
+            workflow_path: repo.join("WORKFLOW.md"),
+            backup_dir: repo.join(".migration/backups"),
+            generation: "sha256:generation".to_owned(),
+            workflow_generation: String::new(),
+            had_config: true,
+            had_workflow: true,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: Some(catalog.clone()),
+            memory_catalog_generation: Some(expected),
+        };
+
+        assert!(matches!(
+            acquire_partial_apply_catalog_guard(&marker),
+            Err(MigrationError::MemoryCatalogChanged { path }) if path == catalog
         ));
     }
 
