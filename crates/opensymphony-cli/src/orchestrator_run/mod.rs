@@ -198,14 +198,7 @@ fn acquire_root_ownership(
                 .create_new(true)
                 .open(&marker)
             {
-                Ok(mut file) => {
-                    writeln!(file, "pid={}", std::process::id()).map_err(|source| {
-                        RunCommandError::RootOwnership {
-                            detail: format!("failed to initialize {}: {source}", marker.display()),
-                        }
-                    })?;
-                    break file;
-                }
+                Ok(file) => break initialize_root_marker(file, &marker)?,
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
                     if root_lock_owner_alive(&marker) {
                         return Err(RunCommandError::RootOwnership {
@@ -246,6 +239,17 @@ fn acquire_root_ownership(
     }
 
     Ok(RuntimeRootOwnership { locks })
+}
+
+fn initialize_root_marker(mut file: File, marker: &Path) -> Result<File, RunCommandError> {
+    if let Err(source) = writeln!(file, "pid={}", std::process::id()) {
+        drop(file);
+        let _ = fs::remove_file(marker);
+        return Err(RunCommandError::RootOwnership {
+            detail: format!("failed to initialize {}: {source}", marker.display()),
+        });
+    }
+    Ok(file)
 }
 
 fn root_lock_owner_alive(marker: &Path) -> bool {
@@ -1117,6 +1121,18 @@ mod tests {
             b"Image Name PID Session Name\nworker.exe 5678 Console\n",
             1234
         ));
+    }
+
+    #[test]
+    fn failed_root_marker_initialization_removes_marker() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let marker = root.path().join(".opensymphony-instance.lock");
+        let file = File::create(&marker).expect("marker should be created");
+        drop(file);
+        let file = File::open(&marker).expect("marker should be reopenable");
+
+        assert!(initialize_root_marker(file, &marker).is_err());
+        assert!(!marker.exists());
     }
 
     #[test]

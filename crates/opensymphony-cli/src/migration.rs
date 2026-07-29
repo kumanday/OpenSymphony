@@ -84,6 +84,8 @@ enum MigrationError {
     },
     #[error("migration cannot serialize a literal tracker secret")]
     LiteralSecret,
+    #[error("migration cannot relocate existing legacy workspace state at {path}")]
+    WorkspaceRootState { path: PathBuf },
     #[error("migration cannot preserve a credential-bearing repository remote")]
     CredentialBearingRemote,
     #[error("central config destination {path} is not an activation of this migration")]
@@ -1246,6 +1248,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
                 })?;
             let resolved = resolve_repo_path(&source.target_repo, &value);
             if paths_overlap(&resolved, &source.target_repo) {
+                reject_workspace_relocation(&resolved)?;
                 format!("~/.opensymphony/workspaces/{instance_id}")
             } else {
                 resolved.display().to_string()
@@ -1927,9 +1930,9 @@ fn hook_creates_repository(value: &str) -> bool {
                     .iter()
                     .skip(1)
                     .any(|token| matches!(*token, "clone" | "checkout" | "co" | "branch" | "get")),
-                "cp" => tokens
-                    .iter()
-                    .any(|token| matches!(*token, "-a" | "-r" | "-R" | "--archive")),
+                "cp" => tokens.iter().any(|token| {
+                    matches!(*token, "-a" | "-r" | "-R" | "--archive" | "--recursive")
+                }),
                 "rsync" => true,
                 _ => false,
             }
@@ -1987,8 +1990,11 @@ fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> b
             "api_key",
             "apikey",
             "authorization",
+            "access_key",
+            "accesskey",
             "credential",
             "password",
+            "pat",
             "secret",
             "token",
         ]
@@ -1996,6 +2002,24 @@ fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> b
         .any(|part| name == *part || name.ends_with(&format!("_{part}")));
         secret_name && credential_variable(value).is_none()
     })
+}
+
+fn reject_workspace_relocation(path: &Path) -> Result<(), MigrationError> {
+    if path.exists()
+        && (!path.is_dir()
+            || fs::read_dir(path)
+                .map_err(|source| MigrationError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?
+                .next()
+                .is_some())
+    {
+        return Err(MigrationError::WorkspaceRootState {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 fn safe_id(value: &str) -> String {
@@ -2288,6 +2312,13 @@ mod tests {
     }
 
     #[test]
+    fn migration_rejects_pat_named_literal_secret() {
+        let env = BTreeMap::from([(String::from("GITHUB_PAT"), String::from("raw-secret"))]);
+
+        assert!(openhands_environment_has_literal_secret(&env));
+    }
+
+    #[test]
     fn migration_keeps_delimiter_leading_prompt_outside_front_matter() {
         let workflow_source = "---\ntracker:\n  kind: linear\n  project_slug: project\n---\n\n---\nTarget branch: develop\n---\n";
         let workflow =
@@ -2539,6 +2570,9 @@ mod tests {
             "hg clone https://example.invalid/repo ."
         ));
         assert!(hook_creates_repository("cp -a /other/repository/. ."));
+        assert!(hook_creates_repository(
+            "cp --recursive /other/repository/. ."
+        ));
         assert!(hook_creates_repository("rsync -a /other/repository/ ."));
     }
 
@@ -2583,6 +2617,41 @@ mod tests {
         let generated = generate_central_config(&source).expect("migration should generate");
         assert!(!generated.contains("/repo/var/workspaces"));
         assert!(generated.contains("~/.opensymphony/workspaces/legacy-repo-"));
+    }
+
+    #[test]
+    fn migration_rejects_nonempty_repo_relative_workspace_root() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let target_repo = root.path().join("repo");
+        let workspace_root = target_repo.join("var/workspaces");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        fs::write(workspace_root.join("COE-1-run.json"), "recoverable state")
+            .expect("workspace state should be written");
+        let workflow_path = target_repo.join("WORKFLOW.md");
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nworkspace:\n  root: ./var/workspaces\n---\n\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            target_repo,
+            workflow_path,
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        assert!(matches!(
+            generate_central_config(&source),
+            Err(MigrationError::WorkspaceRootState { .. })
+        ));
     }
 
     #[test]

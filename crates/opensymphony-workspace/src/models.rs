@@ -155,7 +155,8 @@ fn redact_diagnostic_token(token: &str) -> String {
         && let Some(at) = token[scheme_end + 3..].find('@')
     {
         let at = scheme_end + 3 + at;
-        if token[scheme_end + 3..at].contains(':') {
+        let userinfo = &token[scheme_end + 3..at];
+        if !userinfo.eq_ignore_ascii_case("git") {
             return format!("{}[redacted]{}", &token[..scheme_end + 3], &token[at..]);
         }
     }
@@ -974,5 +975,13 @@ mod tests {
         assert!(!value.contains("quoted-secret"));
         assert!(!value.contains("another-secret"));
         assert_eq!(value.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_token_only_url_userinfo() {
+        let value = redact_runtime_diagnostic("hook failed https://ghp_secret@example.test/repo");
+
+        assert!(!value.contains("ghp_secret"));
+        assert!(value.contains("https://[redacted]@example.test/repo"));
     }
 }

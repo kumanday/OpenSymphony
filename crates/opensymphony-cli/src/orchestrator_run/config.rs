@@ -1513,8 +1513,11 @@ fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> b
             "api_key",
             "apikey",
             "authorization",
+            "access_key",
+            "accesskey",
             "credential",
             "password",
+            "pat",
             "secret",
             "token",
         ]
@@ -2263,6 +2266,25 @@ scheduler:
 
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("literal OpenHands credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_pat_named_openhands_secret() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    local_server:\n      env:\n        GITHUB_PAT: literal-secret\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("PAT-shaped OpenHands credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
     }
