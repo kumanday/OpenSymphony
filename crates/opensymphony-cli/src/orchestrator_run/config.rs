@@ -441,6 +441,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) state_root: Option<PathBuf>,
     pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) retain_failed: bool,
+    pub(super) preserve_terminal_workspaces: bool,
     pub(super) memory: RunMemoryConfig,
 }
 
@@ -455,6 +456,7 @@ pub(super) async fn resolve_runtime_config(
         central_state_root,
         central_workspace_root,
         central_retain_failed,
+        central_preserve_terminal_workspaces,
         central_memory_catalog_root,
         central_workflow_front_matter,
         retry_max_attempts,
@@ -480,6 +482,7 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.state_root),
                     central.workspace_root,
                     Some(central.retain_failed),
+                    Some(central.mode == CentralRoutingMode::LegacySingle),
                     central.memory_catalog_root,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
@@ -491,6 +494,7 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    Some(true),
                     None,
                     None,
                     None,
@@ -503,6 +507,7 @@ pub(super) async fn resolve_runtime_config(
             None,
             None,
             None,
+            Some(true),
             None,
             None,
             None,
@@ -617,6 +622,7 @@ pub(super) async fn resolve_runtime_config(
         state_root: central_state_root,
         memory_catalog_root: central_memory_catalog_root,
         retain_failed: central_retain_failed.unwrap_or(true),
+        preserve_terminal_workspaces: central_preserve_terminal_workspaces.unwrap_or(true),
         memory,
     })
 }
@@ -637,31 +643,47 @@ pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<
     candidate.is_file().then_some(candidate)
 }
 
+const CENTRAL_CONFIG_KEYS: &[&str] = &[
+    "instance",
+    "routing",
+    "tracker_profiles",
+    "project_sets",
+    "linear_projects",
+    "repositories",
+    "credentials",
+    "review_profiles",
+    "workspace",
+    "scheduler",
+    "hooks",
+    "integration",
+    "memory_catalog",
+    "compatibility",
+];
+
+fn has_central_top_level_key(raw: &str) -> bool {
+    raw.lines().any(|line| {
+        if line.starts_with(char::is_whitespace) {
+            return false;
+        }
+        let Some((key, _)) = line.split_once(':') else {
+            return false;
+        };
+        CENTRAL_CONFIG_KEYS
+            .iter()
+            .any(|candidate| key.trim() == *candidate)
+    })
+}
+
 pub fn looks_like_central_config(raw: &str) -> bool {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(raw) else {
-        return false;
+        return has_central_top_level_key(raw);
     };
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
-    [
-        "instance",
-        "routing",
-        "tracker_profiles",
-        "project_sets",
-        "linear_projects",
-        "repositories",
-        "credentials",
-        "review_profiles",
-        "workspace",
-        "scheduler",
-        "hooks",
-        "integration",
-        "memory_catalog",
-        "compatibility",
-    ]
-    .iter()
-    .any(|key| mapping.contains_key(serde_yaml::Value::String((*key).to_owned())))
+    CENTRAL_CONFIG_KEYS
+        .iter()
+        .any(|key| mapping.contains_key(serde_yaml::Value::String((*key).to_owned())))
 }
 
 fn parse_legacy_run_config(path: &Path, raw: &str) -> Result<RunConfigFile, RunCommandError> {
@@ -1092,17 +1114,15 @@ fn central_workflow_front_matter(
                 .values()
                 .next()
                 .expect("length checked");
+            let (project_id, project_slug) = project_front_matter_identity(project);
             (
                 config
                     .tracker_profiles
                     .values()
                     .next()
                     .expect("length checked"),
-                project.provider_project_id.clone(),
-                project
-                    .provider_project_slug
-                    .clone()
-                    .unwrap_or_else(|| project.provider_project_id.clone()),
+                project_id,
+                project_slug,
             )
         }
         "project_set" => {
@@ -1134,14 +1154,8 @@ fn central_workflow_front_matter(
                     field: format!("project_sets.{project_set_id}.projects"),
                 }
             })?;
-            (
-                tracker,
-                project.provider_project_id.clone(),
-                project
-                    .provider_project_slug
-                    .clone()
-                    .unwrap_or_else(|| project.provider_project_id.clone()),
-            )
+            let (project_id, project_slug) = project_front_matter_identity(project);
+            (tracker, project_id, project_slug)
         }
         _ => {
             return Err(CentralConfigError::InvalidReference {
@@ -1159,7 +1173,7 @@ fn central_workflow_front_matter(
             kind: Some(tracker.provider.clone()),
             endpoint: tracker.endpoint.clone(),
             api_key,
-            project_id: Some(project_id),
+            project_id,
             project_slug: Some(project_slug),
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
@@ -1254,6 +1268,17 @@ fn central_workflow_front_matter(
         ..WorkflowFrontMatter::default()
     };
     Ok(front_matter)
+}
+
+fn project_front_matter_identity(project: &CentralLinearProjectFile) -> (Option<String>, String) {
+    match project.provider_project_slug.clone() {
+        Some(slug) if slug == project.provider_project_id => (None, slug),
+        Some(slug) => (Some(project.provider_project_id.clone()), slug),
+        None => (
+            Some(project.provider_project_id.clone()),
+            project.provider_project_id.clone(),
+        ),
+    }
 }
 
 fn central_integer(value: u64, field: &'static str) -> Result<IntegerLike, CentralConfigError> {
@@ -1881,6 +1906,29 @@ scheduler:
         assert!(looks_like_central_config(
             "schema_version: 1\ninstance:\n  id: central\nrouting:\n  mode: legacy_single\n"
         ));
+        assert!(looks_like_central_config("instance:\n  id: [broken\n"));
+    }
+
+    #[test]
+    fn migrated_equal_project_id_and_slug_use_legacy_slug_fallback() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "provider_project_id: core-project",
+            "provider_project_id: legacy-project\n    provider_project_slug: legacy-project",
+        );
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("legacy-compatible central config should resolve");
+        assert_eq!(resolved.workflow_front_matter.tracker.project_id, None);
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .tracker
+                .project_slug
+                .as_deref(),
+            Some("legacy-project")
+        );
     }
 
     #[test]

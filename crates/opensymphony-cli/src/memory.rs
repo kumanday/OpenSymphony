@@ -1649,6 +1649,7 @@ pub(crate) struct MemoryServerHandle {
 
 impl Drop for MemoryServerHandle {
     fn drop(&mut self) {
+        self.abort();
         if let Some(path) = self.activity_marker.take() {
             let _ = fs::remove_file(path);
         }

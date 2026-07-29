@@ -12,8 +12,8 @@ use opensymphony::opensymphony_domain::{
     ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
     ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
     ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
-    SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
-    TrackerIssueStateKind,
+    ReleaseReason as DomainReleaseReason, SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
@@ -5554,6 +5554,44 @@ async fn gateway_run_detail_failed_without_retries() {
     assert_eq!(response.max_turns, 0);
     assert_eq!(response.runtime_seconds, 20);
 
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_preserves_explicit_tracker_inactive_reason() {
+    let mut snapshot = fixture_snapshot_rich(0);
+    let issue = snapshot
+        .issues
+        .iter_mut()
+        .find(|issue| issue.identifier == "COE-302")
+        .expect("failed fixture issue should exist");
+    issue.release_reason = Some(DomainReleaseReason::TrackerInactive);
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-302"))
+        .send()
+        .await
+        .expect("fetch tracker-inactive run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode tracker-inactive run detail");
+
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::TrackerInactive)
+    );
     server_task.abort();
 }
 

@@ -498,7 +498,7 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
 pub(super) fn build_workspace_manager_config(
     workflow: &ResolvedWorkflow,
 ) -> WorkspaceManagerConfig {
-    let mut config = build_workspace_manager_config_with_retention(workflow, true);
+    let mut config = build_workspace_manager_config_with_retention(workflow, true, true);
     // Unit tests exercise backend behavior without the scheduler's
     // outcome-aware cleanup decision, so keep their fixtures available for
     // manifest assertions.
@@ -509,6 +509,7 @@ pub(super) fn build_workspace_manager_config(
 pub(super) fn build_workspace_manager_config_with_retention(
     workflow: &ResolvedWorkflow,
     _retain_failed: bool,
+    preserve_terminal_workspaces: bool,
 ) -> WorkspaceManagerConfig {
     let hooks = &workflow.config.hooks;
     WorkspaceManagerConfig {
@@ -521,9 +522,7 @@ pub(super) fn build_workspace_manager_config_with_retention(
             timeout: Duration::from_millis(hooks.timeout_ms),
         },
         cleanup: CleanupConfig {
-            // Preserve legacy single-repository behavior: terminal workspaces
-            // remain available for inspection and recovery.
-            remove_terminal_workspaces: false,
+            remove_terminal_workspaces: !preserve_terminal_workspaces,
         },
     }
 }
@@ -736,15 +735,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                         .map(datetime_to_timestamp_ms),
                 },
                 had_in_flight_run,
+                pending_retry: run_manifest.as_ref().is_some_and(|run| run.pending_retry),
                 normal_retry_count: run_manifest
                     .as_ref()
-                    .map(|run| {
-                        if run.pending_retry {
-                            run.normal_retry_count.saturating_add(1)
-                        } else {
-                            run.normal_retry_count
-                        }
-                    })
+                    .map(|run| run.normal_retry_count)
                     .unwrap_or_default(),
                 harness_kind,
                 recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
@@ -5597,7 +5591,8 @@ mod tests {
 
         assert_eq!(recoveries.len(), 1);
         assert!(!recoveries[0].had_in_flight_run);
-        assert_eq!(recoveries[0].normal_retry_count, 1);
+        assert!(recoveries[0].pending_retry);
+        assert_eq!(recoveries[0].normal_retry_count, 0);
     }
 
     #[tokio::test]
@@ -5809,6 +5804,7 @@ Run the scheduler.
             state_root: None,
             memory_catalog_root: None,
             retain_failed: true,
+            preserve_terminal_workspaces: true,
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,
@@ -6009,12 +6005,12 @@ Run the scheduler.
             &tempdir.path().join("workspaces"),
         );
         assert!(
-            !build_workspace_manager_config_with_retention(&workflow, true)
+            !build_workspace_manager_config_with_retention(&workflow, true, true)
                 .cleanup
                 .remove_terminal_workspaces
         );
         assert!(
-            !build_workspace_manager_config_with_retention(&workflow, false)
+            build_workspace_manager_config_with_retention(&workflow, false, false)
                 .cleanup
                 .remove_terminal_workspaces
         );

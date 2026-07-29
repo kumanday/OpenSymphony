@@ -112,6 +112,7 @@ pub struct RecoveryRecord {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
     pub had_in_flight_run: bool,
+    pub pending_retry: bool,
     pub normal_retry_count: u32,
     pub harness_kind: Option<String>,
     pub recovered_run: Option<RecoveredRun>,
@@ -953,24 +954,35 @@ where
         };
 
         for record in self.pending_retry_exhaustion.take().unwrap_or_default() {
-            let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) else {
-                if tracker_snapshot.contains_terminal(record.issue.id.as_str()) {
-                    self.workspace
-                        .clear_retry_exhaustion(record.issue.identifier.as_str())
-                        .await
-                        .map_err(|error| SchedulerError::Workspace {
-                            detail: error.to_string(),
-                        })?;
-                }
+            if let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) {
+                let normalized = normalize_tracker_issue(active_issue, &self.config)?;
+                let execution = IssueExecution::new(normalized.clone(), observed_at).release(
+                    observed_at,
+                    ReleaseReason::RetryExhausted,
+                    None,
+                )?;
+                self.insert_execution(normalized.id.clone(), execution);
                 continue;
-            };
-            let normalized = normalize_tracker_issue(active_issue, &self.config)?;
-            let execution = IssueExecution::new(normalized.clone(), observed_at).release(
+            }
+            if tracker_snapshot.contains_terminal(record.issue.id.as_str()) {
+                self.workspace
+                    .clear_retry_exhaustion(record.issue.identifier.as_str())
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+                continue;
+            }
+            let mut issue = record.issue.clone();
+            if let Some(snapshot) = tracker_snapshot.state_by_id.get(record.issue.id.as_str()) {
+                issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
+            }
+            let execution = IssueExecution::new(issue.clone(), observed_at).release(
                 observed_at,
                 ReleaseReason::RetryExhausted,
                 None,
             )?;
-            self.insert_execution(normalized.id.clone(), execution);
+            self.insert_execution(issue.id.clone(), execution);
         }
 
         let mut retry_records = Vec::new();
@@ -991,6 +1003,22 @@ where
                         recovered_harness_kind,
                         observed_at,
                     )?;
+                } else if record.pending_retry {
+                    let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                    let retry = RetryEntry {
+                        issue_id: normalized.id.clone(),
+                        identifier: normalized.identifier.clone(),
+                        attempt: RetryAttempt::new(normal_retry_count)?,
+                        normal_retry_count,
+                        scheduled_at: observed_at,
+                        due_at: observed_at,
+                        reason: RetryReason::Reconciliation,
+                        error: None,
+                    };
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
                 } else if self.retry_limit_reached(record.normal_retry_count) {
                     self.workspace
                         .persist_retry_exhaustion(&record.issue, record.normal_retry_count)
@@ -1164,6 +1192,16 @@ where
                 } else {
                     minimal_issue_from_state_snapshot(snapshot, &self.config)?
                 };
+
+                if category == IssueStateCategory::NonActive
+                    && self
+                        .executions
+                        .get(&issue_id)
+                        .is_some_and(retry_exhausted_release)
+                {
+                    self.refresh_execution_issue(&issue_id, normalized)?;
+                    continue;
+                }
 
                 let (reason, cleanup, abort_reason) = match category {
                     IssueStateCategory::Terminal => (

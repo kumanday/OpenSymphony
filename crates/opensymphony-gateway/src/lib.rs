@@ -4397,8 +4397,14 @@ async fn get_run_detail(
 
     let release_reason = if issue.cancel_failed {
         Some(ReleaseReason::CancelFailed)
-    } else if issue.release_reason == Some(DomainReleaseReason::RetryExhausted) {
-        Some(ReleaseReason::RetryExhausted)
+    } else if let Some(reason) = issue.release_reason {
+        Some(match reason {
+            DomainReleaseReason::Completed => ReleaseReason::Completed,
+            DomainReleaseReason::TrackerInactive => ReleaseReason::TrackerInactive,
+            DomainReleaseReason::TrackerTerminal => ReleaseReason::TrackerTerminal,
+            DomainReleaseReason::Cancelled => ReleaseReason::Cancelled,
+            DomainReleaseReason::RetryExhausted => ReleaseReason::RetryExhausted,
+        })
     } else {
         match issue.last_outcome {
             ControlPlaneWorkerOutcome::Completed => Some(ReleaseReason::Completed),

@@ -403,6 +403,36 @@ fn resume_partial_apply(
     };
     let workflow_stage = stage_path(&marker.workflow_path, &marker.generation);
     if workflow_stage.is_file() {
+        let staged_workflow = fs::read(&workflow_stage).map_err(|source| MigrationError::Read {
+            path: workflow_stage.clone(),
+            source,
+        })?;
+        if marker.workflow_generation.is_empty()
+            || sha256(&staged_workflow) != marker.workflow_generation
+        {
+            restore_or_remove_after_failed_apply(
+                &marker.config_path,
+                &marker.backup_dir.join("config.yaml"),
+                marker.had_config,
+                marker.config_mode,
+            )?;
+            restore_or_remove_after_failed_apply(
+                &marker.workflow_path,
+                &marker.backup_dir.join("WORKFLOW.md"),
+                marker.had_workflow,
+                marker.workflow_mode,
+            )?;
+            remove_staged_files(&[
+                &stage_path(&marker.config_path, &marker.generation),
+                &workflow_stage,
+                &stage_path(&marker_path, &marker.generation),
+            ]);
+            fs::remove_file(&marker_path).map_err(|source| MigrationError::Write {
+                path: marker_path,
+                source,
+            })?;
+            return Ok(ActiveMigrationResolution::Restored);
+        }
         replace_staged_file(&workflow_stage, &marker.workflow_path)?;
         return Ok(ActiveMigrationResolution::Complete);
     }
@@ -2254,6 +2284,24 @@ mod tests {
             .clone()
             .expect("migration should publish an activation marker");
         let marker = parse_activation_marker(&marker_path).expect("activation marker should parse");
+        fs::write(
+            stage_path(&workflow_path, &marker.generation),
+            "truncated staged workflow",
+        )
+        .expect("corrupt staged workflow should be written");
+        let resumed_corrupt = apply(MigrationPaths {
+            config: Some(config_path.clone()),
+            repo: root.path().to_path_buf(),
+            output: Some(output_path.clone()),
+        })
+        .await
+        .expect("mismatched staged workflow should recover safely");
+        assert!(!resumed_corrupt.central_config_already_active);
+        assert!(
+            fs::read_to_string(&workflow_path)
+                .expect("recovered workflow should exist")
+                .contains("codex:")
+        );
         restore_file(
             &marker.backup_dir.join("WORKFLOW.md"),
             &workflow_path,
