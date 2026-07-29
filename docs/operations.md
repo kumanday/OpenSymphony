@@ -681,6 +681,20 @@ migration visible instead of restoring a legacy config that would hide them;
 remove or reconcile the divergent catalog only through an explicit recovery
 operation.
 
+Central-config `opensymphony run` holds a destination-specific
+`.opensymphony/migration/strict-run.active` marker until the process exits, so
+rollback cannot replace the active generation underneath a running instance.
+Lock ownership treats permission-denied Unix PIDs as live and uses `tasklist`
+for stale-lock recovery on Windows. Restart recovery preserves successful
+terminal workspaces according to the configured retention policy, rejects
+pending retries that exceed a newly lowered retry limit, and redacts
+credential-shaped diagnostics before persisting them in `run.json`. If a
+terminal or nonterminal tracker transition cannot stop the remote harness,
+the scheduler retains the execution and retries the interrupt on the next
+reconciliation; terminal recovery also honors `workspace.retain_failed`.
+Malformed central-only memory configuration is detected before legacy fallback
+so it fails validation rather than polling or creating a workspace.
+
 Activation markers are namespaced by the absolute central-config destination,
 so separate instances cannot overwrite or consume one another's rollback
 record.

@@ -33,6 +33,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+#[cfg(not(unix))]
+use std::process::Command;
+
 use self::{
     backends::{
         ManagedLocalPreparation, RuntimeWorkerBackend, RuntimeWorkspaceBackend,
@@ -64,6 +67,8 @@ enum RunCommandError {
     CurrentDir(#[source] io::Error),
     #[error("failed to acquire configured runtime root ownership: {detail}")]
     RootOwnership { detail: String },
+    #[error("failed to acquire the central strict-run marker {path}: {detail}")]
+    StrictRunMarker { path: PathBuf, detail: String },
     #[error("failed to read {path}: {source}")]
     ReadConfig {
         path: PathBuf,
@@ -266,9 +271,70 @@ fn root_lock_owner_alive(marker: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        let Ok(output) = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+        else {
+            // If process liveness cannot be determined, fail closed.
+            return true;
+        };
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    == Some(pid as u32)
+            })
     }
+}
+
+struct StrictRunMarker {
+    path: PathBuf,
+}
+
+impl Drop for StrictRunMarker {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_strict_run_marker(
+    runtime: &RunRuntimeConfig,
+) -> Result<Option<StrictRunMarker>, RunCommandError> {
+    if !runtime.central_config {
+        return Ok(None);
+    }
+    let Some(config_path) = runtime.config_path.as_deref() else {
+        return Ok(None);
+    };
+    let marker = super::migration::strict_run_marker_path(config_path);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(|source| RunCommandError::StrictRunMarker {
+            path: marker.clone(),
+            detail: format!("failed to create marker directory: {source}"),
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .map_err(|source| RunCommandError::StrictRunMarker {
+            path: marker.clone(),
+            detail: source.to_string(),
+        })?;
+    if let Err(source) = writeln!(
+        file,
+        "pid={}\ngeneration={}",
+        std::process::id(),
+        runtime.config_generation
+    ) {
+        let _ = fs::remove_file(&marker);
+        return Err(RunCommandError::StrictRunMarker {
+            path: marker,
+            detail: format!("failed to initialize marker: {source}"),
+        });
+    }
+    Ok(Some(StrictRunMarker { path: marker }))
 }
 
 pub async fn run_command(args: RunArgs) -> ExitCode {
@@ -284,6 +350,7 @@ pub async fn run_command(args: RunArgs) -> ExitCode {
 async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let mut runtime = resolve_runtime_config(&args).await?;
     let _root_ownership = acquire_runtime_root_ownership(&runtime)?;
+    let _strict_run_marker = acquire_strict_run_marker(&runtime)?;
     let linear_worker_env = apply_linear_oauth_client_credentials(&mut runtime).await?;
     info!(
         config = runtime

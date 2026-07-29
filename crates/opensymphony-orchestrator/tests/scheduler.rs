@@ -1135,6 +1135,7 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-492", "COE-492", "Human Review"),
             workspace: recovered_workspace.clone(),
+            successful_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
@@ -1992,6 +1993,70 @@ async fn failed_terminal_interrupt_is_retried_before_cleanup() {
 }
 
 #[tokio::test]
+async fn failed_nonterminal_interrupt_keeps_execution_owned_until_acknowledged() {
+    let issue = tracker_issue("lin-272", "COE-272", "In Progress", 0);
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("remote stop was temporarily unavailable".to_string()),
+        }));
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
+            detail: Some("remote stop acknowledged".to_string()),
+        }));
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().states.insert(
+        "lin-272".to_string(),
+        tracker_state_snapshot("lin-272", "COE-272", "Todo", "unstarted", 200),
+    );
+
+    scheduler
+        .tick(ts(30_200))
+        .await
+        .expect("first inactive reconciliation should retain the run");
+    let issue_id = IssueId::new("lin-272").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("run should remain tracked")
+            .status(),
+        SchedulerStatus::Running
+    );
+    assert!(scheduler.worker().aborted.is_empty());
+
+    scheduler
+        .tick(ts(60_400))
+        .await
+        .expect("second inactive reconciliation should retry the stop");
+    assert_eq!(scheduler.worker().interrupts.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("released run should remain tracked")
+            .status(),
+        SchedulerStatus::Released
+    );
+}
+
+#[tokio::test]
 async fn failed_stall_interrupt_remains_running_until_stop_is_acknowledged() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-275", "COE-275", "In Progress", 0)],
@@ -2135,6 +2200,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-272", "COE-272", "In Progress"),
             workspace: recovered_workspace.clone(),
+            successful_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
@@ -2196,6 +2262,7 @@ async fn pre_conversation_recovery_honors_retry_limit() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-273", "COE-273", "In Progress"),
             workspace: recovered_workspace.clone(),
+            successful_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2241,6 +2308,7 @@ async fn recovery_restores_non_exhausted_retry_budget_before_dispatch() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-274", "COE-274", "In Progress"),
             workspace: recovered_workspace.clone(),
+            successful_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2284,6 +2352,7 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-276", "COE-276", "In Progress"),
             workspace: recovered_workspace.clone(),
+            successful_run: false,
             had_in_flight_run: false,
             pending_retry: true,
             normal_retry_count: 0,
@@ -2316,6 +2385,54 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
 
     assert_eq!(scheduler.worker().launches.len(), 1);
     assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
+}
+
+#[tokio::test]
+async fn recovery_parks_pending_retry_when_current_limit_is_lowered() {
+    let recovered_workspace = workspace_record("COE-277", "/tmp/recovered/COE-277");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-277", "COE-277", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-277", "COE-277", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            had_in_flight_run: false,
+            pending_retry: true,
+            normal_retry_count: 1,
+            retry_scheduled_at: Some(ts(250)),
+            retry_due_at: Some(ts(1_200)),
+            retry_reason: Some(RetryReason::Failure),
+            retry_error: Some("redacted failure".to_string()),
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-277".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("lowered retry limit should be reconciled");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-277").expect("issue id should be valid"))
+        .expect("execution should remain recorded");
+    assert!(matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+    assert!(scheduler.worker().launches.is_empty());
 }
 
 #[tokio::test]
@@ -2422,6 +2539,7 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-273", "COE-273", "In Progress"),
             workspace: recovered_workspace,
+            successful_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2459,6 +2577,44 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
 }
 
 #[tokio::test]
+async fn terminal_recovery_honors_failed_workspace_retention() {
+    let recovered_workspace = workspace_record("COE-274", "/tmp/recovered/COE-274");
+    let tracker = FakeTracker {
+        terminal: vec![tracker_issue("lin-274", "COE-274", "Done", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        retain_failed: true,
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-274", "COE-274", "In Progress"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("terminal recovery should succeed");
+
+    assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
 async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
     // A leftover workspace for a non-active (Backlog) issue is recovered and
     // parked at startup. When the issue later moves back into an active
@@ -2476,6 +2632,7 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-532", "COE-532", "Backlog"),
             workspace: recovered_workspace.clone(),
+            successful_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 0,
@@ -2674,6 +2831,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
         recoveries: vec![RecoveryRecord {
             issue: normalized_issue("lin-283-a", "COE-283-A", "In Progress"),
             workspace: recovered_workspace,
+            successful_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,

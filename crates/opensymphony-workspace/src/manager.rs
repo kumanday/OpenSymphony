@@ -20,7 +20,7 @@ use super::{
     IssueLifecycleState, IssueManifest, PromptCaptureDescriptor, PromptCaptureManifest,
     RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceHandle,
     WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
-    models::AfterCreateBootstrapReceipt,
+    models::{AfterCreateBootstrapReceipt, redact_runtime_diagnostic},
     paths::{normalize_absolute_path, resolve_path_within_root, sanitize_workspace_key},
 };
 
@@ -419,7 +419,16 @@ impl WorkspaceManager {
         manifest: &RunManifest,
     ) -> Result<(), WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
-        self.write_manifest(workspace, &workspace.run_manifest_path(), manifest)
+        let mut sanitized = manifest.clone();
+        sanitized.status_detail = sanitized
+            .status_detail
+            .as_deref()
+            .map(redact_runtime_diagnostic);
+        sanitized.retry_error = sanitized
+            .retry_error
+            .as_deref()
+            .map(redact_runtime_diagnostic);
+        self.write_manifest(workspace, &workspace.run_manifest_path(), &sanitized)
             .await
     }
 

@@ -118,6 +118,22 @@ activity marker. Owner PIDs allow stale lock and marker recovery after an
 unclean exit; apply removes stale markers only after it owns the lock. Rollback
 also fingerprints the migrated catalog and refuses to restore the legacy
 generation after post-migration memory has changed, preserving that evidence.
+Central-config runs publish the same destination-specific
+`.opensymphony/migration/strict-run.active` marker for their full process
+lifetime; rollback checks this marker before restoring the legacy generation
+and normal shutdown removes it. Recovery treats a terminal successful run as
+successful even when its retry count reached the configured limit, while a
+pending retry is parked if a lowered limit would make it exceed the current
+budget. Failed interrupt requests keep the execution owned until a later
+reconciliation observes a stop acknowledgement, and retained failed
+workspaces are not force-removed during terminal recovery. Durable run
+diagnostics are redacted before `run.json` is written. A file containing the
+central-only `memory.catalog_root` shape is classified as central even if its
+required routing fields are malformed, so it fails closed instead of falling
+back to legacy parsing.
+When the migrated implementation prompt itself begins with `---`, migration
+emits an empty front-matter boundary so the prompt remains implementation text
+on the next load.
 
 ## Bootstrap
 

@@ -7,6 +7,105 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Keep transient runtime diagnostics useful without allowing common
+/// credential-shaped values to become durable workspace metadata.
+pub fn redact_runtime_diagnostic(input: &str) -> String {
+    const SENSITIVE_KEYS: &[&str] = &[
+        "access_token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "client_secret",
+        "credential",
+        "password",
+        "refresh_token",
+        "secret",
+        "token",
+    ];
+
+    let mut redacted = input
+        .split_whitespace()
+        .map(redact_diagnostic_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    for key in SENSITIVE_KEYS {
+        redacted = redact_key_value(&redacted, key);
+    }
+    const MAX_CHARS: usize = 512;
+    let mut chars = redacted.chars();
+    let prefix = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
+fn redact_diagnostic_token(token: &str) -> String {
+    if let Some(scheme_end) = token.find("://")
+        && let Some(at) = token[scheme_end + 3..].find('@')
+    {
+        let at = scheme_end + 3 + at;
+        if token[scheme_end + 3..at].contains(':') {
+            return format!("{}[redacted]{}", &token[..scheme_end + 3], &token[at..]);
+        }
+    }
+    token.to_string()
+}
+
+fn redact_key_value(input: &str, key: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let key_lower = key.to_ascii_lowercase();
+    let Some(key_start) = lower.find(&key_lower) else {
+        return input.to_string();
+    };
+    let key_end = key_start + key.len();
+    if key_start > 0
+        && input[..key_start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut delimiter = key_end;
+    while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
+        delimiter += 1;
+    }
+    if delimiter >= bytes.len() || !matches!(bytes[delimiter], b'=' | b':') {
+        return input.to_string();
+    }
+    let mut value_start = delimiter + 1;
+    while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+        value_start += 1;
+    }
+    let quoted = bytes
+        .get(value_start)
+        .copied()
+        .filter(|quote| *quote == b'"' || *quote == b'\'');
+    if quoted.is_some() {
+        value_start += 1;
+    }
+    let mut value_end = value_start;
+    while value_end < bytes.len()
+        && !bytes[value_end].is_ascii_whitespace()
+        && !matches!(bytes[value_end], b',' | b';' | b'}' | b']' | b'&')
+    {
+        value_end += 1;
+    }
+    let mut suffix_start = value_end;
+    if quoted.is_some() && bytes.get(suffix_start) == quoted.as_ref() {
+        suffix_start += 1;
+    }
+    format!(
+        "{}{}[redacted]{}",
+        &input[..key_start],
+        &input[key_start..value_start],
+        &input[suffix_start..]
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueDescriptor {
     pub issue_id: String,
@@ -686,5 +785,22 @@ impl SessionContextArtifact {
             last_retry_reason: None,
             updated_at: Utc::now(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_runtime_diagnostic;
+
+    #[test]
+    fn runtime_diagnostics_redact_common_credentials_and_url_userinfo() {
+        let value = redact_runtime_diagnostic(
+            "request failed token=secret-canary api_key:another-canary https://user:password-canary@example.test/run",
+        );
+
+        assert!(!value.contains("secret-canary"));
+        assert!(!value.contains("another-canary"));
+        assert!(!value.contains("password-canary"));
+        assert!(value.contains("[redacted]"));
     }
 }

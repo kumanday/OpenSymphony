@@ -805,6 +805,9 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                         .last_seen_tracker_refresh_at
                         .map(datetime_to_timestamp_ms),
                 },
+                successful_run: run_manifest
+                    .as_ref()
+                    .is_some_and(|run| run.status == RunStatus::Succeeded),
                 had_in_flight_run,
                 pending_retry: run_manifest.as_ref().is_some_and(|run| run.pending_retry),
                 normal_retry_count: run_manifest
@@ -5922,6 +5925,7 @@ Run the scheduler.
         .expect("workflow should resolve");
         let runtime = RunRuntimeConfig {
             config_path: None,
+            central_config: false,
             config_generation: "test".to_owned(),
             target_repo: tempdir.path().to_path_buf(),
             workflow_path: tempdir.path().join("WORKFLOW.md"),

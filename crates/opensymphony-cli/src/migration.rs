@@ -348,6 +348,10 @@ fn migration_root(target_config: &Path) -> PathBuf {
         .join(".opensymphony/migration")
 }
 
+pub(crate) fn strict_run_marker_path(target_config: &Path) -> PathBuf {
+    migration_root(target_config).join("strict-run.active")
+}
+
 fn migration_marker_path(target_config: &Path) -> PathBuf {
     let target_config = normalize_path(target_config);
     let key = sha256(target_config.display().to_string().as_bytes());
@@ -716,13 +720,12 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         .config
         .map(|path| absolute_path(&cwd, &path))
         .unwrap_or_else(|| cwd.join("config.yaml"));
-    let migration_root = migration_root(&config_path);
     let Some((marker_path, marker)) = load_activation_marker(&config_path)? else {
         return Err(MigrationError::MissingActivation {
             path: migration_marker_path(&config_path),
         });
     };
-    let active_run_marker = migration_root.join("strict-run.active");
+    let active_run_marker = strict_run_marker_path(&config_path);
     if active_run_marker.exists() {
         return Err(MigrationError::ActiveStrictRun {
             path: active_run_marker,
@@ -1318,6 +1321,16 @@ fn workflow_body(source: &SourceContext) -> Result<Vec<u8>, MigrationError> {
     }
 
     if local_front_matter.is_empty() {
+        if source
+            .workflow
+            .prompt_template
+            .trim_start()
+            .starts_with("---")
+        {
+            let mut body = String::from("---\n---\n\n");
+            body.push_str(&source.workflow.prompt_template);
+            return Ok(body.into_bytes());
+        }
         return Ok(source.workflow.prompt_template.as_bytes().to_vec());
     }
 
@@ -2056,6 +2069,38 @@ mod tests {
         let serialized = serde_json::to_string(&report).expect("report should serialize");
         assert!(report.literal_secret_detected);
         assert!(!serialized.contains("super-secret-canary"));
+    }
+
+    #[test]
+    fn migration_keeps_delimiter_leading_prompt_outside_front_matter() {
+        let workflow_source = "---\ntracker:\n  kind: linear\n  project_slug: project\n---\n\n---\nTarget branch: develop\n---\n";
+        let workflow =
+            WorkflowDefinition::parse(workflow_source).expect("legacy workflow should parse");
+        let source = SourceContext {
+            source_config: PathBuf::from("config.yaml"),
+            config_source: String::new(),
+            target_repo: PathBuf::from("repo"),
+            workflow_path: PathBuf::from("repo/WORKFLOW.md"),
+            workflow_source: workflow_source.to_string(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        let migrated = String::from_utf8(workflow_body(&source).expect("body should serialize"))
+            .expect("migrated workflow should be UTF-8");
+        assert!(
+            migrated.starts_with("---\n---\n\n")
+                && migrated.contains("---\nTarget branch: develop"),
+            "migrated workflow: {migrated:?}"
+        );
+        WorkflowDefinition::parse(&migrated)
+            .expect("delimiter-leading migrated prompt should remain loadable");
     }
 
     #[test]

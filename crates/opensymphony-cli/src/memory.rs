@@ -1942,7 +1942,16 @@ fn process_is_alive(pid: u32) -> bool {
         if pid > i32::MAX as u32 {
             return false;
         }
-        Pid::from_raw(pid as _).is_some_and(|pid| test_kill_process(pid).is_ok())
+        let Some(pid) = Pid::from_raw(pid as _) else {
+            return false;
+        };
+        match test_kill_process(pid) {
+            Ok(()) => true,
+            // EPERM means the process exists but belongs to another account;
+            // treating it as stale would allow a second writer to enter.
+            Err(error) if error == rustix::io::Errno::SRCH => false,
+            Err(_) => true,
+        }
     }
     #[cfg(not(unix))]
     {

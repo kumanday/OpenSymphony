@@ -111,6 +111,7 @@ impl SchedulerConfig {
 pub struct RecoveryRecord {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
+    pub successful_run: bool,
     pub had_in_flight_run: bool,
     pub pending_retry: bool,
     pub normal_retry_count: u32,
@@ -1043,20 +1044,33 @@ where
                     }
                 } else if record.pending_retry {
                     let normal_retry_count = record.normal_retry_count.saturating_add(1);
-                    let retry = RetryEntry {
-                        issue_id: normalized.id.clone(),
-                        identifier: normalized.identifier.clone(),
-                        attempt: RetryAttempt::new(normal_retry_count)?,
-                        normal_retry_count,
-                        scheduled_at: record.retry_scheduled_at.unwrap_or(observed_at),
-                        due_at: record.retry_due_at.unwrap_or(observed_at),
-                        reason: record.retry_reason.unwrap_or(RetryReason::Reconciliation),
-                        error: record.retry_error.clone(),
-                    };
-                    let execution = self
-                        .remove_execution(&issue_id)
-                        .expect("active recovery execution should be present");
-                    self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    // A retry whose count equals the configured maximum is
+                    // still the final permitted dispatch; only a pending
+                    // retry beyond that count must be parked here.
+                    if self.retry_count_exceeds_limit(normal_retry_count) {
+                        self.workspace
+                            .persist_retry_exhaustion(&record.issue, normal_retry_count)
+                            .await
+                            .map_err(|error| SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            })?;
+                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                    } else {
+                        let retry = RetryEntry {
+                            issue_id: normalized.id.clone(),
+                            identifier: normalized.identifier.clone(),
+                            attempt: RetryAttempt::new(normal_retry_count)?,
+                            normal_retry_count,
+                            scheduled_at: record.retry_scheduled_at.unwrap_or(observed_at),
+                            due_at: record.retry_due_at.unwrap_or(observed_at),
+                            reason: record.retry_reason.unwrap_or(RetryReason::Reconciliation),
+                            error: record.retry_error.clone(),
+                        };
+                        let execution = self
+                            .remove_execution(&issue_id)
+                            .expect("active recovery execution should be present");
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
                 } else if self.retry_limit_reached(record.normal_retry_count) {
                     self.workspace
                         .persist_retry_exhaustion(&record.issue, record.normal_retry_count)
@@ -1091,7 +1105,14 @@ where
                     .map_err(|error| SchedulerError::Workspace {
                         detail: error.to_string(),
                     })?;
-                let cleanup_result = if self.retry_limit_reached(record.normal_retry_count) {
+                let retain_failed = !record.successful_run
+                    && self.retry_limit_reached(record.normal_retry_count)
+                    && self.workspace.retain_failed_workspaces();
+                let cleanup_result = if retain_failed {
+                    Ok(())
+                } else if !record.successful_run
+                    && self.retry_limit_reached(record.normal_retry_count)
+                {
                     self.workspace
                         .cleanup_failed_workspace(&record.workspace)
                         .await
@@ -1542,6 +1563,12 @@ where
         self.config
             .max_retry_attempts
             .is_some_and(|max_attempts| normal_retry_count >= max_attempts)
+    }
+
+    fn retry_count_exceeds_limit(&self, normal_retry_count: u32) -> bool {
+        self.config
+            .max_retry_attempts
+            .is_some_and(|max_attempts| normal_retry_count > max_attempts)
     }
 
     fn mark_recovered_retry_exhausted(
@@ -2029,6 +2056,7 @@ where
         };
 
         execution.refresh_issue(issue)?;
+        let abort_requested = abort_reason.is_some();
         let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()
             && let Some(abort_reason) = abort_reason
@@ -2037,10 +2065,10 @@ where
                 .abort_worker(&mut execution, &run, abort_reason, observed_at)
                 .await?;
         }
-        if cleanup_terminal && !remote_stopped {
+        if abort_requested && !remote_stopped {
             warn!(
                 issue = %issue_id,
-                "retaining terminal workspace because the harness did not acknowledge its stop request"
+                "retaining execution because the harness did not acknowledge its stop request"
             );
             self.insert_execution(issue_id, execution);
             return Ok(());

@@ -430,6 +430,7 @@ pub(super) struct RunMemoryServerConfig {
 
 pub(super) struct RunRuntimeConfig {
     pub(super) config_path: Option<PathBuf>,
+    pub(super) central_config: bool,
     pub(super) config_generation: String,
     pub(super) target_repo: PathBuf,
     pub(super) workflow_path: PathBuf,
@@ -513,6 +514,7 @@ pub(super) async fn resolve_runtime_config(
             None,
         ),
     };
+    let central_config = central_workflow_front_matter.is_some();
     let config_root = config_path
         .as_deref()
         .and_then(Path::parent)
@@ -611,6 +613,7 @@ pub(super) async fn resolve_runtime_config(
 
     Ok(RunRuntimeConfig {
         config_path,
+        central_config,
         config_generation,
         target_repo,
         workflow_path,
@@ -674,9 +677,38 @@ fn has_central_top_level_key(raw: &str) -> bool {
     })
 }
 
+fn has_central_memory_catalog_key(raw: &str) -> bool {
+    let mut memory_indent = None;
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if indent == 0 {
+            memory_indent = (key.trim() == "memory").then_some(indent);
+            if key.trim() == "memory" && value.contains("catalog_root") {
+                return true;
+            }
+            continue;
+        }
+        if let Some(parent_indent) = memory_indent {
+            if indent <= parent_indent {
+                memory_indent = None;
+            } else if key.trim() == "catalog_root" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn looks_like_central_config(raw: &str) -> bool {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(raw) else {
-        return has_central_top_level_key(raw);
+        return has_central_top_level_key(raw) || has_central_memory_catalog_key(raw);
     };
     let Some(mapping) = value.as_mapping() else {
         return false;
@@ -684,6 +716,12 @@ pub fn looks_like_central_config(raw: &str) -> bool {
     CENTRAL_CONFIG_KEYS
         .iter()
         .any(|key| mapping.contains_key(serde_yaml::Value::String((*key).to_owned())))
+        || mapping
+            .get(serde_yaml::Value::String("memory".to_owned()))
+            .and_then(serde_yaml::Value::as_mapping)
+            .is_some_and(|memory| {
+                memory.contains_key(serde_yaml::Value::String("catalog_root".to_owned()))
+            })
 }
 
 fn parse_legacy_run_config(path: &Path, raw: &str) -> Result<RunConfigFile, RunCommandError> {
@@ -1912,6 +1950,9 @@ scheduler:
     #[test]
     fn central_config_discriminator_requires_instance_and_routing_mode() {
         assert!(!looks_like_central_config("schema_version: 1\n"));
+        assert!(looks_like_central_config(
+            "memory:\n  catalog_root: state/memory\n"
+        ));
         assert!(looks_like_central_config("instance:\n  id: legacy\n"));
         assert!(looks_like_central_config(
             "routing:\n  mode: legacy_single\n"
