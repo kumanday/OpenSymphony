@@ -630,7 +630,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 runtime.openhands_conversation_store.as_ref(),
                                 runtime.memory.auto_archive,
                                 gateway_memory_config.as_ref(),
-                                memory_server.as_ref().map(|server| server.writer_gate()),
+                                memory_server
+                                    .as_ref()
+                                    .and_then(|server| server.writer_gate()),
                             )
                             .await;
                             mark_auto_capture_completed(
@@ -809,12 +811,14 @@ async fn start_runtime_memory_server(
         return Ok(None);
     };
     let config = load_runtime_memory_config(runtime)?;
-    super::memory::start_memory_server_with_central_config(
+    super::memory::start_memory_server_with_resolved_config(
         config,
         server.bind,
         server.token.clone(),
         Some(runtime.workflow.config.workspace.root.clone()),
         runtime.config_path.clone(),
+        Some(runtime.workflow.clone()),
+        Some(runtime.config_generation.clone()),
     )
     .await
     .map(Some)

@@ -1592,6 +1592,8 @@ struct MemoryServerState {
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
     central_config_path: Option<PathBuf>,
+    resolved_workflow: Option<ResolvedWorkflow>,
+    config_generation: Option<String>,
     writer_gate: MemoryWriterGate,
 }
 
@@ -1630,6 +1632,8 @@ async fn run_serve(
         },
         None,
         central_config_path,
+        None,
+        None,
     )
     .await?;
     println!(
@@ -1657,8 +1661,8 @@ impl MemoryServerHandle {
         &self.endpoint
     }
 
-    pub(crate) fn writer_gate(&self) -> MemoryWriterGate {
-        Arc::clone(&self.writer_gate)
+    pub(crate) fn writer_gate(&self) -> Option<MemoryWriterGate> {
+        (!self.is_finished()).then(|| Arc::clone(&self.writer_gate))
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -1701,16 +1705,40 @@ pub(crate) async fn start_memory_server_with_workspace_root(
         },
         workspace_root,
         None,
+        None,
+        None,
     )
     .await
 }
 
+#[allow(dead_code)]
 pub(crate) async fn start_memory_server_with_central_config(
     config: MemoryConfig,
     addr: SocketAddr,
     token: Option<String>,
     workspace_root: Option<PathBuf>,
     central_config_path: Option<PathBuf>,
+) -> Result<MemoryServerHandle, MemoryError> {
+    start_memory_server_with_resolved_config(
+        config,
+        addr,
+        token,
+        workspace_root,
+        central_config_path,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn start_memory_server_with_resolved_config(
+    config: MemoryConfig,
+    addr: SocketAddr,
+    token: Option<String>,
+    workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
+    resolved_workflow: Option<ResolvedWorkflow>,
+    config_generation: Option<String>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     start_memory_server_with_auth(
         config,
@@ -1721,6 +1749,8 @@ pub(crate) async fn start_memory_server_with_central_config(
         },
         workspace_root,
         central_config_path,
+        resolved_workflow,
+        config_generation,
     )
     .await
 }
@@ -1731,6 +1761,8 @@ async fn start_memory_server_with_auth(
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
     central_config_path: Option<PathBuf>,
+    resolved_workflow: Option<ResolvedWorkflow>,
+    config_generation: Option<String>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     let activity_marker = memory_activity_marker_path(&config.memory_root);
     let coordination_lock =
@@ -1797,6 +1829,8 @@ async fn start_memory_server_with_auth(
         auth,
         workspace_root,
         central_config_path,
+        resolved_workflow,
+        config_generation,
         writer_gate: Arc::clone(&writer_gate),
     };
     let app = axum::Router::new()
@@ -1844,10 +1878,7 @@ pub(crate) fn acquire_memory_coordination_lock(
             .create_new(true)
             .open(&path)
         {
-            Ok(mut file) => {
-                writeln!(file, "pid={}", process::id())?;
-                return Ok(MemoryCoordinationLock { path });
-            }
+            Ok(file) => return initialize_memory_coordination_lock(file, &path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 if memory_lock_owner_is_stale(&path) {
                     let quarantine = stale_memory_lock_path(&path);
@@ -1867,6 +1898,19 @@ pub(crate) fn acquire_memory_coordination_lock(
             Err(error) => return Err(error),
         }
     }
+}
+
+fn initialize_memory_coordination_lock(
+    mut file: fs::File,
+    path: &Path,
+) -> io::Result<MemoryCoordinationLock> {
+    if let Err(error) = writeln!(file, "pid={}", process::id()) {
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(MemoryCoordinationLock {
+        path: path.to_path_buf(),
+    })
 }
 
 fn acquire_memory_writer_lock(
@@ -1974,7 +2018,11 @@ fn process_is_alive(pid: u32) -> bool {
 async fn memory_server_health(
     axum::extract::State(state): axum::extract::State<MemoryServerState>,
 ) -> axum::Json<Value> {
-    axum::Json(memory_server_health_payload(&state.auth))
+    let mut payload = memory_server_health_payload(&state.auth);
+    if let Some(generation) = state.config_generation.as_deref() {
+        payload["configGeneration"] = json!(generation);
+    }
+    axum::Json(payload)
 }
 
 fn memory_server_health_payload(auth: &MemoryServerAuth) -> Value {
@@ -2027,6 +2075,7 @@ async fn memory_server_mcp(
                 request.params,
                 state.workspace_root.as_deref(),
                 state.central_config_path.as_deref(),
+                state.resolved_workflow.as_ref(),
             ),
         )
         .await
@@ -2251,7 +2300,7 @@ fn origin_is_localhost(origin: &str) -> bool {
 
 #[cfg(test)]
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
-    call_memory_tool_with_workspace(config, params, None, None).await
+    call_memory_tool_with_workspace(config, params, None, None, None).await
 }
 
 async fn call_memory_tool_with_workspace(
@@ -2259,13 +2308,14 @@ async fn call_memory_tool_with_workspace(
     params: Value,
     workspace_root: Option<&Path>,
     central_config_path: Option<&Path>,
+    resolved_workflow: Option<&ResolvedWorkflow>,
 ) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| MemoryError::InvalidInput("tools/call requires params.name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-    if central_config_path.is_some() && name == "memory.context" {
+    if central_config_path.is_some() && resolved_workflow.is_none() && name == "memory.context" {
         let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
     }
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
@@ -2392,7 +2442,10 @@ async fn call_memory_tool_with_workspace(
         "code.ast.diagnostics" => {
             call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
         }
-        "memory.capture" => call_memory_capture_tool(config, &arguments, central_config_path).await,
+        "memory.capture" => {
+            call_memory_capture_tool(config, &arguments, central_config_path, resolved_workflow)
+                .await
+        }
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
         "memory.reindex" => call_memory_reindex_tool(config, &arguments),
@@ -3158,8 +3211,9 @@ async fn call_memory_capture_tool(
     config: &MemoryConfig,
     arguments: &Value,
     central_config_path: Option<&Path>,
+    resolved_workflow: Option<&ResolvedWorkflow>,
 ) -> Result<Value, MemoryError> {
-    if central_config_path.is_some() {
+    if central_config_path.is_some() && resolved_workflow.is_none() {
         let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
     }
     let identifiers = issue_ids_from_mcp(config, arguments)?;
@@ -3172,6 +3226,9 @@ async fn call_memory_capture_tool(
         .or_else(|| optional_string_arg(arguments, "source_file"))
     {
         load_source_file(&repo_existing_path(config, &source_file)?)?
+    } else if let Some(workflow) = resolved_workflow {
+        let client = linear_client_from_resolved_workflow(workflow)?;
+        load_linear_source_from_client(&client, &identifiers).await?
     } else {
         load_linear_source(&config.repo_root, None, central_config_path, &identifiers).await?
     };
@@ -5636,12 +5693,13 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, RUST_QUERY_PACK_VERSION, authorize_memory_request,
+        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, authorize_memory_request,
         call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
-        context_source_from_mcp, load_memory_config, memory_server_health_payload,
-        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
+        context_source_from_mcp, load_memory_config, memory_server_health,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
+        trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -6392,6 +6450,21 @@ mod tests {
             .await
             .expect("memory server should shut down gracefully");
         assert!(!marker_path.exists());
+    }
+
+    #[test]
+    fn failed_memory_lock_owner_initialization_removes_partial_lock() {
+        let repo = TempDir::new().expect("repo");
+        let path = super::memory_migration_lock_path(repo.path());
+        std::fs::create_dir_all(path.parent().expect("lock parent")).expect("lock parent");
+        std::fs::File::create(&path).expect("lock file");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("read-only lock file");
+
+        assert!(super::initialize_memory_coordination_lock(file, &path).is_err());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -8747,6 +8820,24 @@ Public memory concept.
         let configured_payload = memory_server_health_payload(&configured_admin);
         assert_eq!(configured_payload["mode"], "read_write");
         assert_eq!(configured_payload["adminTools"], true);
+    }
+
+    #[tokio::test]
+    async fn memory_server_health_reports_pinned_config_generation() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let state = MemoryServerState {
+            config,
+            auth: MemoryServerAuth::default(),
+            workspace_root: None,
+            central_config_path: None,
+            resolved_workflow: None,
+            config_generation: Some("sha256:pinned-generation".to_string()),
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        let axum::Json(payload) = memory_server_health(axum::extract::State(state)).await;
+        assert_eq!(payload["configGeneration"], "sha256:pinned-generation");
     }
 
     #[test]

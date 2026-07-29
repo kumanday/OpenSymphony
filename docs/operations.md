@@ -674,6 +674,9 @@ checkout.
 After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
 policy so operational recovery continues to use the migrated OpenHands and
 tracker settings.
+For `legacy_single`, the same central policy resolves the selected repository's
+`instructions.path` beneath its checkout instead of silently reverting to the
+checkout root `WORKFLOW.md`.
 
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after

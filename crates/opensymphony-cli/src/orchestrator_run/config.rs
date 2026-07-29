@@ -28,6 +28,10 @@ const DEFAULT_CONTROL_PLANE_BIND: &str = "127.0.0.1:2468";
 const DEFAULT_MEMORY_SERVER_BIND: &str = "127.0.0.1:0";
 const DEFAULT_MEMORY_TOKEN_ENV: &str = "OPENSYMPHONY_MEMORY_TOKEN";
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Default, Deserialize, Clone)]
 struct RunConfigFile {
     #[serde(default)]
@@ -251,7 +255,7 @@ struct CentralHooksFile {
 #[serde(deny_unknown_fields)]
 struct CentralMemoryFile {
     catalog_root: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     auto_capture: bool,
     #[serde(default)]
     auto_archive: bool,
@@ -306,6 +310,7 @@ pub struct ResolvedCentralConfig {
     pub mode: CentralRoutingMode,
     pub repository: Option<String>,
     pub integration_instructions: Option<ResolvedIntegrationInstructions>,
+    pub repository_instruction_path: Option<PathBuf>,
     pub generation: String,
     pub retry_max_attempts: Option<u32>,
     runtime: RunConfigFile,
@@ -459,6 +464,7 @@ pub(super) async fn resolve_runtime_config(
         central_retain_failed,
         central_preserve_terminal_workspaces,
         central_memory_catalog_root,
+        central_repository_instruction_path,
         central_workflow_front_matter,
         retry_max_attempts,
     ) = match &config_path {
@@ -485,6 +491,7 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.retain_failed),
                     Some(central.mode == CentralRoutingMode::LegacySingle),
                     central.memory_catalog_root,
+                    central.repository_instruction_path,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
                 )
@@ -495,7 +502,8 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
-                    Some(true),
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -508,7 +516,8 @@ pub(super) async fn resolve_runtime_config(
             None,
             None,
             None,
-            Some(true),
+            None,
+            None,
             None,
             None,
             None,
@@ -524,7 +533,8 @@ pub(super) async fn resolve_runtime_config(
         .as_deref()
         .map(|path| super::super::resolve_path(config_root, path))
         .unwrap_or_else(|| cwd.clone());
-    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow_path =
+        central_repository_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     let workflow = WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
         RunCommandError::LoadWorkflow {
             path: workflow_path.clone(),
@@ -1097,6 +1107,30 @@ fn resolve_central_config(
         }
     }
 
+    let legacy_repository_instruction_path = if mode == CentralRoutingMode::LegacySingle {
+        let repository = config
+            .routing
+            .repository
+            .as_ref()
+            .ok_or(CentralConfigError::MissingLegacyRepository)?;
+        let repository_entry = config.repositories.get(repository).ok_or_else(|| {
+            CentralConfigError::InvalidReference {
+                field: "routing.repository".to_owned(),
+            }
+        })?;
+        let checkout_path = repository_entry.checkout_path.as_deref().ok_or_else(|| {
+            CentralConfigError::MissingLegacyCheckout {
+                repository: repository.clone(),
+            }
+        })?;
+        Some(
+            resolve_central_path(config_root, checkout_path, "repositories.checkout_path")?
+                .join(&repository_entry.instructions.path),
+        )
+    } else {
+        None
+    };
+
     let mut generation_input = raw.as_bytes().to_vec();
     if let Some(instructions) = integration_instructions.as_ref() {
         generation_input.extend_from_slice(instructions.content_hash.as_bytes());
@@ -1112,6 +1146,7 @@ fn resolve_central_config(
         mode,
         repository: config.routing.repository,
         integration_instructions,
+        repository_instruction_path: legacy_repository_instruction_path,
         generation: generation_hash(&generation_input),
         retry_max_attempts,
         runtime,
@@ -1883,6 +1918,13 @@ scheduler:
                 .expect("legacy repository should resolve")
                 .ends_with("configs/checkout")
         );
+        assert!(
+            resolved
+                .repository_instruction_path
+                .as_ref()
+                .is_some_and(|path| path.ends_with("configs/checkout/AGENTS.md"))
+        );
+        assert_eq!(resolved.runtime.memory.auto_capture, Some(true));
     }
 
     #[test]

@@ -54,56 +54,78 @@ fn redact_diagnostic_token(token: &str) -> String {
 }
 
 fn redact_key_value(input: &str, key: &str) -> String {
-    let lower = input.to_ascii_lowercase();
     let key_lower = key.to_ascii_lowercase();
-    let Some(key_start) = lower.find(&key_lower) else {
-        return input.to_string();
-    };
-    let key_end = key_start + key.len();
-    if key_start > 0
-        && input[..key_start]
-            .chars()
-            .next_back()
-            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        return input.to_string();
+    let mut redacted = input.to_string();
+    let mut search_from = 0;
+    loop {
+        let lower = redacted.to_ascii_lowercase();
+        let Some(relative_start) = lower
+            .get(search_from..)
+            .and_then(|text| text.find(&key_lower))
+        else {
+            return redacted;
+        };
+        let key_start = search_from + relative_start;
+        let key_end = key_start + key.len();
+        if key_start > 0
+            && redacted[..key_start]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            search_from = key_end;
+            continue;
+        }
+        let bytes = redacted.as_bytes();
+        let mut delimiter = key_end;
+        while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
+            delimiter += 1;
+        }
+        if delimiter >= bytes.len() || !matches!(bytes[delimiter], b'=' | b':') {
+            search_from = key_end;
+            continue;
+        }
+        let mut value_start = delimiter + 1;
+        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        let quoted = bytes
+            .get(value_start)
+            .copied()
+            .filter(|quote| *quote == b'"' || *quote == b'\'');
+        if let Some(quote) = quoted {
+            value_start += 1;
+            let mut value_end = value_start;
+            while value_end < bytes.len() && bytes[value_end] != quote {
+                value_end += 1;
+            }
+            let suffix_start = if value_end < bytes.len() {
+                value_end + 1
+            } else {
+                value_end
+            };
+            if redacted[value_start..value_end].eq_ignore_ascii_case("[redacted]") {
+                search_from = suffix_start;
+                continue;
+            }
+            redacted.replace_range(value_start..value_end, "[redacted]");
+            search_from = value_start + "[redacted]".len();
+            continue;
+        }
+        let mut value_end = value_start;
+        while value_end < bytes.len()
+            && !bytes[value_end].is_ascii_whitespace()
+            && !matches!(bytes[value_end], b',' | b';' | b'}' | b']' | b'&')
+        {
+            value_end += 1;
+        }
+        if redacted[value_start..value_end].eq_ignore_ascii_case("[redacted]") {
+            search_from = value_end;
+            continue;
+        }
+        redacted.replace_range(value_start..value_end, "[redacted]");
+        search_from = value_start + "[redacted]".len();
     }
-    let bytes = input.as_bytes();
-    let mut delimiter = key_end;
-    while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
-        delimiter += 1;
-    }
-    if delimiter >= bytes.len() || !matches!(bytes[delimiter], b'=' | b':') {
-        return input.to_string();
-    }
-    let mut value_start = delimiter + 1;
-    while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
-        value_start += 1;
-    }
-    let quoted = bytes
-        .get(value_start)
-        .copied()
-        .filter(|quote| *quote == b'"' || *quote == b'\'');
-    if quoted.is_some() {
-        value_start += 1;
-    }
-    let mut value_end = value_start;
-    while value_end < bytes.len()
-        && !bytes[value_end].is_ascii_whitespace()
-        && !matches!(bytes[value_end], b',' | b';' | b'}' | b']' | b'&')
-    {
-        value_end += 1;
-    }
-    let mut suffix_start = value_end;
-    if quoted.is_some() && bytes.get(suffix_start) == quoted.as_ref() {
-        suffix_start += 1;
-    }
-    format!(
-        "{}{}[redacted]{}",
-        &input[..key_start],
-        &input[key_start..value_start],
-        &input[suffix_start..]
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -802,5 +824,18 @@ mod tests {
         assert!(!value.contains("another-canary"));
         assert!(!value.contains("password-canary"));
         assert!(value.contains("[redacted]"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_repeated_credentials() {
+        let value = redact_runtime_diagnostic(
+            "access_token=first access_token=second api_key=one api_key=two",
+        );
+
+        assert!(!value.contains("first"));
+        assert!(!value.contains("second"));
+        assert!(!value.contains("one"));
+        assert!(!value.contains("two"));
+        assert_eq!(value.matches("[redacted]").count(), 4);
     }
 }

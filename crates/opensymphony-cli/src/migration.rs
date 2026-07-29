@@ -353,7 +353,8 @@ fn migration_root(target_config: &Path) -> PathBuf {
 }
 
 pub(crate) fn strict_run_marker_path(target_config: &Path) -> PathBuf {
-    let target_config = normalize_path(target_config);
+    let target_config =
+        fs::canonicalize(target_config).unwrap_or_else(|_| normalize_path(target_config));
     let key = sha256(target_config.display().to_string().as_bytes());
     migration_root(&target_config).join(format!(
         "strict-run-{}.active",
@@ -2243,6 +2244,23 @@ mod tests {
         assert!(marker.is_file());
         drop(guard);
         assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_run_markers_canonicalize_existing_symlinked_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("marker root should exist");
+        let real = root.path().join("config.yaml");
+        let symlinked = root.path().join("config-link.yaml");
+        fs::write(&real, "schema_version: 1\n").expect("config should be written");
+        symlink(&real, &symlinked).expect("config symlink should be created");
+
+        assert_eq!(
+            strict_run_marker_path(&real),
+            strict_run_marker_path(&symlinked)
+        );
     }
 
     #[test]
