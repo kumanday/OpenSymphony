@@ -820,7 +820,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         current_dir.clone()
     };
 
-    let (target_repo, configured_tool_dir, central_front_matter) =
+    let (target_repo, configured_tool_dir, central_front_matter, central_instruction_path) =
         if let Some(path) = config_path.as_ref() {
             let raw =
                 fs::read_to_string(path)
@@ -836,6 +836,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
                     target_repo,
                     central.tool_dir(),
                     Some(central.workflow_front_matter.clone()),
+                    central.repository_instruction_path,
                 )
             } else {
                 let config = serde_yaml::from_str::<DebugConfigFile>(&raw).map_err(|source| {
@@ -857,13 +858,13 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
                     .as_deref()
                     .map(|value| resolve_config_path(path, config_root, value))
                     .transpose()?;
-                (target_repo, tool_dir, None)
+                (target_repo, tool_dir, None, None)
             }
         } else {
-            (default_target_repo, None, None)
+            (default_target_repo, None, None, None)
         };
 
-    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     let workflow = WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
         DebugCommandError::LoadWorkflow {
             path: workflow_path.clone(),

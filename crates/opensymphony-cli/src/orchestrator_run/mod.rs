@@ -278,14 +278,22 @@ fn root_lock_owner_alive(marker: &Path) -> bool {
             // If process liveness cannot be determined, fail closed.
             return true;
         };
-        output.status.success()
-            && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-                line.split_whitespace()
-                    .nth(1)
-                    .and_then(|value| value.parse::<u32>().ok())
-                    == Some(pid as u32)
-            })
+        tasklist_process_is_alive(output.status.success(), &output.stdout, pid)
     }
+}
+
+#[cfg(any(test, not(unix)))]
+fn tasklist_process_is_alive(status_success: bool, stdout: &[u8], pid: i32) -> bool {
+    if !status_success {
+        // An unsuccessful probe is unknown, not proof that the owner exited.
+        return true;
+    }
+    String::from_utf8_lossy(stdout).lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<u32>().ok())
+            == Some(pid as u32)
+    })
 }
 
 fn acquire_strict_run_marker(
@@ -1089,6 +1097,25 @@ mod tests {
         drop(first);
         acquire_root_ownership([root.path().to_path_buf()])
             .expect("root should be available after owner drops");
+    }
+
+    #[test]
+    fn unsuccessful_tasklist_probe_is_treated_as_live_unknown() {
+        assert!(tasklist_process_is_alive(false, b"", 1234));
+    }
+
+    #[test]
+    fn successful_tasklist_probe_requires_the_requested_pid() {
+        assert!(tasklist_process_is_alive(
+            true,
+            b"Image Name PID Session Name\nworker.exe 1234 Console\n",
+            1234
+        ));
+        assert!(!tasklist_process_is_alive(
+            true,
+            b"Image Name PID Session Name\nworker.exe 5678 Console\n",
+            1234
+        ));
     }
 
     #[test]

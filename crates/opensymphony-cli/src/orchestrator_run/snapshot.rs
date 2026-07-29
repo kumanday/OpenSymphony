@@ -96,34 +96,40 @@ fn map_issue(
     let runtime_state = match issue.runtime.state {
         SchedulerStatus::Running | SchedulerStatus::Claimed => IssueRuntimeState::Running,
         SchedulerStatus::RetryQueued => IssueRuntimeState::RetryQueued,
-        SchedulerStatus::Released => match issue
-            .last_worker_outcome
-            .as_ref()
-            .map(|outcome| outcome.outcome)
-        {
-            Some(
-                WorkerOutcomeKind::Failed
-                | WorkerOutcomeKind::TimedOut
-                | WorkerOutcomeKind::Stalled,
-            ) => IssueRuntimeState::Failed,
-            _ if issue.runtime.release_reason
-                == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted) =>
-            {
-                IssueRuntimeState::Failed
+        SchedulerStatus::Released => {
+            if issue.issue.state.category == IssueStateCategory::Terminal {
+                // Tracker terminal state is authoritative even when the last
+                // worker outcome was a failure or the release reason is stale.
+                IssueRuntimeState::Completed
+            } else {
+                match issue
+                    .last_worker_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.outcome)
+                {
+                    Some(
+                        WorkerOutcomeKind::Failed
+                        | WorkerOutcomeKind::TimedOut
+                        | WorkerOutcomeKind::Stalled,
+                    ) => IssueRuntimeState::Failed,
+                    _ if issue.runtime.release_reason
+                        == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted) =>
+                    {
+                        IssueRuntimeState::Failed
+                    }
+                    // A released execution with no recorded run never dispatched a
+                    // worker (e.g. a recovered workspace parked while its issue sits
+                    // in a non-active tracker state). Key on the *current* tracker
+                    // state, not the release reason: `release_issue` refreshes the
+                    // issue state but leaves a stale `TrackerInactive` reason when the
+                    // execution is already released, so a parked issue later moved
+                    // straight to a terminal state (Backlog → Done) must still surface
+                    // as a completion rather than a phantom idle row.
+                    None => IssueRuntimeState::Idle,
+                    _ => IssueRuntimeState::Completed,
+                }
             }
-            // A released execution with no recorded run never dispatched a
-            // worker (e.g. a recovered workspace parked while its issue sits
-            // in a non-active tracker state). Key on the *current* tracker
-            // state, not the release reason: `release_issue` refreshes the
-            // issue state but leaves a stale `TrackerInactive` reason when the
-            // execution is already released, so a parked issue later moved
-            // straight to a terminal state (Backlog → Done) must still surface
-            // as a completion rather than a phantom idle row.
-            None if issue.issue.state.category != IssueStateCategory::Terminal => {
-                IssueRuntimeState::Idle
-            }
-            _ => IssueRuntimeState::Completed,
-        },
+        }
         SchedulerStatus::Unclaimed => IssueRuntimeState::Idle,
     };
     let last_outcome = map_worker_outcome(issue, runtime_state);
@@ -484,7 +490,8 @@ mod tests {
         HealthStatus, IssueId, IssueIdentifier, IssueRef, IssueSnapshot as DomainIssueSnapshot,
         IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
         RuntimeStateSnapshot, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, TimestampMs,
-        WorkerAttemptSnapshot, WorkerId, WorkspaceKey, WorkspaceRecord,
+        WorkerAttemptSnapshot, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+        WorkspaceRecord,
     };
     use serde_json::json;
 
@@ -904,6 +911,30 @@ tracker:
         ));
         assert_eq!(
             state,
+            crate::opensymphony_control::IssueRuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn terminal_tracker_state_overrides_a_failed_worker_outcome() {
+        let mut issue = released_issue_snapshot(
+            "Done",
+            IssueStateCategory::Terminal,
+            crate::opensymphony_domain::ReleaseReason::RetryExhausted,
+        );
+        issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-532")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: None,
+            error: Some("historical failure".to_owned()),
+        });
+
+        assert_eq!(
+            map_single_issue_runtime_state(issue),
             crate::opensymphony_control::IssueRuntimeState::Completed
         );
     }

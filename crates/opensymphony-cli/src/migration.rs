@@ -699,7 +699,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         });
     }
 
-    let _memory_lock = acquire_memory_migration_lock(&source.target_repo)?;
+    let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
     let generated = generate_central_config(&source)?;
@@ -744,6 +744,8 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let workflow_stage = stage_path(&source.workflow_path, &generation);
     write_file_with_mode(&central_stage, generated.as_bytes(), config_mode)?;
     let central = load_central_config(&central_stage).await?;
+    memory_locks
+        .acquire_catalog_lock(&source.target_repo, central.memory_catalog_root.as_deref())?;
     preserve_legacy_memory(&source.target_repo, central.memory_catalog_root.as_deref())?;
     let memory_catalog_root = central.memory_catalog_root.clone();
     let memory_catalog_generation = memory_catalog_root
@@ -859,7 +861,9 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         }
     };
 
-    let _memory_lock = acquire_memory_migration_lock(&marker.target_repo())?;
+    let mut memory_locks = acquire_memory_migration_lock(&marker.target_repo())?;
+    memory_locks
+        .acquire_catalog_lock(&marker.target_repo(), marker.memory_catalog_root.as_deref())?;
     verify_activated_files(&marker)?;
     if let (Some(root), Some(expected)) = (
         marker.memory_catalog_root.as_deref(),
@@ -1543,7 +1547,7 @@ fn ensure_memory_migration_inactive(target_repo: &Path) -> Result<(), MigrationE
 }
 
 struct MemoryMigrationLock {
-    _lock: super::memory::MemoryCoordinationLock,
+    _locks: Vec<super::memory::MemoryCoordinationLock>,
 }
 
 fn acquire_memory_migration_lock(
@@ -1578,7 +1582,35 @@ fn acquire_memory_migration_lock(
             source,
         })?;
     }
-    Ok(MemoryMigrationLock { _lock: lock })
+    Ok(MemoryMigrationLock { _locks: vec![lock] })
+}
+
+impl MemoryMigrationLock {
+    fn acquire_catalog_lock(
+        &mut self,
+        target_repo: &Path,
+        catalog_root: Option<&Path>,
+    ) -> Result<(), MigrationError> {
+        let Some(catalog_root) = catalog_root else {
+            return Ok(());
+        };
+        if memory_migration_lock_path(target_repo) == memory_migration_lock_path(catalog_root) {
+            return Ok(());
+        }
+        let path = memory_migration_lock_path(catalog_root);
+        let lock = acquire_memory_coordination_lock(catalog_root).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                MigrationError::MemoryMigrationActive { path: path.clone() }
+            } else {
+                MigrationError::Write {
+                    path: path.clone(),
+                    source,
+                }
+            }
+        })?;
+        self._locks.push(lock);
+        Ok(())
+    }
 }
 
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), MigrationError> {
@@ -2451,6 +2483,27 @@ mod tests {
         let second = acquire_memory_migration_lock(&repo).expect("released lock should succeed");
         drop(second);
         assert!(!memory_migration_lock_path(&repo).exists());
+    }
+
+    #[test]
+    fn migration_lock_also_serializes_a_central_catalog_root() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let catalog = root.path().join("central-state/memory");
+        let mut first = acquire_memory_migration_lock(&repo).expect("repo lock should succeed");
+        first
+            .acquire_catalog_lock(&repo, Some(&catalog))
+            .expect("catalog lock should succeed");
+
+        assert!(matches!(
+            acquire_memory_coordination_lock(&catalog),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+
+        drop(first);
+        let catalog_lock = acquire_memory_coordination_lock(&catalog)
+            .expect("catalog lock should be released with migration scope");
+        drop(catalog_lock);
     }
 
     #[test]

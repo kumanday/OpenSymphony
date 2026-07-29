@@ -587,6 +587,9 @@ pub async fn run_doctor_command(
         &target_repo,
         central_config
             .as_ref()
+            .and_then(|central| central.repository_instruction_path.as_deref()),
+        central_config
+            .as_ref()
             .map(|central| &central.workflow_front_matter),
     );
 
@@ -598,7 +601,7 @@ pub async fn run_doctor_command(
 
     let (runtime, rendered_probe_prompt) = match runtime {
         Ok(runtime) => {
-            checks.push(check_target_repo(&runtime.target_repo).await);
+            checks.push(check_target_repo(&runtime.target_repo, &runtime.workflow_path).await);
             checks.push(check_workflow(&runtime));
 
             let rendered_probe_prompt = match render_doctor_probe_prompt(&runtime.workflow) {
@@ -629,7 +632,13 @@ pub async fn run_doctor_command(
         Err(error) => {
             let fallback_target_repo =
                 configured_target_repo.unwrap_or_else(|| config_root.to_path_buf());
-            checks.push(check_target_repo(&fallback_target_repo).await);
+            checks.push(
+                check_target_repo(
+                    &fallback_target_repo,
+                    &fallback_target_repo.join("WORKFLOW.md"),
+                )
+                .await,
+            );
             checks.push(CheckResult::fail("workflow", error));
             print_checks(&checks);
             return ExitCode::from(1);
@@ -1181,6 +1190,7 @@ fn resolve_doctor_runtime(
     config: &DoctorConfig,
     config_root: &Path,
     default_target_repo: &Path,
+    central_instruction_path: Option<&Path>,
     central_front_matter: Option<&crate::opensymphony_workflow::WorkflowFrontMatter>,
 ) -> Result<DoctorRuntimeConfig, String> {
     let target_repo = config
@@ -1188,7 +1198,9 @@ fn resolve_doctor_runtime(
         .as_deref()
         .map(|target_repo| resolve_path(config_root, target_repo))
         .unwrap_or_else(|| default_target_repo.to_path_buf());
-    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow_path = central_instruction_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     let workflow = WorkflowDefinition::load_from_path(&workflow_path)
         .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
     let workflow = central_front_matter
@@ -1291,7 +1303,7 @@ fn check_repo_root(repo_root: &Path) -> CheckResult {
     }
 }
 
-async fn check_target_repo(target_repo: &Path) -> CheckResult {
+async fn check_target_repo(target_repo: &Path, workflow_path: &Path) -> CheckResult {
     if !target_repo.exists() {
         return CheckResult::fail(
             "target-repo",
@@ -1299,13 +1311,15 @@ async fn check_target_repo(target_repo: &Path) -> CheckResult {
         );
     }
 
-    let workflow_path = target_repo.join("WORKFLOW.md");
     if workflow_path.exists() {
         CheckResult::pass("target-repo", format!("found {}", workflow_path.display()))
     } else {
         CheckResult::fail(
             "target-repo",
-            format!("missing {}", workflow_path.display()),
+            format!(
+                "missing repository instruction file {}",
+                workflow_path.display()
+            ),
         )
     }
 }
@@ -2344,6 +2358,7 @@ async fn resolve_rehydrate_runtime(
     let config_path =
         orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
             .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
+    let mut central_instruction_path = None;
     let (target_repo, tool_dir, central_front_matter) = if config_path.is_file() {
         let raw = fs::read_to_string(&config_path)
             .await
@@ -2352,6 +2367,7 @@ async fn resolve_rehydrate_runtime(
             let central = orchestrator_run::config::load_central_config(&config_path)
                 .await
                 .map_err(|error| error.to_string())?;
+            central_instruction_path = central.repository_instruction_path.clone();
             (
                 central
                     .require_legacy_target_repo()
@@ -2391,17 +2407,17 @@ async fn resolve_rehydrate_runtime(
         (current_dir.to_path_buf(), None, None)
     };
 
-    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     if !workflow_path.exists() {
         return Err(format!(
-            "WORKFLOW.md not found at {}",
+            "repository instruction file not found at {}",
             workflow_path.display()
         ));
     }
 
     let workflow_content = fs::read_to_string(&workflow_path)
         .await
-        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
+        .map_err(|e| format!("failed to read repository instruction file: {}", e))?;
     let workflow_def = WorkflowDefinition::parse(&workflow_content)
         .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
     let workflow_def = central_front_matter
@@ -2543,7 +2559,8 @@ mod tests {
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
         central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
         executable_suffixes, find_cargo_workspace_root, project_set_doctor_mutation_blocked,
-        resolve_doctor_workflow, resolve_rehydrate_runtime, sample_snapshot, spawn_demo_updates,
+        resolve_doctor_runtime, resolve_doctor_workflow, resolve_rehydrate_runtime,
+        sample_snapshot, spawn_demo_updates,
     };
 
     #[test]
@@ -2697,6 +2714,46 @@ mod tests {
     }
 
     #[test]
+    fn doctor_runtime_uses_the_central_repository_instruction_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target_repo = temp_dir.path().join("checkout");
+        let instruction_path = target_repo.join("AGENTS.md");
+        fs::create_dir_all(&target_repo).expect("target repo should exist");
+        fs::write(
+            &instruction_path,
+            "---\ntracker:\n  kind: linear\n  project_slug: legacy\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n\n# Implementation guidance\n",
+        )
+        .expect("central instruction file should exist");
+        let front_matter = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: central\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./central-workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n\n# Central prompt\n",
+        )
+        .expect("central front matter should parse")
+        .front_matter;
+        let config = super::DoctorConfig {
+            target_repo: None,
+            openhands: super::OpenHandsDoctorConfig {
+                tool_dir: None,
+                probe_model: None,
+                probe_api_key_env: None,
+                probe_llm_base_url_env: None,
+            },
+            linear: super::LinearDoctorConfig { enabled: false },
+        };
+
+        let runtime = resolve_doctor_runtime(
+            &config,
+            temp_dir.path(),
+            &target_repo,
+            Some(&instruction_path),
+            Some(&front_matter),
+        )
+        .expect("doctor runtime should use the configured instruction path");
+
+        assert_eq!(runtime.workflow_path, instruction_path);
+        assert_eq!(runtime.workflow.config.tracker.project_slug, "central");
+    }
+
+    #[test]
     fn find_cargo_workspace_root_walks_up_from_nested_paths() {
         let temp_dir = TempDir::new().expect("temp dir");
         let repo_root = temp_dir.path().join("repo");
@@ -2799,6 +2856,33 @@ openhands:
             runtime.workflow.config.tracker.project_slug,
             "selected-project"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_rehydrate_runtime_uses_central_repository_instruction_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let checkout = temp_dir.path().join("checkout");
+        let central = temp_dir.path().join("central.yaml");
+        fs::create_dir_all(&checkout).expect("checkout should exist");
+        fs::write(
+            checkout.join("AGENTS.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: legacy\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n\n# Repository guidance\n",
+        )
+        .expect("repository instruction file should exist");
+        fs::write(
+            &central,
+            format!(
+                "schema_version: 1\ninstance:\n  id: central\n  state_root: {0}/state\nrouting:\n  mode: legacy_single\n  repository: repo\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\n    active_states: [Todo]\n    terminal_states: [Done]\nlinear_projects:\n  project:\n    provider_project_id: project\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\n    checkout_path: {0}/checkout\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+                temp_dir.path().display()
+            ),
+        )
+        .expect("central config should exist");
+
+        let runtime = resolve_rehydrate_runtime(temp_dir.path(), Some(&central))
+            .await
+            .expect("rehydrate runtime should resolve the central instruction path");
+
+        assert_eq!(runtime.workflow.config.tracker.project_slug, "project");
     }
 
     #[test]
