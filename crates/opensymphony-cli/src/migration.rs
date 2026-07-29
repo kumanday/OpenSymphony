@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::opensymphony_workflow::{WorkflowDefinition, WorkflowFrontMatter};
+use crate::opensymphony_workflow::{
+    DEFAULT_WORKSPACE_ROOT, WorkflowDefinition, WorkflowFrontMatter,
+};
 
 use super::memory::{
     MEMORY_MIGRATION_LOCK, MemoryActivityStatus, acquire_memory_coordination_lock,
@@ -716,16 +718,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         });
     }
 
-    let workspace_root = source
-        .workflow
-        .resolve_with_process_env(&source.target_repo)
-        .map_err(|error| MigrationError::ResolveConfig {
-            path: source.workflow_path.clone(),
-            detail: format!("workspace.root: {error}"),
-        })?
-        .config
-        .workspace
-        .root;
+    let workspace_root = legacy_runtime_workspace_root(&source)?;
     ensure_legacy_runtime_quiescent(&workspace_root)?;
     let _runtime_ownership = acquire_legacy_runtime_ownership(&workspace_root)?;
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
@@ -1538,6 +1531,22 @@ fn preserve_legacy_memory(
 
 fn legacy_runtime_lock_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".opensymphony-instance.lock")
+}
+
+fn legacy_runtime_workspace_root(source: &SourceContext) -> Result<PathBuf, MigrationError> {
+    let configured = source
+        .workflow
+        .front_matter
+        .workspace
+        .root
+        .as_deref()
+        .unwrap_or(DEFAULT_WORKSPACE_ROOT);
+    let configured =
+        super::expand_env_tokens(configured).map_err(|error| MigrationError::ResolveConfig {
+            path: source.workflow_path.clone(),
+            detail: format!("workspace.root: {error}"),
+        })?;
+    Ok(resolve_repo_path(&source.target_repo, &configured))
 }
 
 fn ensure_legacy_runtime_quiescent(workspace_root: &Path) -> Result<(), MigrationError> {
