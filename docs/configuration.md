@@ -3,6 +3,58 @@
 This document covers target-repo bootstrap, generated files, and the runtime
 configuration that `opensymphony run` expects.
 
+## Central configuration
+
+`opensymphony run` selects configuration before it reads any repository
+checkout. Selection order is:
+
+1. `--config <path>`;
+2. `~/.opensymphony/config.yaml`;
+3. `./config.yaml` during the explicit legacy compatibility window.
+
+Central files use `schema_version: 1` and own instance roots, routing mode,
+tracker profiles, project sets, Linear projects, repository inventory,
+credential references, review profiles, scheduler, integration, workspace, and
+memory-catalog policy. Relative paths resolve from the central config file.
+Remote values may contain no credentials, repository aliases are unique, and
+strict unknown fields fail before tracker polling or workspace creation.
+
+The supported routing variants are explicit:
+
+```yaml
+routing:
+  mode: legacy_single
+  repository: github:repository:example
+```
+
+`legacy_single` keeps unlabelled existing tasks on one configured repository.
+`project_set` validates the multi-repository model but remains disabled until
+its later release gates pass; it fails before starting the scheduler rather
+than silently falling back to the current directory.
+
+Every run records one `sha256:` config generation in startup diagnostics and
+the initial control-plane event. Resolved credential values are never part of
+the central model or its serialized diagnostics.
+
+## Configuration migration
+
+Migration is explicit and staged:
+
+```bash
+opensymphony migrate preflight --repo /path/to/repo
+opensymphony migrate apply --repo /path/to/repo --config /path/to/repo/config.yaml
+opensymphony migrate rollback --config /path/to/repo/config.yaml
+```
+
+`preflight` is read-only and reports recognized workflow fields, clone-hook
+risks, and secret/remote-risk booleans without printing their values. `apply`
+backs up the legacy config and workflow, writes central config and the
+implementation-only workflow body through same-directory staging, and records
+an activation marker. A marker is written after validation and staging but
+before replacement so an interrupted apply remains recoverable. `rollback`
+restores the backup and refuses to run while the instance's strict-run marker
+is active. Repeating `apply` after activation is a no-op.
+
 ## Bootstrap
 
 Use `opensymphony init` from the target repository root:

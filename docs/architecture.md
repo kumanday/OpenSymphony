@@ -274,6 +274,20 @@ actual acknowledgement, failure, or timeout path.
 
 ## 8. Migration boundary
 
+Central orchestration configuration is selected independently of the current
+directory. The loader resolves one instance-owned config generation before
+loading repository instructions, validates references and contained roots, and
+keeps credential references separate from resolved secret values. Explicit
+`legacy_single` routing preserves the existing single-repository dispatch;
+strict `project_set` routing is parsed and observable but gated until the
+multi-repository release criteria pass.
+
+`opensymphony migrate preflight` performs no writes. `migrate apply` stages a
+central config and the repository implementation-instruction body, creates a
+recoverable backup, and records activation before atomic replacement. The
+activation marker makes interrupted replacement recoverable by `migrate
+rollback`, which is blocked by an active strict-run marker.
+
 OpenSymphony 1.0.0 is the compatibility boundary for the GraphQL-only Linear
 rewrite and the provider-agnostic AI review configuration changes.
 

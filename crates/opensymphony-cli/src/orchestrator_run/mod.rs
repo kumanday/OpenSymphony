@@ -1,5 +1,5 @@
 pub(crate) mod backends;
-mod config;
+pub(super) mod config;
 mod snapshot;
 
 use std::{
@@ -74,6 +74,12 @@ enum RunCommandError {
     },
     #[error("failed to expand {path}: {detail}")]
     ResolveConfig { path: PathBuf, detail: String },
+    #[error("central config validation failed: {0}")]
+    CentralConfig(#[from] config::CentralConfigError),
+    #[error(
+        "strict multi-repository routing is disabled until its release gates pass (config generation {generation})"
+    )]
+    StrictRoutingDisabled { generation: String },
     #[error("invalid control-plane bind address `{value}`: {source}")]
     InvalidBind {
         value: String,
@@ -149,6 +155,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "<none>".to_string()),
+        config_generation = %runtime.config_generation,
         target_repo = %runtime.target_repo.display(),
         workflow = %runtime.workflow_path.display(),
         bind = %runtime.bind,
@@ -245,7 +252,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         &mut recent_events,
         RecentEventKind::SnapshotPublished,
         None,
-        format!("loaded {}", runtime.workflow_path.display()),
+        format!(
+            "loaded {} (config generation {})",
+            runtime.workflow_path.display(),
+            runtime.config_generation
+        ),
         Utc::now(),
     );
     if let Some(env) = &memory_env {

@@ -615,6 +615,22 @@ opensymphony doctor --config ./config.yaml --rehydrate
 
 ## 9. Migration note
 
+Central configuration migration is an explicit operator action. Use
+`opensymphony migrate preflight --repo <path>` to inspect legacy
+`config.yaml`/`WORKFLOW.md` without changing files, then use `migrate apply`
+with the same paths to create a staged central config. The generated config
+uses `legacy_single`, so migration does not activate strict multi-repository
+routing. It records a config generation and an activation marker, preserves
+the workflow body as repository implementation guidance, and keeps a backup
+under `.opensymphony/migration/backups/`. Reports contain only paths, hashes,
+field names, and boolean risk indicators; literal secret values and
+credential-bearing remote values are never printed or serialized.
+
+If apply is interrupted after staging or replacement, run
+`opensymphony migrate rollback --config <central-config>` once the strict-run
+marker is absent. Rollback restores the backed-up runnable generation and
+leaves the backup evidence in place.
+
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.

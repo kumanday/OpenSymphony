@@ -4,6 +4,7 @@ mod init_repo;
 mod install_tooling;
 mod memory;
 mod memory_init_summary;
+mod migration;
 mod orchestrator_run;
 mod update_repo;
 
@@ -73,6 +74,8 @@ enum Command {
     Debug(debug_session::DebugArgs),
     #[command(about = "Capture, query, and sync project memory")]
     Memory(memory::MemoryArgs),
+    #[command(about = "Preflight, apply, and roll back central configuration migration")]
+    Migrate(migration::MigrationArgs),
     #[command(about = "Linear operations guarded by OpenSymphony state")]
     Linear(memory::LinearArgs),
     #[command(about = "Serve the local control-plane demo stream")]
@@ -322,6 +325,7 @@ pub async fn run() -> ExitCode {
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,
         Command::Memory(args) => memory::run_command(args).await,
+        Command::Migrate(args) => migration::run(args).await,
         Command::Linear(args) => memory::run_linear_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
@@ -2439,6 +2443,7 @@ mod tests {
             | Command::Doctor(_)
             | Command::Install(_)
             | Command::Memory(_)
+            | Command::Migrate(_)
             | Command::Linear(_)
             | Command::Update(_)
             | Command::Rehydrate(_) => {

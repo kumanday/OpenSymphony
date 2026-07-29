@@ -5500,6 +5500,7 @@ Run the scheduler.
         .expect("workflow should resolve");
         let runtime = RunRuntimeConfig {
             config_path: None,
+            config_generation: "test".to_owned(),
             target_repo: tempdir.path().to_path_buf(),
             workflow_path: tempdir.path().join("WORKFLOW.md"),
             workflow,
