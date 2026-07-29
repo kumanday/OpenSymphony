@@ -831,9 +831,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
                     })?;
             if super::orchestrator_run::config::looks_like_central_config(&raw) {
                 let central = super::orchestrator_run::config::load_central_config(path).await?;
-                let target_repo = central
-                    .target_repo()
-                    .unwrap_or_else(|| default_target_repo.clone());
+                let target_repo = central.require_legacy_target_repo()?;
                 (
                     target_repo,
                     central.tool_dir(),

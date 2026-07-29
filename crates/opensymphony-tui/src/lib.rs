@@ -4336,6 +4336,7 @@ mod tests {
                         project_name: None,
                         workspace_label: Some(format!("workspace-{index}")),
                         retry_count: index as u32,
+                        release_reason: None,
                         claimed_at: None,
                         started_at: None,
                         finished_at: None,

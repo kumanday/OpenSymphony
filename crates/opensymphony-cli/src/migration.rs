@@ -1023,7 +1023,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "max_concurrent_agents_by_state": max_concurrent_agents_by_state,
             "max_turns": source.workflow.front_matter.agent.max_turns.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
             "max_retry_backoff_ms": source.workflow.front_matter.agent.max_retry_backoff_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
-            "stall_timeout_ms": source.workflow.front_matter.agent.stall_timeout_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
+            "stall_timeout_ms": source.workflow.front_matter.agent.stall_timeout_ms.as_ref().and_then(migrated_stall_timeout_ms),
             "poll_interval_ms": source.workflow.front_matter.polling.interval_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
         },
         "hooks": {
@@ -1135,6 +1135,11 @@ fn integer_value(value: &crate::opensymphony_workflow::IntegerLike) -> String {
         crate::opensymphony_workflow::IntegerLike::Integer(value) => value.to_string(),
         crate::opensymphony_workflow::IntegerLike::String(value) => value.clone(),
     }
+}
+
+fn migrated_stall_timeout_ms(value: &crate::opensymphony_workflow::IntegerLike) -> Option<u64> {
+    let parsed = integer_value(value).parse::<i64>().ok()?;
+    Some(if parsed <= 0 { 0 } else { parsed as u64 })
 }
 
 fn git_remote(repo: &Path) -> Result<String, MigrationError> {
@@ -1492,6 +1497,20 @@ mod tests {
             tracker_credential_variable(Some("literal-secret")),
             Err(MigrationError::LiteralSecret)
         ));
+    }
+
+    #[test]
+    fn migration_preserves_disabled_negative_stall_timeout() {
+        assert_eq!(
+            migrated_stall_timeout_ms(&crate::opensymphony_workflow::IntegerLike::String(
+                "-1".to_owned()
+            )),
+            Some(0)
+        );
+        assert_eq!(
+            migrated_stall_timeout_ms(&crate::opensymphony_workflow::IntegerLike::Integer(-1)),
+            Some(0)
+        );
     }
 
     #[test]

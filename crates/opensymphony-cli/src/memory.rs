@@ -45,7 +45,7 @@ use crate::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
         OpenHandsConversationStorePaths,
     },
-    opensymphony_workflow::WorkflowDefinition,
+    opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
         CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
         workspace_path_for_root,
@@ -454,6 +454,7 @@ impl AutoMemoryReport {
 pub(crate) async fn auto_capture_terminal(
     repo_root: &Path,
     workflow_path: &Path,
+    resolved_workflow: Option<&ResolvedWorkflow>,
     identifiers: &[String],
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     auto_archive: bool,
@@ -469,7 +470,10 @@ pub(crate) async fn auto_capture_terminal(
     }
 
     let config = MemoryConfig::load(repo_root, None)?;
-    let client = linear_client_from_workflow(repo_root, Some(workflow_path))?;
+    let client = match resolved_workflow {
+        Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
+        None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
+    };
     let source = load_linear_source_from_client(&client, &identifiers).await?;
     let selection = IssueSelection {
         identifiers,
@@ -557,7 +561,7 @@ pub(crate) async fn auto_capture_terminal(
         match plan_archive(&evolved_config, &issue_keys, false, None, true, false) {
             Ok(archive_plan) => {
                 warnings.extend(archive_plan.warnings.clone());
-                match archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await {
+                match archive_in_linear_with_client(&client, &archive_plan).await {
                     Ok(archive_report) => {
                         archive_completed =
                             archive_plan.warnings.is_empty() && archive_report.failures.is_empty();
@@ -4479,7 +4483,7 @@ fn expand_config_path(
 fn load_resolved_workflow(
     repo_root: &Path,
     workflow_path: Option<&Path>,
-) -> Result<crate::opensymphony_workflow::ResolvedWorkflow, MemoryError> {
+) -> Result<ResolvedWorkflow, MemoryError> {
     let workflow_path = workflow_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
@@ -4694,8 +4698,14 @@ async fn archive_in_linear(
     plan: &ArchivePlan,
 ) -> Result<LinearArchiveReport, MemoryError> {
     let client = linear_client_from_workflow(repo_root, workflow_path)?;
-    let mut report = LinearArchiveReport::default();
+    archive_in_linear_with_client(&client, plan).await
+}
 
+async fn archive_in_linear_with_client(
+    client: &LinearClient,
+    plan: &ArchivePlan,
+) -> Result<LinearArchiveReport, MemoryError> {
+    let mut report = LinearArchiveReport::default();
     for issue in plan.issues.iter().filter(|issue| issue.eligible) {
         match client.archive_issue(&issue.issue_key).await {
             Ok(()) => report.archived.push(issue.issue_key.clone()),
@@ -4728,13 +4738,19 @@ fn linear_client_from_workflow(
         .map_err(|error| {
             MemoryError::InvalidInput(format!("failed to resolve workflow: {error}"))
         })?;
+    linear_client_from_resolved_workflow(&resolved)
+}
+
+fn linear_client_from_resolved_workflow(
+    resolved: &ResolvedWorkflow,
+) -> Result<LinearClient, MemoryError> {
     let mut linear_config = LinearConfig::new(
-        resolved.config.tracker.api_key,
-        resolved.config.tracker.project_slug,
+        resolved.config.tracker.api_key.clone(),
+        resolved.config.tracker.project_slug.clone(),
     );
-    linear_config.base_url = resolved.config.tracker.endpoint;
-    linear_config.active_states = resolved.config.tracker.active_states;
-    linear_config.terminal_states = resolved.config.tracker.terminal_states;
+    linear_config.base_url = resolved.config.tracker.endpoint.clone();
+    linear_config.active_states = resolved.config.tracker.active_states.clone();
+    linear_config.terminal_states = resolved.config.tracker.terminal_states.clone();
     LinearClient::new(linear_config)
         .map_err(|error| MemoryError::Linear(format!("invalid Linear config: {error}")))
 }

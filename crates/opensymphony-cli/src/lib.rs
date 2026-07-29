@@ -1946,6 +1946,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             } else {
                 0
             },
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,
@@ -1989,6 +1990,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             project_name: None,
             workspace_label: Some("OSYM-401".to_owned()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,
@@ -2040,6 +2042,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             project_name: None,
             workspace_label: Some("OSYM-402".to_owned()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,
@@ -2324,8 +2327,8 @@ async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntim
                 .map_err(|error| error.to_string())?;
             (
                 central
-                    .target_repo()
-                    .unwrap_or_else(|| current_dir.to_path_buf()),
+                    .require_legacy_target_repo()
+                    .map_err(|error| error.to_string())?,
                 central.tool_dir(),
                 Some(central.workflow_front_matter.clone()),
             )

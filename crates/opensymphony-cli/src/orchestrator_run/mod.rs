@@ -426,6 +426,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             let auto_capture_result = super::memory::auto_capture_terminal(
                                 &runtime.target_repo,
                                 &runtime.workflow_path,
+                                Some(&runtime.workflow),
                                 &auto_capture_candidates,
                                 runtime.openhands_conversation_store.as_ref(),
                                 runtime.memory.auto_archive,

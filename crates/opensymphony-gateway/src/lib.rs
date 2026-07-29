@@ -79,8 +79,8 @@ pub use crate::opensymphony_domain::{
     ControlPlaneDaemonStatus, ControlPlaneFileChange, ControlPlaneFileChangeKind,
     ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot, ControlPlaneMetricsSnapshot,
     ControlPlaneRecentEvent, ControlPlaneRecentEventKind, ControlPlaneWorkerOutcome,
-    InMemoryEventJournal as DomainInMemoryEventJournal, SnapshotEnvelope,
-    StreamBroker as DomainStreamBroker,
+    InMemoryEventJournal as DomainInMemoryEventJournal, ReleaseReason as DomainReleaseReason,
+    SnapshotEnvelope, StreamBroker as DomainStreamBroker,
 };
 pub use crate::opensymphony_gateway_schema::{
     action::{
@@ -4401,11 +4401,13 @@ async fn get_run_detail(
         match issue.last_outcome {
             ControlPlaneWorkerOutcome::Completed => Some(ReleaseReason::Completed),
             ControlPlaneWorkerOutcome::Canceled => Some(ReleaseReason::Cancelled),
-            // When the snapshot indicates a failure and retries are exhausted
-            // (retry_count > 0), treat it as RetryExhausted.  When the issue
-            // failed on the first attempt with no retry queued, treat it as a
-            // terminal tracker state rather than an exhausted-retry signal.
-            ControlPlaneWorkerOutcome::Failed if issue.retry_count > 0 => {
+            // Preserve the scheduler's explicit release reason rather than
+            // inferring exhaustion from the retry counter. A queued retry has
+            // a positive counter too, while an exhausted release has no queue
+            // entry left to contribute one.
+            ControlPlaneWorkerOutcome::Failed
+                if issue.release_reason == Some(DomainReleaseReason::RetryExhausted) =>
+            {
                 Some(ReleaseReason::RetryExhausted)
             }
             ControlPlaneWorkerOutcome::Failed => Some(ReleaseReason::TrackerTerminal),
@@ -5876,6 +5878,7 @@ exit 2
             project_name: None,
             workspace_label: flags.workspace.then(|| "workspace".to_string()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,

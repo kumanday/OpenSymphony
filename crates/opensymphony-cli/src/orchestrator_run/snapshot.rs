@@ -210,6 +210,7 @@ fn map_issue(
             .as_ref()
             .map(|retry| retry.normal_retry_count)
             .unwrap_or(0),
+        release_reason: issue.runtime.release_reason,
         claimed_at: issue.runtime.claimed_at.map(timestamp_to_datetime),
         started_at,
         finished_at,
@@ -864,6 +865,19 @@ tracker:
         assert_eq!(
             state,
             crate::opensymphony_control::IssueRuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn retry_exhausted_release_preserves_explicit_reason() {
+        let issue = map_single_issue(released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::RetryExhausted,
+        ));
+        assert_eq!(
+            issue.release_reason,
+            Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted)
         );
     }
 

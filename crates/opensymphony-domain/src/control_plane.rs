@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::ReleaseReason;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotEnvelope {
     pub sequence: u64,
@@ -111,6 +113,11 @@ pub struct ControlPlaneIssueSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_label: Option<String>,
     pub retry_count: u32,
+    /// Preserve the scheduler's explicit release reason for consumers that
+    /// need to distinguish a parked exhausted retry from a first-attempt
+    /// terminal failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_reason: Option<ReleaseReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

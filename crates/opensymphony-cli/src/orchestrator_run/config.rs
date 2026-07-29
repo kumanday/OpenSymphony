@@ -313,6 +313,16 @@ impl ResolvedCentralConfig {
         self.runtime.target_repo.as_deref().map(PathBuf::from)
     }
 
+    pub(crate) fn require_legacy_target_repo(&self) -> Result<PathBuf, CentralConfigError> {
+        if self.mode != CentralRoutingMode::LegacySingle {
+            return Err(CentralConfigError::UnsupportedRoutingMode {
+                mode: "project_set",
+            });
+        }
+        self.target_repo()
+            .ok_or(CentralConfigError::MissingLegacyRepository)
+    }
+
     pub(crate) fn tool_dir(&self) -> Option<PathBuf> {
         self.runtime
             .openhands
@@ -368,6 +378,8 @@ pub enum CentralConfigError {
     },
     #[error("legacy_single routing requires a configured repository")]
     MissingLegacyRepository,
+    #[error("central routing mode `{mode}` is not supported by this command")]
+    UnsupportedRoutingMode { mode: &'static str },
     #[error("legacy_single repository `{repository}` must define checkout_path")]
     MissingLegacyCheckout { repository: String },
     #[error("central config path is outside the selected instance roots")]
@@ -1696,6 +1708,12 @@ scheduler:
             .expect("central fixture should resolve");
 
         assert_eq!(resolved.mode, CentralRoutingMode::ProjectSet);
+        assert!(matches!(
+            resolved.require_legacy_target_repo(),
+            Err(CentralConfigError::UnsupportedRoutingMode {
+                mode: "project_set"
+            })
+        ));
         assert!(matches!(
             resolved
                 .workflow_front_matter

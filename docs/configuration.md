@@ -35,7 +35,9 @@ routing:
 `legacy_single` keeps unlabelled existing tasks on one configured repository.
 `project_set` validates the multi-repository model but remains disabled until
 its later release gates pass; it fails before starting the scheduler rather
-than silently falling back to the current directory.
+than silently falling back to the current directory. Operational recovery
+commands (`debug` and `rehydrate`) reject the same gated mode instead of
+selecting an unrelated checkout for workflow or conversation-store discovery.
 
 Every run records one `sha256:` config generation in startup diagnostics and
 the initial control-plane event. Resolved credential values are never part of

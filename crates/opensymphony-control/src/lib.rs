@@ -454,6 +454,7 @@ mod tests {
                 project_name: None,
                 workspace_label: Some("COE-255".to_owned()),
                 retry_count: 0,
+                release_reason: None,
                 claimed_at: None,
                 started_at: None,
                 finished_at: None,
