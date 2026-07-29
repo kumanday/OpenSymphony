@@ -18,6 +18,7 @@ use crate::opensymphony_domain::{
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     select,
@@ -113,6 +114,12 @@ pub struct RecoveryRecord {
     pub normal_retry_count: u32,
     pub harness_kind: Option<String>,
     pub recovered_run: Option<RecoveredRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryExhaustionRecord {
+    pub issue: NormalizedIssue,
+    pub normal_retry_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +277,12 @@ pub trait WorkspaceBackend {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
+    async fn recover_retry_exhaustion(
+        &mut self,
+    ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     async fn cleanup_workspace(
         &mut self,
         workspace: &WorkspaceRecord,
@@ -279,6 +292,14 @@ pub trait WorkspaceBackend {
     async fn persist_retry_count(
         &mut self,
         _workspace: &WorkspaceRecord,
+        _normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_retry_exhaustion(
+        &mut self,
+        _issue: &NormalizedIssue,
         _normal_retry_count: u32,
     ) -> Result<(), Self::Error> {
         Ok(())
@@ -358,6 +379,7 @@ pub struct Scheduler<T, W, M> {
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
+    pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     recovered: bool,
     next_worker_ordinal: u64,
     last_poll_at: Option<TimestampMs>,
@@ -390,6 +412,7 @@ where
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
             pending_recovery: None,
+            pending_retry_exhaustion: None,
             recovered: false,
             next_worker_ordinal: 0,
             last_poll_at: None,
@@ -491,14 +514,7 @@ where
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<OrchestratorSnapshot, SchedulerError> {
-        if self.pending_recovery.is_none() {
-            self.pending_recovery =
-                Some(self.workspace.recover_workspaces().await.map_err(|error| {
-                    SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    }
-                })?);
-        }
+        self.load_recovery_state().await?;
 
         if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
             self.record_full_detail_refresh(observed_at);
@@ -517,14 +533,7 @@ where
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<OrchestratorSnapshot, SchedulerError> {
-        if self.pending_recovery.is_none() {
-            self.pending_recovery =
-                Some(self.workspace.recover_workspaces().await.map_err(|error| {
-                    SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    }
-                })?);
-        }
+        self.load_recovery_state().await?;
 
         let updates = self
             .worker
@@ -931,6 +940,19 @@ where
             return Ok(());
         };
 
+        for record in self.pending_retry_exhaustion.take().unwrap_or_default() {
+            let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) else {
+                continue;
+            };
+            let normalized = normalize_tracker_issue(active_issue, &self.config)?;
+            let execution = IssueExecution::new(normalized.clone(), observed_at).release(
+                observed_at,
+                ReleaseReason::RetryExhausted,
+                None,
+            )?;
+            self.insert_execution(normalized.id.clone(), execution);
+        }
+
         let mut retry_records = Vec::new();
         for record in records {
             let issue_id = record.issue.id.clone();
@@ -946,6 +968,12 @@ where
                         observed_at,
                     )?;
                 } else if self.retry_limit_reached(record.normal_retry_count) {
+                    self.workspace
+                        .persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                        .await
+                        .map_err(|error| SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        })?;
                     self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
                 }
                 continue;
@@ -975,6 +1003,14 @@ where
             } else {
                 ReleaseReason::TrackerInactive
             };
+            if reason == ReleaseReason::RetryExhausted {
+                self.workspace
+                    .persist_retry_exhaustion(&issue, record.normal_retry_count)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+            }
             let execution = execution.release(observed_at, reason, None)?;
             self.executions.entry(issue.id.clone()).or_insert(execution);
         }
@@ -1383,6 +1419,10 @@ where
         let Some(execution) = self.remove_execution(issue_id) else {
             return Ok(());
         };
+        if retry_exhausted_release(&execution) {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        }
         let execution = execution.release(observed_at, ReleaseReason::RetryExhausted, None)?;
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
@@ -1532,6 +1572,7 @@ where
             }
 
             let state_key = normalized_state_name(&normalized.state.name);
+            let issue_id = normalized.id.clone();
 
             if let Some(limit) =
                 state_limit_for(&self.config.max_concurrent_agents_by_state, &state_key)
@@ -1554,7 +1595,20 @@ where
                     detail: error.to_string(),
                 })?;
 
-            let issue_id = normalized.id.clone();
+            if let Some(normal_retry_count) = self
+                .executions
+                .get(&issue_id)
+                .and_then(IssueExecution::retry)
+                .map(|retry| retry.normal_retry_count)
+            {
+                self.workspace
+                    .persist_retry_count(&workspace, normal_retry_count)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+            }
+
             let worker_id = self.next_worker_id()?;
             let previous_retry = self
                 .executions
@@ -1980,6 +2034,18 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
         );
+        if reason == ReleaseReason::RetryExhausted {
+            let normal_retry_count = execution
+                .current_run()
+                .map(|run| run.normal_retry_count)
+                .unwrap_or_default();
+            self.workspace
+                .persist_retry_exhaustion(execution.issue(), normal_retry_count)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+        }
         let mut execution = execution.release(observed_at, reason, outcome)?;
         let retain_failed =
             reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
@@ -2033,15 +2099,29 @@ where
                 self.config.retry_policy,
             )?,
         };
-        if let Some(workspace) = execution.workspace() {
+        Ok(execution.queue_retry(retry, outcome)?)
+    }
+
+    async fn load_recovery_state(&mut self) -> Result<(), SchedulerError> {
+        if self.pending_recovery.is_some() {
+            return Ok(());
+        }
+
+        let recoveries = self.workspace.recover_workspaces().await.map_err(|error| {
+            SchedulerError::Workspace {
+                detail: error.to_string(),
+            }
+        })?;
+        let retry_exhaustion =
             self.workspace
-                .persist_retry_count(workspace, retry.normal_retry_count)
+                .recover_retry_exhaustion()
                 .await
                 .map_err(|error| SchedulerError::Workspace {
                     detail: error.to_string(),
                 })?;
-        }
-        Ok(execution.queue_retry(retry, outcome)?)
+        self.pending_recovery = Some(recoveries);
+        self.pending_retry_exhaustion = Some(retry_exhaustion);
+        Ok(())
     }
 
     fn next_worker_id(&mut self) -> Result<WorkerId, SchedulerError> {

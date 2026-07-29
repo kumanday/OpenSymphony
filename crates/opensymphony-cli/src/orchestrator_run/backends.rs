@@ -30,8 +30,8 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveredRun, RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
+    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, TrackerBackend, WorkerAbortReason,
+    WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
@@ -74,6 +74,8 @@ pub(super) enum CliWorkspaceError {
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
     #[error("Codex lifecycle recovery failed: {0}")]
     CodexLifecycle(String),
+    #[error("retry state persistence failed: {0}")]
+    RetryState(String),
 }
 
 #[derive(Debug, Error)]
@@ -136,6 +138,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     terminal_cleanup_paths: HashSet<PathBuf>,
     codex_bin: String,
     retain_failed: bool,
+    retry_state_root: PathBuf,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -635,10 +638,21 @@ impl RuntimeWorkspaceBackend {
         Self::new_with_retention(manager, workflow, true)
     }
 
+    #[cfg(test)]
     pub(super) fn new_with_retention(
         manager: Arc<WorkspaceManager>,
         workflow: &ResolvedWorkflow,
         retain_failed: bool,
+    ) -> Self {
+        let retry_state_root = manager.config().root.join(".opensymphony-retry-state");
+        Self::new_with_retention_and_state_root(manager, workflow, retain_failed, retry_state_root)
+    }
+
+    pub(super) fn new_with_retention_and_state_root(
+        manager: Arc<WorkspaceManager>,
+        workflow: &ResolvedWorkflow,
+        retain_failed: bool,
+        retry_state_root: PathBuf,
     ) -> Self {
         Self {
             manager,
@@ -659,6 +673,7 @@ impl RuntimeWorkspaceBackend {
             terminal_cleanup_paths: HashSet::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             retain_failed,
+            retry_state_root,
         }
     }
 }
@@ -731,6 +746,46 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             });
         }
         Ok(recoveries)
+    }
+
+    async fn recover_retry_exhaustion(
+        &mut self,
+    ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
+        let directory = self.retry_state_root.join("retry-exhaustion");
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(CliWorkspaceError::RetryState(format!(
+                    "failed to list {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        let mut records = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path).await.map_err(|error| {
+                CliWorkspaceError::RetryState(format!("failed to read {}: {error}", path.display()))
+            })?;
+            let record = serde_json::from_str::<RetryExhaustionRecord>(&raw).map_err(|error| {
+                CliWorkspaceError::RetryState(format!(
+                    "failed to parse {}: {error}",
+                    path.display()
+                ))
+            })?;
+            records.push(record);
+        }
+        records.sort_by(|left, right| left.issue.identifier.cmp(&right.issue.identifier));
+        Ok(records)
     }
 
     async fn cleanup_workspace(
@@ -820,6 +875,48 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         manifest.normal_retry_count = normal_retry_count;
         manifest.updated_at = chrono::Utc::now();
         self.manager.write_run_manifest(&handle, &manifest).await?;
+        Ok(())
+    }
+
+    async fn persist_retry_exhaustion(
+        &mut self,
+        issue: &NormalizedIssue,
+        normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue.identifier.as_str())?;
+        let directory = self.retry_state_root.join("retry-exhaustion");
+        fs::create_dir_all(&directory).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to create {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = directory.join(format!("{key}.json"));
+        let temporary = directory.join(format!(".{key}.json.tmp"));
+        let contents = serde_json::to_vec_pretty(&RetryExhaustionRecord {
+            issue: issue.clone(),
+            normal_retry_count,
+        })
+        .map_err(|error| CliWorkspaceError::RetryState(error.to_string()))?;
+        fs::write(&temporary, contents).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to write {}: {error}",
+                temporary.display()
+            ))
+        })?;
+        match fs::rename(&temporary, &path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temporary).await;
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary).await;
+                return Err(CliWorkspaceError::RetryState(format!(
+                    "failed to activate {}: {error}",
+                    path.display()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -5405,6 +5502,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_exhaustion_is_recovered_from_instance_state() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let state_root = tempdir.path().join("state-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let mut backend = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
+            workspace_manager,
+            &workflow,
+            false,
+            state_root.clone(),
+        );
+
+        backend
+            .persist_retry_exhaustion(&issue, 3)
+            .await
+            .expect("retry exhaustion should persist");
+        let records = backend
+            .recover_retry_exhaustion()
+            .await
+            .expect("retry exhaustion should recover");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].issue.identifier, issue.identifier);
+        assert_eq!(records[0].normal_retry_count, 3);
+        assert!(state_root.join("retry-exhaustion/COE-284.json").is_file());
+        assert!(!workspace_root.join("COE-284").exists());
+    }
+
+    #[tokio::test]
     async fn active_store_preparation_moves_legacy_current_issue_before_startup() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
@@ -5575,6 +5707,7 @@ Run the scheduler.
             tool_dir: None,
             openhands_conversation_store: None,
             retry_max_attempts: None,
+            state_root: None,
             memory_catalog_root: None,
             retain_failed: true,
             memory: super::super::config::RunMemoryConfig {

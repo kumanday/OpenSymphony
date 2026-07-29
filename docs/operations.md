@@ -480,6 +480,11 @@ memory:
   auto_archive: false
 ```
 
+With a central instance config, automatic capture uses the configured catalog
+even when the selected checkout has no repository-local memory YAML. After a
+capsule write, the reload falls back to the normal default policy lookup rather
+than treating the absent local file as an explicit required path.
+
 Manual commands remain available for setup, backfill, inspection, and guarded
 archive operations:
 
@@ -640,6 +645,11 @@ the server claim the same atomic `.opensymphony/memory.migration.lock` before
 reading or copying the catalog; the server holds it for its lifetime. The lock
 and activity marker record an owner PID, so stale ownership from an unclean
 exit can be reclaimed while a live owner still blocks migration/startup.
+Stale lock recovery atomically renames the old lock to a unique quarantine file
+before removing it; it never removes a newly-created owner lock at the shared
+path. A project-set central config is also rejected by every doctor mode until
+strict routing is enabled, avoiding a probe against an unrelated legacy
+checkout.
 After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
 policy so operational recovery continues to use the migrated OpenHands and
 tracker settings.

@@ -1260,7 +1260,7 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
     let retry = execution.retry().expect("retry metadata should exist");
     assert_eq!(retry.reason, RetryReason::Continuation);
     assert_eq!(retry.due_at, ts(1_200));
-    assert_eq!(scheduler.workspace().persisted_retry_counts, vec![1]);
+    assert!(scheduler.workspace().persisted_retry_counts.is_empty());
 
     scheduler
         .tick(ts(1_300))
@@ -1272,6 +1272,7 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
         .expect("execution should still exist");
     assert_eq!(execution.status(), SchedulerStatus::Running);
     assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.workspace().persisted_retry_counts, vec![1]);
     let second_run = &scheduler.worker().launches[1].run;
     assert_eq!(
         second_run

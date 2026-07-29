@@ -31,6 +31,11 @@ the legacy retry behavior.
 `workspace.retain_failed` applies only to failed or retry-exhausted outcomes:
 successful, cancelled, and tracker-terminal releases still clean up their
 workspaces.
+Queued retries do not advance the durable retry count until dispatch begins, so
+a restart during the backoff window cannot mistake a pending retry for an
+exhausted one. Once the limit is reached, the instance state root records a
+retry-exhaustion marker before a disposable failed workspace is removed; the
+marker keeps the issue parked across a later run.
 
 The supported routing variants are explicit:
 
@@ -44,9 +49,9 @@ routing:
 `project_set` validates the multi-repository model but remains disabled until
 its later release gates pass; it fails before starting the scheduler rather
 than silently falling back to the current directory. Operational recovery
-commands (`debug` and `rehydrate`), plus doctor live probes and rehydration,
-reject the same gated mode before selecting an unrelated checkout for workflow
-or conversation-store discovery.
+commands (`debug` and `rehydrate`), plus all doctor modes, reject the same gated
+mode before selecting an unrelated checkout for workflow or conversation-store
+discovery.
 `rehydrate` also accepts `--config <path>` when an instance is not the default
 home configuration. `memory init` refuses to treat a selected central config
 as a repository-local memory file; initialize the local memory config instead.

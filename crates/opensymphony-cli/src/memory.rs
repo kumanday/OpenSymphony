@@ -5,6 +5,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -64,6 +65,7 @@ const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
 pub(crate) const MEMORY_ACTIVITY_MARKER: &str = ".opensymphony-memory.active";
 pub(crate) const MEMORY_MIGRATION_LOCK: &str = "memory.migration.lock";
+static MEMORY_STALE_LOCK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryActivityStatus {
@@ -856,7 +858,11 @@ fn apply_central_memory_root(
 }
 
 fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryError> {
-    let mut evolved = MemoryConfig::load(&config.repo_root, Some(&config.config_path))?;
+    let mut evolved = if config.config_path.is_file() {
+        MemoryConfig::load(&config.repo_root, Some(&config.config_path))?
+    } else {
+        MemoryConfig::load(&config.repo_root, None)?
+    };
     evolved.memory_root = config.memory_root.clone();
     evolved.index_path = config.index_path.clone();
     Ok(evolved)
@@ -1804,14 +1810,32 @@ pub(crate) fn acquire_memory_coordination_lock(
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 if memory_lock_owner_is_stale(&path) {
-                    fs::remove_file(&path)?;
-                    continue;
+                    let quarantine = stale_memory_lock_path(&path);
+                    match fs::rename(&path, &quarantine) {
+                        Ok(()) => {
+                            fs::remove_file(&quarantine)?;
+                            continue;
+                        }
+                        Err(rename_error) if rename_error.kind() == io::ErrorKind::NotFound => {
+                            continue;
+                        }
+                        Err(rename_error) => return Err(rename_error),
+                    }
                 }
                 return Err(error);
             }
             Err(error) => return Err(error),
         }
     }
+}
+
+fn stale_memory_lock_path(path: &Path) -> PathBuf {
+    let sequence = MEMORY_STALE_LOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(MEMORY_MIGRATION_LOCK);
+    path.with_file_name(format!(".{name}.stale-{}-{sequence}", process::id()))
 }
 
 pub(crate) fn memory_lock_is_stale(repo_root: &Path) -> bool {
@@ -6256,6 +6280,20 @@ mod tests {
         handle.abort();
         drop(handle);
         assert!(!marker_path.exists());
+    }
+
+    #[test]
+    fn central_memory_reload_uses_defaults_when_local_config_is_absent() {
+        let repo = TempDir::new().expect("repo");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.memory_root = repo.path().join("central-catalog");
+        config.index_path = config.memory_root.join("memory.duckdb");
+        assert!(!config.config_path.is_file());
+
+        let evolved = super::reload_memory_config(&config).expect("reload should use defaults");
+
+        assert_eq!(evolved.memory_root, config.memory_root);
+        assert_eq!(evolved.index_path, config.index_path);
     }
 
     #[test]

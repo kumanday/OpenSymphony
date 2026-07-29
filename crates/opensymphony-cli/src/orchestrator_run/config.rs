@@ -436,6 +436,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) tool_dir: Option<PathBuf>,
     pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     pub(super) retry_max_attempts: Option<u32>,
+    pub(super) state_root: Option<PathBuf>,
     pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) retain_failed: bool,
     pub(super) memory: RunMemoryConfig,
@@ -449,6 +450,7 @@ pub(super) async fn resolve_runtime_config(
     let (
         config,
         config_generation,
+        central_state_root,
         central_workspace_root,
         central_retain_failed,
         central_memory_catalog_root,
@@ -473,6 +475,7 @@ pub(super) async fn resolve_runtime_config(
                 (
                     central.runtime,
                     central.generation,
+                    Some(central.state_root),
                     central.workspace_root,
                     Some(central.retain_failed),
                     central.memory_catalog_root,
@@ -488,12 +491,14 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    None,
                 )
             }
         }
         None => (
             RunConfigFile::default(),
             "legacy-unconfigured".to_string(),
+            None,
             None,
             None,
             None,
@@ -607,6 +612,7 @@ pub(super) async fn resolve_runtime_config(
         tool_dir,
         openhands_conversation_store,
         retry_max_attempts,
+        state_root: central_state_root,
         memory_catalog_root: central_memory_catalog_root,
         retain_failed: central_retain_failed.unwrap_or(true),
         memory,

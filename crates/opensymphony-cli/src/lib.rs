@@ -509,7 +509,7 @@ pub async fn run_doctor_command(
     }) {
         checks.push(CheckResult::fail(
             "config",
-            "doctor --live-openhands and --rehydrate are disabled for project_set central routing until strict routing is enabled",
+            "doctor is disabled for project_set central routing until strict routing is enabled",
         ));
         print_checks(&checks);
         return ExitCode::from(1);
@@ -758,13 +758,13 @@ pub async fn run_doctor_command(
 
 fn project_set_doctor_mutation_blocked(
     mode: &orchestrator_run::config::CentralRoutingMode,
-    live_openhands: bool,
-    rehydrate: bool,
+    _live_openhands: bool,
+    _rehydrate: bool,
 ) -> bool {
     matches!(
         mode,
         orchestrator_run::config::CentralRoutingMode::ProjectSet
-    ) && (live_openhands || rehydrate)
+    )
 }
 
 fn central_doctor_probe_settings(
@@ -2557,6 +2557,11 @@ mod tests {
             &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
             false,
             true,
+        ));
+        assert!(project_set_doctor_mutation_blocked(
+            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
+            false,
+            false,
         ));
         assert!(!project_set_doctor_mutation_blocked(
             &super::orchestrator_run::config::CentralRoutingMode::LegacySingle,
