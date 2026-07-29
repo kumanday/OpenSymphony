@@ -202,6 +202,11 @@ struct ActiveCentralConfig {
     activation_marker: PathBuf,
 }
 
+enum ActiveMigrationResolution {
+    Complete,
+    Restored,
+}
+
 pub async fn run(args: MigrationArgs) -> std::process::ExitCode {
     let result = match args.command {
         MigrationCommand::Preflight(paths) => preflight(paths).await,
@@ -366,6 +371,46 @@ fn load_activation_marker(
     }
 }
 
+fn resume_partial_apply(
+    active: &ActiveCentralConfig,
+) -> Result<ActiveMigrationResolution, MigrationError> {
+    let Some((marker_path, marker)) = load_activation_marker(&active.target_config)? else {
+        return Ok(ActiveMigrationResolution::Complete);
+    };
+    let workflow_stage = stage_path(&marker.workflow_path, &marker.generation);
+    if workflow_stage.is_file() {
+        replace_staged_file(&workflow_stage, &marker.workflow_path)?;
+        return Ok(ActiveMigrationResolution::Complete);
+    }
+
+    let workflow_source =
+        fs::read_to_string(&marker.workflow_path).map_err(|source| MigrationError::Read {
+            path: marker.workflow_path.clone(),
+            source,
+        })?;
+    if !workflow_has_orchestration_front_matter(&workflow_source) {
+        return Ok(ActiveMigrationResolution::Complete);
+    }
+
+    restore_or_remove_after_failed_apply(
+        &marker.config_path,
+        &marker.backup_dir.join("config.yaml"),
+        marker.had_config,
+        marker.config_mode,
+    )?;
+    restore_or_remove_after_failed_apply(
+        &marker.workflow_path,
+        &marker.backup_dir.join("WORKFLOW.md"),
+        marker.had_workflow,
+        marker.workflow_mode,
+    )?;
+    fs::remove_file(&marker_path).map_err(|source| MigrationError::Write {
+        path: marker_path,
+        source,
+    })?;
+    Ok(ActiveMigrationResolution::Restored)
+}
+
 async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     if let Some(active) = active_target_central_config(&paths).await? {
         return Ok(active_report("preflight", &active, true));
@@ -417,8 +462,21 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
 async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     let _ = preflight(paths.clone()).await?;
     if let Some(active) = active_target_central_config(&paths).await? {
-        return Ok(active_report("apply", &active, false));
+        return match resume_partial_apply(&active)? {
+            ActiveMigrationResolution::Complete => Ok(active_report("apply", &active, false)),
+            ActiveMigrationResolution::Restored => {
+                // The interrupted generation was safely restored.  Continue this
+                // invocation from the legacy source so repeat apply completes the
+                // migration instead of returning a false success.
+                let _ = preflight(paths.clone()).await?;
+                apply_legacy_source(paths).await
+            }
+        };
     }
+    apply_legacy_source(paths).await
+}
+
+async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     let source = load_source(&paths)?;
     if looks_like_central_config(&source.config_source) {
         let central = load_central_config(&source.source_config).await?;
@@ -509,7 +567,8 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
     let workflow_stage = stage_path(&source.workflow_path, &generation);
     write_file_with_mode(&central_stage, generated.as_bytes(), config_mode)?;
     load_central_config(&central_stage).await?;
-    write_file_with_mode(&workflow_stage, workflow_body(&source), workflow_mode)?;
+    let workflow_body = workflow_body(&source)?;
+    write_file_with_mode(&workflow_stage, &workflow_body, workflow_mode)?;
 
     let marker = ActivationMarker {
         source_config: source.source_config.clone(),
@@ -966,7 +1025,6 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "max_retry_backoff_ms": source.workflow.front_matter.agent.max_retry_backoff_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
             "stall_timeout_ms": source.workflow.front_matter.agent.stall_timeout_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
             "poll_interval_ms": source.workflow.front_matter.polling.interval_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
-            "retry": {"max_attempts": 3}
         },
         "hooks": {
             "after_create": source.workflow.front_matter.hooks.after_create.clone(),
@@ -980,13 +1038,25 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "catalog_root": format!("{state_root}/memory"),
             "auto_capture": source.config.memory.auto_capture.unwrap_or(true),
             "auto_archive": source.config.memory.auto_archive.unwrap_or(false),
-            "serve": source.config.memory.serve.unwrap_or_else(|| source.target_repo.join(".opensymphony/memory").is_dir()),
+            "serve": source.config.memory.serve.unwrap_or_else(|| source.target_repo.join(".opensymphony/memory/memory.yaml").is_file()),
             "bind": memory_bind,
             "token_env": memory_token_env,
         },
         "control_plane": {"bind": control_plane_bind.unwrap_or_else(|| "127.0.0.1:2468".to_owned())},
         "openhands": {
-            "tool_dir": source.config.openhands.tool_dir.clone(),
+            "tool_dir": expand_legacy_bind(
+                source.config.openhands.tool_dir.as_deref(),
+                &source.source_config,
+                "openhands.tool_dir",
+            )?
+            .map(|value| {
+                resolve_repo_path(
+                    source.source_config.parent().unwrap_or_else(|| Path::new(".")),
+                    &value,
+                )
+                .display()
+                .to_string()
+            }),
             "transport_base_url": source.workflow.front_matter.openhands.transport.base_url.clone(),
             "transport_session_api_key_env": source.workflow.front_matter.openhands.transport.session_api_key_env.clone(),
             "front_matter": source.workflow.front_matter.openhands.clone(),
@@ -996,14 +1066,60 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
     serde_yaml::to_string(&root).map_err(MigrationError::SerializeConfig)
 }
 
-fn workflow_body(source: &SourceContext) -> &[u8] {
-    if source.workflow_source.trim_start().starts_with("---")
-        && source.workflow_source.match_indices("---").count() >= 2
-    {
-        source.workflow.prompt_template.as_bytes()
-    } else {
-        source.workflow_source.as_bytes()
+fn workflow_has_front_matter(source: &str) -> bool {
+    source.trim_start().starts_with("---") && source.match_indices("---").count() >= 2
+}
+
+fn workflow_has_orchestration_front_matter(source: &str) -> bool {
+    if !workflow_has_front_matter(source) {
+        return false;
     }
+    let Ok(workflow) = WorkflowDefinition::parse(source) else {
+        return true;
+    };
+    let front_matter = workflow.front_matter;
+    front_matter.tracker != Default::default()
+        || front_matter.polling != Default::default()
+        || front_matter.workspace != Default::default()
+        || front_matter.hooks != Default::default()
+        || front_matter.agent != Default::default()
+        || front_matter.openhands != Default::default()
+        || front_matter.routing != Default::default()
+}
+
+fn workflow_body(source: &SourceContext) -> Result<Vec<u8>, MigrationError> {
+    if !workflow_has_front_matter(&source.workflow_source) {
+        return Ok(source.workflow_source.as_bytes().to_vec());
+    }
+
+    let mut local_front_matter = BTreeMap::<String, serde_yaml::Value>::new();
+    if let Some(codex) = source.workflow.front_matter.codex.as_ref() {
+        local_front_matter.insert(
+            "codex".to_owned(),
+            serde_yaml::to_value(codex).map_err(MigrationError::SerializeConfig)?,
+        );
+    }
+    if let Some(logging) = source.workflow.front_matter.logging.as_ref() {
+        local_front_matter.insert(
+            "logging".to_owned(),
+            serde_yaml::to_value(logging).map_err(MigrationError::SerializeConfig)?,
+        );
+    }
+    for (name, value) in &source.workflow.front_matter.extensions {
+        local_front_matter.insert(name.clone(), value.clone());
+    }
+
+    if local_front_matter.is_empty() {
+        return Ok(source.workflow.prompt_template.as_bytes().to_vec());
+    }
+
+    let serialized =
+        serde_yaml::to_string(&local_front_matter).map_err(MigrationError::SerializeConfig)?;
+    let mut body = String::from("---\n");
+    body.push_str(&serialized);
+    body.push_str("---\n\n");
+    body.push_str(&source.workflow.prompt_template);
+    Ok(body.into_bytes())
 }
 
 fn target_branch(prompt: &str) -> Option<String> {
@@ -1068,27 +1184,32 @@ fn hook_creates_repository(value: &str) -> bool {
         .to_ascii_lowercase();
     normalized
         .split([';', '\n'])
-        .map(str::split_whitespace)
-        .any(|mut tokens| {
-            let tokens = tokens
-                .by_ref()
+        .map(|command| {
+            command
+                .split_whitespace()
                 .map(|token| {
                     token.trim_matches(|character: char| {
-                        matches!(character, '&' | '|' | ';' | '(' | ')' | '\'' | '"')
+                        matches!(character, '&' | '|' | ';' | '(' | ')' | '\'' | '"' | '`')
                     })
                 })
                 .filter(|token| !token.is_empty())
-                .collect::<Vec<_>>();
-            let Some(command) = tokens.first().copied() else {
-                return false;
-            };
-            match command {
-                "git" => tokens[1..]
+                .collect::<Vec<_>>()
+        })
+        .any(|tokens| {
+            let git_index = tokens
+                .iter()
+                .position(|token| token.rsplit('/').next().is_some_and(|name| name == "git"));
+            if let Some(index) = git_index {
+                return tokens[index + 1..]
                     .iter()
-                    .any(|token| matches!(*token, "clone" | "init")),
-                "gh" => tokens.get(1..3) == Some(["repo", "clone"].as_slice()),
-                _ => false,
+                    .any(|token| matches!(*token, "clone" | "init"));
             }
+            tokens
+                .iter()
+                .position(|token| token.rsplit('/').next().is_some_and(|name| name == "gh"))
+                .is_some_and(|index| {
+                    tokens.get(index + 1..index + 3) == Some(["repo", "clone"].as_slice())
+                })
         })
 }
 
@@ -1350,6 +1471,11 @@ mod tests {
         assert!(hook_creates_repository("gh repo \\\nclone owner/repo ."));
         assert!(hook_creates_repository("git \\\nclone URL ."));
         assert!(hook_creates_repository("cd repo && git clone URL ."));
+        assert!(hook_creates_repository("/usr/bin/git clone URL ."));
+        assert!(hook_creates_repository(
+            "env GIT_SSH_COMMAND=ssh git clone URL ."
+        ));
+        assert!(hook_creates_repository("sh -c 'git clone URL .'"));
         assert!(!hook_creates_repository("npm init -y"));
         assert!(!hook_creates_repository("cargo init --name clone"));
         assert!(!hook_creates_repository("printf '%s\\n' ready"));
@@ -1435,11 +1561,13 @@ mod tests {
         let config_path = root.path().join("config.yaml");
         let output_path = root.path().join("central/central.yaml");
         let workflow_path = root.path().join("WORKFLOW.md");
-        let old_config =
-            "control_plane:\n  bind: 127.0.0.1:2468\nmemory:\n  token_env: MEMORY_TOKEN_ENV\n";
-        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ../.legacy-workspaces\nagent:\n  max_concurrent_agents_by_state:\n    In Progress: 1\nrouting:\n  harness_env: CUSTOM_HARNESS\n  model_env: CUSTOM_MODEL\n  model_profile_env: CUSTOM_MODEL_PROFILE\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\n---\n\nTarget branch: develop\n\n# Implementation instructions\n";
+        let old_config = "control_plane:\n  bind: 127.0.0.1:2468\nopenhands:\n  tool_dir: ./managed-tools\nmemory:\n  token_env: MEMORY_TOKEN_ENV\n";
+        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ../.legacy-workspaces\nagent:\n  max_concurrent_agents_by_state:\n    In Progress: 1\nrouting:\n  harness_env: CUSTOM_HARNESS\n  model_env: CUSTOM_MODEL\n  model_profile_env: CUSTOM_MODEL_PROFILE\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\ncodex:\n  command: codex app-server\nlogging:\n  level: debug\nrepository_local:\n  preserve: true\n---\n\nTarget branch: develop\n\n# Implementation instructions\n";
+        let old_workflow = old_workflow.replace("repository_local:\n  preserve: true\n", "");
         fs::write(&config_path, old_config).expect("legacy config should be written");
-        fs::write(&workflow_path, old_workflow).expect("legacy workflow should be written");
+        fs::write(&workflow_path, &old_workflow).expect("legacy workflow should be written");
+        fs::create_dir_all(root.path().join(".opensymphony/memory"))
+            .expect("legacy memory directory should be created");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1470,6 +1598,15 @@ mod tests {
         assert!(migrated_config.contains("CUSTOM_HARNESS"));
         assert!(migrated_config.contains("CUSTOM_MODEL_PROFILE"));
         assert!(migrated_config.contains("MEMORY_TOKEN_ENV"));
+        assert!(migrated_config.contains(
+            &root
+                .path()
+                .join("managed-tools")
+                .display()
+                .to_string()
+        ));
+        assert!(!migrated_config.contains("max_attempts"));
+        assert!(migrated_config.contains("serve: false"));
         assert!(migrated_config.contains("reconnect_max_ms"));
         assert!(migrated_config.contains("max_concurrent_agents_by_state"));
         assert!(
@@ -1484,7 +1621,34 @@ mod tests {
             )
         );
         assert!(migrated_workflow.contains("Implementation instructions"));
+        assert!(migrated_workflow.contains("codex:"));
+        assert!(migrated_workflow.contains("logging:"));
         assert!(!migrated_config.contains("super-secret"));
+
+        let marker_path = report
+            .activation_marker
+            .clone()
+            .expect("migration should publish an activation marker");
+        let marker = parse_activation_marker(&marker_path).expect("activation marker should parse");
+        restore_file(
+            &marker.backup_dir.join("WORKFLOW.md"),
+            &workflow_path,
+            marker.workflow_mode,
+        )
+        .expect("partial apply should restore the legacy workflow");
+        let resumed = apply(MigrationPaths {
+            config: Some(config_path.clone()),
+            repo: root.path().to_path_buf(),
+            output: Some(output_path.clone()),
+        })
+        .await
+        .expect("repeat apply should recover a partially published migration");
+        assert!(!resumed.central_config_already_active);
+        assert!(
+            fs::read_to_string(&workflow_path)
+                .expect("recovered workflow should exist")
+                .contains("codex:")
+        );
 
         let conflicting_output = root.path().join("central/conflicting.yaml");
         fs::copy(&output_path, &conflicting_output)

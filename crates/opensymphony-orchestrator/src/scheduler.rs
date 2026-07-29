@@ -2247,17 +2247,6 @@ fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
         }
     );
     retry_exhausted
-        && matches!(
-            execution
-                .last_worker_outcome()
-                .map(|outcome| outcome.outcome),
-            Some(
-                WorkerOutcomeKind::Failed
-                    | WorkerOutcomeKind::TimedOut
-                    | WorkerOutcomeKind::Stalled
-                    | WorkerOutcomeKind::Cancelled,
-            )
-        )
         || matches!(
             execution
                 .last_worker_outcome()

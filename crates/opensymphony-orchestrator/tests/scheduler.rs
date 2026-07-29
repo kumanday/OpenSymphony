@@ -1266,6 +1266,82 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
 }
 
 #[tokio::test]
+async fn retry_limit_parks_successful_continuations() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-269", "COE-269", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(200),
+                Some("first continuation should queue".to_owned()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("first successful run should queue continuation");
+    scheduler
+        .tick(ts(1_300))
+        .await
+        .expect("continuation should dispatch once");
+
+    let second_run = scheduler.worker().launches[1].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: second_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &second_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(1_400),
+                Some("retry limit should park continuation".to_owned()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(1_400))
+        .await
+        .expect("exhausted continuation should release");
+
+    let issue_id = IssueId::new("lin-269").expect("issue id should be valid");
+    assert!(matches!(
+        scheduler
+            .execution(&issue_id)
+            .expect("released execution should remain recorded")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+    scheduler
+        .tick(ts(61_400))
+        .await
+        .expect("exhausted continuation should remain parked");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+}
+
+#[tokio::test]
 async fn worker_finish_rechecks_tracker_state_before_continuation_retry() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-492", "COE-492", "In Progress", 0)],

@@ -508,13 +508,15 @@ pub async fn run_doctor_command(
                 "config",
                 format!("parsed central config {}", config_path.display()),
             ));
+            let (probe_model, probe_api_key_env, probe_llm_base_url_env) =
+                central_doctor_probe_settings(&central.workflow_front_matter);
             DoctorConfig {
                 target_repo: central.target_repo().map(|path| path.display().to_string()),
                 openhands: OpenHandsDoctorConfig {
                     tool_dir: central.tool_dir().map(|path| path.display().to_string()),
-                    probe_model: None,
-                    probe_api_key_env: None,
-                    probe_llm_base_url_env: None,
+                    probe_model,
+                    probe_api_key_env,
+                    probe_llm_base_url_env,
                 },
                 linear: LinearDoctorConfig { enabled: true },
             }
@@ -740,6 +742,22 @@ pub async fn run_doctor_command(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn central_doctor_probe_settings(
+    front_matter: &crate::opensymphony_workflow::WorkflowFrontMatter,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let llm = front_matter
+        .openhands
+        .conversation
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.llm.as_ref());
+    (
+        llm.and_then(|llm| llm.model.clone()),
+        llm.and_then(|llm| llm.api_key_env.clone()),
+        llm.and_then(|llm| llm.base_url_env.clone()),
+    )
 }
 
 /// Bulk rehydration for all workspaces with missing/corrupted LLM API keys
@@ -2493,8 +2511,9 @@ mod tests {
 
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        command_check_name, effective_openhands_probe_base_url, executable_suffixes,
-        find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot, spawn_demo_updates,
+        central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
+        executable_suffixes, find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot,
+        spawn_demo_updates,
     };
 
     #[test]
@@ -2602,6 +2621,23 @@ mod tests {
                 "workflow max_iterations {} exceeds u32::MAX ({}), which is the maximum the doctor probe can handle",
                 u64::from(u32::MAX) + 1,
                 u32::MAX
+            )
+        );
+    }
+
+    #[test]
+    fn central_doctor_probe_settings_preserve_llm_environment_selectors() {
+        let workflow = WorkflowDefinition::parse(
+            "---\nopenhands:\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n        base_url_env: CUSTOM_OPENAI_BASE_URL\n---\nprobe\n",
+        )
+        .expect("central OpenHands front matter should parse");
+
+        assert_eq!(
+            central_doctor_probe_settings(&workflow.front_matter),
+            (
+                Some("custom/model".to_owned()),
+                Some("CUSTOM_OPENAI_KEY".to_owned()),
+                Some("CUSTOM_OPENAI_BASE_URL".to_owned()),
             )
         );
     }

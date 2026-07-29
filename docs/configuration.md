@@ -53,17 +53,19 @@ opensymphony migrate rollback --config /path/to/repo/config.yaml
 
 `preflight` is read-only and reports recognized workflow fields, clone-hook
 risks, and secret/remote-risk booleans without printing their values. `apply`
-backs up the legacy config and workflow, writes central config and the
-implementation-only workflow body through same-directory staging, and records
-an activation marker specific to the central config destination. A marker is
-written after validation and staging but before replacement so an interrupted
-apply remains recoverable. Relative legacy workspace roots are resolved against
-the target repository, and migration requires an exact `Target branch:` line.
+backs up the legacy config and workflow, writes central config and a reduced
+workflow body through same-directory staging, preserves supported repository-local
+`codex`/`logging` namespaces, and records an activation marker specific to the
+central config destination. A marker is written after validation and staging but
+before replacement so an interrupted apply remains recoverable. Relative legacy
+workspace roots are resolved against the target repository, and migration
+requires an exact `Target branch:` line.
 Applying again with a separate `--output` detects the active destination
 generation before creating a backup or rewriting the source. `rollback`
 restores the backup and refuses to run while the instance's strict-run marker
 is active; it restores the original file permissions as well as file contents.
-Repeating `apply` after activation is a no-op.
+Repeating a complete `apply` is a no-op; a partially published activation
+promotes its staged workflow or restores the backup before retrying.
 
 ## Bootstrap
 
