@@ -383,6 +383,7 @@ struct FakeWorkspace {
     records: HashMap<String, WorkspaceRecord>,
     persisted_retry_counts: Vec<u32>,
     persisted_retry_pending: usize,
+    persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
     retain_failed: bool,
 }
 
@@ -451,6 +452,9 @@ impl WorkspaceBackend for FakeWorkspace {
         _workspace: &WorkspaceRecord,
         _retry: &RetryEntry,
     ) -> Result<(), Self::Error> {
+        if let Some(result) = self.persist_retry_pending_results.pop_front() {
+            result?;
+        }
         self.persisted_retry_pending += 1;
         Ok(())
     }
@@ -1463,6 +1467,71 @@ async fn worker_finish_rechecks_tracker_state_before_continuation_retry() {
     assert_eq!(
         scheduler.tracker().state_requests,
         vec![vec!["lin-492".to_string()]]
+    );
+}
+
+#[tokio::test]
+async fn retry_state_survives_a_failed_manifest_persistence() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-269", "COE-269", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler.tick(ts(100)).await.expect("initial dispatch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .workspace_mut()
+        .persist_retry_pending_results
+        .push_back(Err(FakeError {
+            message: "manifest write failed".to_string(),
+            category: None,
+            retry_after: None,
+        }));
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("worker failed".to_string()),
+                None,
+            ),
+        });
+
+    assert!(
+        scheduler.tick(ts(200)).await.is_err(),
+        "manifest persistence failure should be surfaced"
+    );
+    let issue_id = IssueId::new("lin-269").expect("issue id should be valid");
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("execution should remain");
+    assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+    assert_eq!(
+        execution
+            .retry()
+            .expect("retry state should remain in memory")
+            .normal_retry_count,
+        1
+    );
+
+    scheduler
+        .tick(ts(300))
+        .await
+        .expect("the next tick should retry persistence");
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 1);
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("execution should remain queued")
+            .status(),
+        SchedulerStatus::RetryQueued
     );
 }
 

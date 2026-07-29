@@ -23,7 +23,7 @@ pub fn redact_runtime_diagnostic(input: &str) -> String {
         "token",
     ];
 
-    let mut redacted = input
+    let mut redacted = redact_authorization_headers(input)
         .split_whitespace()
         .map(redact_diagnostic_token)
         .collect::<Vec<_>>()
@@ -38,6 +38,115 @@ pub fn redact_runtime_diagnostic(input: &str) -> String {
         format!("{prefix}...")
     } else {
         prefix
+    }
+}
+
+fn redact_authorization_headers(input: &str) -> String {
+    let mut redacted = input.to_owned();
+    let mut search_from = 0;
+    loop {
+        let lower = redacted.to_ascii_lowercase();
+        let Some(relative_start) = lower
+            .get(search_from..)
+            .and_then(|text| text.find("authorization"))
+        else {
+            return redacted;
+        };
+        let key_start = search_from + relative_start;
+        let key_end = key_start + "authorization".len();
+        if key_start > 0
+            && redacted[..key_start]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            search_from = key_end;
+            continue;
+        }
+
+        let bytes = redacted.as_bytes();
+        let mut delimiter = key_end;
+        if bytes
+            .get(delimiter)
+            .is_some_and(|character| *character == b'"' || *character == b'\'')
+        {
+            delimiter += 1;
+        }
+        while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
+            delimiter += 1;
+        }
+        if delimiter >= bytes.len() || !matches!(bytes[delimiter], b'=' | b':') {
+            search_from = key_end;
+            continue;
+        }
+        let mut value_start = delimiter + 1;
+        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        let quoted = bytes
+            .get(value_start)
+            .copied()
+            .filter(|quote| *quote == b'"' || *quote == b'\'');
+        if let Some(quote) = quoted {
+            let content_start = value_start + 1;
+            let mut content_end = content_start;
+            while content_end < bytes.len() && bytes[content_end] != quote {
+                content_end += 1;
+            }
+            let content = &redacted[content_start..content_end];
+            let replacement = authorization_value_replacement(content);
+            if replacement != content {
+                redacted.replace_range(content_start..content_end, &replacement);
+                search_from = content_start + replacement.len();
+            } else {
+                search_from = content_end;
+            }
+            continue;
+        }
+
+        let mut value_end = value_start;
+        while value_end < bytes.len()
+            && !bytes[value_end].is_ascii_whitespace()
+            && !matches!(bytes[value_end], b',' | b';' | b'}' | b']' | b'&')
+        {
+            value_end += 1;
+        }
+        let scheme = &redacted[value_start..value_end];
+        if scheme.eq_ignore_ascii_case("bearer") {
+            let mut token_start = value_end;
+            while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
+                token_start += 1;
+            }
+            let mut token_end = token_start;
+            while token_end < bytes.len()
+                && !bytes[token_end].is_ascii_whitespace()
+                && !matches!(bytes[token_end], b',' | b';' | b'}' | b']' | b'&')
+            {
+                token_end += 1;
+            }
+            if token_start < token_end {
+                redacted.replace_range(token_start..token_end, "[redacted]");
+                search_from = token_start + "[redacted]".len();
+            } else {
+                search_from = value_end;
+            }
+        } else if value_start < value_end {
+            redacted.replace_range(value_start..value_end, "[redacted]");
+            search_from = value_start + "[redacted]".len();
+        } else {
+            search_from = value_end;
+        }
+    }
+}
+
+fn authorization_value_replacement(value: &str) -> String {
+    let Some((scheme, token)) = value.split_once(char::is_whitespace) else {
+        return "[redacted]".to_owned();
+    };
+    if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {
+        format!("{scheme} [redacted]")
+    } else {
+        "[redacted]".to_owned()
     }
 }
 
@@ -837,5 +946,16 @@ mod tests {
         assert!(!value.contains("one"));
         assert!(!value.contains("two"));
         assert_eq!(value.matches("[redacted]").count(), 4);
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_complete_bearer_authorization_values() {
+        let value = redact_runtime_diagnostic(
+            "Authorization: Bearer first \"authorization\":\"Bearer second\" authorization=Bearer third",
+        );
+
+        assert!(!value.contains("first"));
+        assert!(!value.contains("second"));
+        assert!(!value.contains("third"));
     }
 }

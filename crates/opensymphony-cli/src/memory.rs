@@ -1765,11 +1765,12 @@ async fn start_memory_server_with_auth(
     config_generation: Option<String>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     let activity_marker = memory_activity_marker_path(&config.memory_root);
+    let coordination_root = memory_coordination_root(&config);
     let coordination_lock =
-        acquire_memory_coordination_lock(&config.repo_root).map_err(|source| {
+        acquire_memory_coordination_lock(&coordination_root).map_err(|source| {
             MemoryError::InvalidInput(format!(
                 "memory migration or server activity is already active at {}; {source}",
-                memory_migration_lock_path(&config.repo_root).display()
+                memory_migration_lock_path(&coordination_root).display()
             ))
         })?;
     fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
@@ -1900,6 +1901,15 @@ pub(crate) fn acquire_memory_coordination_lock(
     }
 }
 
+fn memory_coordination_root(config: &MemoryConfig) -> PathBuf {
+    let local_default = config.repo_root.join(".opensymphony/memory");
+    if config.memory_root == local_default {
+        config.repo_root.clone()
+    } else {
+        config.memory_root.clone()
+    }
+}
+
 fn initialize_memory_coordination_lock(
     mut file: fs::File,
     path: &Path,
@@ -1916,8 +1926,9 @@ fn initialize_memory_coordination_lock(
 fn acquire_memory_writer_lock(
     config: &MemoryConfig,
 ) -> Result<MemoryCoordinationLock, MemoryError> {
-    acquire_memory_coordination_lock(&config.repo_root).map_err(|source| MemoryError::WriteFile {
-        path: memory_migration_lock_path(&config.repo_root),
+    let coordination_root = memory_coordination_root(config);
+    acquire_memory_coordination_lock(&coordination_root).map_err(|source| MemoryError::WriteFile {
+        path: memory_migration_lock_path(&coordination_root),
         source,
     })
 }
@@ -2003,15 +2014,17 @@ fn process_is_alive(pid: u32) -> bool {
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
         else {
-            return false;
+            return true;
         };
-        output.status.success()
-            && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-                line.split_whitespace()
-                    .nth(1)
-                    .and_then(|value| value.parse::<u32>().ok())
-                    == Some(pid)
-            })
+        if !output.status.success() {
+            return true;
+        }
+        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<u32>().ok())
+                == Some(pid)
+        })
     }
 }
 
@@ -5693,9 +5706,9 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, authorize_memory_request,
-        call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
-        context_source_from_mcp, load_memory_config, memory_server_health,
+        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
+        authorize_memory_request, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
+        call_memory_tool, context_source_from_mcp, load_memory_config, memory_server_health,
         memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
         parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
         required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
@@ -6479,6 +6492,26 @@ mod tests {
 
         assert_eq!(evolved.memory_root, config.memory_root);
         assert_eq!(evolved.index_path, config.index_path);
+    }
+
+    #[test]
+    fn central_memory_writers_share_a_catalog_coordination_lock() {
+        let first_repo = TempDir::new().expect("first repo");
+        let second_repo = TempDir::new().expect("second repo");
+        let catalog = first_repo.path().join("central-catalog");
+        let mut first = MemoryConfig::load(first_repo.path(), None).expect("first config");
+        let mut second = MemoryConfig::load(second_repo.path(), None).expect("second config");
+        first.memory_root = catalog.clone();
+        second.memory_root = catalog.clone();
+
+        let lock = acquire_memory_writer_lock(&first).expect("first catalog lock");
+        assert!(matches!(
+            acquire_memory_writer_lock(&second),
+            Err(MemoryError::WriteFile { .. })
+        ));
+        drop(lock);
+        acquire_memory_writer_lock(&second)
+            .expect("catalog lock should be released after the first writer exits");
     }
 
     #[test]

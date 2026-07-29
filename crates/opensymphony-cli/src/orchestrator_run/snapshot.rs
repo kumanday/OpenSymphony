@@ -106,6 +106,11 @@ fn map_issue(
                 | WorkerOutcomeKind::TimedOut
                 | WorkerOutcomeKind::Stalled,
             ) => IssueRuntimeState::Failed,
+            _ if issue.runtime.release_reason
+                == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted) =>
+            {
+                IssueRuntimeState::Failed
+            }
             // A released execution with no recorded run never dispatched a
             // worker (e.g. a recovered workspace parked while its issue sits
             // in a non-active tracker state). Key on the *current* tracker
@@ -878,6 +883,10 @@ tracker:
         assert_eq!(
             issue.release_reason,
             Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted)
+        );
+        assert_eq!(
+            issue.runtime_state,
+            crate::opensymphony_control::IssueRuntimeState::Failed
         );
     }
 

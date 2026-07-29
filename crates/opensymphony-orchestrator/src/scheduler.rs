@@ -404,6 +404,7 @@ pub struct Scheduler<T, W, M> {
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
+    pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     recovered: bool,
@@ -437,6 +438,7 @@ where
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
+            pending_retry_persistence: BTreeMap::new(),
             pending_recovery: None,
             pending_retry_exhaustion: None,
             recovered: false,
@@ -560,6 +562,7 @@ where
         observed_at: TimestampMs,
     ) -> Result<OrchestratorSnapshot, SchedulerError> {
         self.load_recovery_state().await?;
+        self.flush_pending_retry_persistence().await?;
 
         let updates = self
             .worker
@@ -1903,7 +1906,26 @@ where
                     let execution = self
                         .resolve_finished_execution(execution, outcome, finished_at)
                         .await?;
+                    let retry = execution.retry().cloned();
                     self.insert_execution(issue_id, execution);
+                    if let Some(retry) = retry {
+                        let issue_id = retry.issue_id.clone();
+                        let workspace = self
+                            .executions
+                            .get(&issue_id)
+                            .and_then(|execution| execution.workspace().cloned());
+                        if let Some(workspace) = workspace
+                            && let Err(error) = self
+                                .workspace
+                                .persist_retry_pending(&workspace, &retry)
+                                .await
+                        {
+                            self.pending_retry_persistence.insert(issue_id, retry);
+                            return Err(SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            });
+                        }
+                    }
                 }
                 WorkerUpdate::ConversationMetadataUpdate {
                     worker_id,
@@ -2359,15 +2381,31 @@ where
                 self.config.retry_policy,
             )?,
         };
-        if let Some(workspace) = execution.workspace() {
-            self.workspace
-                .persist_retry_pending(workspace, &retry)
-                .await
-                .map_err(|error| SchedulerError::Workspace {
-                    detail: error.to_string(),
-                })?;
-        }
         Ok(execution.queue_retry(retry, outcome)?)
+    }
+
+    async fn flush_pending_retry_persistence(&mut self) -> Result<(), SchedulerError> {
+        let pending = std::mem::take(&mut self.pending_retry_persistence);
+        for (issue_id, retry) in pending {
+            let workspace = self
+                .executions
+                .get(&issue_id)
+                .and_then(|execution| execution.workspace().cloned());
+            let Some(workspace) = workspace else {
+                continue;
+            };
+            if let Err(error) = self
+                .workspace
+                .persist_retry_pending(&workspace, &retry)
+                .await
+            {
+                self.pending_retry_persistence.insert(issue_id, retry);
+                return Err(SchedulerError::Workspace {
+                    detail: error.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     async fn load_recovery_state(&mut self) -> Result<(), SchedulerError> {

@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use clap::{Args, Subcommand};
@@ -362,6 +363,8 @@ pub(crate) fn strict_run_marker_path(target_config: &Path) -> PathBuf {
     ))
 }
 
+static STRICT_STALE_MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) struct StrictRunMarkerGuard {
     path: PathBuf,
 }
@@ -377,25 +380,52 @@ pub(crate) fn claim_strict_run_marker(
     generation: &str,
 ) -> std::io::Result<StrictRunMarkerGuard> {
     let marker = strict_run_marker_path(target_config);
-    if marker.exists() && !strict_run_marker_owner_alive(&marker) {
-        match fs::remove_file(&marker) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
     if let Some(parent) = marker.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)?;
-    if let Err(error) = writeln!(file, "pid={}\ngeneration={generation}", std::process::id()) {
-        let _ = fs::remove_file(&marker);
-        return Err(error);
+    loop {
+        if marker.exists() && !strict_run_marker_owner_alive(&marker) {
+            let quarantine = stale_strict_run_marker_path(&marker);
+            match fs::rename(&marker, &quarantine) {
+                Ok(()) => {
+                    fs::remove_file(&quarantine)?;
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(mut file) => {
+                if let Err(error) =
+                    writeln!(file, "pid={}\ngeneration={generation}", std::process::id())
+                {
+                    let _ = fs::remove_file(&marker);
+                    return Err(error);
+                }
+                return Ok(StrictRunMarkerGuard { path: marker });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if strict_run_marker_owner_alive(&marker) {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
     }
-    Ok(StrictRunMarkerGuard { path: marker })
+}
+
+fn stale_strict_run_marker_path(path: &Path) -> PathBuf {
+    let sequence = STRICT_STALE_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("strict-run.active");
+    path.with_file_name(format!(".{name}.stale-{}-{sequence}", std::process::id()))
 }
 
 fn strict_run_marker_owner_alive(marker: &Path) -> bool {
@@ -1149,7 +1179,10 @@ fn build_report(
             .tracker
             .api_key
             .as_deref()
-            .is_some_and(|value| credential_variable(value).is_none()),
+            .is_some_and(|value| credential_variable(value).is_none())
+            || openhands_environment_has_literal_secret(
+                &source.workflow.front_matter.openhands.local_server.env,
+            ),
         credential_bearing_remote_detected: remote_has_credentials(&source.remote),
         backup,
         activation_marker: None,
@@ -1165,6 +1198,11 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         .as_deref()
         .is_some_and(|value| credential_variable(value).is_none())
     {
+        return Err(MigrationError::LiteralSecret);
+    }
+    if openhands_environment_has_literal_secret(
+        &source.workflow.front_matter.openhands.local_server.env,
+    ) {
         return Err(MigrationError::LiteralSecret);
     }
     if remote_has_credentials(&source.remote) {
@@ -1211,11 +1249,10 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         }
         None => format!("~/.opensymphony/workspaces/{instance_id}"),
     };
-    let instruction_path = if source.target_repo.join("AGENTS.md").is_file() {
-        "AGENTS.md"
-    } else {
-        "WORKFLOW.md"
-    };
+    // WORKFLOW.md retains the legacy execution prompt after orchestration
+    // front matter is moved into the central config. AGENTS.md remains in the
+    // checkout as implementation guidance for the worker.
+    let instruction_path = "WORKFLOW.md";
     let remote_locator = source.remote.clone();
     let linear_projects = BTreeMap::from([(
         project.clone(),
@@ -1910,6 +1947,25 @@ fn credential_variable(value: &str) -> Option<&str> {
     Some(variable)
 }
 
+fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> bool {
+    env.iter().any(|(name, value)| {
+        let name = name.to_ascii_lowercase();
+        let secret_name = [
+            "access_token",
+            "api_key",
+            "apikey",
+            "authorization",
+            "credential",
+            "password",
+            "secret",
+            "token",
+        ]
+        .iter()
+        .any(|part| name == *part || name.ends_with(&format!("_{part}")));
+        secret_name && credential_variable(value).is_none()
+    })
+}
+
 fn safe_id(value: &str) -> String {
     value
         .chars()
@@ -2166,6 +2222,37 @@ mod tests {
         let serialized = serde_json::to_string(&report).expect("report should serialize");
         assert!(report.literal_secret_detected);
         assert!(!serialized.contains("super-secret-canary"));
+    }
+
+    #[test]
+    fn migration_rejects_literal_openhands_secret_environment_values() {
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nopenhands:\n  local_server:\n    env:\n      OPENAI_API_KEY: raw-secret-canary\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let target_repo = PathBuf::from("repo");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            target_repo: target_repo.clone(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        let report = build_report("preflight", &source, None, None, true);
+        assert!(report.literal_secret_detected);
+        assert!(matches!(
+            generate_central_config(&source),
+            Err(MigrationError::LiteralSecret)
+        ));
     }
 
     #[test]
@@ -2443,6 +2530,38 @@ mod tests {
         let generated = generate_central_config(&source).expect("migration should generate");
         assert!(!generated.contains("/repo/var/workspaces"));
         assert!(generated.contains("~/.opensymphony/workspaces/legacy-repo-"));
+    }
+
+    #[test]
+    fn migration_keeps_workflow_prompt_when_agents_guidance_exists() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let target_repo = root.path().join("repo");
+        fs::create_dir_all(&target_repo).expect("repository should exist");
+        fs::write(target_repo.join("AGENTS.md"), "implementation guidance\n")
+            .expect("repository guidance should exist");
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            target_repo: target_repo.clone(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        let generated = generate_central_config(&source).expect("migration should generate");
+        assert!(generated.contains("path: WORKFLOW.md"));
+        assert!(!generated.contains("path: AGENTS.md"));
     }
 
     #[test]
