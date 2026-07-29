@@ -53,7 +53,7 @@ use crate::{
 };
 
 use super::orchestrator_run::config::{
-    looks_like_central_config, select_config_path, validate_central_config_text,
+    CentralRoutingMode, looks_like_central_config, select_config_path, validate_central_config_text,
 };
 
 const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -671,7 +671,12 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         return run_remote_memory_tool(&endpoint, tool_name, arguments).await;
     }
     match command {
-        MemoryCommand::Init(args) => run_init(&repo_root, config_path.as_deref(), args),
+        MemoryCommand::Init(args) => run_init(
+            &repo_root,
+            config_path.as_deref(),
+            selected_central_config.as_deref(),
+            args,
+        ),
         MemoryCommand::Capture(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_capture(
@@ -726,7 +731,7 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Serve(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_serve(config, args).await
+            run_serve(config, args, selected_central_config).await
         }
         MemoryCommand::Lint(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
@@ -824,8 +829,15 @@ fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryErr
 fn run_init(
     repo_root: &Path,
     config_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     args: InitArgs,
 ) -> Result<(), MemoryError> {
+    if central_config_path.is_some() {
+        return Err(MemoryError::InvalidInput(
+            "memory init cannot target a central instance config; initialize a repository-local memory config instead"
+                .to_string(),
+        ));
+    }
     let plan = plan_memory_init(repo_root, config_path, args.force)?;
     println!("# Memory Init Plan\n");
     println!("Config: {}", plan.config_path.display());
@@ -1072,6 +1084,9 @@ async fn run_context(
     central_config_path: Option<&Path>,
     args: ContextArgs,
 ) -> Result<(), MemoryError> {
+    if central_config_path.is_some() {
+        let _ = load_central_resolved_workflow(repo_root, central_config_path)?;
+    }
     let mut warnings = Vec::new();
     let source =
         match load_linear_context_source(repo_root, None, central_config_path, &args.issue).await {
@@ -1504,6 +1519,7 @@ struct MemoryServerState {
     config: MemoryConfig,
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -1527,7 +1543,11 @@ struct MemoryMcpRequest {
     params: Value,
 }
 
-async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryError> {
+async fn run_serve(
+    config: MemoryConfig,
+    args: ServeArgs,
+    central_config_path: Option<PathBuf>,
+) -> Result<(), MemoryError> {
     let handle = start_memory_server_with_auth(
         config,
         args.addr,
@@ -1536,6 +1556,7 @@ async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryEr
             admin_token: args.admin_token,
         },
         None,
+        central_config_path,
     )
     .await?;
     println!(
@@ -1575,6 +1596,7 @@ impl MemoryServerHandle {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn start_memory_server_with_workspace_root(
     config: MemoryConfig,
     addr: SocketAddr,
@@ -1589,6 +1611,27 @@ pub(crate) async fn start_memory_server_with_workspace_root(
             admin_token: None,
         },
         workspace_root,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn start_memory_server_with_central_config(
+    config: MemoryConfig,
+    addr: SocketAddr,
+    token: Option<String>,
+    workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
+) -> Result<MemoryServerHandle, MemoryError> {
+    start_memory_server_with_auth(
+        config,
+        addr,
+        MemoryServerAuth {
+            read_token: token,
+            admin_token: None,
+        },
+        workspace_root,
+        central_config_path,
     )
     .await
 }
@@ -1598,6 +1641,7 @@ async fn start_memory_server_with_auth(
     addr: SocketAddr,
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
         MemoryError::InvalidInput(format!("failed to bind memory server {addr}: {error}"))
@@ -1609,6 +1653,7 @@ async fn start_memory_server_with_auth(
         config,
         auth,
         workspace_root,
+        central_config_path,
     };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
@@ -1669,6 +1714,7 @@ async fn memory_server_mcp(
                 &state.config,
                 request.params,
                 state.workspace_root.as_deref(),
+                state.central_config_path.as_deref(),
             ),
         )
         .await
@@ -1881,19 +1927,23 @@ fn origin_is_localhost(origin: &str) -> bool {
 
 #[cfg(test)]
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
-    call_memory_tool_with_workspace(config, params, None).await
+    call_memory_tool_with_workspace(config, params, None, None).await
 }
 
 async fn call_memory_tool_with_workspace(
     config: &MemoryConfig,
     params: Value,
     workspace_root: Option<&Path>,
+    central_config_path: Option<&Path>,
 ) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| MemoryError::InvalidInput("tools/call requires params.name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if central_config_path.is_some() && name == "memory.context" {
+        let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
+    }
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
         return Err(MemoryError::InvalidInput(
             "AST code-intelligence tools are disabled".to_string(),
@@ -2018,7 +2068,7 @@ async fn call_memory_tool_with_workspace(
         "code.ast.diagnostics" => {
             call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
         }
-        "memory.capture" => call_memory_capture_tool(config, &arguments).await,
+        "memory.capture" => call_memory_capture_tool(config, &arguments, central_config_path).await,
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
         "memory.reindex" => call_memory_reindex_tool(config, &arguments),
@@ -2783,7 +2833,11 @@ fn truncate_capture(text: &str, max_bytes: usize) -> (String, bool) {
 async fn call_memory_capture_tool(
     config: &MemoryConfig,
     arguments: &Value,
+    central_config_path: Option<&Path>,
 ) -> Result<Value, MemoryError> {
+    if central_config_path.is_some() {
+        let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
+    }
     let identifiers = issue_ids_from_mcp(config, arguments)?;
     if identifiers.is_empty() {
         return Err(MemoryError::InvalidInput(
@@ -2795,7 +2849,7 @@ async fn call_memory_capture_tool(
     {
         load_source_file(&repo_existing_path(config, &source_file)?)?
     } else {
-        load_linear_source(&config.repo_root, None, None, &identifiers).await?
+        load_linear_source(&config.repo_root, None, central_config_path, &identifiers).await?
     };
     let selection = IssueSelection {
         identifiers,
@@ -4919,6 +4973,12 @@ fn load_central_resolved_workflow(
     })?;
     let central = validate_central_config_text(&config_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    if central.mode == CentralRoutingMode::ProjectSet {
+        return Err(MemoryError::InvalidInput(
+            "memory commands do not support project_set central routing until strict routing is enabled"
+                .to_string(),
+        ));
+    }
     let workflow = WorkflowDefinition {
         front_matter: central.workflow_front_matter,
         prompt_template: String::new(),
@@ -5222,7 +5282,7 @@ mod tests {
         context_source_from_mcp, memory_server_health_payload, memory_tool_descriptors,
         origin_is_localhost, parse_remote_memory_response, remote_memory_tool_token,
         replace_or_append_managed_section, required_access_for_request, resolve_code_graph_overlay,
-        resolve_code_intel_repo, trim_auto_memory_status_log,
+        resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -5284,6 +5344,65 @@ mod tests {
         assert!(names.contains(&"code.ast.query".to_string()));
         assert!(names.contains(&"code.ast.context".to_string()));
         assert!(names.contains(&"code.ast.diagnostics".to_string()));
+    }
+
+    #[test]
+    fn memory_init_rejects_a_selected_central_config() {
+        let repo = TempDir::new().expect("repo should exist");
+        let central = repo.path().join("central.yaml");
+        let error = run_init(
+            repo.path(),
+            Some(&central),
+            Some(&central),
+            super::InitArgs {
+                dry_run: true,
+                force: false,
+            },
+        )
+        .expect_err("central config must not be overwritten by memory init");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot target a central instance config")
+        );
+    }
+
+    #[tokio::test]
+    async fn project_set_memory_commands_are_rejected_before_tracker_access() {
+        let repo = TempDir::new().expect("repo should exist");
+        let central = repo.path().join("central.yaml");
+        std::fs::write(
+            &central,
+            format!(
+                "schema_version: 1\ninstance:\n  id: project-set\n  state_root: {0}/state\nrouting:\n  mode: project_set\n  active_project_set: suite\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\nproject_sets:\n  suite:\n    tracker_profile: linear\n    projects: [project]\nlinear_projects:\n  project:\n    provider_project_id: project-id\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: github.com/example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+                repo.path().display()
+            ),
+        )
+        .expect("central config should be written");
+
+        let error = super::load_central_resolved_workflow(repo.path(), Some(&central))
+            .expect_err("project_set memory commands must be gated");
+        assert!(error.to_string().contains("do not support project_set"));
+
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config should load");
+        let error = super::run_context(
+            repo.path(),
+            &config,
+            Some(&central),
+            super::ContextArgs {
+                scope: super::ScopeArgs::default(),
+                issue: "COE-547".to_string(),
+                milestone: None,
+                area: None,
+                include: Vec::new(),
+                paths: Vec::new(),
+                include_code_intel: false,
+                limit: 20,
+            },
+        )
+        .await
+        .expect_err("CLI context must reject project_set memory commands");
+        assert!(error.to_string().contains("do not support project_set"));
     }
 
     #[test]

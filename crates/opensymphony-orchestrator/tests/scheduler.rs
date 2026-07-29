@@ -1712,6 +1712,10 @@ async fn retry_limit_counts_failures_and_prevents_redispatch() {
             ..
         }
     ));
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![("COE-270".to_string(), true)]
+    );
 
     scheduler
         .tick(ts(70_400))

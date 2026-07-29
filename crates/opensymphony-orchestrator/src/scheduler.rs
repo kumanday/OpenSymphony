@@ -1906,7 +1906,10 @@ where
         reason: ReleaseReason,
         outcome: Option<WorkerOutcomeRecord>,
     ) -> Result<IssueExecution, SchedulerError> {
-        let cleanup_terminal = matches!(reason, ReleaseReason::TrackerTerminal);
+        let cleanup_terminal = matches!(
+            reason,
+            ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
+        );
         let execution = execution.release(observed_at, reason, outcome)?;
         if cleanup_terminal
             && let Some(workspace) = execution.workspace().cloned()

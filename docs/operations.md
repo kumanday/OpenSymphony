@@ -599,7 +599,7 @@ Use it for:
 Examples:
 
 ```bash
-opensymphony rehydrate COE-123 --reason "API key rotation"
+opensymphony rehydrate COE-123 --config ~/.opensymphony/config.yaml --reason "API key rotation"
 opensymphony doctor --config ./config.yaml --rehydrate
 ```
 
@@ -631,9 +631,12 @@ If apply is interrupted after staging or replacement, run
 marker is absent. Rollback restores the backed-up runnable generation and
 leaves the backup evidence in place. Migration rejects repository-creation
 hooks, query/fragment-bearing remotes, and ambiguous credential expressions
-before activation. After front matter is moved, `doctor`, `debug`, and
-`rehydrate` load the central policy so operational recovery continues to use
-the migrated OpenHands and tracker settings.
+before activation. Existing repository-local memory entries are copied into
+the central catalog; identical repeat applies are idempotent, while divergent
+entries fail as a recoverable conflict instead of silently keeping stale data.
+After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
+policy so operational recovery continues to use the migrated OpenHands and
+tracker settings.
 
 Activation markers are namespaced by the absolute central-config destination,
 so separate instances cannot overwrite or consume one another's rollback

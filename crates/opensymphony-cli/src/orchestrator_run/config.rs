@@ -192,7 +192,7 @@ struct CentralReviewProfileFile {
 struct CentralWorkspaceFile {
     root: String,
     #[serde(default)]
-    retain_failed: bool,
+    retain_failed: Option<bool>,
     #[serde(default)]
     cleanup_after_parent_finalization: bool,
 }
@@ -299,6 +299,7 @@ pub struct ResolvedCentralConfig {
     pub instance_id: String,
     pub state_root: PathBuf,
     pub workspace_root: Option<PathBuf>,
+    pub retain_failed: bool,
     pub memory_catalog_root: Option<PathBuf>,
     pub mode: CentralRoutingMode,
     pub repository: Option<String>,
@@ -436,6 +437,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     pub(super) retry_max_attempts: Option<u32>,
     pub(super) memory_catalog_root: Option<PathBuf>,
+    pub(super) retain_failed: bool,
     pub(super) memory: RunMemoryConfig,
 }
 
@@ -448,6 +450,7 @@ pub(super) async fn resolve_runtime_config(
         config,
         config_generation,
         central_workspace_root,
+        central_retain_failed,
         central_memory_catalog_root,
         central_workflow_front_matter,
         retry_max_attempts,
@@ -471,6 +474,7 @@ pub(super) async fn resolve_runtime_config(
                     central.runtime,
                     central.generation,
                     central.workspace_root,
+                    Some(central.retain_failed),
                     central.memory_catalog_root,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
@@ -483,12 +487,14 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    None,
                 )
             }
         }
         None => (
             RunConfigFile::default(),
             "legacy-unconfigured".to_string(),
+            None,
             None,
             None,
             None,
@@ -602,6 +608,7 @@ pub(super) async fn resolve_runtime_config(
         openhands_conversation_store,
         retry_max_attempts,
         memory_catalog_root: central_memory_catalog_root,
+        retain_failed: central_retain_failed.unwrap_or(true),
         memory,
     })
 }
@@ -712,6 +719,11 @@ fn resolve_central_config(
         .and_then(|workspace| {
             resolve_central_path(config_root, &workspace.root, "workspace.root")
         })?;
+    let retain_failed = config
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.retain_failed)
+        .unwrap_or(true);
     ensure_non_overlapping(&state_root, &workspace_root)?;
     if let Some(workspace) = config.workspace.as_ref() {
         let _ = (
@@ -1001,6 +1013,7 @@ fn resolve_central_config(
         instance_id,
         state_root,
         workspace_root: Some(workspace_root),
+        retain_failed,
         memory_catalog_root,
         mode,
         repository: config.routing.repository,
@@ -1824,6 +1837,23 @@ scheduler:
                 .expect("central root should canonicalize")
                 .join("integration.md")
         );
+    }
+
+    #[test]
+    fn central_config_preserves_workspace_retention_policy() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should exist");
+        let source = central_fixture(root.path()).replace(
+            &format!("workspace:\n  root: {}/workspace", root.path().display()),
+            &format!(
+                "workspace:\n  root: {}/workspace\n  retain_failed: false",
+                root.path().display()
+            ),
+        );
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("central fixture should resolve");
+        assert!(!resolved.retain_failed);
     }
 
     #[test]

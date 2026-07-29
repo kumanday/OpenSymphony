@@ -151,6 +151,8 @@ pub struct DoctorArgs {
 pub struct RehydrateArgs {
     #[arg(help = "Issue identifier to rehydrate (e.g., COE-123)")]
     issue: String,
+    #[arg(long, help = "Central or repository runtime config YAML path")]
+    config: Option<PathBuf>,
     #[arg(help = "Reason for rehydration")]
     #[arg(long, default_value = "manual rehydration via CLI")]
     reason: String,
@@ -2173,7 +2175,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
-    let runtime = resolve_rehydrate_runtime(&current_dir).await?;
+    let runtime = resolve_rehydrate_runtime(&current_dir, args.config.as_deref()).await?;
     let workflow = runtime.workflow;
 
     // Setup workspace manager
@@ -2314,9 +2316,13 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     Ok(())
 }
 
-async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntimeConfig, String> {
-    let config_path = orchestrator_run::config::select_config_path(current_dir, None)
-        .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
+async fn resolve_rehydrate_runtime(
+    current_dir: &Path,
+    explicit_config_path: Option<&Path>,
+) -> Result<RehydrateRuntimeConfig, String> {
+    let config_path =
+        orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
+            .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
     let (target_repo, tool_dir, central_front_matter) = if config_path.is_file() {
         let raw = fs::read_to_string(&config_path)
             .await
@@ -2515,8 +2521,8 @@ mod tests {
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
         central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
-        executable_suffixes, find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot,
-        spawn_demo_updates,
+        executable_suffixes, find_cargo_workspace_root, resolve_doctor_workflow,
+        resolve_rehydrate_runtime, sample_snapshot, spawn_demo_updates,
     };
 
     #[test]
@@ -2706,11 +2712,48 @@ openhands:
         )
         .expect("config should exist");
 
-        let runtime = super::resolve_rehydrate_runtime(&target_repo)
+        let runtime = resolve_rehydrate_runtime(&target_repo, None)
             .await
             .expect("rehydrate runtime should resolve");
 
         assert_eq!(runtime.tool_dir, Some(tool_dir));
+    }
+
+    #[tokio::test]
+    async fn resolve_rehydrate_runtime_honors_explicit_config_selection() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let current_dir = temp_dir.path().join("current");
+        let selected_repo = temp_dir.path().join("selected");
+        let selected_config = temp_dir.path().join("configs/selected.yaml");
+        fs::create_dir_all(&current_dir).expect("current directory should exist");
+        fs::create_dir_all(&selected_repo).expect("selected repo should exist");
+        fs::create_dir_all(
+            selected_config
+                .parent()
+                .expect("selected config should have a parent"),
+        )
+        .expect("config directory should exist");
+        fs::write(
+            selected_repo.join("WORKFLOW.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: selected-project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n",
+        )
+        .expect("selected workflow should exist");
+        fs::write(
+            &selected_config,
+            format!(
+                "target_repo: {}\nopenhands:\n  tool_dir: ./tools\n",
+                selected_repo.display()
+            ),
+        )
+        .expect("selected config should exist");
+
+        let runtime = resolve_rehydrate_runtime(&current_dir, Some(&selected_config))
+            .await
+            .expect("explicit rehydrate config should resolve");
+        assert_eq!(
+            runtime.workflow.config.tracker.project_slug,
+            "selected-project"
+        );
     }
 
     #[test]

@@ -35,7 +35,7 @@ use self::{
     backends::{
         ManagedLocalPreparation, RuntimeWorkerBackend, RuntimeWorkspaceBackend,
         build_linear_client, build_runtime_transport, build_tracker_backend,
-        build_workspace_manager_config, prepare_active_conversation_store,
+        build_workspace_manager_config_with_retention, prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{
@@ -164,7 +164,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
 
     let mut tracker = build_tracker_backend(&runtime.workflow)?;
     let workspace_manager = Arc::new(crate::opensymphony_workspace::WorkspaceManager::new(
-        build_workspace_manager_config(&runtime.workflow),
+        build_workspace_manager_config_with_retention(&runtime.workflow, runtime.retain_failed),
     )?);
     let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
     let selected_openhands = selected_openhands_harness(&runtime);
@@ -598,11 +598,12 @@ async fn start_runtime_memory_server(
         return Ok(None);
     };
     let config = load_runtime_memory_config(runtime)?;
-    super::memory::start_memory_server_with_workspace_root(
+    super::memory::start_memory_server_with_central_config(
         config,
         server.bind,
         server.token.clone(),
         Some(runtime.workflow.config.workspace.root.clone()),
+        runtime.config_path.clone(),
     )
     .await
     .map(Some)

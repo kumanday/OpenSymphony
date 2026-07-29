@@ -1258,14 +1258,82 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Migr
             });
         }
         if file_type.is_dir() {
-            copy_directory_contents(&source_path, &destination_path)?;
-        } else if file_type.is_file() && !destination_path.exists() {
-            fs::copy(&source_path, &destination_path).map_err(|source_error| {
-                MigrationError::Write {
-                    path: destination_path.clone(),
-                    source: source_error,
+            match fs::symlink_metadata(&destination_path) {
+                Ok(metadata)
+                    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() =>
+                {
+                    copy_directory_contents(&source_path, &destination_path)?;
                 }
-            })?;
+                Ok(_) => {
+                    return Err(MigrationError::Write {
+                        path: destination_path,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "legacy memory directory conflicts with an existing central entry",
+                        ),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    copy_directory_contents(&source_path, &destination_path)?;
+                }
+                Err(source_error) => {
+                    return Err(MigrationError::Read {
+                        path: destination_path,
+                        source: source_error,
+                    });
+                }
+            }
+        } else if file_type.is_file() {
+            match fs::symlink_metadata(&destination_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::copy(&source_path, &destination_path).map_err(|source_error| {
+                        MigrationError::Write {
+                            path: destination_path.clone(),
+                            source: source_error,
+                        }
+                    })?;
+                }
+                Ok(metadata)
+                    if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+                {
+                    let source_contents =
+                        fs::read(&source_path).map_err(|source_error| MigrationError::Read {
+                            path: source_path.clone(),
+                            source: source_error,
+                        })?;
+                    let destination_contents =
+                        fs::read(&destination_path).map_err(|source_error| {
+                            MigrationError::Read {
+                                path: destination_path.clone(),
+                                source: source_error,
+                            }
+                        })?;
+                    if source_contents != destination_contents {
+                        return Err(MigrationError::Write {
+                            path: destination_path,
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::AlreadyExists,
+                                "legacy memory file conflicts with an existing central catalog entry",
+                            ),
+                        });
+                    }
+                }
+                Ok(_) => {
+                    return Err(MigrationError::Write {
+                        path: destination_path,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "legacy memory file conflicts with an existing central entry",
+                        ),
+                    });
+                }
+                Err(source_error) => {
+                    return Err(MigrationError::Read {
+                        path: destination_path,
+                        source: source_error,
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -1729,10 +1797,11 @@ mod tests {
                 .expect("copied capsule should exist"),
             "capsule\n"
         );
+        preserve_legacy_memory(&root.path().join("repo"), Some(&destination))
+            .expect("identical repeat preservation should be safe");
         fs::write(destination.join("issues/COE-1.md"), "newer\n")
             .expect("destination capsule should be writable");
-        preserve_legacy_memory(&root.path().join("repo"), Some(&destination))
-            .expect("repeat preservation should be safe");
+        assert!(preserve_legacy_memory(&root.path().join("repo"), Some(&destination)).is_err());
         assert_eq!(
             fs::read_to_string(destination.join("issues/COE-1.md"))
                 .expect("destination capsule should remain"),

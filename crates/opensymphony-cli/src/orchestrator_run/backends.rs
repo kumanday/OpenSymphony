@@ -489,8 +489,16 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
+#[cfg(test)]
 pub(super) fn build_workspace_manager_config(
     workflow: &ResolvedWorkflow,
+) -> WorkspaceManagerConfig {
+    build_workspace_manager_config_with_retention(workflow, true)
+}
+
+pub(super) fn build_workspace_manager_config_with_retention(
+    workflow: &ResolvedWorkflow,
+    retain_failed: bool,
 ) -> WorkspaceManagerConfig {
     let hooks = &workflow.config.hooks;
     WorkspaceManagerConfig {
@@ -503,7 +511,7 @@ pub(super) fn build_workspace_manager_config(
             timeout: Duration::from_millis(hooks.timeout_ms),
         },
         cleanup: CleanupConfig {
-            remove_terminal_workspaces: false,
+            remove_terminal_workspaces: !retain_failed,
         },
     }
 }
@@ -5509,6 +5517,7 @@ Run the scheduler.
             openhands_conversation_store: None,
             retry_max_attempts: None,
             memory_catalog_root: None,
+            retain_failed: true,
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,
@@ -5691,6 +5700,25 @@ Run the scheduler.
             DEFAULT_WORKER_LAUNCH_TIMEOUT
         );
         assert!(CODEX_WORKER_LAUNCH_TIMEOUT > CODEX_RESPONSE_TIMEOUT * 2);
+    }
+
+    #[test]
+    fn workspace_manager_config_applies_failed_workspace_retention() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workflow = sample_workflow(
+            &tempdir.path().join("repo"),
+            &tempdir.path().join("workspaces"),
+        );
+        assert!(
+            !build_workspace_manager_config_with_retention(&workflow, true)
+                .cleanup
+                .remove_terminal_workspaces
+        );
+        assert!(
+            build_workspace_manager_config_with_retention(&workflow, false)
+                .cleanup
+                .remove_terminal_workspaces
+        );
     }
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {

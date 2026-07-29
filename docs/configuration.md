@@ -38,6 +38,9 @@ its later release gates pass; it fails before starting the scheduler rather
 than silently falling back to the current directory. Operational recovery
 commands (`debug` and `rehydrate`) reject the same gated mode instead of
 selecting an unrelated checkout for workflow or conversation-store discovery.
+`rehydrate` also accepts `--config <path>` when an instance is not the default
+home configuration. `memory init` refuses to treat a selected central config
+as a repository-local memory file; initialize the local memory config instead.
 
 Every run records one `sha256:` config generation in startup diagnostics and
 the initial control-plane event. Resolved credential values are never part of
