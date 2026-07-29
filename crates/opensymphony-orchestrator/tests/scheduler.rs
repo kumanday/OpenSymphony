@@ -381,6 +381,7 @@ struct FakeWorkspace {
     cleanup_results: VecDeque<Result<(), FakeError>>,
     records: HashMap<String, WorkspaceRecord>,
     persisted_retry_counts: Vec<u32>,
+    persisted_retry_pending: usize,
     retain_failed: bool,
 }
 
@@ -435,8 +436,16 @@ impl WorkspaceBackend for FakeWorkspace {
         Ok(())
     }
 
-    async fn clear_retry_exhaustion(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
-        self.cleared_retry_exhaustion.push(issue_id.to_string());
+    async fn persist_retry_pending(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.persisted_retry_pending += 1;
+        Ok(())
+    }
+
+    async fn clear_retry_exhaustion(&mut self, identifier: &str) -> Result<(), Self::Error> {
+        self.cleared_retry_exhaustion.push(identifier.to_string());
         Ok(())
     }
 
@@ -1274,6 +1283,7 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
     assert_eq!(retry.reason, RetryReason::Continuation);
     assert_eq!(retry.due_at, ts(1_200));
     assert!(scheduler.workspace().persisted_retry_counts.is_empty());
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 1);
 
     scheduler
         .tick(ts(1_300))
@@ -2092,7 +2102,7 @@ async fn terminal_retry_marker_is_cleared_when_tracker_state_is_terminal() {
 
     assert_eq!(
         scheduler.workspace().cleared_retry_exhaustion,
-        vec!["lin-275".to_string()]
+        vec!["COE-275".to_string()]
     );
 }
 

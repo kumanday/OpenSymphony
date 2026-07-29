@@ -439,6 +439,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 runtime.openhands_conversation_store.as_ref(),
                                 runtime.memory.auto_archive,
                                 gateway_memory_config.as_ref(),
+                                memory_server.as_ref().map(|server| server.writer_gate()),
                             )
                             .await;
                             mark_auto_capture_completed(

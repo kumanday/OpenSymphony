@@ -248,6 +248,8 @@ project_sets:
 linear_projects:
   opensymphony-core:
     provider_project_id: "<linear-project-id>"
+    # Migration compatibility only; central configs normally omit this.
+    provider_project_slug: "<linear-project-slug>"
     repositories:
       - github:repository:<provider-id-for-core>
   opensymphony-clients:

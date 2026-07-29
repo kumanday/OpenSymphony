@@ -306,7 +306,14 @@ pub trait WorkspaceBackend {
         Ok(())
     }
 
-    async fn clear_retry_exhaustion(&mut self, _issue_id: &IssueId) -> Result<(), Self::Error> {
+    async fn clear_retry_exhaustion(&mut self, _identifier: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_retry_pending(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -949,7 +956,7 @@ where
             let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) else {
                 if tracker_snapshot.contains_terminal(record.issue.id.as_str()) {
                     self.workspace
-                        .clear_retry_exhaustion(&record.issue.id)
+                        .clear_retry_exhaustion(record.issue.identifier.as_str())
                         .await
                         .map_err(|error| SchedulerError::Workspace {
                             detail: error.to_string(),
@@ -1013,7 +1020,7 @@ where
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
                 self.workspace
-                    .clear_retry_exhaustion(&issue_id)
+                    .clear_retry_exhaustion(record.issue.identifier.as_str())
                     .await
                     .map_err(|error| SchedulerError::Workspace {
                         detail: error.to_string(),
@@ -1109,15 +1116,16 @@ where
             if let Some(terminal_state_name) =
                 tracker_snapshot.terminal_state_name(issue_id.as_str())
             {
+                let Some(existing) = self.executions.get(&issue_id) else {
+                    continue;
+                };
+                let identifier = existing.issue().identifier.clone();
                 self.workspace
-                    .clear_retry_exhaustion(&issue_id)
+                    .clear_retry_exhaustion(identifier.as_str())
                     .await
                     .map_err(|error| SchedulerError::Workspace {
                         detail: error.to_string(),
                     })?;
-                let Some(existing) = self.executions.get(&issue_id) else {
-                    continue;
-                };
                 let mut normalized = existing.issue().clone();
                 normalized.state = issue_state_from_name(terminal_state_name, &self.config);
                 self.release_issue(
@@ -2206,6 +2214,14 @@ where
                 self.config.retry_policy,
             )?,
         };
+        if let Some(workspace) = execution.workspace() {
+            self.workspace
+                .persist_retry_pending(workspace)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+        }
         Ok(execution.queue_retry(retry, outcome)?)
     }
 

@@ -30,9 +30,10 @@ transport, local-server, conversation/LLM, subscription-reference, and
 WebSocket profile when a workflow is migrated. `scheduler.retry.max_attempts`
 is enforced as the maximum number of automatic retries; omitted values retain
 the legacy retry behavior.
-`workspace.retain_failed` applies only to failed or retry-exhausted outcomes:
-successful, cancelled, and tracker-terminal releases still clean up their
-workspaces.
+`workspace.retain_failed` applies only to failed or retry-exhausted outcomes.
+The explicit `legacy_single` compatibility path retains terminal workspaces as
+before, including successful, cancelled, and tracker-terminal releases. Future
+strict routing may opt into terminal cleanup only through an explicit policy.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before
@@ -63,6 +64,12 @@ as a repository-local memory file; initialize the local memory config instead.
 Every run records one `sha256:` config generation in startup diagnostics and
 the initial control-plane event. Resolved credential values are never part of
 the central model or its serialized diagnostics.
+
+`linear_projects.<alias>.provider_project_id` is the provider project identity
+used for Linear lookup. Migrated legacy files may also carry
+`provider_project_slug`; that field is an explicit compatibility fallback for
+older slug-based tracker configuration and is not a repository association or
+execution default.
 
 ## Configuration migration
 

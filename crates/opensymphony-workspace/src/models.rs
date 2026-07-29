@@ -363,6 +363,8 @@ pub struct RunManifest {
     pub attempt: u32,
     #[serde(default)]
     pub normal_retry_count: u32,
+    #[serde(default)]
+    pub pending_retry: bool,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -383,6 +385,7 @@ impl RunManifest {
             workspace_path: workspace.workspace_path().to_path_buf(),
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
+            pending_retry: false,
             status: RunStatus::Preparing,
             created_at: now,
             updated_at: now,

@@ -785,19 +785,23 @@ impl LinearClient {
                         }),
                     )
                     .await?;
-                Ok(response
-                    .projects
-                    .nodes
-                    .into_iter()
-                    .next()
-                    .map(|project| project.slug_id)
-                    .filter(|slug| !slug.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        // Migrated legacy configs historically stored the Linear
-                        // slugId in this slot. Preserve that mode while central
-                        // configs with a real provider ID use the ID lookup above.
-                        self.config.project_slug.clone()
-                    }))
+                let Some(project) = response.projects.nodes.into_iter().next() else {
+                    if self.config.project_slug != *project_id {
+                        // Migrated legacy configs explicitly carry the old slug
+                        // in project_slug. Typed central configs leave it equal
+                        // to the provider ID, so an unresolved ID fails closed.
+                        return Ok(self.config.project_slug.clone());
+                    }
+                    return Err(LinearError::InvalidConfiguration(format!(
+                        "configured tracker.project_id `{project_id}` could not be resolved to a Linear project"
+                    )));
+                };
+                if project.slug_id.trim().is_empty() {
+                    return Err(LinearError::InvalidConfiguration(format!(
+                        "configured tracker.project_id `{project_id}` resolved to a Linear project without a slugId"
+                    )));
+                }
+                Ok(project.slug_id)
             })
             .await?;
         Ok(slug.clone())

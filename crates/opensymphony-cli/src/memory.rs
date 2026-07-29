@@ -5,7 +5,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -13,10 +16,15 @@ use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    task::JoinHandle,
+};
 
 #[cfg(unix)]
 use rustix::process::{Pid, test_kill_process};
+#[cfg(not(unix))]
+use std::process::Command;
 
 use crate::{
     opensymphony_code_intel::{
@@ -82,6 +90,14 @@ impl Drop for MemoryCoordinationLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+type MemoryWriterGate = Arc<Mutex<()>>;
+
+#[allow(dead_code)]
+enum MemoryWriterGuard {
+    File(MemoryCoordinationLock),
+    Shared(OwnedMutexGuard<()>),
 }
 const AST_MCP_TOOL_NAMES: &[&str] = &[
     "code.ast.status",
@@ -480,6 +496,7 @@ impl AutoMemoryReport {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn auto_capture_terminal(
     repo_root: &Path,
     workflow_path: &Path,
@@ -488,6 +505,7 @@ pub(crate) async fn auto_capture_terminal(
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     auto_archive: bool,
     memory_config: Option<&MemoryConfig>,
+    writer_gate: Option<MemoryWriterGate>,
 ) -> Result<AutoMemoryReport, MemoryError> {
     let mut identifiers = identifiers
         .iter()
@@ -503,7 +521,7 @@ pub(crate) async fn auto_capture_terminal(
         .cloned()
         .map(Ok)
         .unwrap_or_else(|| load_memory_config(repo_root, None))?;
-    let _coordination_lock = acquire_memory_writer_lock(&config)?;
+    let _coordination_lock = acquire_memory_writer_guard(&config, writer_gate).await?;
     let client = match resolved_workflow {
         Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
         None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
@@ -1574,6 +1592,7 @@ struct MemoryServerState {
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
     central_config_path: Option<PathBuf>,
+    writer_gate: MemoryWriterGate,
 }
 
 #[derive(Clone, Default)]
@@ -1625,6 +1644,7 @@ pub(crate) struct MemoryServerHandle {
     task: Option<JoinHandle<Result<(), String>>>,
     activity_marker: Option<PathBuf>,
     _coordination_lock: Option<MemoryCoordinationLock>,
+    writer_gate: MemoryWriterGate,
 }
 
 impl Drop for MemoryServerHandle {
@@ -1638,6 +1658,10 @@ impl Drop for MemoryServerHandle {
 impl MemoryServerHandle {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub(crate) fn writer_gate(&self) -> MemoryWriterGate {
+        Arc::clone(&self.writer_gate)
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -1772,11 +1796,13 @@ async fn start_memory_server_with_auth(
         let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
+    let writer_gate = Arc::new(Mutex::new(()));
     let state = MemoryServerState {
         config,
         auth,
         workspace_root,
         central_config_path,
+        writer_gate: Arc::clone(&writer_gate),
     };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
@@ -1792,6 +1818,7 @@ async fn start_memory_server_with_auth(
         task: Some(task),
         activity_marker: Some(activity_marker),
         _coordination_lock: Some(coordination_lock),
+        writer_gate,
     })
 }
 
@@ -1848,6 +1875,16 @@ fn acquire_memory_writer_lock(
         path: memory_migration_lock_path(&config.repo_root),
         source,
     })
+}
+
+async fn acquire_memory_writer_guard(
+    config: &MemoryConfig,
+    writer_gate: Option<MemoryWriterGate>,
+) -> Result<MemoryWriterGuard, MemoryError> {
+    if let Some(writer_gate) = writer_gate {
+        return Ok(MemoryWriterGuard::Shared(writer_gate.lock_owned().await));
+    }
+    Ok(MemoryWriterGuard::File(acquire_memory_writer_lock(config)?))
 }
 
 fn stale_memory_lock_path(path: &Path) -> PathBuf {
@@ -1908,8 +1945,19 @@ fn process_is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        let Ok(output) = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+        else {
+            return false;
+        };
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    == Some(pid)
+            })
     }
 }
 
@@ -1942,6 +1990,17 @@ async fn memory_server_mcp(
         return response;
     }
     let id = request.id.clone();
+    let writer_request = request.method == "tools/call"
+        && request
+            .params
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(is_memory_writer_tool);
+    let _writer_guard = if writer_request {
+        Some(state.writer_gate.clone().lock_owned().await)
+    } else {
+        None
+    };
     let result = match request.method.as_str() {
         "initialize" => Ok(json!({
             "protocolVersion": "2025-06-18",
@@ -2063,6 +2122,18 @@ fn is_admin_memory_tool(name: &str) -> bool {
         "memory.capture"
             | "memory.sync_docs"
             | "memory.lint"
+            | "memory.reindex"
+            | "memory.export_okf"
+            | "memory.import_okf"
+            | "memory.ingest_code_intel"
+    )
+}
+
+fn is_memory_writer_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "memory.capture"
+            | "memory.sync_docs"
             | "memory.reindex"
             | "memory.export_okf"
             | "memory.import_okf"

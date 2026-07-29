@@ -521,11 +521,9 @@ pub(super) fn build_workspace_manager_config_with_retention(
             timeout: Duration::from_millis(hooks.timeout_ms),
         },
         cleanup: CleanupConfig {
-            // Retention is decided by the scheduler from the terminal outcome.
-            // The manager must keep normal terminal cleanup enabled so a
-            // successful or cancelled issue is not retained just because the
-            // failed-workspace policy is enabled.
-            remove_terminal_workspaces: true,
+            // Preserve legacy single-repository behavior: terminal workspaces
+            // remain available for inspection and recovery.
+            remove_terminal_workspaces: false,
         },
     }
 }
@@ -740,7 +738,13 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 had_in_flight_run,
                 normal_retry_count: run_manifest
                     .as_ref()
-                    .map(|run| run.normal_retry_count)
+                    .map(|run| {
+                        if run.pending_retry {
+                            run.normal_retry_count.saturating_add(1)
+                        } else {
+                            run.normal_retry_count
+                        }
+                    })
                     .unwrap_or_default(),
                 harness_kind,
                 recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
@@ -874,6 +878,35 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             }));
         };
         manifest.normal_retry_count = normal_retry_count;
+        manifest.pending_retry = false;
+        manifest.updated_at = chrono::Utc::now();
+        self.manager.write_run_manifest(&handle, &manifest).await?;
+        Ok(())
+    }
+
+    async fn persist_retry_pending(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        let Some((handle, _)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
+            }));
+        };
+        let Some(mut manifest) = self.manager.load_run_manifest(&handle).await? else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: handle.run_manifest_path(),
+                source: io::Error::new(io::ErrorKind::NotFound, "run manifest is missing"),
+            }));
+        };
+        manifest.pending_retry = true;
         manifest.updated_at = chrono::Utc::now();
         self.manager.write_run_manifest(&handle, &manifest).await?;
         Ok(())
@@ -921,8 +954,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(())
     }
 
-    async fn clear_retry_exhaustion(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
-        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue_id.as_str())?;
+    async fn clear_retry_exhaustion(&mut self, identifier: &str) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(identifier)?;
         let path = self
             .retry_state_root
             .join("retry-exhaustion")
@@ -5527,6 +5560,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recover_workspaces_restores_a_pending_first_retry() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let mut run_manifest = workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-pending-retry", 1))
+            .await
+            .expect("run manifest should be written");
+        workspace_manager
+            .finish_run(&ensured.handle, &mut run_manifest, RunStatus::Failed)
+            .await
+            .expect("completed run should be persisted");
+        run_manifest.pending_retry = true;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("pending retry marker should be persisted");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(!recoveries[0].had_in_flight_run);
+        assert_eq!(recoveries[0].normal_retry_count, 1);
+    }
+
+    #[tokio::test]
     async fn retry_exhaustion_is_recovered_from_instance_state() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
@@ -5935,12 +6009,12 @@ Run the scheduler.
             &tempdir.path().join("workspaces"),
         );
         assert!(
-            build_workspace_manager_config_with_retention(&workflow, true)
+            !build_workspace_manager_config_with_retention(&workflow, true)
                 .cleanup
                 .remove_terminal_workspaces
         );
         assert!(
-            build_workspace_manager_config_with_retention(&workflow, false)
+            !build_workspace_manager_config_with_retention(&workflow, false)
                 .cleanup
                 .remove_terminal_workspaces
         );

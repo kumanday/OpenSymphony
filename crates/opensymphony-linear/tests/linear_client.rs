@@ -184,6 +184,27 @@ async fn configured_project_id_resolves_to_the_linear_project_slug_for_issue_que
 }
 
 #[tokio::test]
+async fn unresolved_configured_project_id_fails_closed() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        r#"{"data":{"projects":{"nodes":[]}}}"#,
+    )])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = Some("missing-project-id".to_string());
+    config.project_slug = "missing-project-id".to_string();
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("an unresolved provider project ID should fail");
+    assert!(
+        matches!(error, LinearError::InvalidConfiguration(message) if message.contains("missing-project-id"))
+    );
+    assert_eq!(server.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
 async fn candidate_issue_summaries_use_lightweight_dispatch_query() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
         "fixtures/candidate_issues_page.json"

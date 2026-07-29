@@ -699,6 +699,7 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         });
     }
 
+    let _memory_lock = acquire_memory_migration_lock(&marker.target_repo())?;
     verify_activated_files(&marker)?;
     if let (Some(root), Some(expected)) = (
         marker.memory_catalog_root.as_deref(),
@@ -1087,6 +1088,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         project.clone(),
         json!({
             "provider_project_id": project.clone(),
+            "provider_project_slug": project.clone(),
             "repositories": ["legacy-repository"]
         }),
     )]);

@@ -133,6 +133,8 @@ struct CentralProjectSetFile {
 struct CentralLinearProjectFile {
     provider_project_id: String,
     #[serde(default)]
+    provider_project_slug: Option<String>,
+    #[serde(default)]
     repositories: Vec<String>,
 }
 
@@ -862,6 +864,9 @@ fn resolve_central_config(
             &project.provider_project_id,
             "linear_projects.provider_project_id",
         )?;
+        if let Some(slug) = project.provider_project_slug.as_deref() {
+            required_literal(slug, "linear_projects.provider_project_slug")?;
+        }
         for repository in &project.repositories {
             if !config.repositories.contains_key(repository) {
                 return Err(CentralConfigError::InvalidReference {
@@ -1070,7 +1075,7 @@ fn central_workflow_front_matter(
             field: "openhands.transport_session_api_key_env".to_owned(),
         });
     }
-    let (tracker, project_slug) = match config.routing.mode.trim() {
+    let (tracker, project_id, project_slug) = match config.routing.mode.trim() {
         "legacy_single" => {
             if config.tracker_profiles.len() != 1 {
                 return Err(CentralConfigError::InvalidReference {
@@ -1082,19 +1087,22 @@ fn central_workflow_front_matter(
                     field: "routing.repository.linear_project".to_owned(),
                 });
             }
+            let project = config
+                .linear_projects
+                .values()
+                .next()
+                .expect("length checked");
             (
                 config
                     .tracker_profiles
                     .values()
                     .next()
                     .expect("length checked"),
-                config
-                    .linear_projects
-                    .values()
-                    .next()
-                    .expect("length checked")
-                    .provider_project_id
-                    .clone(),
+                project.provider_project_id.clone(),
+                project
+                    .provider_project_slug
+                    .clone()
+                    .unwrap_or_else(|| project.provider_project_id.clone()),
             )
         }
         "project_set" => {
@@ -1126,7 +1134,14 @@ fn central_workflow_front_matter(
                     field: format!("project_sets.{project_set_id}.projects"),
                 }
             })?;
-            (tracker, project.provider_project_id.clone())
+            (
+                tracker,
+                project.provider_project_id.clone(),
+                project
+                    .provider_project_slug
+                    .clone()
+                    .unwrap_or_else(|| project.provider_project_id.clone()),
+            )
         }
         _ => {
             return Err(CentralConfigError::InvalidReference {
@@ -1144,7 +1159,7 @@ fn central_workflow_front_matter(
             kind: Some(tracker.provider.clone()),
             endpoint: tracker.endpoint.clone(),
             api_key,
-            project_id: Some(project_slug.clone()),
+            project_id: Some(project_id),
             project_slug: Some(project_slug),
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
