@@ -42,7 +42,9 @@ use self::{
         build_linear_client, build_runtime_transport, build_tracker_backend,
         build_workspace_manager_config_with_retention, prepare_active_conversation_store,
     },
-    config::{RunRuntimeConfig, resolve_runtime_config},
+    config::{
+        RunRuntimeConfig, looks_like_central_config, resolve_runtime_config, select_config_path,
+    },
     snapshot::{
         current_agent_server_status, current_memory_server_status, map_snapshot, push_recent_event,
         terminal_state_set,
@@ -62,7 +64,7 @@ pub struct RunArgs {
 }
 
 #[derive(Debug, Error)]
-enum RunCommandError {
+pub(crate) enum RunCommandError {
     #[error("failed to determine the current working directory: {0}")]
     CurrentDir(#[source] io::Error),
     #[error("failed to acquire configured runtime root ownership: {detail}")]
@@ -146,7 +148,7 @@ enum RunCommandError {
 }
 
 #[derive(Debug)]
-struct RuntimeRootOwnership {
+pub(crate) struct RuntimeRootOwnership {
     locks: Vec<RuntimeRootLock>,
 }
 
@@ -175,7 +177,7 @@ fn acquire_runtime_root_ownership(
     acquire_root_ownership(roots)
 }
 
-fn acquire_root_ownership(
+pub(crate) fn acquire_root_ownership(
     roots: impl IntoIterator<Item = PathBuf>,
 ) -> Result<RuntimeRootOwnership, RunCommandError> {
     let mut canonical_roots = BTreeSet::new();
@@ -254,7 +256,7 @@ fn initialize_root_marker(mut file: File, marker: &Path) -> Result<File, RunComm
     Ok(file)
 }
 
-fn root_lock_owner_alive(marker: &Path) -> bool {
+pub(crate) fn root_lock_owner_alive(marker: &Path) -> bool {
     let Ok(contents) = fs::read_to_string(marker) else {
         return true;
     };
@@ -321,6 +323,31 @@ fn acquire_strict_run_marker(
         })
 }
 
+async fn preclaim_strict_run_marker(
+    args: &RunArgs,
+) -> Result<Option<super::migration::StrictRunMarkerGuard>, RunCommandError> {
+    let cwd = std::env::current_dir().map_err(RunCommandError::CurrentDir)?;
+    let Some(config_path) = select_config_path(&cwd, args.config.as_deref()) else {
+        return Ok(None);
+    };
+    let raw = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|source| RunCommandError::ReadConfig {
+            path: config_path.clone(),
+            source,
+        })?;
+    if !looks_like_central_config(&raw) {
+        return Ok(None);
+    }
+    let marker = super::migration::strict_run_marker_path(&config_path);
+    super::migration::claim_strict_run_marker(&config_path, "pending-resolution")
+        .map(Some)
+        .map_err(|source| RunCommandError::StrictRunMarker {
+            path: marker,
+            detail: source.to_string(),
+        })
+}
+
 pub async fn run_command(args: RunArgs) -> ExitCode {
     match run_orchestrator(args).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -332,9 +359,26 @@ pub async fn run_command(args: RunArgs) -> ExitCode {
 }
 
 async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
+    let strict_run_marker = preclaim_strict_run_marker(&args).await?;
     let mut runtime = resolve_runtime_config(&args).await?;
+    if let Some(marker) = strict_run_marker.as_ref() {
+        marker
+            .update_generation(&runtime.config_generation)
+            .map_err(|source| RunCommandError::StrictRunMarker {
+                path: super::migration::strict_run_marker_path(
+                    runtime
+                        .config_path
+                        .as_deref()
+                        .expect("central runtime should retain its config path"),
+                ),
+                detail: source.to_string(),
+            })?;
+    }
     let _root_ownership = acquire_runtime_root_ownership(&runtime)?;
-    let _strict_run_marker = acquire_strict_run_marker(&runtime)?;
+    let _strict_run_marker = match strict_run_marker {
+        Some(marker) => Some(marker),
+        None => acquire_strict_run_marker(&runtime)?,
+    };
     let linear_worker_env = apply_linear_oauth_client_credentials(&mut runtime).await?;
     info!(
         config = runtime
@@ -1122,6 +1166,36 @@ mod tests {
             "a failed later acquisition must release earlier roots"
         );
         drop(blocker);
+    }
+
+    #[tokio::test]
+    async fn strict_run_marker_is_claimed_before_runtime_resolution() {
+        let root = tempfile::tempdir().expect("config root");
+        let config = root.path().join("config.yaml");
+        fs::write(&config, "instance:\n  id: test\n")
+            .expect("central-shaped config should be written");
+        let args = RunArgs {
+            config: Some(config.clone()),
+            dry_run: false,
+        };
+
+        let marker = preclaim_strict_run_marker(&args)
+            .await
+            .expect("preclaim should succeed")
+            .expect("central-shaped config should claim a marker");
+        let marker_path = super::super::migration::strict_run_marker_path(&config);
+        let marker_contents = fs::read_to_string(&marker_path).expect("marker should exist");
+        assert!(marker_contents.contains("generation=pending-resolution"));
+        marker
+            .update_generation("sha256:resolved")
+            .expect("marker generation should be updatable");
+        assert!(
+            fs::read_to_string(&marker_path)
+                .expect("updated marker should exist")
+                .contains("generation=sha256:resolved")
+        );
+        drop(marker);
+        assert!(!marker_path.exists());
     }
 
     #[test]

@@ -127,6 +127,10 @@ enum MigrationError {
     MemoryActive { path: PathBuf },
     #[error("memory migration is already active at {path}")]
     MemoryMigrationActive { path: PathBuf },
+    #[error("legacy orchestrator owns the workspace root at {path}")]
+    RuntimeActive { path: PathBuf },
+    #[error("failed to acquire the legacy runtime root lock at {path}: {detail}")]
+    RuntimeLock { path: PathBuf, detail: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -370,6 +374,16 @@ static STRICT_STALE_MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct StrictRunMarkerGuard {
     path: PathBuf,
+}
+
+impl StrictRunMarkerGuard {
+    pub(crate) fn update_generation(&self, generation: &str) -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
+        writeln!(file, "pid={}\ngeneration={generation}", std::process::id())
+    }
 }
 
 impl Drop for StrictRunMarkerGuard {
@@ -702,6 +716,18 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         });
     }
 
+    let workspace_root = source
+        .workflow
+        .resolve_with_process_env(&source.target_repo)
+        .map_err(|error| MigrationError::ResolveConfig {
+            path: source.workflow_path.clone(),
+            detail: format!("workspace.root: {error}"),
+        })?
+        .config
+        .workspace
+        .root;
+    ensure_legacy_runtime_quiescent(&workspace_root)?;
+    let _runtime_ownership = acquire_legacy_runtime_ownership(&workspace_root)?;
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
@@ -1510,6 +1536,39 @@ fn preserve_legacy_memory(
     copy_directory_contents(&source, destination)
 }
 
+fn legacy_runtime_lock_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".opensymphony-instance.lock")
+}
+
+fn ensure_legacy_runtime_quiescent(workspace_root: &Path) -> Result<(), MigrationError> {
+    let marker = legacy_runtime_lock_path(workspace_root);
+    if marker.exists() && super::orchestrator_run::root_lock_owner_alive(&marker) {
+        return Err(MigrationError::RuntimeActive { path: marker });
+    }
+    Ok(())
+}
+
+fn acquire_legacy_runtime_ownership(
+    workspace_root: &Path,
+) -> Result<super::orchestrator_run::RuntimeRootOwnership, MigrationError> {
+    let marker = legacy_runtime_lock_path(workspace_root);
+    if marker.exists() && super::orchestrator_run::root_lock_owner_alive(&marker) {
+        return Err(MigrationError::RuntimeActive { path: marker });
+    }
+    match super::orchestrator_run::acquire_root_ownership(vec![workspace_root.to_path_buf()]) {
+        Ok(ownership) => Ok(ownership),
+        Err(_error)
+            if marker.exists() && super::orchestrator_run::root_lock_owner_alive(&marker) =>
+        {
+            Err(MigrationError::RuntimeActive { path: marker })
+        }
+        Err(error) => Err(MigrationError::RuntimeLock {
+            path: marker,
+            detail: error.to_string(),
+        }),
+    }
+}
+
 fn ensure_legacy_memory_quiescent(target_repo: &Path) -> Result<(), MigrationError> {
     let memory_root = target_repo.join(".opensymphony/memory");
     let marker = memory_activity_marker_path(&memory_root);
@@ -1889,9 +1948,13 @@ fn hook_creates_repository(value: &str) -> bool {
                 .iter()
                 .position(|token| token.rsplit('/').next().is_some_and(|name| name == "git"));
             if let Some(index) = git_index {
-                return tokens[index + 1..]
+                let git_arguments = &tokens[index + 1..];
+                return git_arguments
                     .iter()
-                    .any(|token| matches!(*token, "clone" | "init"));
+                    .any(|token| matches!(*token, "clone" | "init"))
+                    || git_arguments
+                        .windows(2)
+                        .any(|pair| pair == ["worktree", "add"]);
             }
             if tokens
                 .iter()
@@ -2572,6 +2635,27 @@ mod tests {
     }
 
     #[test]
+    fn migration_refuses_a_live_legacy_runtime_root() {
+        let root = tempfile::tempdir().expect("migration root");
+        let workspace_root = root.path().join("workspaces");
+        let runtime =
+            super::super::orchestrator_run::acquire_root_ownership([workspace_root.clone()])
+                .expect("legacy runtime should own the workspace root");
+
+        assert!(matches!(
+            ensure_legacy_runtime_quiescent(&workspace_root),
+            Err(MigrationError::RuntimeActive { .. })
+        ));
+        assert!(matches!(
+            acquire_legacy_runtime_ownership(&workspace_root),
+            Err(MigrationError::RuntimeActive { .. })
+        ));
+        drop(runtime);
+        acquire_legacy_runtime_ownership(&workspace_root)
+            .expect("migration should acquire the released legacy root");
+    }
+
+    #[test]
     fn migration_lock_also_serializes_a_central_catalog_root() {
         let root = tempfile::tempdir().expect("migration root should exist");
         let repo = root.path().join("repo");
@@ -2625,6 +2709,11 @@ mod tests {
             "git -c protocol.version=2 clone URL ."
         ));
         assert!(hook_creates_repository("gh repo \\\nclone owner/repo ."));
+        assert!(hook_creates_repository("git worktree add ../checkout HEAD"));
+        assert!(hook_creates_repository(
+            "/usr/bin/git worktree add ../checkout HEAD"
+        ));
+        assert!(!hook_creates_repository("git worktree list"));
         assert!(hook_creates_repository("git \\\nclone URL ."));
         assert!(hook_creates_repository("cd repo && git clone URL ."));
         assert!(hook_creates_repository("/usr/bin/git clone URL ."));

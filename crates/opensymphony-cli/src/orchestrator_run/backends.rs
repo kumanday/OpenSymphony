@@ -811,6 +811,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 cancelled_run: run_manifest
                     .as_ref()
                     .is_some_and(|run| run.status == RunStatus::Cancelled),
+                completed_run: run_manifest.as_ref().is_some_and(|run| {
+                    matches!(
+                        run.status,
+                        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+                    )
+                }),
                 had_in_flight_run,
                 pending_retry: run_manifest.as_ref().is_some_and(|run| run.pending_retry),
                 normal_retry_count: run_manifest
@@ -945,11 +951,24 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
             }));
         };
-        let Some(mut manifest) = self.manager.load_run_manifest(&handle).await? else {
-            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
-                path: handle.run_manifest_path(),
-                source: io::Error::new(io::ErrorKind::NotFound, "run manifest is missing"),
-            }));
+        let mut manifest = match self.manager.load_run_manifest(&handle).await? {
+            Some(manifest) => manifest,
+            None => {
+                let run = RunDescriptor::new(
+                    format!("retry-pending-{}", handle.workspace_key()),
+                    retry.attempt.get(),
+                )
+                .with_normal_retry_count(retry.normal_retry_count);
+                let mut manifest = RunManifest::new(&handle, &run);
+                // The failed launch never produced an executable run manifest.
+                // Create a non-in-flight marker so recovery sees the durable
+                // pending retry instead of repeatedly treating the workspace as
+                // an initial dispatch.
+                manifest.status = RunStatus::PreparationFailed;
+                manifest.status_detail =
+                    Some("worker launch failed before a run manifest was created".to_string());
+                manifest
+            }
         };
         manifest.pending_retry = true;
         manifest.retry_scheduled_at = Some(retry.scheduled_at.as_u64());
@@ -5735,6 +5754,59 @@ mod tests {
             recoveries[0].retry_error.as_deref(),
             Some("transient failure")
         );
+    }
+
+    #[tokio::test]
+    async fn persist_retry_pending_creates_manifest_when_launch_failed_before_start_run() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: RetryAttempt::new(1).expect("retry attempt should be valid"),
+            normal_retry_count: 1,
+            scheduled_at: TimestampMs::new(250),
+            due_at: TimestampMs::new(1_200),
+            reason: RetryReason::Failure,
+            error: Some("launch failed".to_owned()),
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &workflow);
+
+        backend
+            .persist_retry_pending(&workspace, &retry)
+            .await
+            .expect("pending retry should create a durable manifest");
+
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.status, RunStatus::PreparationFailed);
+        assert!(manifest.pending_retry);
+        assert_eq!(manifest.normal_retry_count, 1);
+        assert_eq!(manifest.retry_due_at, Some(1_200));
     }
 
     #[tokio::test]

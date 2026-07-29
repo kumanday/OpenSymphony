@@ -30,7 +30,16 @@ It is responsible for:
 Current workflow contract:
 
 - `tracker.kind` must be `linear`
-- `tracker.project_slug` stores Linear `Project.slugId`
+- `tracker.project_slug` stores Linear `Project.slugId` and remains the
+  compatibility selector for legacy workflow files
+- central configurations may also set `tracker.project_id` to the immutable
+  Linear `Project.id`; when present, the orchestrator resolves that provider
+  project first and uses its returned `slugId` for the existing project-scoped
+  queries. A legacy-compatible configuration with a distinct non-empty
+  `project_slug` falls back to that slug if the ID lookup returns no project;
+  a typed central configuration normally keeps the provider ID and slug
+  aligned, so an unresolved ID fails startup before polling. A resolved
+  project without a `slugId` always fails startup.
 - `LINEAR_API_KEY` must be available when Linear mode is enabled
 - if `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are both present,
   `opensymphony run` mints a Linear OAuth client-credentials access token at

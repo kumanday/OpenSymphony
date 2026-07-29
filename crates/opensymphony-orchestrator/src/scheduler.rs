@@ -113,6 +113,7 @@ pub struct RecoveryRecord {
     pub workspace: WorkspaceRecord,
     pub successful_run: bool,
     pub cancelled_run: bool,
+    pub completed_run: bool,
     pub had_in_flight_run: bool,
     pub pending_retry: bool,
     pub normal_retry_count: u32,
@@ -1070,6 +1071,28 @@ where
                             .expect("active recovery execution should be present");
                         self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
                     }
+                } else if record.completed_run {
+                    if self.retry_limit_reached(record.normal_retry_count) {
+                        self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                            .await?;
+                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                    } else {
+                        let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                        let retry = RetryEntry {
+                            issue_id: normalized.id.clone(),
+                            identifier: normalized.identifier.clone(),
+                            attempt: RetryAttempt::new(normal_retry_count)?,
+                            normal_retry_count,
+                            scheduled_at: observed_at,
+                            due_at: observed_at,
+                            reason: RetryReason::Reconciliation,
+                            error: None,
+                        };
+                        let execution = self
+                            .remove_execution(&issue_id)
+                            .expect("active recovery execution should be present");
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
                 } else if self.retry_limit_reached(record.normal_retry_count) {
                     self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                         .await?;
@@ -1538,7 +1561,9 @@ where
             execution.issue().identifier.clone(),
             workspace.path.clone(),
             observed_at,
-            None,
+            (recovered_run.normal_retry_count > 0)
+                .then(|| RetryAttempt::new(recovered_run.normal_retry_count))
+                .transpose()?,
             self.config.max_turns,
         )
         .with_normal_retry_count(recovered_run.normal_retry_count);

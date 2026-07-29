@@ -220,6 +220,17 @@ fn map_issue(
             .retry
             .as_ref()
             .map(|retry| retry.normal_retry_count)
+            .or_else(|| {
+                (issue.runtime.release_reason
+                    == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted))
+                .then(|| {
+                    issue
+                        .last_worker_outcome
+                        .as_ref()
+                        .and_then(|outcome| outcome.attempt.map(|attempt| attempt.get()))
+                        .unwrap_or(0)
+                })
+            })
             .unwrap_or(0),
         release_reason: issue.runtime.release_reason,
         claimed_at: issue.runtime.claimed_at.map(timestamp_to_datetime),
@@ -488,7 +499,7 @@ mod tests {
     use crate::opensymphony_domain::{
         BlockerRef, ComponentHealthSnapshot, ConversationId, ConversationMetadata, DaemonSnapshot,
         HealthStatus, IssueId, IssueIdentifier, IssueRef, IssueSnapshot as DomainIssueSnapshot,
-        IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
+        IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, RetryAttempt,
         RuntimeStateSnapshot, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, TimestampMs,
         WorkerAttemptSnapshot, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
         WorkspaceRecord,
@@ -882,15 +893,27 @@ tracker:
 
     #[test]
     fn retry_exhausted_release_preserves_explicit_reason() {
-        let issue = map_single_issue(released_issue_snapshot(
+        let mut domain_issue = released_issue_snapshot(
             "In Progress",
             IssueStateCategory::Active,
             crate::opensymphony_domain::ReleaseReason::RetryExhausted,
-        ));
+        );
+        domain_issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-532")),
+            attempt: Some(must(RetryAttempt::new(3))),
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: None,
+            error: Some("historical failure".to_owned()),
+        });
+        let issue = map_single_issue(domain_issue);
         assert_eq!(
             issue.release_reason,
             Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted)
         );
+        assert_eq!(issue.retry_count, 3);
         assert_eq!(
             issue.runtime_state,
             crate::opensymphony_control::IssueRuntimeState::Failed

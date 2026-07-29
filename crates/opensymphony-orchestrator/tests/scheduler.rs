@@ -1207,6 +1207,7 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
@@ -2549,6 +2550,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
@@ -2612,6 +2614,7 @@ async fn pre_conversation_recovery_honors_retry_limit() {
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2659,6 +2662,7 @@ async fn recovery_advances_consumed_retry_budget_before_dispatch() {
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2692,6 +2696,54 @@ async fn recovery_advances_consumed_retry_budget_before_dispatch() {
 }
 
 #[tokio::test]
+async fn recovery_retries_an_interrupted_completed_initial_run() {
+    let recovered_workspace = workspace_record("COE-278", "/tmp/recovered/COE-278");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-278", "COE-278", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-278", "COE-278", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-278".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("completed initial recovery should succeed");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0]
+            .run
+            .attempt
+            .map(|attempt| attempt.get()),
+        Some(1)
+    );
+    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
+}
+
+#[tokio::test]
 async fn recovery_dispatches_persisted_pending_retry_before_limit() {
     let recovered_workspace = workspace_record("COE-276", "/tmp/recovered/COE-276");
     let tracker = FakeTracker {
@@ -2704,6 +2756,7 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: false,
             pending_retry: true,
             normal_retry_count: 0,
@@ -2751,6 +2804,7 @@ async fn recovery_parks_pending_retry_when_current_limit_is_lowered() {
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: false,
             pending_retry: true,
             normal_retry_count: 1,
@@ -2893,6 +2947,7 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
             workspace: recovered_workspace,
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2943,6 +2998,7 @@ async fn terminal_recovery_honors_failed_workspace_retention() {
             workspace: recovered_workspace,
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2981,6 +3037,7 @@ async fn terminal_recovery_preserves_cancelled_workspace_policy() {
             workspace: recovered_workspace,
             successful_run: false,
             cancelled_run: true,
+            completed_run: true,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -3030,6 +3087,7 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 0,
@@ -3230,6 +3288,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             workspace: recovered_workspace,
             successful_run: false,
             cancelled_run: false,
+            completed_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
