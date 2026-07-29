@@ -1250,6 +1250,35 @@ fn build_report(
     }
 }
 
+fn migrated_workspace_root(
+    source: &SourceContext,
+    instance_id: &str,
+    legacy_default_root: &Path,
+) -> Result<String, MigrationError> {
+    match source.workflow.front_matter.workspace.root.as_deref() {
+        Some(value) => {
+            let value =
+                super::expand_env_tokens(value).map_err(|error| MigrationError::ResolveConfig {
+                    path: source.workflow_path.clone(),
+                    detail: format!("workspace.root: {error}"),
+                })?;
+            let resolved = resolve_repo_path(&source.target_repo, &value);
+            if paths_overlap(&resolved, &source.target_repo) {
+                reject_workspace_relocation(&resolved)?;
+                Ok(format!("~/.opensymphony/workspaces/{instance_id}"))
+            } else {
+                Ok(resolved.display().to_string())
+            }
+        }
+        None => {
+            // The legacy resolver uses this default when front matter omits
+            // workspace.root. Do not silently abandon populated state there.
+            reject_workspace_relocation(legacy_default_root)?;
+            Ok(format!("~/.opensymphony/workspaces/{instance_id}"))
+        }
+    }
+}
+
 fn generate_central_config(source: &SourceContext) -> Result<String, MigrationError> {
     if workflow_has_literal_secret(&source.workflow.front_matter) {
         return Err(MigrationError::LiteralSecret);
@@ -1282,23 +1311,8 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         ),
         &sha256(source.target_repo.display().to_string().as_bytes())[7..23]
     );
-    let workspace_root = match source.workflow.front_matter.workspace.root.as_deref() {
-        Some(value) => {
-            let value =
-                super::expand_env_tokens(value).map_err(|error| MigrationError::ResolveConfig {
-                    path: source.workflow_path.clone(),
-                    detail: format!("workspace.root: {error}"),
-                })?;
-            let resolved = resolve_repo_path(&source.target_repo, &value);
-            if paths_overlap(&resolved, &source.target_repo) {
-                reject_workspace_relocation(&resolved)?;
-                format!("~/.opensymphony/workspaces/{instance_id}")
-            } else {
-                resolved.display().to_string()
-            }
-        }
-        None => format!("~/.opensymphony/workspaces/{instance_id}"),
-    };
+    let workspace_root =
+        migrated_workspace_root(source, &instance_id, Path::new(DEFAULT_WORKSPACE_ROOT))?;
     // WORKFLOW.md retains the legacy execution prompt after orchestration
     // front matter is moved into the central config. AGENTS.md remains in the
     // checkout as implementation guidance for the worker.
@@ -2905,7 +2919,7 @@ mod tests {
             "---\ntracker:\n  kind: linear\n  project_slug: project\nworkspace:\n  root: ./var/workspaces\n---\n\nTarget branch: develop\n",
         )
         .expect("workflow should parse");
-        let source = SourceContext {
+        let mut source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
             target_repo,
@@ -2923,6 +2937,18 @@ mod tests {
         let generated = generate_central_config(&source).expect("migration should generate");
         assert!(!generated.contains("/repo/var/workspaces"));
         assert!(generated.contains("~/.opensymphony/workspaces/legacy-repo-"));
+
+        let legacy_default = tempfile::tempdir().expect("legacy default root should exist");
+        fs::write(
+            legacy_default.path().join("COE-1-run.json"),
+            "recoverable state",
+        )
+        .expect("legacy default state should be written");
+        source.workflow.front_matter.workspace.root = None;
+        assert!(matches!(
+            migrated_workspace_root(&source, "legacy-instance", legacy_default.path()),
+            Err(MigrationError::WorkspaceRootState { .. })
+        ));
     }
 
     #[test]

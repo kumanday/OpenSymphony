@@ -2013,10 +2013,12 @@ type: topic-doc
             .expect("state root should canonicalize");
         assert_eq!(export.output_path, canonical_state.join("export"));
 
+        let repo_bundle = repo.path().join("repo-export");
+        copy_dir_recursive(&source, &repo_bundle);
         config.memory_root = state.join("imported");
         config.index_path = config.memory_root.join("memory.duckdb");
-        let import = import_okf_bundle(&config, Path::new("export"), false)
-            .expect("central catalog import should be contained by state root");
+        let import = import_okf_bundle(&config, Path::new("repo-export"), false)
+            .expect("central catalog import should keep repo-contained sources");
         assert_eq!(import.target_path, canonical_state.join("imported"));
     }
 

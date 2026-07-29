@@ -290,13 +290,21 @@ impl IssueExecution {
         let Some(conversation) = &self.conversation else {
             return Err(StateTransitionError::ConversationNotAttached);
         };
+        let command = HarnessInterruptCommand {
+            run_id: run.issue_identifier.to_string(),
+            issue_id: self.issue.id.clone(),
+            harness_kind: harness_kind.into(),
+            conversation_id: conversation.conversation_id.clone(),
+            turn_id,
+            reason,
+            expected_next_state,
+        };
         if let Some(interrupt) = &self.interrupt {
             match interrupt.status {
                 HarnessInterruptStatus::Requested | HarnessInterruptStatus::Acknowledged => {
                     return Ok((interrupt.command.clone(), false));
                 }
                 HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut => {
-                    let command = interrupt.command.clone();
                     self.interrupt = Some(HarnessInterruptState::requested(
                         command.clone(),
                         requested_at,
@@ -306,18 +314,7 @@ impl IssueExecution {
             }
         }
 
-        self.interrupt = Some(HarnessInterruptState::requested(
-            HarnessInterruptCommand {
-                run_id: run.issue_identifier.to_string(),
-                issue_id: self.issue.id.clone(),
-                harness_kind: harness_kind.into(),
-                conversation_id: conversation.conversation_id.clone(),
-                turn_id,
-                reason,
-                expected_next_state,
-            },
-            requested_at,
-        ));
+        self.interrupt = Some(HarnessInterruptState::requested(command, requested_at));
         let interrupt = self.interrupt.as_ref().expect("interrupt was just set");
         Ok((interrupt.command.clone(), true))
     }

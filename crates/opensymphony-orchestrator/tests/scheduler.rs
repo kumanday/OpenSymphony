@@ -1070,6 +1070,78 @@ async fn acknowledged_operator_cancel_releases_without_retrying_completed_run() 
 }
 
 #[tokio::test]
+async fn timed_out_operator_cancel_releases_late_cancelled_run_without_retry() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-507", "COE-507", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("operator cancel acknowledgement timed out".to_string()),
+            timed_out: true,
+        }));
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should dispatch active worker");
+    let first_run = scheduler.worker().launches[0].run.clone();
+
+    assert!(
+        scheduler
+            .interrupt_operator_cancel("COE-507", ts(200))
+            .await
+            .expect("operator cancel should be handled")
+    );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-507").expect("issue id should be valid"))
+            .expect("execution should remain tracked")
+            .interrupt()
+            .expect("interrupt should be recorded")
+            .status,
+        HarnessInterruptStatus::TimedOut
+    );
+
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Cancelled,
+                ts(300),
+                Some("worker stopped after operator cancel".to_string()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(300))
+        .await
+        .expect("late cancellation should release without retry");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-507").expect("issue id should be valid"))
+        .expect("execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::Released);
+    assert!(execution.retry().is_none());
+    match execution.state() {
+        crate::opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+            assert_eq!(*reason, ReleaseReason::Cancelled);
+        }
+        other => panic!("expected released state, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn merging_supersedes_human_review_polling_once_and_continues_same_issue() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-492", "COE-492", "Human Review", 0)],

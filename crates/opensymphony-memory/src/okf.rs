@@ -399,8 +399,11 @@ pub fn import_okf_bundle(
     force: bool,
 ) -> Result<OkfImportReport, MemoryError> {
     let containment_root = config.containment_root.as_deref().unwrap_or(&config.repo_root);
-    let source_path = canonicalize_existing_path(&resolve_path(containment_root, source))?;
-    ensure_okf_contained(containment_root, &source_path)?;
+    // The bundle is an input from the repository-facing CLI path. Central
+    // state-root containment applies to the destination catalog, not to this
+    // source path, which must remain a repo-contained bundle.
+    let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
+    ensure_okf_contained(&config.repo_root, &source_path)?;
     ensure_okf_contained(containment_root, &config.memory_root)?;
     create_dir_all(&config.memory_root)?;
     let target_root = canonicalize_existing_path(&config.memory_root)?;

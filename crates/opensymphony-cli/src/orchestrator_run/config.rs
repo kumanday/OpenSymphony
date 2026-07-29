@@ -1466,6 +1466,15 @@ fn validate_repository(
         if !is_contained(&checkout_path, &instruction_path) {
             return Err(CentralConfigError::InvalidInstructionPath);
         }
+        if instruction_path.exists() {
+            let canonical_checkout = std::fs::canonicalize(&checkout_path)
+                .map_err(|_| CentralConfigError::InvalidInstructionPath)?;
+            let canonical_instruction = std::fs::canonicalize(&instruction_path)
+                .map_err(|_| CentralConfigError::InvalidInstructionPath)?;
+            if !canonical_instruction.starts_with(canonical_checkout) {
+                return Err(CentralConfigError::InvalidInstructionPath);
+            }
+        }
     }
     Ok(())
 }
@@ -2438,6 +2447,29 @@ scheduler:
             error,
             CentralConfigError::IntegrationInsideCheckout
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn central_config_rejects_repository_instruction_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let checkout = root.path().join("checkout");
+        let external = root.path().join("external.md");
+        std::fs::create_dir_all(&checkout).expect("checkout should be created");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        std::fs::write(&external, "external instructions\n")
+            .expect("external instructions should be written");
+        symlink(&external, checkout.join("AGENTS.md")).expect("instruction symlink should exist");
+
+        let error = resolve_central_config(
+            &root.path().join("config.yaml"),
+            &central_fixture(root.path()),
+        )
+        .expect_err("repository instruction symlinks must stay inside the checkout");
+        assert!(matches!(error, CentralConfigError::InvalidInstructionPath));
     }
 
     #[test]

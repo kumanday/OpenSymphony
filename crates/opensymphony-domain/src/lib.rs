@@ -519,6 +519,36 @@ mod tests {
     }
 
     #[test]
+    fn failed_interrupt_retry_rebuilds_a_changed_request() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(60),
+        ));
+        must(execution.fail_interrupt(ts(61), "adapter refused interrupt"));
+
+        let (command, queued) = must(execution.request_interrupt(
+            "codex_app_server",
+            Some("turn-2".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(62),
+        ));
+
+        assert!(queued);
+        assert_eq!(command.harness_kind, "codex_app_server");
+        assert_eq!(command.turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(command.reason, HarnessInterruptReason::OperatorCancel);
+        assert_eq!(
+            command.expected_next_state,
+            HarnessInterruptExpectedNextState::Paused
+        );
+    }
+
+    #[test]
     fn cancel_failed_outcome_marks_requested_interrupt_failed() {
         let mut execution = running_execution();
         must(execution.request_interrupt(

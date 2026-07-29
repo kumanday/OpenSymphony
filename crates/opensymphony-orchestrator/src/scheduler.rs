@@ -2285,9 +2285,9 @@ where
         }
 
         // Detached and CancelFailed are terminal outcomes: release the execution instead of
-        // queuing a retry. Acknowledged operator cancels are also terminal from the
-        // scheduler's perspective for completed or cancelled outcomes because retrying
-        // would restart work the operator explicitly stopped.
+        // queuing a retry. Operator cancels are also terminal from the scheduler's perspective
+        // for completed or cancelled outcomes, even when the worker outcome races a failed or
+        // timed-out acknowledgement, because retrying would restart work the operator stopped.
         if matches!(
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
@@ -2897,8 +2897,13 @@ fn acknowledged_operator_cancel_terminal(
         outcome.outcome,
         WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Cancelled
     ) && execution.interrupt().is_some_and(|interrupt| {
-        interrupt.status == HarnessInterruptStatus::Acknowledged
-            && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
+        matches!(
+            interrupt.status,
+            HarnessInterruptStatus::Requested
+                | HarnessInterruptStatus::Acknowledged
+                | HarnessInterruptStatus::Failed
+                | HarnessInterruptStatus::TimedOut
+        ) && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
             && interrupt.command.expected_next_state == HarnessInterruptExpectedNextState::Paused
     })
 }
