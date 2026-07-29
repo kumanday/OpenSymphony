@@ -786,6 +786,33 @@ fn resolve_central_config(
     {
         return Err(CentralConfigError::LiteralSecret);
     }
+    for (field, value) in [
+        (
+            "memory.token_env",
+            config
+                .memory
+                .as_ref()
+                .and_then(|memory| memory.token_env.as_deref()),
+        ),
+        (
+            "openhands.transport_session_api_key_env",
+            config.openhands.transport_session_api_key_env.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            validate_central_env_name(value).map_err(|_| CentralConfigError::InvalidReference {
+                field: field.to_owned(),
+            })?;
+        }
+    }
+    if let Some(front_matter) = config.openhands.front_matter.as_ref() {
+        let value = serde_yaml::to_value(front_matter).map_err(|_| {
+            CentralConfigError::InvalidReference {
+                field: "openhands.front_matter".to_owned(),
+            }
+        })?;
+        validate_openhands_env_references(&value, "openhands.front_matter")?;
+    }
 
     let config_root = path.parent().unwrap_or_else(|| Path::new("."));
     let instance_id = required_literal(&config.instance.id, "instance.id")?;
@@ -1521,15 +1548,46 @@ fn openhands_yaml_value_has_literal_secret(value: &serde_yaml::Value) -> bool {
     if let Some(mapping) = value.as_mapping() {
         return mapping.iter().any(|(key, value)| {
             let secret_name = key.as_str().is_some_and(openhands_secret_field_name)
-                && value
-                    .as_str()
-                    .is_some_and(|value| !is_central_credential_reference(value));
+                && match value.as_str() {
+                    Some(value) => !is_central_credential_reference(value),
+                    None => !value.is_null(),
+                };
             secret_name || openhands_yaml_value_has_literal_secret(value)
         });
     }
     value
         .as_sequence()
         .is_some_and(|values| values.iter().any(openhands_yaml_value_has_literal_secret))
+}
+
+fn validate_openhands_env_references(
+    value: &serde_yaml::Value,
+    path: &str,
+) -> Result<(), CentralConfigError> {
+    if let Some(mapping) = value.as_mapping() {
+        for (key, value) in mapping {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            let field = format!("{}.{}", path, key);
+            if key.ends_with("_env") && !value.is_null() {
+                let Some(value) = value.as_str() else {
+                    return Err(CentralConfigError::InvalidReference { field });
+                };
+                validate_central_env_name(value).map_err(|_| {
+                    CentralConfigError::InvalidReference {
+                        field: field.clone(),
+                    }
+                })?;
+            }
+            validate_openhands_env_references(value, &field)?;
+        }
+    } else if let Some(values) = value.as_sequence() {
+        for (index, value) in values.iter().enumerate() {
+            validate_openhands_env_references(value, &format!("{}[{}]", path, index))?;
+        }
+    }
+    Ok(())
 }
 
 fn openhands_secret_field_name(name: &str) -> bool {
@@ -2361,6 +2419,44 @@ scheduler:
             .expect_err("PAT-shaped OpenHands credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_invalid_openhands_environment_selectors() {
+        let root = tempfile::tempdir().expect("temporary config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    transport:\n      session_api_key_env: not-an-environment-name\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("OpenHands environment selectors must use environment names");
+        assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+        assert!(!error.to_string().contains("not-an-environment-name"));
+    }
+
+    #[test]
+    fn central_config_rejects_structured_openhands_secret_values() {
+        let root = tempfile::tempdir().expect("temporary config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              access_token:\n                value: nested-secret\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("structured OpenHands credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("nested-secret"));
     }
 
     #[test]

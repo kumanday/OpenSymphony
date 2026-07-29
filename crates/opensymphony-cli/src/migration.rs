@@ -705,9 +705,11 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
 async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     let _ = preflight(paths.clone()).await?;
     if let Some(active) = active_target_central_config(&paths).await? {
+        let _strict_run_marker = claim_migration_strict_run_marker(&active.target_config)?;
         return match resume_partial_apply(&active)? {
             ActiveMigrationResolution::Complete => Ok(active_report("apply", &active, false)),
             ActiveMigrationResolution::Restored => {
+                drop(_strict_run_marker);
                 // The interrupted generation was safely restored.  Continue this
                 // invocation from the legacy source so repeat apply completes the
                 // migration instead of returning a false success.
@@ -772,6 +774,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
+    let _strict_run_marker = claim_migration_strict_run_marker(&target_config)?;
     let generated = generate_central_config(&source)?;
     let generation = sha256(generated.as_bytes());
     let migration_root = migration_root(&target_config);
@@ -902,6 +905,22 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         backup: Some(backup_dir),
         activation_marker: Some(marker_path),
     })
+}
+
+fn claim_migration_strict_run_marker(
+    config_path: &Path,
+) -> Result<StrictRunMarkerGuard, MigrationError> {
+    let marker = strict_run_marker_path(config_path);
+    match claim_strict_run_marker(config_path, "migration") {
+        Ok(marker_guard) => Ok(marker_guard),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(MigrationError::ActiveStrictRun { path: marker })
+        }
+        Err(source) => Err(MigrationError::Write {
+            path: marker,
+            source,
+        }),
+    }
 }
 
 async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError> {
@@ -3243,6 +3262,30 @@ mod tests {
             .clone()
             .expect("migration should publish an activation marker");
         let marker = parse_activation_marker(&marker_path).expect("activation marker should parse");
+        let strict_run_marker = strict_run_marker_path(&output_path);
+        fs::create_dir_all(
+            strict_run_marker
+                .parent()
+                .expect("migration marker directory should have a parent"),
+        )
+        .expect("migration marker directory should be creatable");
+        fs::write(
+            &strict_run_marker,
+            format!("pid={}\ngeneration=active\n", std::process::id()),
+        )
+        .expect("strict run marker should be written");
+        let blocked_apply = apply(MigrationPaths {
+            config: Some(config_path.clone()),
+            repo: root.path().to_path_buf(),
+            output: Some(output_path.clone()),
+        })
+        .await
+        .expect_err("partial apply should be blocked by an active strict run");
+        assert!(matches!(
+            blocked_apply,
+            MigrationError::ActiveStrictRun { .. }
+        ));
+        fs::remove_file(&strict_run_marker).expect("strict run marker should be removed");
         fs::write(
             stage_path(&workflow_path, &marker.generation),
             "truncated staged workflow",

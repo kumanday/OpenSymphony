@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{Arc, Mutex, OnceLock},
+    thread,
+    time::Duration,
 };
 
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
@@ -158,6 +160,16 @@ struct RuntimeRootLock {
     _file: File,
 }
 
+struct RootOwnershipSerialization {
+    path: PathBuf,
+}
+
+impl Drop for RootOwnershipSerialization {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 impl Drop for RuntimeRootOwnership {
     fn drop(&mut self) {
         for RuntimeRootLock { marker, _file } in self.locks.drain(..) {
@@ -187,6 +199,9 @@ pub(crate) fn acquire_root_ownership(
         .map_err(|_| RunCommandError::RootOwnership {
             detail: "runtime root ownership serialization was poisoned".to_owned(),
         })?;
+    // ponytail: one host-wide file lock serializes cross-process claims; per-root
+    // handshakes would add more failure states without improving this local MVP.
+    let _filesystem_serialization = acquire_root_ownership_serialization()?;
     let mut canonical_roots = BTreeSet::new();
     for root in roots {
         fs::create_dir_all(&root).map_err(|source| RunCommandError::RootOwnership {
@@ -316,6 +331,50 @@ pub(crate) fn acquire_root_ownership(
     }
 
     Ok(ownership)
+}
+
+fn acquire_root_ownership_serialization() -> Result<RootOwnershipSerialization, RunCommandError> {
+    let path = std::env::temp_dir().join("opensymphony-runtime-root-ownership.lock");
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(source) = writeln!(file, "pid={}", std::process::id()) {
+                    let _ = fs::remove_file(&path);
+                    return Err(RunCommandError::RootOwnership {
+                        detail: format!("failed to initialize {}: {source}", path.display()),
+                    });
+                }
+                return Ok(RootOwnershipSerialization { path });
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                if !root_lock_owner_alive(&path) {
+                    let stale = path.with_file_name(format!(
+                        "opensymphony-runtime-root-ownership.lock.stale-{}-{}",
+                        std::process::id(),
+                        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                    ));
+                    match fs::rename(&path, &stale) {
+                        Ok(()) => {
+                            let _ = fs::remove_file(stale);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(RunCommandError::RootOwnership {
+                                detail: format!("failed to reclaim {}: {error}", path.display()),
+                            });
+                        }
+                    }
+                    continue;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(source) => {
+                return Err(RunCommandError::RootOwnership {
+                    detail: format!("failed to serialize root ownership: {source}"),
+                });
+            }
+        }
+    }
 }
 
 fn root_marker_blocks(marker: &Path) -> bool {
@@ -782,8 +841,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         ))
         .await;
 
-    let poll_interval =
-        std::time::Duration::from_millis(runtime.workflow.config.polling.interval_ms);
+    let poll_interval = Duration::from_millis(runtime.workflow.config.polling.interval_ms);
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 

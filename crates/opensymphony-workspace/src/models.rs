@@ -15,6 +15,11 @@ pub fn redact_runtime_diagnostic(input: &str) -> String {
         "api_key",
         "apikey",
         "authorization",
+        "account_id",
+        "accountid",
+        "account_identifier",
+        "account_identity",
+        "chatgpt_account_id",
         "client_secret",
         "credential",
         "password",
@@ -1014,5 +1019,16 @@ mod tests {
 
         assert!(!value.contains("ghp_secret"));
         assert!(value.contains("https://[redacted]@example.test/repo"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_account_identities() {
+        let value = redact_runtime_diagnostic(
+            "account_id=acct_123 account_identifier:acct_456 chatgpt_account_id=acct_789",
+        );
+
+        assert!(!value.contains("acct_123"));
+        assert!(!value.contains("acct_456"));
+        assert!(!value.contains("acct_789"));
     }
 }
