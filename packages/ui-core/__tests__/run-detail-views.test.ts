@@ -275,6 +275,42 @@ describe("Run detail views", () => {
     handle.destroy();
   });
 
+  it("opens a diff symbol when the optional run overlay is unavailable", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = buildTransport(runDetail);
+    const codePath = codeGraphFixtureOutlines[0].path;
+    Object.assign(transport, {
+      runFiles: async () => [{ ...files[0], path: codePath }],
+      runDiffs: async () => ({
+        ...diff,
+        file_path: codePath,
+        hunks: [{ ...diff.hunks[0], file_path: codePath, header: "@@ -10,1 +10,1 @@", start_line: 10 }],
+      }),
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport,
+      codeGraphAdapter: {
+        ...createFixtureCodeGraphAdapter(),
+        getFileOutline: async () => ({ ...codeGraphFixtureOutlines[0], run_id: runDetail.run_id }),
+        getRunDiffOverlay: async () => {
+          throw new Error("diff overlay unavailable");
+        },
+      },
+    });
+    await openRun(root);
+    await flushUntil(() => root.querySelector("[data-diff-symbol-action]") !== null);
+
+    (root.querySelector("[data-diff-symbol-action]") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
+    expect(root.querySelector("[data-code-mode='neighborhood']")?.classList.contains("is-selected")).toBe(true);
+    const app = handle as unknown as { state: { codeGraph: { selectedNodeIds: string[] } } };
+    await flushUntil(() => app.state.codeGraph.selectedNodeIds.includes("symbol:graphReducer"));
+    await handle.destroy();
+  });
+
   it("keeps a pending run overlay alive while selecting another file", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

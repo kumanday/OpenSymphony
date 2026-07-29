@@ -2001,16 +2001,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private runCodeDeepLink(symbolKey?: string, path?: string): string | null {
     const run = this.state.runDetail;
     const overlay = this.state.runCodeOverlay;
-    if (!run || !overlay || (symbolKey && path)) return null;
+    const repoId = overlay?.repo_id ?? this.state.runCodeOutline?.repo_id;
+    if (!run || !repoId || (symbolKey && path)) return null;
     try {
       return formatCodeDeepLink({
-        repoId: overlay.repo_id,
-        mode: "diff",
+        repoId,
         symbolKey: symbolKey ?? null,
         path: path ?? null,
         runId: run.run_id,
-        baseRevision: overlay.base_revision,
-        headRevision: overlay.head_revision,
+        baseRevision: overlay?.base_revision ?? null,
+        headRevision: overlay?.head_revision ?? null,
       });
     } catch {
       return null;
