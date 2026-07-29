@@ -530,6 +530,20 @@ index a torn catalog. Prefer the CLI or MCP admin surface for maintenance;
 direct file or DuckDB access is an offline recovery and diagnostics fallback
 only.
 
+Each `opensymphony run` claims the configured state and workspace roots before
+constructing tracker, memory, or workspace services. A second live process
+using either root fails without polling Linear or creating a workspace. The
+ownership marker records only the process ID; stale markers from an unclean
+exit are atomically quarantined before the root is reclaimed. The marker is
+released when the run shuts down, including legacy single-repository runs.
+
+When a worker outcome schedules a retry, the run manifest records the retry's
+scheduled time, due deadline, reason, and redacted error summary. Restart
+recovery restores those values and waits for the original deadline. Failed
+stall-stop requests remain attached to the running execution until a later
+stop attempt is acknowledged, so a remote worker cannot be forgotten after a
+transient interrupt failure.
+
 For worker or tool access, `opensymphony run` starts the read-only memory server
 when memory is initialized and `memory.serve` is not disabled. The supervised
 server binds to loopback on an ephemeral port by default, reports the endpoint

@@ -114,6 +114,10 @@ pub struct RecoveryRecord {
     pub had_in_flight_run: bool,
     pub pending_retry: bool,
     pub normal_retry_count: u32,
+    pub retry_scheduled_at: Option<TimestampMs>,
+    pub retry_due_at: Option<TimestampMs>,
+    pub retry_reason: Option<RetryReason>,
+    pub retry_error: Option<String>,
     pub harness_kind: Option<String>,
     pub recovered_run: Option<RecoveredRun>,
 }
@@ -321,6 +325,7 @@ pub trait WorkspaceBackend {
     async fn persist_retry_pending(
         &mut self,
         _workspace: &WorkspaceRecord,
+        _retry: &RetryEntry,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -1017,10 +1022,10 @@ where
                         identifier: normalized.identifier.clone(),
                         attempt: RetryAttempt::new(normal_retry_count)?,
                         normal_retry_count,
-                        scheduled_at: observed_at,
-                        due_at: observed_at,
-                        reason: RetryReason::Reconciliation,
-                        error: None,
+                        scheduled_at: record.retry_scheduled_at.unwrap_or(observed_at),
+                        due_at: record.retry_due_at.unwrap_or(observed_at),
+                        reason: record.retry_reason.unwrap_or(RetryReason::Reconciliation),
+                        error: record.retry_error.clone(),
                     };
                     let execution = self
                         .remove_execution(&issue_id)
@@ -1060,11 +1065,16 @@ where
                     .map_err(|error| SchedulerError::Workspace {
                         detail: error.to_string(),
                     })?;
-                if let Err(error) = self
-                    .workspace
-                    .cleanup_failed_workspace(&record.workspace)
-                    .await
-                {
+                let cleanup_result = if self.retry_limit_reached(record.normal_retry_count) {
+                    self.workspace
+                        .cleanup_failed_workspace(&record.workspace)
+                        .await
+                } else {
+                    self.workspace
+                        .cleanup_workspace(&record.workspace, true)
+                        .await
+                };
+                if let Err(error) = cleanup_result {
                     tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
                     retry_records.push(record);
                 }
@@ -1921,6 +1931,13 @@ where
                     observed_at,
                 )
                 .await?;
+            if !remote_stopped {
+                // The local worker and execution remain owned by the scheduler;
+                // keep the run in Running so the next stall pass retries the
+                // same stop request instead of releasing a still-live remote run.
+                self.insert_execution(issue_id, execution);
+                continue;
+            }
             let outcome = WorkerOutcomeRecord::from_run(
                 &run,
                 if remote_stopped {
@@ -2002,7 +2019,11 @@ where
             self.insert_execution(issue_id, execution);
             return Ok(());
         }
-        if execution.status() != SchedulerStatus::Released {
+        if execution.status() == SchedulerStatus::Released
+            && reason == ReleaseReason::TrackerTerminal
+        {
+            execution = execution.replace_release_reason(observed_at, reason)?;
+        } else if execution.status() != SchedulerStatus::Released {
             execution = execution.release(observed_at, reason, None)?;
         }
         let retain_failed =
@@ -2277,7 +2298,7 @@ where
         };
         if let Some(workspace) = execution.workspace() {
             self.workspace
-                .persist_retry_pending(workspace)
+                .persist_retry_pending(workspace, &retry)
                 .await
                 .map_err(|error| SchedulerError::Workspace {
                     detail: error.to_string(),

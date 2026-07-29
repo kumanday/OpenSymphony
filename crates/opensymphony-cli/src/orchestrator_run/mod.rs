@@ -4,7 +4,9 @@ mod snapshot;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    path::PathBuf,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
@@ -59,12 +61,14 @@ pub struct RunArgs {
 #[derive(Debug, Error)]
 enum RunCommandError {
     #[error("failed to determine the current working directory: {0}")]
-    CurrentDir(#[source] std::io::Error),
+    CurrentDir(#[source] io::Error),
+    #[error("failed to acquire configured runtime root ownership: {detail}")]
+    RootOwnership { detail: String },
     #[error("failed to read {path}: {source}")]
     ReadConfig {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
     #[error("failed to parse {path}: {source}")]
     ParseConfig {
@@ -121,9 +125,9 @@ enum RunCommandError {
     #[error("failed to build scheduler configuration: {0}")]
     SchedulerConfig(#[from] SchedulerError),
     #[error("failed to bind control-plane listener: {0}")]
-    BindListener(#[source] std::io::Error),
+    BindListener(#[source] io::Error),
     #[error("control-plane server exited unexpectedly: {0}")]
-    Serve(#[source] std::io::Error),
+    Serve(#[source] io::Error),
     #[error(
         "workflow config requires a managed local OpenHands server, but `openhands.tool_dir` is missing from config.yaml (recommended: ~/.opensymphony/openhands-server)"
     )]
@@ -134,6 +138,137 @@ enum RunCommandError {
     MissingTransportPort { value: String },
     #[error("failed to mint Linear OAuth token: {0}")]
     LinearOAuthToken(String),
+}
+
+#[derive(Debug)]
+struct RuntimeRootOwnership {
+    locks: Vec<RuntimeRootLock>,
+}
+
+#[derive(Debug)]
+struct RuntimeRootLock {
+    marker: PathBuf,
+    _file: File,
+}
+
+impl Drop for RuntimeRootOwnership {
+    fn drop(&mut self) {
+        for lock in self.locks.drain(..) {
+            let _ = fs::remove_file(lock.marker);
+        }
+    }
+}
+
+fn acquire_runtime_root_ownership(
+    runtime: &RunRuntimeConfig,
+) -> Result<RuntimeRootOwnership, RunCommandError> {
+    let mut roots = vec![runtime.workflow.config.workspace.root.clone()];
+    if let Some(state_root) = &runtime.state_root {
+        roots.push(state_root.clone());
+    }
+    acquire_root_ownership(roots)
+}
+
+fn acquire_root_ownership(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> Result<RuntimeRootOwnership, RunCommandError> {
+    let mut canonical_roots = BTreeSet::new();
+    for root in roots {
+        fs::create_dir_all(&root).map_err(|source| RunCommandError::RootOwnership {
+            detail: format!("failed to create {}: {source}", root.display()),
+        })?;
+        let root = fs::canonicalize(&root).map_err(|source| RunCommandError::RootOwnership {
+            detail: format!("failed to resolve {}: {source}", root.display()),
+        })?;
+        canonical_roots.insert(root);
+    }
+
+    let mut locks = Vec::with_capacity(canonical_roots.len());
+    for root in canonical_roots {
+        let marker = root.join(".opensymphony-instance.lock");
+        let file = loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "pid={}", std::process::id()).map_err(|source| {
+                        RunCommandError::RootOwnership {
+                            detail: format!("failed to initialize {}: {source}", marker.display()),
+                        }
+                    })?;
+                    break file;
+                }
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                    if root_lock_owner_alive(&marker) {
+                        return Err(RunCommandError::RootOwnership {
+                            detail: format!("{} is already owned by another run", root.display()),
+                        });
+                    }
+                    let stale_marker = root.join(format!(
+                        ".opensymphony-instance.lock.stale-{}-{}",
+                        std::process::id(),
+                        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                    ));
+                    match fs::rename(&marker, &stale_marker) {
+                        Ok(()) => {
+                            let _ = fs::remove_file(stale_marker);
+                        }
+                        Err(rename_error) if rename_error.kind() == io::ErrorKind::NotFound => {}
+                        Err(rename_error) => {
+                            return Err(RunCommandError::RootOwnership {
+                                detail: format!(
+                                    "failed to reclaim stale {}: {rename_error}",
+                                    marker.display()
+                                ),
+                            });
+                        }
+                    }
+                }
+                Err(source) => {
+                    return Err(RunCommandError::RootOwnership {
+                        detail: format!("failed to lock {}: {source}", root.display()),
+                    });
+                }
+            }
+        };
+        locks.push(RuntimeRootLock {
+            marker,
+            _file: file,
+        });
+    }
+
+    Ok(RuntimeRootOwnership { locks })
+}
+
+fn root_lock_owner_alive(marker: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return true;
+    };
+    let Some(pid) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())
+    else {
+        return true;
+    };
+
+    #[cfg(unix)]
+    {
+        let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+            return true;
+        };
+        match rustix::process::test_kill_process(pid) {
+            Ok(()) => true,
+            Err(error) if error == rustix::io::Errno::SRCH => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 pub async fn run_command(args: RunArgs) -> ExitCode {
@@ -148,6 +283,7 @@ pub async fn run_command(args: RunArgs) -> ExitCode {
 
 async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let mut runtime = resolve_runtime_config(&args).await?;
+    let _root_ownership = acquire_runtime_root_ownership(&runtime)?;
     let linear_worker_env = apply_linear_oauth_client_credentials(&mut runtime).await?;
     info!(
         config = runtime
@@ -346,7 +482,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     return Ok(());
                 }
                 Ok(Err(error)) => return Err(RunCommandError::Serve(error)),
-                Err(error) => return Err(RunCommandError::Serve(std::io::Error::other(error.to_string()))),
+                Err(error) => return Err(RunCommandError::Serve(io::Error::other(error.to_string()))),
             }
         }
         result = scheduler.bootstrap(now_timestamp()) => result?,
@@ -389,7 +525,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 match result {
                     Ok(Ok(())) => break,
                     Ok(Err(error)) => return Err(RunCommandError::Serve(error)),
-                    Err(error) => return Err(RunCommandError::Serve(std::io::Error::other(error.to_string()))),
+                    Err(error) => return Err(RunCommandError::Serve(io::Error::other(error.to_string()))),
                 }
             }
             result = async {
@@ -878,6 +1014,18 @@ mod tests {
             client.is_none(),
             "gateway task graph reader should fail closed instead of aborting run startup",
         );
+    }
+
+    #[test]
+    fn runtime_root_ownership_rejects_a_second_live_owner_and_releases_on_drop() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let first = acquire_root_ownership([root.path().to_path_buf()])
+            .expect("first owner should acquire the root");
+        let second = acquire_root_ownership([root.path().to_path_buf()]);
+        assert!(matches!(second, Err(RunCommandError::RootOwnership { .. })));
+        drop(first);
+        acquire_root_ownership([root.path().to_path_buf()])
+            .expect("root should be available after owner drops");
     }
 
     #[test]

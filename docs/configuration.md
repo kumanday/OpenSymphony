@@ -25,6 +25,11 @@ current-directory discovery. A legacy file containing only `schema_version`
 remains on the legacy parser. `compatibility.allow_repo_local_config` is currently unsupported
 and must remain `false`; setting it to `true` fails validation rather than
 silently discarding repository-local orchestration settings.
+Before tracker or workspace initialization, each run claims a process-lifetime
+`.opensymphony-instance.lock` in every configured state and workspace root.
+The lock prevents two instances from sharing runtime state; a live owner fails
+startup, while a marker whose PID is no longer alive is atomically quarantined
+and reclaimed. Legacy runs claim their configured workspace root as well.
 The `openhands.front_matter` subsection carries the complete typed OpenHands
 transport, local-server, conversation/LLM, subscription-reference, and
 WebSocket profile when a workflow is migrated. `scheduler.retry.max_attempts`
@@ -41,6 +46,9 @@ redispatch, while terminal tracker reconciliation removes stale exhaustion
 markers. Once the limit is reached, the instance state root records a
 retry-exhaustion marker before a disposable failed workspace is removed; the
 marker keeps the issue parked across a later run.
+Pending retry manifests also retain their scheduled time, due deadline,
+reason, and redacted error summary, so recovery preserves the original
+backoff instead of redispatching immediately.
 
 The supported routing variants are explicit:
 

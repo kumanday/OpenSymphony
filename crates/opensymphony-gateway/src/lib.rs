@@ -4403,7 +4403,10 @@ async fn get_run_detail(
     let release_reason = if issue.cancel_failed {
         Some(ReleaseReason::CancelFailed)
     } else if terminal_tracker_state
-        && issue.release_reason == Some(DomainReleaseReason::TrackerInactive)
+        && matches!(
+            issue.release_reason,
+            Some(DomainReleaseReason::TrackerInactive | DomainReleaseReason::RetryExhausted)
+        )
     {
         Some(ReleaseReason::TrackerTerminal)
     } else if let Some(reason) = issue.release_reason {

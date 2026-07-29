@@ -1120,7 +1120,13 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
     let linear_projects = BTreeMap::from([(
         project.clone(),
         json!({
-            "provider_project_id": project.clone(),
+            "provider_project_id": source
+                .workflow
+                .front_matter
+                .tracker
+                .project_id
+                .clone()
+                .unwrap_or_else(|| project.clone()),
             "provider_project_slug": project.clone(),
             "repositories": ["legacy-repository"]
         }),
@@ -2257,6 +2263,43 @@ mod tests {
         let generated = generate_central_config(&source).expect("migration should generate");
         assert!(!generated.contains("/repo/var/workspaces"));
         assert!(generated.contains("~/.opensymphony/workspaces/legacy-repo-"));
+    }
+
+    #[test]
+    fn migration_preserves_linear_project_id_separately_from_slug() {
+        let target_repo = PathBuf::from("/repo");
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_id: immutable-project-id\n  project_slug: human-project-slug\n---\n\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source: String::new(),
+            target_repo,
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        let generated = generate_central_config(&source).expect("migration should generate");
+        let generated: serde_yaml::Value =
+            serde_yaml::from_str(&generated).expect("generated config should parse");
+        let project = &generated["linear_projects"]["human-project-slug"];
+        assert_eq!(
+            project["provider_project_id"].as_str(),
+            Some("immutable-project-id")
+        );
+        assert_eq!(
+            project["provider_project_slug"].as_str(),
+            Some("human-project-slug")
+        );
     }
 
     #[test]

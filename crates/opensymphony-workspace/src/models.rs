@@ -365,6 +365,14 @@ pub struct RunManifest {
     pub normal_retry_count: u32,
     #[serde(default)]
     pub pending_retry: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_scheduled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_due_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_error: Option<String>,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -386,6 +394,10 @@ impl RunManifest {
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
             pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             status: RunStatus::Preparing,
             created_at: now,
             updated_at: now,

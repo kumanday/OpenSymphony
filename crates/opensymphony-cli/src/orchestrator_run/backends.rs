@@ -17,8 +17,9 @@ use crate::opensymphony_codex::{
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
-    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+    NormalizedIssue, RetryEntry, RetryReason, RuntimeStreamState, TimestampMs,
+    TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -810,6 +811,19 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     .as_ref()
                     .map(|run| run.normal_retry_count)
                     .unwrap_or_default(),
+                retry_scheduled_at: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_scheduled_at.map(TimestampMs::new)),
+                retry_due_at: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_due_at.map(TimestampMs::new)),
+                retry_reason: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_reason.as_deref())
+                    .and_then(retry_reason_from_manifest),
+                retry_error: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_error.clone()),
                 harness_kind,
                 recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
             });
@@ -899,6 +913,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         };
         manifest.normal_retry_count = normal_retry_count;
         manifest.pending_retry = false;
+        manifest.retry_scheduled_at = None;
+        manifest.retry_due_at = None;
+        manifest.retry_reason = None;
+        manifest.retry_error = None;
         manifest.updated_at = chrono::Utc::now();
         self.manager.write_run_manifest(&handle, &manifest).await?;
         Ok(())
@@ -907,6 +925,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     async fn persist_retry_pending(
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        retry: &RetryEntry,
     ) -> Result<(), Self::Error> {
         let Some((handle, _)) = self
             .manager
@@ -927,6 +946,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             }));
         };
         manifest.pending_retry = true;
+        manifest.retry_scheduled_at = Some(retry.scheduled_at.as_u64());
+        manifest.retry_due_at = Some(retry.due_at.as_u64());
+        manifest.retry_reason = Some(retry_reason_for_manifest(retry.reason));
+        manifest.retry_error = retry.error.clone();
         manifest.updated_at = chrono::Utc::now();
         self.manager.write_run_manifest(&handle, &manifest).await?;
         Ok(())
@@ -992,6 +1015,28 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
 
     fn retain_failed_workspaces(&self) -> bool {
         self.retain_failed
+    }
+}
+
+fn retry_reason_for_manifest(reason: RetryReason) -> String {
+    match reason {
+        RetryReason::Continuation => "continuation",
+        RetryReason::Failure => "failure",
+        RetryReason::Stalled => "stalled",
+        RetryReason::Cancelled => "cancelled",
+        RetryReason::Reconciliation => "reconciliation",
+    }
+    .to_owned()
+}
+
+fn retry_reason_from_manifest(value: &str) -> Option<RetryReason> {
+    match value {
+        "continuation" => Some(RetryReason::Continuation),
+        "failure" => Some(RetryReason::Failure),
+        "stalled" => Some(RetryReason::Stalled),
+        "cancelled" => Some(RetryReason::Cancelled),
+        "reconciliation" => Some(RetryReason::Reconciliation),
+        _ => None,
     }
 }
 
@@ -4483,6 +4528,12 @@ mod tests {
         let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
 
         backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("ordinary terminal cleanup should honor retention");
+        assert!(ensured.handle.workspace_path().exists());
+
+        backend
             .cleanup_failed_workspace(&workspace)
             .await
             .expect("failed cleanup should remove retained terminal workspace");
@@ -5642,6 +5693,10 @@ mod tests {
             .await
             .expect("completed run should be persisted");
         run_manifest.pending_retry = true;
+        run_manifest.retry_scheduled_at = Some(250);
+        run_manifest.retry_due_at = Some(1_200);
+        run_manifest.retry_reason = Some("failure".to_owned());
+        run_manifest.retry_error = Some("transient failure".to_owned());
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
@@ -5657,6 +5712,16 @@ mod tests {
         assert!(!recoveries[0].had_in_flight_run);
         assert!(recoveries[0].pending_retry);
         assert_eq!(recoveries[0].normal_retry_count, 0);
+        assert_eq!(
+            recoveries[0].retry_scheduled_at,
+            Some(TimestampMs::new(250))
+        );
+        assert_eq!(recoveries[0].retry_due_at, Some(TimestampMs::new(1_200)));
+        assert_eq!(recoveries[0].retry_reason, Some(RetryReason::Failure));
+        assert_eq!(
+            recoveries[0].retry_error.as_deref(),
+            Some("transient failure")
+        );
     }
 
     #[tokio::test]

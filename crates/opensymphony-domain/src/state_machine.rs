@@ -556,6 +556,24 @@ impl IssueExecution {
         Ok(self)
     }
 
+    pub fn replace_release_reason(
+        mut self,
+        released_at: TimestampMs,
+        reason: ReleaseReason,
+    ) -> Result<Self, StateTransitionError> {
+        if !matches!(self.state, SchedulerState::Released { .. }) {
+            return Err(StateTransitionError::InvalidTransition {
+                from: self.status(),
+                action: TransitionAction::Release,
+            });
+        }
+        self.state = SchedulerState::Released {
+            released_at,
+            reason,
+        };
+        Ok(self)
+    }
+
     pub fn reopen(mut self, observed_at: TimestampMs) -> Result<Self, StateTransitionError> {
         match self.state {
             SchedulerState::Released { reason, .. } => {

@@ -9,7 +9,7 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
-    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason,
+    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryEntry,
     RetryExhaustionRecord, RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig,
     SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue, TrackerIssueState,
     TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason,
@@ -439,6 +439,7 @@ impl WorkspaceBackend for FakeWorkspace {
     async fn persist_retry_pending(
         &mut self,
         _workspace: &WorkspaceRecord,
+        _retry: &RetryEntry,
     ) -> Result<(), Self::Error> {
         self.persisted_retry_pending += 1;
         Ok(())
@@ -1137,6 +1138,10 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             harness_kind: Some("codex_app_server".to_string()),
             recovered_run: Some(RecoveredRun {
                 worker_id: recovered_worker_id.clone(),
@@ -1987,6 +1992,63 @@ async fn failed_terminal_interrupt_is_retried_before_cleanup() {
 }
 
 #[tokio::test]
+async fn failed_stall_interrupt_remains_running_until_stop_is_acknowledged() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-275", "COE-275", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("remote stop was temporarily unavailable".to_string()),
+        }));
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
+            detail: Some("remote stop acknowledged".to_string()),
+        }));
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    scheduler
+        .tick(ts(250))
+        .await
+        .expect("first stalled stop attempt should be retained");
+
+    let issue_id = IssueId::new("lin-275").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("failed stalled execution should remain tracked")
+            .status(),
+        SchedulerStatus::Running
+    );
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert!(scheduler.worker().aborted.is_empty());
+
+    scheduler
+        .tick(ts(350))
+        .await
+        .expect("second stalled stop attempt should succeed");
+    assert_eq!(scheduler.worker().interrupts.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("stalled retry should remain tracked")
+            .status(),
+        SchedulerStatus::RetryQueued
+    );
+}
+
+#[tokio::test]
 async fn runtime_events_extend_stall_deadlines_before_retrying_a_stalled_worker() {
     let tracker = FakeTracker {
         active: vec![
@@ -2076,6 +2138,10 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             harness_kind: Some("openhands_agent_server".to_string()),
             recovered_run: None,
         }],
@@ -2124,6 +2190,10 @@ async fn recovery_restores_non_exhausted_retry_budget_before_dispatch() {
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             harness_kind: None,
             recovered_run: None,
         }],
@@ -2163,6 +2233,10 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
             had_in_flight_run: false,
             pending_retry: true,
             normal_retry_count: 0,
+            retry_scheduled_at: Some(ts(250)),
+            retry_due_at: Some(ts(1_200)),
+            retry_reason: Some(RetryReason::Continuation),
+            retry_error: None,
             harness_kind: None,
             recovered_run: None,
         }],
@@ -2177,7 +2251,14 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
     scheduler
         .tick(ts(100))
         .await
-        .expect("pending retry recovery should dispatch");
+        .expect("pending retry recovery should restore schedule");
+
+    assert!(scheduler.worker().launches.is_empty());
+
+    scheduler
+        .tick(ts(1_300))
+        .await
+        .expect("pending retry should dispatch after its restored deadline");
 
     assert_eq!(scheduler.worker().launches.len(), 1);
     assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
@@ -2290,6 +2371,10 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             harness_kind: None,
             recovered_run: None,
         }],
@@ -2340,6 +2425,10 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             harness_kind: None,
             recovered_run: None,
         }],
@@ -2534,6 +2623,10 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
             harness_kind: Some("openhands_agent_server".to_string()),
             recovered_run: None,
         }],
