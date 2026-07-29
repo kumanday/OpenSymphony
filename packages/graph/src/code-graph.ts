@@ -340,20 +340,30 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
         : {
             ...state,
             mode: action.mode,
-            baseRevision: null,
-            headRevision: null,
-            diffOverlay: null,
+            baseRevision: state.runId ? state.baseRevision : null,
+            headRevision: state.runId ? state.headRevision : null,
+            diffOverlay: state.runId ? state.diffOverlay : null,
             filters: { ...state.filters, deltaStatuses: [] },
           };
     case "REPO_SELECTED":
       return selectCodeGraphRepo(state, action.repoId);
-    case "TARGET_SET":
+    case "TARGET_SET": {
+      const runChanged = action.runId !== undefined && action.runId !== state.runId;
       return {
         ...state,
         symbolKey: action.symbolKey === undefined ? state.symbolKey : action.symbolKey,
         path: action.path === undefined ? state.path : action.path,
         runId: action.runId === undefined ? state.runId : action.runId,
+        ...(runChanged
+          ? {
+              baseRevision: null,
+              headRevision: null,
+              diffOverlay: null,
+              filters: { ...state.filters, deltaStatuses: [] },
+            }
+          : {}),
       };
+    }
     case "NODE_SELECTED":
       return { ...state, selectedNodeIds: action.nodeId ? [action.nodeId] : [] };
     case "SELECTION_SET":
@@ -410,25 +420,32 @@ export function codeGraphReducer(state: CodeGraphState, action: CodeGraphAction)
       return { ...state, stale: true, lastUpdatedAt: action.updatedAt };
     case "HISTORY_RESTORED": {
       const restoredMode = action.state.mode ?? state.mode;
+      const restoredRunId = action.state.runId === undefined
+        ? state.runId
+        : action.state.runId;
+      const runChanged = restoredRunId !== state.runId;
       const restoredBaseRevision = action.state.baseRevision === undefined
-        ? state.baseRevision
+        ? runChanged ? null : state.baseRevision
         : action.state.baseRevision;
       const restoredHeadRevision = action.state.headRevision === undefined
-        ? state.headRevision
+        ? runChanged ? null : state.headRevision
         : action.state.headRevision;
       const restoredRepoId = action.state.repoId === undefined ? state.repoId : action.state.repoId;
       const keepsDiffOverlay = restoredMode === "diff"
+        && !runChanged
         && restoredRepoId === state.repoId
         && restoredBaseRevision === state.baseRevision
         && restoredHeadRevision === state.headRevision;
       return {
         ...state,
         ...action.state,
+        baseRevision: restoredBaseRevision,
+        headRevision: restoredHeadRevision,
         diffOverlay: keepsDiffOverlay ? state.diffOverlay : null,
         depth: clamp(action.state.depth ?? state.depth, codeGraphDepthBounds.min, codeGraphDepthBounds.max),
         filters: normalizeCodeGraphFilters({
           ...(action.state.filters ?? state.filters),
-          ...((restoredMode !== "diff") ? { deltaStatuses: [] } : {}),
+          ...((restoredMode !== "diff" || runChanged) ? { deltaStatuses: [] } : {}),
         }),
         selectedNodeIds: uniqueSorted(action.state.selectedNodeIds ?? state.selectedNodeIds),
       };

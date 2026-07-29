@@ -125,6 +125,35 @@ describe("Code Graph adapters and state", () => {
     expect(state.filters.deltaStatuses).toEqual([]);
   });
 
+  it("keeps run diff context across mode toggles and clears it for another run", () => {
+    const overlay = codeGraphFixtureDiffOverlays[0];
+    let state = codeGraphReducer(createInitialCodeGraphState(), {
+      type: "TARGET_SET",
+      runId: "COE-547",
+    });
+    state = codeGraphReducer(state, { type: "DIFF_LOADED", overlay });
+    state = codeGraphReducer(state, { type: "MODE_SET", mode: "neighborhood" });
+    expect(state.baseRevision).toBe(overlay.base_revision);
+    expect(state.headRevision).toBe(overlay.head_revision);
+    expect(state.diffOverlay).toEqual(overlay);
+
+    state = codeGraphReducer(state, { type: "MODE_SET", mode: "diff" });
+    expect(state.mode).toBe("diff");
+
+    const restored = codeGraphReducer(state, {
+      type: "HISTORY_RESTORED",
+      state: { runId: "COE-548", mode: "diff" },
+    });
+    expect(restored.baseRevision).toBeNull();
+    expect(restored.headRevision).toBeNull();
+    expect(restored.diffOverlay).toBeNull();
+
+    const retargeted = codeGraphReducer(state, { type: "TARGET_SET", runId: "COE-548" });
+    expect(retargeted.baseRevision).toBeNull();
+    expect(retargeted.headRevision).toBeNull();
+    expect(retargeted.diffOverlay).toBeNull();
+  });
+
   it("does not retain a Diff overlay when restoring another repository", () => {
     const overlay = codeGraphFixtureDiffOverlays[0];
     let state = codeGraphReducer(createInitialCodeGraphState(), { type: "DIFF_LOADED", overlay });
