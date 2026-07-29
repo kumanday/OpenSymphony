@@ -280,6 +280,34 @@ pub(crate) fn acquire_root_ownership(
         });
     }
 
+    // The initial hierarchy scan prevents most conflicts, while this second
+    // scan closes the race where two instances create nested markers between
+    // one another's scans.  A deterministic marker-path winner lets one
+    // contender keep its claim and forces the other to release every claim it
+    // acquired in this call, so both instances cannot proceed.
+    let own_markers = ownership
+        .locks
+        .iter()
+        .map(|lock| lock.marker.clone())
+        .collect::<BTreeSet<_>>();
+    for lock in &ownership.locks {
+        if let Some(conflicting_marker) = find_conflicting_root_marker(&lock.marker, &own_markers)?
+            && conflicting_marker < lock.marker
+        {
+            let conflicting_root = conflicting_marker
+                .parent()
+                .unwrap_or(&conflicting_marker)
+                .display();
+            return Err(RunCommandError::RootOwnership {
+                detail: format!(
+                    "{} lost the overlapping root ownership race to {}",
+                    lock.marker.parent().unwrap_or(&lock.marker).display(),
+                    conflicting_root
+                ),
+            });
+        }
+    }
+
     Ok(ownership)
 }
 
@@ -323,6 +351,56 @@ fn find_live_descendant_root_marker(root: &Path) -> Result<Option<PathBuf>, RunC
         }
         if let Some(marker) = find_live_descendant_root_marker(&path)? {
             return Ok(Some(marker));
+        }
+    }
+    Ok(None)
+}
+
+fn find_conflicting_root_marker(
+    marker: &Path,
+    own_markers: &BTreeSet<PathBuf>,
+) -> Result<Option<PathBuf>, RunCommandError> {
+    let root = marker.parent().unwrap_or(marker);
+    let mut ancestor = root.parent();
+    while let Some(path) = ancestor {
+        let candidate = path.join(".opensymphony-instance.lock");
+        if !own_markers.contains(&candidate) && root_marker_blocks(&candidate) {
+            return Ok(Some(candidate));
+        }
+        ancestor = path.parent();
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let entries = fs::read_dir(&current).map_err(|source| RunCommandError::RootOwnership {
+            detail: format!(
+                "failed to inspect nested roots below {}: {source}",
+                current.display()
+            ),
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| RunCommandError::RootOwnership {
+                detail: format!(
+                    "failed to inspect nested roots below {}: {source}",
+                    current.display()
+                ),
+            })?;
+            let path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|source| RunCommandError::RootOwnership {
+                    detail: format!(
+                        "failed to inspect nested root path {}: {source}",
+                        path.display()
+                    ),
+                })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                continue;
+            }
+            let candidate = path.join(".opensymphony-instance.lock");
+            if !own_markers.contains(&candidate) && root_marker_blocks(&candidate) {
+                return Ok(Some(candidate));
+            }
+            pending.push(path);
         }
     }
     Ok(None)

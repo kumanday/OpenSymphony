@@ -354,11 +354,11 @@ fn migration_target_config(paths: &MigrationPaths, cwd: &Path, source: &Path) ->
         .as_deref()
         .map(|path| absolute_path(cwd, path))
         .unwrap_or_else(|| source.to_path_buf());
-    normalize_path(&target)
+    canonicalize_destination(&target)
 }
 
 fn migration_root(target_config: &Path) -> PathBuf {
-    normalize_path(target_config)
+    canonicalize_destination(target_config)
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".opensymphony/migration")
@@ -508,7 +508,7 @@ fn strict_run_marker_owner_alive(marker: &Path) -> bool {
 }
 
 fn migration_marker_path(target_config: &Path) -> PathBuf {
-    let target_config = normalize_path(target_config);
+    let target_config = canonicalize_destination(target_config);
     let key = sha256(target_config.display().to_string().as_bytes());
     migration_root(&target_config).join(format!(
         "activation-{}.yaml",
@@ -877,10 +877,12 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
 
 async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError> {
     let cwd = current_dir()?;
-    let config_path = args
-        .config
-        .map(|path| absolute_path(&cwd, &path))
-        .unwrap_or_else(|| cwd.join("config.yaml"));
+    let config_path = canonicalize_destination(
+        &args
+            .config
+            .map(|path| absolute_path(&cwd, &path))
+            .unwrap_or_else(|| cwd.join("config.yaml")),
+    );
     let Some((marker_path, marker)) = load_activation_marker(&config_path)? else {
         return Err(MigrationError::MissingActivation {
             path: migration_marker_path(&config_path),
@@ -2363,6 +2365,31 @@ fn absolute_path(base: &Path, path: &Path) -> PathBuf {
     normalize_path(&joined)
 }
 
+fn canonicalize_destination(path: &Path) -> PathBuf {
+    let normalized = normalize_path(path);
+    let Some(file_name) = normalized.file_name() else {
+        return normalized;
+    };
+    let parent = normalized.parent().unwrap_or_else(|| Path::new("."));
+    canonicalize_existing_prefix(parent)
+        .unwrap_or_else(|| normalize_path(parent))
+        .join(file_name)
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut unresolved = Vec::new();
+    let mut existing = path.to_path_buf();
+    while !existing.exists() {
+        unresolved.push(existing.file_name()?.to_os_string());
+        existing = existing.parent()?.to_path_buf();
+    }
+    let mut resolved = fs::canonicalize(existing).ok()?;
+    for component in unresolved.iter().rev() {
+        resolved.push(component);
+    }
+    Some(normalize_path(&resolved))
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -2628,6 +2655,27 @@ mod tests {
         assert_eq!(
             strict_run_marker_path(&real),
             strict_run_marker_path(&symlinked)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_markers_canonicalize_symlinked_destination_parents() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("marker root should exist");
+        let real_parent = root.path().join("real");
+        let alias_parent = root.path().join("alias");
+        fs::create_dir(&real_parent).expect("real destination parent should exist");
+        symlink(&real_parent, &alias_parent).expect("destination parent symlink should exist");
+
+        let real = real_parent.join("config.yaml");
+        let aliased = alias_parent.join("config.yaml");
+
+        assert_eq!(migration_root(&real), migration_root(&aliased));
+        assert_eq!(
+            migration_marker_path(&real),
+            migration_marker_path(&aliased)
         );
     }
 

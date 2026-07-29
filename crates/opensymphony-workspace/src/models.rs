@@ -89,10 +89,7 @@ fn redact_authorization_headers(input: &str) -> String {
             .filter(|quote| *quote == b'"' || *quote == b'\'');
         if let Some(quote) = quoted {
             let content_start = value_start + 1;
-            let mut content_end = content_start;
-            while content_end < bytes.len() && bytes[content_end] != quote {
-                content_end += 1;
-            }
+            let content_end = quoted_value_end(bytes, content_start, quote);
             let content = &redacted[content_start..content_end];
             let replacement = authorization_value_replacement(content);
             if replacement != content {
@@ -208,10 +205,7 @@ fn redact_key_value(input: &str, key: &str) -> String {
             .filter(|quote| *quote == b'"' || *quote == b'\'');
         if let Some(quote) = quoted {
             value_start += 1;
-            let mut value_end = value_start;
-            while value_end < bytes.len() && bytes[value_end] != quote {
-                value_end += 1;
-            }
+            let value_end = quoted_value_end(bytes, value_start, quote);
             let suffix_start = if value_end < bytes.len() {
                 value_end + 1
             } else {
@@ -239,6 +233,23 @@ fn redact_key_value(input: &str, key: &str) -> String {
         redacted.replace_range(value_start..value_end, "[redacted]");
         search_from = value_start + "[redacted]".len();
     }
+}
+
+fn quoted_value_end(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == quote && !escaped {
+            return index;
+        }
+        if byte == b'\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+        index += 1;
+    }
+    index
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -984,6 +995,17 @@ mod tests {
         assert!(!value.contains("quoted-secret"));
         assert!(!value.contains("another-secret"));
         assert_eq!(value.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_escaped_quoted_credentials() {
+        let value = redact_runtime_diagnostic(
+            r#"{"refresh_token":"abc\"secret-suffix","api_key":"plain-secret"}"#,
+        );
+
+        assert!(!value.contains("abc"));
+        assert!(!value.contains("secret-suffix"));
+        assert!(!value.contains("plain-secret"));
     }
 
     #[test]
