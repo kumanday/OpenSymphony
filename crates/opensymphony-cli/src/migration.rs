@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::opensymphony_workflow::WorkflowDefinition;
+use crate::opensymphony_workflow::{WorkflowDefinition, WorkflowFrontMatter};
 
 use super::memory::{
-    MemoryActivityStatus, acquire_memory_coordination_lock, memory_activity_marker_path,
-    memory_activity_status, memory_lock_is_stale, memory_migration_lock_path,
+    MEMORY_MIGRATION_LOCK, MemoryActivityStatus, acquire_memory_coordination_lock,
+    memory_activity_marker_path, memory_activity_status, memory_lock_is_stale,
+    memory_migration_lock_path,
 };
 use super::orchestrator_run::config::{
     CentralConfigError, load_central_config, looks_like_central_config,
@@ -1007,7 +1008,9 @@ fn collect_memory_catalog_entries(
             path: current.to_path_buf(),
             source,
         })?;
-        if entry.file_name() == super::memory::MEMORY_ACTIVITY_MARKER {
+        if entry.file_name() == super::memory::MEMORY_ACTIVITY_MARKER
+            || entry.file_name() == MEMORY_MIGRATION_LOCK
+        {
             continue;
         }
         let path = entry.path();
@@ -1179,16 +1182,7 @@ fn build_report(
         config_generation: None,
         recognized_front_matter: recognized,
         hardcoded_clone_hooks,
-        literal_secret_detected: source
-            .workflow
-            .front_matter
-            .tracker
-            .api_key
-            .as_deref()
-            .is_some_and(|value| credential_variable(value).is_none())
-            || openhands_environment_has_literal_secret(
-                &source.workflow.front_matter.openhands.local_server.env,
-            ),
+        literal_secret_detected: workflow_has_literal_secret(&source.workflow.front_matter),
         credential_bearing_remote_detected: remote_has_credentials(&source.remote),
         backup,
         activation_marker: None,
@@ -1196,19 +1190,7 @@ fn build_report(
 }
 
 fn generate_central_config(source: &SourceContext) -> Result<String, MigrationError> {
-    if source
-        .workflow
-        .front_matter
-        .tracker
-        .api_key
-        .as_deref()
-        .is_some_and(|value| credential_variable(value).is_none())
-    {
-        return Err(MigrationError::LiteralSecret);
-    }
-    if openhands_environment_has_literal_secret(
-        &source.workflow.front_matter.openhands.local_server.env,
-    ) {
+    if workflow_has_literal_secret(&source.workflow.front_matter) {
         return Err(MigrationError::LiteralSecret);
     }
     if remote_has_credentials(&source.remote) {
@@ -1982,6 +1964,48 @@ fn credential_variable(value: &str) -> Option<&str> {
     Some(variable)
 }
 
+fn workflow_has_literal_secret(front_matter: &WorkflowFrontMatter) -> bool {
+    front_matter
+        .tracker
+        .api_key
+        .as_deref()
+        .is_some_and(|value| credential_variable(value).is_none())
+        || openhands_environment_has_literal_secret(&front_matter.openhands.local_server.env)
+        || openhands_credential_selector_is_literal(front_matter)
+}
+
+fn openhands_credential_selector_is_literal(front_matter: &WorkflowFrontMatter) -> bool {
+    let openhands = &front_matter.openhands;
+    let mut selectors = vec![openhands.transport.session_api_key_env.as_deref()];
+    if let Some(agent) = openhands.conversation.agent.as_ref()
+        && let Some(llm) = agent.llm.as_ref()
+    {
+        selectors.extend([llm.api_key_env.as_deref(), llm.base_url_env.as_deref()]);
+        if let Some(subscription) = llm.subscription.as_ref() {
+            selectors.extend([
+                subscription.access_token_env.as_deref(),
+                subscription.account_id_env.as_deref(),
+                subscription.auth_directory_env.as_deref(),
+            ]);
+        }
+    }
+    selectors
+        .into_iter()
+        .flatten()
+        .any(|value| !is_environment_variable_name(value))
+}
+
+fn is_environment_variable_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase() || character == '_')
+}
+
 fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> bool {
     env.iter().any(|(name, value)| {
         let name = name.to_ascii_lowercase();
@@ -2319,6 +2343,37 @@ mod tests {
     }
 
     #[test]
+    fn migration_rejects_literal_openhands_credential_selector() {
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nopenhands:\n  conversation:\n    agent:\n      llm:\n        credential_mode: openai_subscription\n        subscription:\n          access_token_env: resolved-access-token\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let target_repo = PathBuf::from("repo");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            target_repo: target_repo.clone(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        let report = build_report("preflight", &source, None, None, true);
+        assert!(report.literal_secret_detected);
+        assert!(matches!(
+            generate_central_config(&source),
+            Err(MigrationError::LiteralSecret)
+        ));
+    }
+
+    #[test]
     fn migration_keeps_delimiter_leading_prompt_outside_front_matter() {
         let workflow_source = "---\ntracker:\n  kind: linear\n  project_slug: project\n---\n\n---\nTarget branch: develop\n---\n";
         let workflow =
@@ -2535,6 +2590,20 @@ mod tests {
         let catalog_lock = acquire_memory_coordination_lock(&catalog)
             .expect("catalog lock should be released with migration scope");
         drop(catalog_lock);
+    }
+
+    #[test]
+    fn memory_catalog_generation_ignores_coordination_lock() {
+        let root = tempfile::tempdir().expect("catalog root should exist");
+        fs::create_dir_all(root.path().join(".opensymphony"))
+            .expect("coordination directory should exist");
+        fs::write(root.path().join("issue.md"), "capsule\n").expect("catalog entry should exist");
+        let before = memory_catalog_generation(root.path()).expect("generation should succeed");
+        fs::write(memory_migration_lock_path(root.path()), "pid=123\n")
+            .expect("coordination lock should exist");
+        let after = memory_catalog_generation(root.path()).expect("generation should succeed");
+
+        assert_eq!(before, after);
     }
 
     #[test]

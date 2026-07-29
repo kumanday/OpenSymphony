@@ -2314,8 +2314,28 @@ where
                 .current_run()
                 .map(|run| run.normal_retry_count)
                 .unwrap_or_default();
-            self.persist_retry_exhaustion(execution.issue(), normal_retry_count)
+            let persisted = self
+                .persist_retry_exhaustion(execution.issue(), normal_retry_count)
                 .await?;
+            let mut execution = execution.release(observed_at, reason, outcome)?;
+            let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
+            if cleanup_terminal
+                && !retain_failed
+                && let Some(workspace) = execution.workspace().cloned()
+            {
+                let cleanup = self.workspace.cleanup_failed_workspace(&workspace).await;
+                match cleanup {
+                    Ok(()) => execution.clear_workspace(),
+                    Err(error) => {
+                        tracing::warn!(
+                            issue = %execution.issue().id,
+                            %error,
+                            "retaining released execution while terminal workspace cleanup retries"
+                        );
+                    }
+                }
+            }
+            return Ok(execution);
         }
         let mut execution = execution.release(observed_at, reason, outcome)?;
         let retain_failed =
@@ -2347,7 +2367,7 @@ where
         &mut self,
         issue: &NormalizedIssue,
         normal_retry_count: u32,
-    ) -> Result<(), SchedulerError> {
+    ) -> Result<bool, SchedulerError> {
         let record = RetryExhaustionRecord {
             issue: issue.clone(),
             normal_retry_count,
@@ -2364,8 +2384,9 @@ where
             );
             self.pending_retry_exhaustion_persistence
                 .insert(issue.id.clone(), record);
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn queue_retry_for_outcome(
@@ -2486,8 +2507,38 @@ where
                     detail: error.to_string(),
                 });
             }
+            self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
+                .await;
         }
         Ok(())
+    }
+
+    async fn cleanup_retry_exhausted_workspace_if_ready(&mut self, issue_id: &IssueId) {
+        if self.workspace.retain_failed_workspaces() {
+            return;
+        }
+        let Some(workspace) = self
+            .executions
+            .get(issue_id)
+            .filter(|execution| retry_exhausted_release(execution))
+            .and_then(|execution| execution.workspace().cloned())
+        else {
+            return;
+        };
+        match self.workspace.cleanup_failed_workspace(&workspace).await {
+            Ok(()) => {
+                if let Some(execution) = self.executions.get_mut(issue_id) {
+                    execution.clear_workspace();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    issue = %issue_id,
+                    %error,
+                    "retry-exhausted workspace cleanup failed after durable marker persistence"
+                );
+            }
+        }
     }
 
     fn next_worker_id(&mut self) -> Result<WorkerId, SchedulerError> {

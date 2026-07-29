@@ -1640,12 +1640,20 @@ async fn exhaustion_persistence_failure_keeps_released_execution_tracked() {
         SchedulerStatus::Released
     );
     assert!(scheduler.workspace().persisted_retry_exhaustions.is_empty());
+    assert!(
+        scheduler.workspace().failed_cleaned.is_empty(),
+        "workspace cleanup must wait for durable retry exhaustion"
+    );
 
     scheduler
         .tick(ts(300))
         .await
         .expect("deferred exhaustion marker should retry");
     assert_eq!(scheduler.workspace().persisted_retry_exhaustions, vec![0]);
+    assert_eq!(
+        scheduler.workspace().failed_cleaned,
+        vec!["COE-270".to_string()]
+    );
 }
 
 #[tokio::test]

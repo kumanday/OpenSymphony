@@ -189,7 +189,9 @@ fn acquire_root_ownership(
         canonical_roots.insert(root);
     }
 
-    let mut locks = Vec::with_capacity(canonical_roots.len());
+    let mut ownership = RuntimeRootOwnership {
+        locks: Vec::with_capacity(canonical_roots.len()),
+    };
     for root in canonical_roots {
         let marker = root.join(".opensymphony-instance.lock");
         let file = loop {
@@ -232,13 +234,13 @@ fn acquire_root_ownership(
                 }
             }
         };
-        locks.push(RuntimeRootLock {
+        ownership.locks.push(RuntimeRootLock {
             marker,
             _file: file,
         });
     }
 
-    Ok(RuntimeRootOwnership { locks })
+    Ok(ownership)
 }
 
 fn initialize_root_marker(mut file: File, marker: &Path) -> Result<File, RunCommandError> {
@@ -1102,6 +1104,24 @@ mod tests {
         drop(first);
         acquire_root_ownership([root.path().to_path_buf()])
             .expect("root should be available after owner drops");
+    }
+
+    #[test]
+    fn runtime_root_ownership_releases_earlier_roots_when_a_later_root_is_busy() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let first_root = root.path().join("a-first");
+        let second_root = root.path().join("b-second");
+        let blocker = acquire_root_ownership([second_root.clone()])
+            .expect("second root should have a live blocker");
+
+        let result = acquire_root_ownership([first_root.clone(), second_root.clone()]);
+
+        assert!(matches!(result, Err(RunCommandError::RootOwnership { .. })));
+        assert!(
+            !first_root.join(".opensymphony-instance.lock").exists(),
+            "a failed later acquisition must release earlier roots"
+        );
+        drop(blocker);
     }
 
     #[test]
