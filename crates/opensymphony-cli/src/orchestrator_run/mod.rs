@@ -335,46 +335,104 @@ pub(crate) fn acquire_root_ownership(
 
 fn acquire_root_ownership_serialization() -> Result<RootOwnershipSerialization, RunCommandError> {
     let path = std::env::temp_dir().join("opensymphony-runtime-root-ownership.lock");
+    acquire_root_ownership_serialization_at(&path)
+}
+
+fn acquire_root_ownership_serialization_at(
+    path: &Path,
+) -> Result<RootOwnershipSerialization, RunCommandError> {
     loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        // Fully initialize a sibling staging file before publishing it with
+        // hard_link. Unlike rename, hard_link never replaces an existing
+        // destination, so a concurrent contender cannot steal a live lock;
+        // unlike create_new on the final path, a crash before initialization
+        // leaves only an unreferenced staging file and never an empty lock.
+        let staging_path = path.with_file_name(format!(
+            "{}.staging-{}-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("lock"),
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
             Ok(mut file) => {
-                if let Err(source) = writeln!(file, "pid={}", std::process::id()) {
-                    let _ = fs::remove_file(&path);
+                let initialize =
+                    writeln!(file, "pid={}", std::process::id()).and_then(|_| file.sync_all());
+                if let Err(source) = initialize {
+                    let _ = fs::remove_file(&staging_path);
                     return Err(RunCommandError::RootOwnership {
                         detail: format!("failed to initialize {}: {source}", path.display()),
                     });
                 }
-                return Ok(RootOwnershipSerialization { path });
-            }
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-                if !root_lock_owner_alive(&path) {
-                    let stale = path.with_file_name(format!(
-                        "opensymphony-runtime-root-ownership.lock.stale-{}-{}",
-                        std::process::id(),
-                        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-                    ));
-                    match fs::rename(&path, &stale) {
-                        Ok(()) => {
-                            let _ = fs::remove_file(stale);
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(RunCommandError::RootOwnership {
-                                detail: format!("failed to reclaim {}: {error}", path.display()),
-                            });
-                        }
+                match fs::hard_link(&staging_path, path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(staging_path);
+                        return Ok(RootOwnershipSerialization {
+                            path: path.to_path_buf(),
+                        });
                     }
-                    continue;
+                    Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                        let _ = fs::remove_file(staging_path);
+                    }
+                    Err(source) => {
+                        let _ = fs::remove_file(staging_path);
+                        return Err(RunCommandError::RootOwnership {
+                            detail: format!("failed to publish {}: {source}", path.display()),
+                        });
+                    }
                 }
-                thread::sleep(Duration::from_millis(10));
             }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(source) => {
                 return Err(RunCommandError::RootOwnership {
-                    detail: format!("failed to serialize root ownership: {source}"),
+                    detail: format!("failed to stage {}: {source}", path.display()),
                 });
             }
         }
+
+        if !serialization_lock_owner_alive(path) {
+            let stale = path.with_file_name(format!(
+                "opensymphony-runtime-root-ownership.lock.stale-{}-{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            match fs::rename(path, &stale) {
+                Ok(()) => {
+                    let _ = fs::remove_file(stale);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(RunCommandError::RootOwnership {
+                        detail: format!("failed to reclaim {}: {error}", path.display()),
+                    });
+                }
+            }
+            continue;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn serialization_lock_owner_alive(marker: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return true;
+    };
+    let Some(pid) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())
+    else {
+        // This path is only used for the atomically published host-wide
+        // serialization marker. An empty/malformed marker can only be an
+        // interrupted pre-publication file from an older implementation and
+        // is therefore reclaimable.
+        return false;
+    };
+    process_owner_alive(pid)
 }
 
 fn root_marker_blocks(marker: &Path) -> bool {
@@ -494,6 +552,10 @@ pub(crate) fn root_lock_owner_alive(marker: &Path) -> bool {
         return true;
     };
 
+    process_owner_alive(pid)
+}
+
+fn process_owner_alive(pid: i32) -> bool {
     #[cfg(unix)]
     {
         let Some(pid) = rustix::process::Pid::from_raw(pid) else {
@@ -776,7 +838,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     .active_states
                     .iter()
                     .cloned(),
-            );
+            )
+            .with_terminal_states(terminal_state_set(&runtime.workflow));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
     let mut gateway_action_cursor = 0;
 
@@ -1374,6 +1437,22 @@ mod tests {
         drop(first);
         acquire_root_ownership([root.path().to_path_buf()])
             .expect("root should be available after owner drops");
+    }
+
+    #[test]
+    fn serialization_lock_reclaims_an_uninitialized_marker() {
+        let root = tempfile::tempdir().expect("serialization root");
+        let path = root.path().join("serialization.lock");
+        fs::write(&path, "").expect("write interrupted marker");
+
+        let owner = acquire_root_ownership_serialization_at(&path)
+            .expect("an interrupted marker should be recoverable");
+        assert_eq!(
+            fs::read_to_string(&path).expect("published marker should be readable"),
+            format!("pid={}\n", std::process::id())
+        );
+        drop(owner);
+        assert!(!path.exists());
     }
 
     #[test]

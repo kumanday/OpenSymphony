@@ -5566,6 +5566,8 @@ async fn gateway_run_detail_preserves_explicit_tracker_inactive_reason() {
         .find(|issue| issue.identifier == "COE-302")
         .expect("failed fixture issue should exist");
     issue.release_reason = Some(DomainReleaseReason::TrackerInactive);
+    issue.runtime_state = IssueRuntimeState::Completed;
+    issue.last_outcome = WorkerOutcome::Completed;
     let store = SnapshotStore::new(snapshot);
     let server = GatewayServer::new(store.clone());
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -5605,8 +5607,9 @@ async fn gateway_run_detail_terminal_tracker_state_overrides_stale_inactive_reas
         .expect("failed fixture issue should exist");
     issue.release_reason = Some(DomainReleaseReason::TrackerInactive);
     issue.runtime_state = IssueRuntimeState::Completed;
+    issue.tracker_state = "Done".to_owned();
     let store = SnapshotStore::new(snapshot);
-    let server = GatewayServer::new(store.clone());
+    let server = GatewayServer::new(store.clone()).with_terminal_states(["Done".to_owned()]);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -5644,8 +5647,9 @@ async fn gateway_run_detail_terminal_tracker_state_overrides_stale_exhaustion_re
         .expect("failed fixture issue should exist");
     issue.release_reason = Some(DomainReleaseReason::RetryExhausted);
     issue.runtime_state = IssueRuntimeState::Completed;
+    issue.tracker_state = "Done".to_owned();
     let store = SnapshotStore::new(snapshot);
-    let server = GatewayServer::new(store.clone());
+    let server = GatewayServer::new(store.clone()).with_terminal_states(["Done".to_owned()]);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");

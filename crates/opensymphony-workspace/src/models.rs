@@ -20,6 +20,10 @@ pub fn redact_runtime_diagnostic(input: &str) -> String {
         "account_identifier",
         "account_identity",
         "chatgpt_account_id",
+        "account-id",
+        "account-identifier",
+        "account-identity",
+        "chatgpt-account-id",
         "client_secret",
         "credential",
         "password",
@@ -1024,11 +1028,12 @@ mod tests {
     #[test]
     fn runtime_diagnostics_redact_account_identities() {
         let value = redact_runtime_diagnostic(
-            "account_id=acct_123 account_identifier:acct_456 chatgpt_account_id=acct_789",
+            "account_id=acct_123 account_identifier:acct_456 chatgpt_account_id=acct_789 chatgpt-account-id:acct_999",
         );
 
         assert!(!value.contains("acct_123"));
         assert!(!value.contains("acct_456"));
         assert!(!value.contains("acct_789"));
+        assert!(!value.contains("acct_999"));
     }
 }

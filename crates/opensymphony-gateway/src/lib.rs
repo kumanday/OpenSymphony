@@ -304,6 +304,10 @@ pub struct GatewayState {
     /// workflow config is wired in (bare test servers), in which case the
     /// category is used as a fallback.
     pub active_states: Arc<HashSet<String>>,
+    /// Normalized workflow terminal-state names. Run detail uses this to
+    /// distinguish a tracker-terminal release from a completed worker run
+    /// that was parked because the tracker was merely inactive.
+    pub terminal_states: Arc<HashSet<String>>,
     pub codex_readiness_cache: Arc<CodexReadinessCache>,
     pub workspace_scans: WorkspaceScans,
     pub comparison_bases: WorkspaceComparisonBases,
@@ -323,6 +327,7 @@ impl Clone for GatewayState {
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
             active_states: self.active_states.clone(),
+            terminal_states: self.terminal_states.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
             workspace_scans: self.workspace_scans.clone(),
             comparison_bases: self.comparison_bases.clone(),
@@ -583,6 +588,7 @@ pub struct GatewayServer {
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     memory_config: Option<MemoryConfig>,
     active_states: Arc<HashSet<String>>,
+    terminal_states: Arc<HashSet<String>>,
     comparison_bases: WorkspaceComparisonBases,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -598,6 +604,7 @@ impl Clone for GatewayServer {
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
             active_states: self.active_states.clone(),
+            terminal_states: self.terminal_states.clone(),
             comparison_bases: self.comparison_bases.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
@@ -655,6 +662,7 @@ impl GatewayServer {
             linear_task_graph: None,
             memory_config: None,
             active_states: Arc::new(HashSet::new()),
+            terminal_states: Arc::new(HashSet::new()),
             comparison_bases: WorkspaceComparisonBases::default(),
             terminal_ingest_handle: Mutex::new(None),
         }
@@ -675,6 +683,7 @@ impl GatewayServer {
             linear_task_graph: None,
             memory_config: None,
             active_states: Arc::new(HashSet::new()),
+            terminal_states: Arc::new(HashSet::new()),
             comparison_bases: WorkspaceComparisonBases::default(),
             terminal_ingest_handle: Mutex::new(None),
         }
@@ -733,6 +742,19 @@ impl GatewayServer {
         self
     }
 
+    /// Install the workflow's terminal-state names so run detail can preserve
+    /// an explicit `TrackerInactive` reason until the tracker actually enters
+    /// a configured terminal state.
+    pub fn with_terminal_states(mut self, states: impl IntoIterator<Item = String>) -> Self {
+        self.terminal_states = Arc::new(
+            states
+                .into_iter()
+                .map(|state| state.trim().to_ascii_lowercase())
+                .collect(),
+        );
+        self
+    }
+
     /// Extract clones of the journal and broker so the caller can keep them for testing.
     pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal.clone(), self.broker.clone())
@@ -751,6 +773,7 @@ impl GatewayServer {
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
             active_states: self.active_states.clone(),
+            terminal_states: self.terminal_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
             workspace_scans: WorkspaceScans::with_target_branch(self.memory_config.as_ref().map(
                 |config| code_index_branch(&config.repo_root).map_err(|error| error.to_string()),
@@ -4395,11 +4418,13 @@ async fn get_run_detail(
         ControlPlaneIssueRuntimeState::Failed => (RunStatus::Released, RunLifecycleState::Failed),
     };
 
-    // Tracker state is authoritative when a parked execution is later moved
-    // directly to a terminal state. The scheduler keeps the original
-    // TrackerInactive release reason on an already-released execution, but a
-    // terminal tracker state must not render that run as cancelled/failed.
-    let terminal_tracker_state = issue.runtime_state == ControlPlaneIssueRuntimeState::Completed;
+    // Runtime completion describes the worker execution, not the tracker
+    // category. A successful worker can be released as TrackerInactive while
+    // its issue remains in a nonterminal tracker state, so only a configured
+    // terminal tracker state may override the scheduler's explicit reason.
+    let terminal_tracker_state = state
+        .terminal_states
+        .contains(&issue.tracker_state.trim().to_ascii_lowercase());
     let release_reason = if issue.cancel_failed {
         Some(ReleaseReason::CancelFailed)
     } else if terminal_tracker_state

@@ -1596,7 +1596,11 @@ fn validate_openhands_env_references(
 }
 
 fn openhands_secret_field_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
+    // OpenHands emits some identity headers with hyphens (for example,
+    // `chatgpt-account-id`) even though most serialized config uses
+    // underscore-separated keys. Normalize the separator before applying the
+    // secret-shaped field rules so both spellings fail closed.
+    let name = name.to_ascii_lowercase().replace('-', "_");
     [
         "access_token",
         "api_key",
@@ -2547,6 +2551,25 @@ scheduler:
             .expect_err("literal OpenHands account identities must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("acct_123"));
+    }
+
+    #[test]
+    fn central_config_rejects_hyphenated_openhands_account_identity() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              chatgpt-account-id: acct_456\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("hyphenated OpenHands account identities must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("acct_456"));
     }
 
     #[test]
