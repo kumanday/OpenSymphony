@@ -79,6 +79,8 @@ enum MigrationError {
     CredentialBearingRemote,
     #[error("central config destination {path} is not an activation of this migration")]
     DestinationConflict { path: PathBuf },
+    #[error("activated migration file changed after apply: {path}")]
+    ActivatedFileChanged { path: PathBuf },
     #[error("workflow {path} does not declare an exact `Target branch:`")]
     MissingTargetBranch { path: PathBuf },
     #[error("workflow field {field} is not a valid unsigned integer: {value}")]
@@ -164,6 +166,8 @@ struct ActivationMarker {
     workflow_path: PathBuf,
     backup_dir: PathBuf,
     generation: String,
+    #[serde(default)]
+    workflow_generation: String,
     had_config: bool,
     had_workflow: bool,
     #[serde(default)]
@@ -576,6 +580,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         workflow_path: source.workflow_path.clone(),
         backup_dir: backup_dir.clone(),
         generation: generation.clone(),
+        workflow_generation: sha256(&workflow_body),
         had_config,
         had_workflow,
         config_mode,
@@ -665,6 +670,8 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         });
     }
 
+    verify_activated_files(&marker)?;
+
     if marker.had_config {
         restore_file(
             &marker.backup_dir.join("config.yaml"),
@@ -709,6 +716,26 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         backup: Some(marker.backup_dir),
         activation_marker: Some(marker_path),
     })
+}
+
+fn verify_activated_files(marker: &ActivationMarker) -> Result<(), MigrationError> {
+    verify_activated_file(&marker.config_path, &marker.generation)?;
+    if !marker.workflow_generation.is_empty() {
+        verify_activated_file(&marker.workflow_path, &marker.workflow_generation)?;
+    }
+    Ok(())
+}
+
+fn verify_activated_file(path: &Path, generation: &str) -> Result<(), MigrationError> {
+    let contents = fs::read(path).map_err(|_| MigrationError::ActivatedFileChanged {
+        path: path.to_path_buf(),
+    })?;
+    if sha256(&contents) != generation {
+        return Err(MigrationError::ActivatedFileChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> {
@@ -904,9 +931,12 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
                     path: source.workflow_path.clone(),
                     detail: format!("workspace.root: {error}"),
                 })?;
-            resolve_repo_path(&source.target_repo, &value)
-                .display()
-                .to_string()
+            let resolved = resolve_repo_path(&source.target_repo, &value);
+            if paths_overlap(&resolved, &source.target_repo) {
+                format!("~/.opensymphony/workspaces/{instance_id}")
+            } else {
+                resolved.display().to_string()
+            }
         }
         None => format!("~/.opensymphony/workspaces/{instance_id}"),
     };
@@ -1133,8 +1163,12 @@ fn target_branch(prompt: &str) -> Option<String> {
 fn integer_value(value: &crate::opensymphony_workflow::IntegerLike) -> String {
     match value {
         crate::opensymphony_workflow::IntegerLike::Integer(value) => value.to_string(),
-        crate::opensymphony_workflow::IntegerLike::String(value) => value.clone(),
+        crate::opensymphony_workflow::IntegerLike::String(value) => value.trim().to_owned(),
     }
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 fn migrated_stall_timeout_ms(value: &crate::opensymphony_workflow::IntegerLike) -> Option<u64> {
@@ -1209,12 +1243,31 @@ fn hook_creates_repository(value: &str) -> bool {
                     .iter()
                     .any(|token| matches!(*token, "clone" | "init"));
             }
-            tokens
+            if tokens
                 .iter()
                 .position(|token| token.rsplit('/').next().is_some_and(|name| name == "gh"))
                 .is_some_and(|index| {
                     tokens.get(index + 1..index + 3) == Some(["repo", "clone"].as_slice())
                 })
+            {
+                return true;
+            }
+
+            let command = tokens
+                .first()
+                .and_then(|token| token.rsplit('/').next())
+                .unwrap_or_default();
+            match command {
+                "hg" | "svn" | "bzr" | "darcs" | "fossil" | "pijul" => tokens
+                    .iter()
+                    .skip(1)
+                    .any(|token| matches!(*token, "clone" | "checkout" | "co" | "branch" | "get")),
+                "cp" => tokens
+                    .iter()
+                    .any(|token| matches!(*token, "-a" | "-r" | "-R" | "--archive")),
+                "rsync" => true,
+                _ => false,
+            }
         })
 }
 
@@ -1318,11 +1371,42 @@ fn restore_file(backup: &Path, target: &Path, mode: Option<u32>) -> Result<(), M
 
 fn replace_staged_file(stage: &Path, target: &Path) -> Result<(), MigrationError> {
     #[cfg(windows)]
-    if target.exists() {
-        fs::remove_file(target).map_err(|source| MigrationError::Write {
-            path: target.to_path_buf(),
-            source,
-        })?;
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MoveFileExW(existing_name: *const u16, new_name: *const u16, flags: u32) -> i32;
+        }
+
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        let existing = stage
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let replacement = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // MoveFileExW replaces the destination in one filesystem operation;
+        // unlike remove-then-rename it cannot leave a runnable file absent.
+        let replaced = unsafe {
+            MoveFileExW(
+                existing.as_ptr(),
+                replacement.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            return Err(MigrationError::Write {
+                path: target.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        return Ok(());
     }
     fs::rename(stage, target).map_err(|source| MigrationError::Write {
         path: target.to_path_buf(),
@@ -1484,6 +1568,54 @@ mod tests {
         assert!(!hook_creates_repository("npm init -y"));
         assert!(!hook_creates_repository("cargo init --name clone"));
         assert!(!hook_creates_repository("printf '%s\\n' ready"));
+        assert!(hook_creates_repository(
+            "hg clone https://example.invalid/repo ."
+        ));
+        assert!(hook_creates_repository("cp -a /other/repository/. ."));
+        assert!(hook_creates_repository("rsync -a /other/repository/ ."));
+    }
+
+    #[test]
+    fn migration_relocates_repo_relative_workspace_roots() {
+        assert!(paths_overlap(
+            Path::new("/repo/var/workspaces"),
+            Path::new("/repo")
+        ));
+        assert!(!paths_overlap(
+            Path::new("/var/workspaces"),
+            Path::new("/repo")
+        ));
+        assert_eq!(
+            integer_value(&crate::opensymphony_workflow::IntegerLike::String(
+                " 4 ".to_owned()
+            )),
+            "4"
+        );
+
+        let target_repo = PathBuf::from("/repo");
+        let workflow_path = target_repo.join("WORKFLOW.md");
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nworkspace:\n  root: ./var/workspaces\n---\n\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            target_repo,
+            workflow_path,
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+        let generated = generate_central_config(&source).expect("migration should generate");
+        assert!(!generated.contains("/repo/var/workspaces"));
+        assert!(generated.contains("~/.opensymphony/workspaces/legacy-repo-"));
     }
 
     #[test]
@@ -1566,6 +1698,8 @@ mod tests {
 
     #[tokio::test]
     async fn apply_and_rollback_restore_legacy_files() {
+        use std::io::Write;
+
         let root = tempfile::tempdir().expect("migration root should exist");
         Command::new("git")
             .args(["init", "-q"])
@@ -1723,6 +1857,24 @@ mod tests {
         .await
         .expect("repeat apply should be idempotent");
         assert!(repeated.central_config_already_active);
+
+        let active_config = fs::read(&output_path).expect("active config should be readable");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&output_path)
+            .expect("active config should be writable")
+            .write_all(b"# changed after activation\n")
+            .expect("active config should be changed");
+        let changed = rollback(RollbackArgs {
+            config: Some(output_path.clone()),
+        })
+        .await
+        .expect_err("rollback should refuse changed activated files");
+        assert!(matches!(
+            changed,
+            MigrationError::ActivatedFileChanged { .. }
+        ));
+        fs::write(&output_path, active_config).expect("active config should be restored");
 
         rollback(RollbackArgs {
             config: Some(output_path.clone()),

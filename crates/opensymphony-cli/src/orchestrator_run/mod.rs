@@ -282,10 +282,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let gateway_journal = InMemoryEventJournal::new(10_000, 256);
     let gateway_broker = StreamBroker::new(gateway_journal.clone());
     let gateway_memory_config = if runtime.memory.server.is_some() || runtime.memory.auto_capture {
-        Some(crate::opensymphony_memory::MemoryConfig::load(
-            &runtime.target_repo,
-            None,
-        )?)
+        Some(load_runtime_memory_config(&runtime)?)
     } else {
         None
     };
@@ -430,6 +427,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 &auto_capture_candidates,
                                 runtime.openhands_conversation_store.as_ref(),
                                 runtime.memory.auto_archive,
+                                gateway_memory_config.as_ref(),
                             )
                             .await;
                             mark_auto_capture_completed(
@@ -599,7 +597,7 @@ async fn start_runtime_memory_server(
     let Some(server) = runtime.memory.server.as_ref() else {
         return Ok(None);
     };
-    let config = crate::opensymphony_memory::MemoryConfig::load(&runtime.target_repo, None)?;
+    let config = load_runtime_memory_config(runtime)?;
     super::memory::start_memory_server_with_workspace_root(
         config,
         server.bind,
@@ -609,6 +607,17 @@ async fn start_runtime_memory_server(
     .await
     .map(Some)
     .map_err(RunCommandError::MemoryServer)
+}
+
+fn load_runtime_memory_config(
+    runtime: &RunRuntimeConfig,
+) -> Result<crate::opensymphony_memory::MemoryConfig, crate::opensymphony_memory::MemoryError> {
+    let mut config = crate::opensymphony_memory::MemoryConfig::load(&runtime.target_repo, None)?;
+    if let Some(memory_root) = runtime.memory_catalog_root.as_ref() {
+        config.memory_root = memory_root.clone();
+        config.index_path = memory_root.join(crate::opensymphony_memory::DEFAULT_INDEX_FILE_NAME);
+    }
+    Ok(config)
 }
 
 async fn publish_auto_capture_event(

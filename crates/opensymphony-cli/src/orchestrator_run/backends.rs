@@ -5508,6 +5508,7 @@ Run the scheduler.
             tool_dir: None,
             openhands_conversation_store: None,
             retry_max_attempts: None,
+            memory_catalog_root: None,
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,

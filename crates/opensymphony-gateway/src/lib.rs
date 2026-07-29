@@ -4397,6 +4397,8 @@ async fn get_run_detail(
 
     let release_reason = if issue.cancel_failed {
         Some(ReleaseReason::CancelFailed)
+    } else if issue.release_reason == Some(DomainReleaseReason::RetryExhausted) {
+        Some(ReleaseReason::RetryExhausted)
     } else {
         match issue.last_outcome {
             ControlPlaneWorkerOutcome::Completed => Some(ReleaseReason::Completed),
@@ -4405,11 +4407,6 @@ async fn get_run_detail(
             // inferring exhaustion from the retry counter. A queued retry has
             // a positive counter too, while an exhausted release has no queue
             // entry left to contribute one.
-            ControlPlaneWorkerOutcome::Failed
-                if issue.release_reason == Some(DomainReleaseReason::RetryExhausted) =>
-            {
-                Some(ReleaseReason::RetryExhausted)
-            }
             ControlPlaneWorkerOutcome::Failed => Some(ReleaseReason::TrackerTerminal),
             _ => None,
         }

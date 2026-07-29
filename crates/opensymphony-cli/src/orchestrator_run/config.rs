@@ -299,6 +299,7 @@ pub struct ResolvedCentralConfig {
     pub instance_id: String,
     pub state_root: PathBuf,
     pub workspace_root: Option<PathBuf>,
+    pub memory_catalog_root: Option<PathBuf>,
     pub mode: CentralRoutingMode,
     pub repository: Option<String>,
     pub integration_instructions: Option<ResolvedIntegrationInstructions>,
@@ -434,6 +435,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) tool_dir: Option<PathBuf>,
     pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     pub(super) retry_max_attempts: Option<u32>,
+    pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) memory: RunMemoryConfig,
 }
 
@@ -446,6 +448,7 @@ pub(super) async fn resolve_runtime_config(
         config,
         config_generation,
         central_workspace_root,
+        central_memory_catalog_root,
         central_workflow_front_matter,
         retry_max_attempts,
     ) = match &config_path {
@@ -468,6 +471,7 @@ pub(super) async fn resolve_runtime_config(
                     central.runtime,
                     central.generation,
                     central.workspace_root,
+                    central.memory_catalog_root,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
                 )
@@ -478,12 +482,14 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    None,
                 )
             }
         }
         None => (
             RunConfigFile::default(),
             "legacy-unconfigured".to_string(),
+            None,
             None,
             None,
             None,
@@ -579,7 +585,11 @@ pub(super) async fn resolve_runtime_config(
         auto_archive: config.memory.auto_archive.unwrap_or(false),
         server: memory_server,
     };
-    validate_memory_bootstrap(&target_repo, &memory)?;
+    validate_memory_bootstrap(
+        &target_repo,
+        &memory,
+        central_memory_catalog_root.as_deref(),
+    )?;
 
     Ok(RunRuntimeConfig {
         config_path,
@@ -591,6 +601,7 @@ pub(super) async fn resolve_runtime_config(
         tool_dir,
         openhands_conversation_store,
         retry_max_attempts,
+        memory_catalog_root: central_memory_catalog_root,
         memory,
     })
 }
@@ -708,14 +719,17 @@ fn resolve_central_config(
             workspace.cleanup_after_parent_finalization,
         );
     }
-    if let Some(memory) = config.memory.as_ref() {
+    let memory_catalog_root = if let Some(memory) = config.memory.as_ref() {
         let memory_root =
             resolve_central_path(config_root, &memory.catalog_root, "memory.catalog_root")?;
         if !is_contained(&state_root, &memory_root) {
             return Err(CentralConfigError::InvalidRoot);
         }
         let _ = (memory.auto_capture, memory.auto_archive, memory.serve);
-    }
+        Some(memory_root)
+    } else {
+        None
+    };
 
     let mut aliases = BTreeSet::new();
     let mut checkout_roots: Vec<PathBuf> = Vec::new();
@@ -987,6 +1001,7 @@ fn resolve_central_config(
         instance_id,
         state_root,
         workspace_root: Some(workspace_root),
+        memory_catalog_root,
         mode,
         repository: config.routing.repository,
         integration_instructions,
@@ -1422,8 +1437,12 @@ fn generation_hash(bytes: &[u8]) -> String {
 fn validate_memory_bootstrap(
     target_repo: &Path,
     memory: &RunMemoryConfig,
+    central_catalog_root: Option<&Path>,
 ) -> Result<(), RunCommandError> {
     if !memory.auto_capture && memory.server.is_none() {
+        return Ok(());
+    }
+    if central_catalog_root.is_some() {
         return Ok(());
     }
     let path = target_repo.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE);
@@ -1502,7 +1521,7 @@ mod tests {
             server: None,
         };
 
-        let result = validate_memory_bootstrap(repo.path(), &memory);
+        let result = validate_memory_bootstrap(repo.path(), &memory, None);
 
         assert!(matches!(
             result,
@@ -1519,7 +1538,8 @@ mod tests {
             server: None,
         };
 
-        validate_memory_bootstrap(repo.path(), &memory).expect("disabled auto-capture should pass");
+        validate_memory_bootstrap(repo.path(), &memory, None)
+            .expect("disabled auto-capture should pass");
     }
 
     #[test]
@@ -1536,7 +1556,8 @@ mod tests {
             server: None,
         };
 
-        validate_memory_bootstrap(repo.path(), &memory).expect("memory config should satisfy run");
+        validate_memory_bootstrap(repo.path(), &memory, None)
+            .expect("memory config should satisfy run");
     }
 
     #[test]
@@ -1551,12 +1572,28 @@ mod tests {
             }),
         };
 
-        let result = validate_memory_bootstrap(repo.path(), &memory);
+        let result = validate_memory_bootstrap(repo.path(), &memory, None);
 
         assert!(matches!(
             result,
             Err(RunCommandError::MissingMemoryConfig { .. })
         ));
+    }
+
+    #[test]
+    fn memory_bootstrap_accepts_a_central_catalog_without_repo_config() {
+        let repo = tempfile::tempdir().expect("temporary repo should exist");
+        let memory = RunMemoryConfig {
+            auto_capture: true,
+            auto_archive: false,
+            server: None,
+        };
+        validate_memory_bootstrap(
+            repo.path(),
+            &memory,
+            Some(&repo.path().join("state/memory")),
+        )
+        .expect("central memory catalog should replace repo-local bootstrap");
     }
 
     fn central_fixture(root: &Path) -> String {
@@ -1678,6 +1715,12 @@ scheduler:
         let resolved = resolve_central_config(Path::new("configs/config.yaml"), source)
             .expect("relative central config path should resolve");
         assert!(resolved.state_root.ends_with("configs/state"));
+        assert!(
+            resolved
+                .memory_catalog_root
+                .as_ref()
+                .is_some_and(|root| root.ends_with("configs/state/memory"))
+        );
         assert_eq!(
             resolved
                 .workspace_root
