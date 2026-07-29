@@ -983,6 +983,20 @@ fn resolve_central_config(
             if repository_entry.checkout_path.is_none() {
                 return Err(CentralConfigError::MissingLegacyCheckout { repository });
             }
+            if config.linear_projects.len() == 1
+                && !config
+                    .linear_projects
+                    .values()
+                    .next()
+                    .expect("length checked")
+                    .repositories
+                    .iter()
+                    .any(|allowed| allowed == &repository)
+            {
+                return Err(CentralConfigError::InvalidReference {
+                    field: "routing.repository".to_owned(),
+                });
+            }
         }
         CentralRoutingMode::ProjectSet => {
             if config.routing.repository.is_some() {
@@ -2046,6 +2060,25 @@ scheduler:
             error,
             CentralConfigError::InvalidReference { field }
                 if field == "routing.repository.tracker_profile"
+        ));
+    }
+
+    #[test]
+    fn central_legacy_mode_rejects_repository_outside_project_associations() {
+        let root = tempfile::tempdir().expect("temporary config root should exist");
+        let source = central_fixture(root.path())
+            .replace(
+                "mode: project_set\n  active_project_set: suite",
+                "mode: legacy_single\n  repository: core-repo",
+            )
+            .replace("    repositories: [core-repo]", "    repositories: []")
+            .replace("    integration_instructions: integration.md\n", "");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("legacy routing must respect project repository associations");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "routing.repository"
         ));
     }
 

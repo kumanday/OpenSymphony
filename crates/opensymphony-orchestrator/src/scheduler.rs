@@ -1009,12 +1009,38 @@ where
                     Some(record.workspace),
                 )?;
                 if record.had_in_flight_run {
-                    self.restore_recovered_run(
-                        &issue_id,
-                        record.recovered_run,
-                        recovered_harness_kind,
-                        observed_at,
-                    )?;
+                    if record.recovered_run.is_some() {
+                        self.restore_recovered_run(
+                            &issue_id,
+                            record.recovered_run,
+                            recovered_harness_kind,
+                            observed_at,
+                        )?;
+                    } else if self.retry_limit_reached(record.normal_retry_count) {
+                        self.workspace
+                            .persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                            .await
+                            .map_err(|error| SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            })?;
+                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                    } else {
+                        let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                        let retry = RetryEntry {
+                            issue_id: normalized.id.clone(),
+                            identifier: normalized.identifier.clone(),
+                            attempt: RetryAttempt::new(normal_retry_count)?,
+                            normal_retry_count,
+                            scheduled_at: observed_at,
+                            due_at: observed_at,
+                            reason: RetryReason::Reconciliation,
+                            error: None,
+                        };
+                        let execution = self
+                            .remove_execution(&issue_id)
+                            .expect("active recovery execution should be present");
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
                 } else if record.pending_retry {
                     let normal_retry_count = record.normal_retry_count.saturating_add(1);
                     let retry = RetryEntry {

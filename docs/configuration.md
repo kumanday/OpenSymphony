@@ -49,6 +49,9 @@ marker keeps the issue parked across a later run.
 Pending retry manifests also retain their scheduled time, due deadline,
 reason, and redacted error summary, so recovery preserves the original
 backoff instead of redispatching immediately.
+If a crash leaves a `Preparing` or `Prepared` run without a conversation
+manifest, recovery consumes that attempt as a reconciliation retry and still
+enforces `scheduler.retry.max_attempts`.
 
 The supported routing variants are explicit:
 
@@ -59,6 +62,9 @@ routing:
 ```
 
 `legacy_single` keeps unlabelled existing tasks on one configured repository.
+That repository must also appear in the sole selected Linear project's
+`repositories` association set; a mismatch fails before tracker polling so a
+legacy run cannot execute a project's tasks from an unrelated checkout.
 `project_set` validates the multi-repository model but remains disabled until
 its later release gates pass; it fails before starting the scheduler rather
 than silently falling back to the current directory. Operational recovery

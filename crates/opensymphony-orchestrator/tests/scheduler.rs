@@ -2149,7 +2149,9 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
         ..Default::default()
     };
     let worker = FakeWorker::default();
-    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
 
     scheduler
         .tick(ts(100))
@@ -2173,7 +2175,59 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
         scheduler.worker().launches[0].workspace.path,
         recovered_workspace.path
     );
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .and_then(|execution| execution.current_run())
+            .map(|run| run.normal_retry_count),
+        Some(1)
+    );
     assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
+async fn pre_conversation_recovery_honors_retry_limit() {
+    let recovered_workspace = workspace_record("COE-273", "/tmp/recovered/COE-273");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-273", "COE-273", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-273", "COE-273", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-273".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("pre-conversation recovery should succeed");
+
+    let issue_id = IssueId::new("lin-273").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("recovered execution should remain visible")
+            .status(),
+        SchedulerStatus::Released
+    );
+    assert_eq!(scheduler.worker().launches.len(), 0);
 }
 
 #[tokio::test]

@@ -543,6 +543,10 @@ recovery restores those values and waits for the original deadline. Failed
 stall-stop requests remain attached to the running execution until a later
 stop attempt is acknowledged, so a remote worker cannot be forgotten after a
 transient interrupt failure.
+An interrupted `Preparing` or `Prepared` run with no conversation manifest is
+recovered as a retry using its persisted retry count; once the configured
+retry limit is reached it is parked as exhausted instead of being dispatched
+as a fresh attempt.
 
 For worker or tool access, `opensymphony run` starts the read-only memory server
 when memory is initialized and `memory.serve` is not disabled. The supervised
