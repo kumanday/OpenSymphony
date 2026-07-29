@@ -399,13 +399,8 @@ pub(crate) struct StrictRunMarkerGuard {
 impl StrictRunMarkerGuard {
     pub(crate) fn update_generation(&self, generation: &str) -> std::io::Result<()> {
         let sequence = STRICT_STALE_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temporary = self.path.with_file_name(format!(
-            ".{}.generation-{sequence}.tmp",
-            self.path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("strict-run.active")
-        ));
+        remove_stale_strict_generation_staging(&self.path)?;
+        let temporary = strict_generation_stage_path(&self.path, sequence);
         let result = (|| {
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -420,6 +415,45 @@ impl StrictRunMarkerGuard {
         }
         result
     }
+}
+
+fn strict_generation_stage_path(path: &Path, sequence: u64) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.generation-{}-{sequence}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("strict-run.active"),
+        std::process::id()
+    ))
+}
+
+fn remove_stale_strict_generation_staging(path: &Path) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("strict-run.active");
+    let prefix = format!(".{name}.generation-");
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let entry_name = entry.file_name();
+        let entry_name = entry_name.to_string_lossy();
+        if entry_name.starts_with(&prefix) && entry_name.ends_with(".tmp") {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Drop for StrictRunMarkerGuard {
@@ -570,6 +604,17 @@ fn resume_partial_apply(
         return Ok(ActiveMigrationResolution::Complete);
     };
     let workflow_stage = stage_path(&marker.workflow_path, &marker.generation);
+    if marker.memory_catalog_copy_in_progress && workflow_stage.is_file() {
+        let config_stage = stage_path(&marker.config_path, &marker.generation);
+        let config_target = marker.config_path.clone();
+        let workflow_target = marker.workflow_path.clone();
+        verify_current_generation(&config_stage, &marker.generation)?;
+        verify_current_generation(&workflow_stage, &marker.workflow_generation)?;
+        resume_in_progress_catalog_copy(&marker_path, marker)?;
+        replace_staged_file(&config_stage, &config_target)?;
+        replace_staged_file(&workflow_stage, &workflow_target)?;
+        return Ok(ActiveMigrationResolution::Complete);
+    }
     if workflow_stage.is_file() {
         let staged_workflow = fs::read(&workflow_stage).map_err(|source| MigrationError::Read {
             path: workflow_stage.clone(),
@@ -634,6 +679,26 @@ fn resume_partial_apply(
         source,
     })?;
     Ok(ActiveMigrationResolution::Restored)
+}
+
+fn resume_in_progress_catalog_copy(
+    marker_path: &Path,
+    mut marker: ActivationMarker,
+) -> Result<(), MigrationError> {
+    let mut memory_locks = acquire_memory_migration_lock(&marker.target_repo())?;
+    memory_locks
+        .acquire_catalog_lock(&marker.target_repo(), marker.memory_catalog_root.as_deref())?;
+    preserve_legacy_memory(&marker.target_repo(), marker.memory_catalog_root.as_deref())?;
+    marker.memory_catalog_generation = marker
+        .memory_catalog_root
+        .as_deref()
+        .map(memory_catalog_generation)
+        .transpose()?;
+    marker.memory_catalog_copy_in_progress = false;
+    let marker_raw = serde_yaml::to_string(&marker).map_err(MigrationError::SerializeConfig)?;
+    let marker_stage = stage_path(marker_path, &marker.generation);
+    write_file(&marker_stage, marker_raw.as_bytes())?;
+    replace_staged_file(&marker_stage, marker_path)
 }
 
 fn acquire_partial_apply_catalog_guard(
@@ -2224,7 +2289,7 @@ fn is_environment_variable_name(value: &str) -> bool {
 
 fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> bool {
     env.iter().any(|(name, value)| {
-        let name = name.to_ascii_lowercase();
+        let name = normalize_secret_field_name(name);
         let secret_name = [
             "access_token",
             "api_key",
@@ -2242,6 +2307,39 @@ fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> b
         .any(|part| name == *part || name.ends_with(&format!("_{part}")));
         secret_name && credential_variable(value).is_none()
     })
+}
+
+fn normalize_secret_field_name(name: &str) -> String {
+    let characters = name.chars().collect::<Vec<_>>();
+    let mut normalized = String::with_capacity(name.len());
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '-' {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+        if character.is_ascii_uppercase() {
+            let previous_is_lower_or_digit = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
+            let previous_is_acronym_boundary = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_uppercase())
+                && characters
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_lowercase());
+            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
+                && !normalized.ends_with('_')
+            {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
 }
 
 fn reject_workspace_relocation(path: &Path) -> Result<(), MigrationError> {
@@ -2692,6 +2790,24 @@ mod tests {
         assert!(!marker.exists());
     }
 
+    #[test]
+    fn strict_run_generation_update_reclaims_stale_staging_files() {
+        let root = tempfile::tempdir().expect("marker root should exist");
+        let config = root.path().join("config.yaml");
+        let marker = strict_run_marker_path(&config);
+        fs::create_dir_all(marker.parent().expect("marker parent should exist"))
+            .expect("marker parent should be created");
+        let stale_stage = strict_generation_stage_path(&marker, 0);
+        fs::write(&stale_stage, "stale\n").expect("stale stage should be written");
+
+        let guard = claim_strict_run_marker(&config, "initial").expect("marker should claim");
+        guard
+            .update_generation("next")
+            .expect("generation update should reclaim stale staging");
+        assert!(!stale_stage.exists());
+        drop(guard);
+    }
+
     #[cfg(unix)]
     #[test]
     fn migration_rejects_symlinked_legacy_inputs_before_apply() {
@@ -2839,6 +2955,53 @@ mod tests {
             acquire_partial_apply_catalog_guard(&marker),
             Err(MigrationError::MemoryCatalogChanged { path }) if path == catalog
         ));
+    }
+
+    #[test]
+    fn interrupted_catalog_copy_resumes_before_promotion() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let source = repo.join(".opensymphony/memory");
+        let catalog = root.path().join("state/memory");
+        fs::create_dir_all(&source).expect("legacy memory root should exist");
+        fs::write(source.join("capture.md"), "legacy capture\n")
+            .expect("legacy capture should be written");
+        let config_path = repo.join("config.yaml");
+        let marker_path = migration_marker_path(&config_path);
+        let marker = ActivationMarker {
+            source_config: config_path.clone(),
+            config_path,
+            workflow_path: repo.join("WORKFLOW.md"),
+            backup_dir: repo.join(".opensymphony/migration/backups"),
+            generation: "sha256:generation".to_owned(),
+            workflow_generation: String::new(),
+            had_config: false,
+            had_workflow: true,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: Some(catalog.clone()),
+            memory_catalog_generation: Some(
+                memory_catalog_generation(&catalog).expect("empty catalog should hash"),
+            ),
+            memory_catalog_copy_in_progress: true,
+        };
+
+        resume_in_progress_catalog_copy(&marker_path, marker)
+            .expect("interrupted catalog copy should resume");
+
+        assert_eq!(
+            fs::read_to_string(catalog.join("capture.md"))
+                .expect("legacy capture should be resumed"),
+            "legacy capture\n"
+        );
+        let (_, marker) = load_activation_marker(&repo.join("config.yaml"))
+            .expect("activation marker should load")
+            .expect("activation marker should be published");
+        assert!(!marker.memory_catalog_copy_in_progress);
+        assert_eq!(
+            marker.memory_catalog_generation,
+            Some(memory_catalog_generation(&catalog).expect("catalog generation should hash"))
+        );
     }
 
     #[test]

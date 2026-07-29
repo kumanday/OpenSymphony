@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeSet,
-    env, fs,
-    io::{self, Write},
+    env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
@@ -11,6 +10,9 @@ use std::{
     },
     time::Duration,
 };
+
+#[cfg(test)]
+use std::io::Write;
 
 use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand, ValueEnum};
@@ -1852,23 +1854,16 @@ async fn start_memory_server_with_auth(
             )));
         }
     }
-    let mut marker = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&activity_marker)
-        .map_err(|source| {
-            MemoryError::InvalidInput(format!(
-                "memory server is already active or cannot claim {}; {source}",
-                activity_marker.display()
-            ))
-        })?;
-    if let Err(source) = writeln!(marker, "pid={}", process::id()) {
-        let _ = fs::remove_file(&activity_marker);
-        return Err(MemoryError::WriteFile {
-            path: activity_marker,
-            source,
-        });
-    }
+    super::orchestrator_run::publish_initialized_marker(
+        &activity_marker,
+        &format!("pid={}\n", process::id()),
+    )
+    .map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "memory server is already active or cannot claim {}; {source}",
+            activity_marker.display()
+        ))
+    })?;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
         let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to bind memory server {addr}: {error}"))

@@ -386,6 +386,8 @@ struct FakeWorkspace {
     persist_retry_exhaustion_results: VecDeque<Result<(), FakeError>>,
     persisted_retry_pending: usize,
     persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
+    persisted_interrupt_reasons: Vec<HarnessInterruptReason>,
+    persist_interrupt_results: VecDeque<Result<(), FakeError>>,
     retain_failed: bool,
 }
 
@@ -470,6 +472,18 @@ impl WorkspaceBackend for FakeWorkspace {
             result?;
         }
         self.persisted_retry_pending += 1;
+        Ok(())
+    }
+
+    async fn persist_interrupt_reason(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        reason: HarnessInterruptReason,
+    ) -> Result<(), Self::Error> {
+        if let Some(result) = self.persist_interrupt_results.pop_front() {
+            result?;
+        }
+        self.persisted_interrupt_reasons.push(reason);
         Ok(())
     }
 
@@ -2446,6 +2460,44 @@ async fn failed_terminal_interrupt_is_retried_before_cleanup() {
 }
 
 #[tokio::test]
+async fn interrupt_persistence_failure_keeps_terminal_run_tracked() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-272", "COE-272", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        persist_interrupt_results: VecDeque::from([Err(FakeError {
+            message: "run manifest is unwritable".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue("lin-272", "COE-272", "Done", 0)];
+
+    assert!(scheduler.tick(ts(300_200)).await.is_err());
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-272").expect("issue id should be valid"))
+            .expect("execution should be reinserted after persistence failure")
+            .status(),
+        SchedulerStatus::Running
+    );
+}
+
+#[tokio::test]
 async fn failed_nonterminal_interrupt_keeps_execution_owned_until_acknowledged() {
     let issue = tracker_issue("lin-272", "COE-272", "In Progress", 0);
     let tracker = FakeTracker {
@@ -3553,6 +3605,66 @@ async fn running_count_follows_active_state_reconciliation() {
             .execution(&IssueId::new("lin-282").expect("issue id should be valid"))
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn recovered_in_flight_run_restores_persisted_interrupt_intent() {
+    let recovered_worker_id =
+        WorkerId::new("worker-recovered-cancel").expect("worker id should be valid");
+    let recovered_workspace = workspace_record("COE-493", "/tmp/recovered/COE-493");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-493", "COE-493", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-493", "COE-493", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: Some(HarnessInterruptReason::OperatorCancel),
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+            }),
+        }],
+        records: HashMap::from([("lin-493".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup recovery should restore the active run");
+    let execution = scheduler
+        .execution(&IssueId::new("lin-493").expect("issue id should be valid"))
+        .expect("recovered execution should exist");
+    let interrupt = execution
+        .interrupt()
+        .expect("persisted interrupt intent should be restored");
+    assert_eq!(
+        interrupt.command.reason,
+        HarnessInterruptReason::OperatorCancel
+    );
+    assert_eq!(
+        interrupt.command.expected_next_state,
+        crate::opensymphony_domain::HarnessInterruptExpectedNextState::Paused
+    );
+    assert_eq!(interrupt.status, HarnessInterruptStatus::Requested);
 }
 
 #[tokio::test]

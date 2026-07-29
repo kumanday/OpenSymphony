@@ -167,28 +167,12 @@ fn redact_diagnostic_token(token: &str) -> String {
 }
 
 fn redact_key_value(input: &str, key: &str) -> String {
-    let key_lower = key.to_ascii_lowercase();
     let mut redacted = input.to_string();
     let mut search_from = 0;
     loop {
-        let lower = redacted.to_ascii_lowercase();
-        let Some(relative_start) = lower
-            .get(search_from..)
-            .and_then(|text| text.find(&key_lower))
-        else {
+        let Some((_, key_end)) = find_sensitive_key(&redacted, search_from, key) else {
             return redacted;
         };
-        let key_start = search_from + relative_start;
-        let key_end = key_start + key.len();
-        if key_start > 0
-            && redacted[..key_start]
-                .chars()
-                .next_back()
-                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
-        {
-            search_from = key_end;
-            continue;
-        }
         let bytes = redacted.as_bytes();
         let mut delimiter = key_end;
         if bytes
@@ -242,6 +226,72 @@ fn redact_key_value(input: &str, key: &str) -> String {
         redacted.replace_range(value_start..value_end, "[redacted]");
         search_from = value_start + "[redacted]".len();
     }
+}
+
+fn find_sensitive_key(input: &str, search_from: usize, key: &str) -> Option<(usize, usize)> {
+    let key = normalize_secret_field_name(key);
+    let bytes = input.as_bytes();
+    let mut index = search_from;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_alphanumeric() && bytes[index] != b'_' && bytes[index] != b'-' {
+            index += 1;
+            continue;
+        }
+        if index > 0
+            && (bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'-')
+        {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
+        {
+            end += 1;
+        }
+        if normalize_secret_field_name(&input[index..end]) == key
+            || normalize_secret_field_name(&input[index..end]).ends_with(&format!("_{key}"))
+        {
+            return Some((index, end));
+        }
+        index = end;
+    }
+    None
+}
+
+fn normalize_secret_field_name(name: &str) -> String {
+    let characters = name.chars().collect::<Vec<_>>();
+    let mut normalized = String::with_capacity(name.len());
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '-' {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+        if character.is_ascii_uppercase() {
+            let previous_is_lower_or_digit = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
+            let previous_is_acronym_boundary = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_uppercase())
+                && characters
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_lowercase());
+            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
+                && !normalized.ends_with('_')
+            {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
 }
 
 fn quoted_value_end(bytes: &[u8], mut index: usize, quote: u8) -> usize {
@@ -1007,6 +1057,17 @@ mod tests {
         assert!(!value.contains("quoted-secret"));
         assert!(!value.contains("another-secret"));
         assert_eq!(value.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_camel_case_credentials() {
+        let value = redact_runtime_diagnostic(
+            r#"{"accessToken":"quoted-token","refreshToken":"refresh-secret","chatgptAccountId":"acct_123"}"#,
+        );
+
+        assert!(!value.contains("quoted-token"));
+        assert!(!value.contains("refresh-secret"));
+        assert!(!value.contains("acct_123"));
     }
 
     #[test]

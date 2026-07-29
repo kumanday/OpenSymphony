@@ -328,6 +328,40 @@ impl IssueExecution {
         Ok((interrupt.command.clone(), true))
     }
 
+    pub fn restore_interrupt_intent(
+        &mut self,
+        harness_kind: impl Into<String>,
+        reason: HarnessInterruptReason,
+        expected_next_state: HarnessInterruptExpectedNextState,
+        requested_at: TimestampMs,
+    ) -> Result<(), StateTransitionError> {
+        let run = match &self.state {
+            SchedulerState::Claimed { run } | SchedulerState::Running { run, .. } => run,
+            _ => {
+                return Err(StateTransitionError::InvalidTransition {
+                    from: self.status(),
+                    action: TransitionAction::RequestInterrupt,
+                });
+            }
+        };
+        let Some(conversation) = &self.conversation else {
+            return Err(StateTransitionError::ConversationNotAttached);
+        };
+        self.interrupt = Some(HarnessInterruptState::requested(
+            HarnessInterruptCommand {
+                run_id: run.issue_identifier.to_string(),
+                issue_id: self.issue.id.clone(),
+                harness_kind: harness_kind.into(),
+                conversation_id: conversation.conversation_id.clone(),
+                turn_id: None,
+                reason,
+                expected_next_state,
+            },
+            requested_at,
+        ));
+        Ok(())
+    }
+
     pub fn acknowledge_interrupt(
         &mut self,
         observed_at: TimestampMs,

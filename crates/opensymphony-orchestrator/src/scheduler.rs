@@ -1040,6 +1040,7 @@ where
                             &issue_id,
                             record.recovered_run,
                             recovered_harness_kind,
+                            record.interrupt_reason,
                             observed_at,
                         )?;
                     } else if self.retry_limit_reached(record.normal_retry_count) {
@@ -1655,6 +1656,7 @@ where
         issue_id: &IssueId,
         recovered_run: Option<RecoveredRun>,
         harness_kind: Option<String>,
+        interrupt_reason: Option<HarnessInterruptReason>,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
         let Some(recovered_run) = recovered_run else {
@@ -1688,6 +1690,25 @@ where
             Some(recovered_run.conversation),
         )?;
         execution.record_turn_started(observed_at)?;
+        if let Some(reason) = interrupt_reason {
+            let expected_next_state = match reason {
+                HarnessInterruptReason::OperatorCancel => HarnessInterruptExpectedNextState::Paused,
+                HarnessInterruptReason::TrackerMergingSupersedesHumanReview => {
+                    HarnessInterruptExpectedNextState::CloseoutPending
+                }
+                HarnessInterruptReason::SchedulerAbort => {
+                    HarnessInterruptExpectedNextState::Released
+                }
+            };
+            execution.restore_interrupt_intent(
+                harness_kind
+                    .clone()
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                reason,
+                expected_next_state,
+                observed_at,
+            )?;
+        }
         self.worker_metadata.insert(
             run.worker_id.clone(),
             WorkerMetadata::new(
@@ -2226,9 +2247,16 @@ where
         if let Some(run) = execution.current_run().cloned()
             && let Some(abort_reason) = abort_reason
         {
-            remote_stopped = self
+            remote_stopped = match self
                 .abort_worker(&mut execution, &run, abort_reason, observed_at)
-                .await?;
+                .await
+            {
+                Ok(remote_stopped) => remote_stopped,
+                Err(error) => {
+                    self.insert_execution(issue_id, execution);
+                    return Err(error);
+                }
+            };
         }
         if abort_requested && !remote_stopped {
             warn!(

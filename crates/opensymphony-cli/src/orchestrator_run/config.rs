@@ -1601,7 +1601,7 @@ fn openhands_secret_field_name(name: &str) -> bool {
     // `chatgpt-account-id`) even though most serialized config uses
     // underscore-separated keys. Normalize the separator before applying the
     // secret-shaped field rules so both spellings fail closed.
-    let name = name.to_ascii_lowercase().replace('-', "_");
+    let name = normalize_secret_field_name(name);
     [
         "access_token",
         "api_key",
@@ -1622,6 +1622,39 @@ fn openhands_secret_field_name(name: &str) -> bool {
     ]
     .iter()
     .any(|part| name == *part || name.ends_with(&format!("_{part}")))
+}
+
+fn normalize_secret_field_name(name: &str) -> String {
+    let characters = name.chars().collect::<Vec<_>>();
+    let mut normalized = String::with_capacity(name.len());
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '-' {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+        if character.is_ascii_uppercase() {
+            let previous_is_lower_or_digit = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
+            let previous_is_acronym_boundary = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_uppercase())
+                && characters
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_lowercase());
+            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
+                && !normalized.ends_with('_')
+            {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
 }
 
 fn validate_active_repository_aliases(
@@ -2590,6 +2623,25 @@ scheduler:
             .expect_err("hyphenated OpenHands account identities must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("acct_456"));
+    }
+
+    #[test]
+    fn central_config_rejects_camel_case_openhands_secret() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              accessToken: literal-secret\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("camelCase OpenHands credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("literal-secret"));
     }
 
     #[test]
