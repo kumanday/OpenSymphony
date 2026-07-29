@@ -71,6 +71,10 @@ restores the backup and refuses to run while the instance's strict-run marker
 is active; it restores the original file permissions as well as file contents.
 Repeating a complete `apply` is a no-op; a partially published activation
 promotes its staged workflow or restores the backup before retrying.
+When preserving a legacy `.opensymphony/memory` tree, preflight refuses an
+active memory writer and apply takes a recoverable migration lock before
+copying; the local memory server honors that lock and publishes an activity
+marker while it is running.
 
 ## Bootstrap
 

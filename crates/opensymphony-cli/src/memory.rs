@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
@@ -58,6 +59,8 @@ use super::orchestrator_run::config::{
 
 const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
+pub(crate) const MEMORY_ACTIVITY_MARKER: &str = ".opensymphony-memory.active";
+pub(crate) const MEMORY_MIGRATION_LOCK: &str = "memory.migration.lock";
 const AST_MCP_TOOL_NAMES: &[&str] = &[
     "code.ast.status",
     "code.ast.outline",
@@ -763,7 +766,8 @@ fn load_memory_config(
     config_path: Option<&Path>,
 ) -> Result<MemoryConfig, MemoryError> {
     if let Some(central_path) = selected_central_config_path(repo_root, config_path)? {
-        let mut config = MemoryConfig::load(repo_root, None)?;
+        let memory_repo_root = central_memory_repo_root(repo_root, &central_path)?;
+        let mut config = MemoryConfig::load(memory_repo_root, None)?;
         apply_central_memory_root(&mut config, &central_path)?;
         return Ok(config);
     }
@@ -800,6 +804,18 @@ fn selected_central_config_path(
         source,
     })?;
     Ok(looks_like_central_config(&raw).then_some(config_path))
+}
+
+fn central_memory_repo_root(repo_root: &Path, central_path: &Path) -> Result<PathBuf, MemoryError> {
+    let raw = fs::read_to_string(central_path).map_err(|source| MemoryError::ReadFile {
+        path: central_path.to_path_buf(),
+        source,
+    })?;
+    let central = validate_central_config_text(central_path, &raw)
+        .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    Ok(central
+        .target_repo()
+        .unwrap_or_else(|| repo_root.to_path_buf()))
 }
 
 fn apply_central_memory_root(
@@ -1568,7 +1584,16 @@ async fn run_serve(
 
 pub(crate) struct MemoryServerHandle {
     endpoint: String,
-    task: JoinHandle<Result<(), String>>,
+    task: Option<JoinHandle<Result<(), String>>>,
+    activity_marker: Option<PathBuf>,
+}
+
+impl Drop for MemoryServerHandle {
+    fn drop(&mut self) {
+        if let Some(path) = self.activity_marker.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 impl MemoryServerHandle {
@@ -1577,15 +1602,21 @@ impl MemoryServerHandle {
     }
 
     pub(crate) fn is_finished(&self) -> bool {
-        self.task.is_finished()
+        self.task.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
     pub(crate) fn abort(&self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 
-    pub(crate) async fn wait(self) -> Result<(), MemoryError> {
-        match self.task.await {
+    pub(crate) async fn wait(mut self) -> Result<(), MemoryError> {
+        let task = self
+            .task
+            .take()
+            .expect("memory server task should only be awaited once");
+        match task.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(MemoryError::InvalidInput(error)),
             Err(error) if error.is_cancelled() => Ok(()),
@@ -1643,10 +1674,41 @@ async fn start_memory_server_with_auth(
     workspace_root: Option<PathBuf>,
     central_config_path: Option<PathBuf>,
 ) -> Result<MemoryServerHandle, MemoryError> {
+    let activity_marker = memory_activity_marker_path(&config.memory_root);
+    let migration_lock = memory_migration_lock_path(&config.repo_root);
+    if migration_lock.exists() {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory migration is active at {}; stop the migration before starting the memory server",
+            migration_lock.display()
+        )));
+    }
+    fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
+        path: config.memory_root.clone(),
+        source,
+    })?;
+    let mut marker = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&activity_marker)
+        .map_err(|source| {
+            MemoryError::InvalidInput(format!(
+                "memory server is already active or cannot claim {}; {source}",
+                activity_marker.display()
+            ))
+        })?;
+    if let Err(source) = writeln!(marker, "pid={}", process::id()) {
+        let _ = fs::remove_file(&activity_marker);
+        return Err(MemoryError::WriteFile {
+            path: activity_marker,
+            source,
+        });
+    }
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
+        let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to bind memory server {addr}: {error}"))
     })?;
     let local_addr = listener.local_addr().map_err(|error| {
+        let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
     let state = MemoryServerState {
@@ -1666,8 +1728,17 @@ async fn start_memory_server_with_auth(
     });
     Ok(MemoryServerHandle {
         endpoint: format!("http://{local_addr}/mcp"),
-        task,
+        task: Some(task),
+        activity_marker: Some(activity_marker),
     })
+}
+
+pub(crate) fn memory_activity_marker_path(memory_root: &Path) -> PathBuf {
+    memory_root.join(MEMORY_ACTIVITY_MARKER)
+}
+
+pub(crate) fn memory_migration_lock_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".opensymphony").join(MEMORY_MIGRATION_LOCK)
 }
 
 async fn memory_server_health(
@@ -4633,34 +4704,65 @@ fn conversation_store_from_run_config(
     if !config_path.is_file() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
-        path: config_path.clone(),
-        source,
-    })?;
-    let config =
-        serde_yaml::from_str::<ConversationArchiveRuntimeConfig>(&raw).map_err(|source| {
-            MemoryError::ParseYaml {
-                path: config_path.clone(),
-                source,
-            }
+    let central = if central_config_path.is_some() {
+        let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+            path: config_path.clone(),
+            source,
         })?;
+        Some(
+            validate_central_config_text(&config_path, &raw).map_err(|error| {
+                MemoryError::InvalidInput(format!("invalid central config: {error}"))
+            })?,
+        )
+    } else {
+        None
+    };
+    let config = if central.is_none() {
+        let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+            path: config_path.clone(),
+            source,
+        })?;
+        Some(
+            serde_yaml::from_str::<ConversationArchiveRuntimeConfig>(&raw).map_err(|source| {
+                MemoryError::ParseYaml {
+                    path: config_path.clone(),
+                    source,
+                }
+            })?,
+        )
+    } else {
+        None
+    };
     let config_root = config_path.parent().unwrap_or(repo_root);
-    let target_repo = match workflow_path.and_then(Path::parent) {
-        Some(workflow_root) => workflow_root.to_path_buf(),
-        None => config
+    let target_repo = if let Some(workflow_root) = workflow_path.and_then(Path::parent) {
+        workflow_root.to_path_buf()
+    } else if let Some(central) = central.as_ref() {
+        central
+            .target_repo()
+            .unwrap_or_else(|| repo_root.to_path_buf())
+    } else if let Some(config) = config.as_ref() {
+        config
             .target_repo
             .as_deref()
             .map(|value| expand_config_path(&config_path, config_root, value))
             .transpose()?
-            .unwrap_or_else(|| repo_root.to_path_buf()),
+            .unwrap_or_else(|| repo_root.to_path_buf())
+    } else {
+        repo_root.to_path_buf()
     };
-    let Some(tool_dir) = config
-        .openhands
-        .tool_dir
-        .as_deref()
-        .map(|value| expand_config_path(&config_path, config_root, value))
-        .transpose()?
-    else {
+    let tool_dir = if let Some(central) = central.as_ref() {
+        central.tool_dir()
+    } else if let Some(config) = config.as_ref() {
+        config
+            .openhands
+            .tool_dir
+            .as_deref()
+            .map(|value| expand_config_path(&config_path, config_root, value))
+            .transpose()?
+    } else {
+        None
+    };
+    let Some(tool_dir) = tool_dir else {
         return Ok(None);
     };
     OpenHandsConversationStorePaths::for_tool_dir(tool_dir, target_repo)
@@ -5279,10 +5381,10 @@ mod tests {
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, RUST_QUERY_PACK_VERSION, authorize_memory_request,
         call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
-        context_source_from_mcp, memory_server_health_payload, memory_tool_descriptors,
-        origin_is_localhost, parse_remote_memory_response, remote_memory_tool_token,
-        replace_or_append_managed_section, required_access_for_request, resolve_code_graph_overlay,
-        resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
+        context_source_from_mcp, load_memory_config, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -5365,6 +5467,47 @@ mod tests {
                 .to_string()
                 .contains("cannot target a central instance config")
         );
+    }
+
+    #[test]
+    fn central_memory_load_uses_typed_checkout_for_repository_policy() {
+        let root = TempDir::new().expect("central config root should exist");
+        let checkout = root.path().join("checkout");
+        let central = root.path().join("central.yaml");
+        std::fs::create_dir_all(checkout.join(".opensymphony/memory"))
+            .expect("checkout memory config directory should exist");
+        std::fs::write(
+            checkout.join(".opensymphony/memory/memory.yaml"),
+            "docs:\n  public_root: repository-docs\nareas:\n  ops:\n    docs_target: repository-ops.md\nredaction:\n  deny_patterns: [checkout-secret]\n",
+        )
+        .expect("checkout memory config should be written");
+        std::fs::write(
+            &central,
+            format!(
+                "schema_version: 1\ninstance:\n  id: typed-checkout\n  state_root: {0}/state\nrouting:\n  mode: legacy_single\n  repository: repo\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\n    active_states: [Todo]\n    terminal_states: [Done]\nlinear_projects:\n  project:\n    provider_project_id: project-id\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: github.com/example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\n    checkout_path: {0}/checkout\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+                root.path().display()
+            ),
+        )
+        .expect("central config should be written");
+
+        let config = load_memory_config(root.path(), Some(&central))
+            .expect("central memory config should load");
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        assert_eq!(config.repo_root, canonical_root.join("checkout"));
+        assert_eq!(config.memory_root, canonical_root.join("state/memory"));
+        assert_eq!(
+            config.docs.public_root,
+            canonical_root.join("checkout/repository-docs")
+        );
+        assert_eq!(
+            config
+                .areas
+                .get("ops")
+                .expect("checkout area should load")
+                .docs_target,
+            canonical_root.join("checkout/repository-ops.md")
+        );
+        assert_eq!(config.redaction.deny_patterns, vec!["checkout-secret"]);
     }
 
     #[tokio::test]
@@ -5870,6 +6013,7 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("repo id")
             .to_string();
+        let activity_marker = super::memory_activity_marker_path(&config.memory_root);
         let handle = super::start_memory_server_with_workspace_root(
             config,
             "127.0.0.1:0".parse().expect("address"),
@@ -5878,6 +6022,7 @@ mod tests {
         )
         .await
         .expect("start memory server");
+        assert!(activity_marker.is_file());
         let client = reqwest::Client::new();
         let list = client
             .post(handle.endpoint())
@@ -5932,6 +6077,36 @@ mod tests {
             .expect("AST response");
         assert!(ast["result"]["markdown"].as_str().is_some());
         handle.abort();
+        drop(handle);
+        assert!(!activity_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn memory_server_refuses_to_start_during_migration() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let lock_path = super::memory_migration_lock_path(&config.repo_root);
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent"))
+            .expect("lock parent should exist");
+        std::fs::write(&lock_path, "active\n").expect("migration lock should exist");
+
+        let result = super::start_memory_server_with_workspace_root(
+            config,
+            "127.0.0.1:0".parse().expect("address"),
+            None,
+            None,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(handle) => {
+                handle.abort();
+                panic!("memory server must honor migration lock");
+            }
+        };
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("migration"))
+        );
     }
 
     #[test]

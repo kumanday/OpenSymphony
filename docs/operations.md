@@ -634,6 +634,11 @@ hooks, query/fragment-bearing remotes, and ambiguous credential expressions
 before activation. Existing repository-local memory entries are copied into
 the central catalog; identical repeat applies are idempotent, while divergent
 entries fail as a recoverable conflict instead of silently keeping stale data.
+The memory server marks its catalog as active while running, so preflight
+refuses to copy from a live legacy writer. Apply also takes
+`.opensymphony/memory.migration.lock` before copying and the memory server
+refuses to start while that lock is present, keeping the legacy catalog
+quiescent through the staged migration.
 After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
 policy so operational recovery continues to use the migrated OpenHands and
 tracker settings.

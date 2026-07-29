@@ -110,6 +110,7 @@ pub struct RecoveryRecord {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
     pub had_in_flight_run: bool,
+    pub normal_retry_count: u32,
     pub harness_kind: Option<String>,
     pub recovered_run: Option<RecoveredRun>,
 }
@@ -118,6 +119,7 @@ pub struct RecoveryRecord {
 pub struct RecoveredRun {
     pub worker_id: WorkerId,
     pub conversation: ConversationMetadata,
+    pub normal_retry_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -924,12 +926,16 @@ where
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
                 self.upsert_active_execution(normalized, observed_at, Some(record.workspace))?;
-                self.restore_recovered_run(
-                    &issue_id,
-                    record.recovered_run,
-                    recovered_harness_kind,
-                    observed_at,
-                )?;
+                if record.had_in_flight_run {
+                    self.restore_recovered_run(
+                        &issue_id,
+                        record.recovered_run,
+                        recovered_harness_kind,
+                        observed_at,
+                    )?;
+                } else if self.retry_limit_reached(record.normal_retry_count) {
+                    self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                }
                 continue;
             }
 
@@ -952,7 +958,12 @@ where
 
             let mut execution = IssueExecution::new(issue.clone(), observed_at);
             execution.attach_workspace(record.workspace)?;
-            let execution = execution.release(observed_at, ReleaseReason::TrackerInactive, None)?;
+            let reason = if self.retry_limit_reached(record.normal_retry_count) {
+                ReleaseReason::RetryExhausted
+            } else {
+                ReleaseReason::TrackerInactive
+            };
+            let execution = execution.release(observed_at, reason, None)?;
             self.executions.entry(issue.id.clone()).or_insert(execution);
         }
 
@@ -971,6 +982,27 @@ where
     ) -> Result<(), SchedulerError> {
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+            let retry_cleanup_workspace = self
+                .executions
+                .get(&normalized.id)
+                .filter(|execution| retry_exhausted_release(execution))
+                .and_then(|execution| execution.workspace().cloned());
+            if let Some(workspace) = retry_cleanup_workspace {
+                match self.workspace.cleanup_workspace(&workspace, true).await {
+                    Ok(()) => {
+                        if let Some(execution) = self.executions.get_mut(&normalized.id) {
+                            execution.clear_workspace();
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            issue = %normalized.id,
+                            %error,
+                            "retry-exhausted workspace cleanup failed; will retry on the next reconciliation"
+                        );
+                    }
+                }
+            }
             if self
                 .interrupt_human_review_polling_for_merging(&normalized, observed_at)
                 .await?
@@ -1303,7 +1335,8 @@ where
             observed_at,
             None,
             self.config.max_turns,
-        );
+        )
+        .with_normal_retry_count(recovered_run.normal_retry_count);
         let mut execution = execution.claim(run.clone())?;
         execution = execution.start_running(
             observed_at,
@@ -1318,6 +1351,25 @@ where
                 harness_kind.filter(|kind| !kind.trim().is_empty()),
             ),
         );
+        self.insert_execution(issue_id.clone(), execution);
+        Ok(())
+    }
+
+    fn retry_limit_reached(&self, normal_retry_count: u32) -> bool {
+        self.config
+            .max_retry_attempts
+            .is_some_and(|max_attempts| normal_retry_count >= max_attempts)
+    }
+
+    fn mark_recovered_retry_exhausted(
+        &mut self,
+        issue_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(execution) = self.remove_execution(issue_id) else {
+            return Ok(());
+        };
+        let execution = execution.release(observed_at, ReleaseReason::RetryExhausted, None)?;
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
     }
@@ -1910,16 +1962,18 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
         );
-        let execution = execution.release(observed_at, reason, outcome)?;
-        if cleanup_terminal
-            && let Some(workspace) = execution.workspace().cloned()
-            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
-        {
-            tracing::warn!(
-                issue = %execution.issue().id,
-                %error,
-                "retaining released execution while terminal workspace cleanup retries"
-            );
+        let mut execution = execution.release(observed_at, reason, outcome)?;
+        if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
+            match self.workspace.cleanup_workspace(&workspace, true).await {
+                Ok(()) => execution.clear_workspace(),
+                Err(error) => {
+                    tracing::warn!(
+                        issue = %execution.issue().id,
+                        %error,
+                        "retaining released execution while terminal workspace cleanup retries"
+                    );
+                }
+            }
         }
         Ok(execution)
     }
@@ -2242,14 +2296,7 @@ fn acknowledged_operator_cancel_terminal(
 }
 
 fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
-    let retry_exhausted = matches!(
-        execution.state(),
-        crate::opensymphony_orchestrator::SchedulerState::Released {
-            reason: ReleaseReason::RetryExhausted,
-            ..
-        }
-    );
-    retry_exhausted
+    retry_exhausted_release(execution)
         || matches!(
             execution
                 .last_worker_outcome()
@@ -2259,6 +2306,16 @@ fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
         || execution
             .last_worker_outcome()
             .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
+}
+
+fn retry_exhausted_release(execution: &IssueExecution) -> bool {
+    matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    )
 }
 
 fn tracker_merging_interrupt_cancelled(

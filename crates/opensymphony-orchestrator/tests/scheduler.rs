@@ -1098,10 +1098,12 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
             issue: normalized_issue("lin-492", "COE-492", "Human Review"),
             workspace: recovered_workspace.clone(),
             had_in_flight_run: true,
+            normal_retry_count: 0,
             harness_kind: Some("codex_app_server".to_string()),
             recovered_run: Some(RecoveredRun {
                 worker_id: recovered_worker_id.clone(),
                 conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
             }),
         }],
         records: HashMap::from([("lin-492".to_string(), recovered_workspace)]),
@@ -1639,7 +1641,17 @@ async fn retry_limit_counts_failures_and_prevents_redispatch() {
         active: vec![tracker_issue("lin-270", "COE-270", "In Progress", 0)],
         ..Default::default()
     };
-    let workspace = FakeWorkspace::default();
+    let workspace = FakeWorkspace {
+        cleanup_results: VecDeque::from([
+            Err(FakeError {
+                message: "archive unavailable".to_string(),
+                category: None,
+                retry_after: None,
+            }),
+            Ok(()),
+        ]),
+        ..Default::default()
+    };
     let worker = FakeWorker::default();
     let mut config = scheduler_config();
     config.max_retry_attempts = Some(1);
@@ -1718,10 +1730,14 @@ async fn retry_limit_counts_failures_and_prevents_redispatch() {
     );
 
     scheduler
-        .tick(ts(70_400))
+        .tick(ts(3_600_200))
         .await
-        .expect("exhausted execution should remain parked");
+        .expect("full reconciliation should retry exhausted cleanup");
     assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![("COE-270".to_string(), true), ("COE-270".to_string(), true),]
+    );
 }
 
 #[tokio::test]
@@ -1941,6 +1957,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             issue: normalized_issue("lin-272", "COE-272", "In Progress"),
             workspace: recovered_workspace.clone(),
             had_in_flight_run: true,
+            normal_retry_count: 0,
             harness_kind: Some("openhands_agent_server".to_string()),
             recovered_run: None,
         }],
@@ -1976,6 +1993,48 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
 }
 
 #[tokio::test]
+async fn recovery_restores_exhausted_retry_count_without_dispatching() {
+    let recovered_workspace = workspace_record("COE-273", "/tmp/recovered/COE-273");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-273", "COE-273", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-273", "COE-273", "In Progress"),
+            workspace: recovered_workspace,
+            had_in_flight_run: false,
+            normal_retry_count: 1,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("recovery should preserve retry exhaustion");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-273").expect("issue id should be valid"))
+        .expect("recovered execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::Released);
+    assert!(matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
 async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
     // A leftover workspace for a non-active (Backlog) issue is recovered and
     // parked at startup. When the issue later moves back into an active
@@ -1994,6 +2053,7 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
             issue: normalized_issue("lin-532", "COE-532", "Backlog"),
             workspace: recovered_workspace.clone(),
             had_in_flight_run: false,
+            normal_retry_count: 0,
             harness_kind: None,
             recovered_run: None,
         }],
@@ -2186,6 +2246,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             issue: normalized_issue("lin-283-a", "COE-283-A", "In Progress"),
             workspace: recovered_workspace,
             had_in_flight_run: true,
+            normal_retry_count: 0,
             harness_kind: Some("openhands_agent_server".to_string()),
             recovered_run: None,
         }],

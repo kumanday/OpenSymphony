@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::opensymphony_workflow::WorkflowDefinition;
 
+use super::memory::{memory_activity_marker_path, memory_migration_lock_path};
 use super::orchestrator_run::config::{
     CentralConfigError, load_central_config, looks_like_central_config,
     validate_central_config_text,
@@ -107,6 +108,10 @@ enum MigrationError {
     CentralConfig(#[from] CentralConfigError),
     #[error("git did not provide a usable repository remote")]
     MissingRemote,
+    #[error("legacy memory writers are active at {path}; stop them before migration")]
+    MemoryActive { path: PathBuf },
+    #[error("memory migration is already active at {path}")]
+    MemoryMigrationActive { path: PathBuf },
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +242,7 @@ async fn active_target_central_config(
 ) -> Result<Option<ActiveCentralConfig>, MigrationError> {
     let cwd = current_dir()?;
     let repo = absolute_path(&cwd, &paths.repo);
+    ensure_memory_migration_inactive(&repo)?;
     let source_config = paths
         .config
         .as_ref()
@@ -281,6 +287,7 @@ async fn active_target_central_config(
     let (target_repo, workflow) = marker
         .map(|marker| (marker.target_repo(), marker.workflow_path))
         .unwrap_or_else(|| (repo.clone(), repo.join("WORKFLOW.md")));
+    ensure_memory_migration_inactive(&target_repo)?;
     Ok(Some(ActiveCentralConfig {
         source_config,
         target_config,
@@ -529,6 +536,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         });
     }
 
+    let _memory_lock = acquire_memory_migration_lock(&source.target_repo)?;
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
     let generated = generate_central_config(&source)?;
@@ -812,6 +820,8 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
         })
         .transpose()?
         .unwrap_or(repo);
+    ensure_memory_migration_inactive(&target_repo)?;
+    ensure_legacy_memory_quiescent(&target_repo)?;
     let workflow_path = target_repo.join("WORKFLOW.md");
     let workflow_source = fs::read_to_string(&workflow_path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
@@ -1206,6 +1216,7 @@ fn preserve_legacy_memory(
     target_repo: &Path,
     central_memory_root: Option<&Path>,
 ) -> Result<(), MigrationError> {
+    ensure_legacy_memory_quiescent(target_repo)?;
     let Some(destination) = central_memory_root else {
         return Ok(());
     };
@@ -1224,6 +1235,62 @@ fn preserve_legacy_memory(
         return Ok(());
     }
     copy_directory_contents(&source, destination)
+}
+
+fn ensure_legacy_memory_quiescent(target_repo: &Path) -> Result<(), MigrationError> {
+    let marker = memory_activity_marker_path(&target_repo.join(".opensymphony/memory"));
+    if marker.exists() {
+        return Err(MigrationError::MemoryActive { path: marker });
+    }
+    Ok(())
+}
+
+fn ensure_memory_migration_inactive(target_repo: &Path) -> Result<(), MigrationError> {
+    let path = memory_migration_lock_path(target_repo);
+    if path.exists() {
+        return Err(MigrationError::MemoryMigrationActive { path });
+    }
+    Ok(())
+}
+
+struct MemoryMigrationLock {
+    path: PathBuf,
+}
+
+impl Drop for MemoryMigrationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_memory_migration_lock(
+    target_repo: &Path,
+) -> Result<MemoryMigrationLock, MigrationError> {
+    let path = memory_migration_lock_path(target_repo);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| MigrationError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(MigrationError::MemoryMigrationActive { path });
+        }
+        Err(source) => {
+            return Err(MigrationError::Write { path, source });
+        }
+    }
+    if let Err(error) = ensure_legacy_memory_quiescent(target_repo) {
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(MemoryMigrationLock { path })
 }
 
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), MigrationError> {
@@ -1807,6 +1874,41 @@ mod tests {
                 .expect("destination capsule should remain"),
             "newer\n"
         );
+    }
+
+    #[test]
+    fn migration_rejects_active_legacy_memory_writer_before_copying() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let source = repo.join(".opensymphony/memory");
+        let destination = root.path().join("state/memory");
+        fs::create_dir_all(&source).expect("legacy memory root should exist");
+        fs::write(memory_activity_marker_path(&source), "pid=1234\n")
+            .expect("activity marker should be written");
+        fs::write(source.join("issue.md"), "capsule\n").expect("legacy capsule should exist");
+
+        let error = preserve_legacy_memory(&repo, Some(&destination))
+            .expect_err("active memory writers must block migration");
+        assert!(matches!(error, MigrationError::MemoryActive { .. }));
+        assert!(
+            !destination.exists(),
+            "blocked migration must not copy memory"
+        );
+    }
+
+    #[test]
+    fn migration_lock_is_exclusive_and_released_after_apply_scope() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let first = acquire_memory_migration_lock(&repo).expect("first lock should succeed");
+        assert!(matches!(
+            acquire_memory_migration_lock(&repo),
+            Err(MigrationError::MemoryMigrationActive { .. })
+        ));
+        drop(first);
+        let second = acquire_memory_migration_lock(&repo).expect("released lock should succeed");
+        drop(second);
+        assert!(!memory_migration_lock_path(&repo).exists());
     }
 
     #[test]

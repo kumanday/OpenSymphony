@@ -20,6 +20,7 @@ pub struct IssueDescriptor {
 pub struct RunDescriptor {
     pub run_id: String,
     pub attempt: u32,
+    pub normal_retry_count: u32,
 }
 
 impl RunDescriptor {
@@ -27,7 +28,13 @@ impl RunDescriptor {
         Self {
             run_id: run_id.into(),
             attempt,
+            normal_retry_count: 0,
         }
+    }
+
+    pub fn with_normal_retry_count(mut self, normal_retry_count: u32) -> Self {
+        self.normal_retry_count = normal_retry_count;
+        self
     }
 }
 
@@ -354,6 +361,8 @@ pub struct RunManifest {
     pub sanitized_workspace_key: String,
     pub workspace_path: PathBuf,
     pub attempt: u32,
+    #[serde(default)]
+    pub normal_retry_count: u32,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -373,6 +382,7 @@ impl RunManifest {
             sanitized_workspace_key: workspace.workspace_key().to_string(),
             workspace_path: workspace.workspace_path().to_path_buf(),
             attempt: run.attempt,
+            normal_retry_count: run.normal_retry_count,
             status: RunStatus::Preparing,
             created_at: now,
             updated_at: now,

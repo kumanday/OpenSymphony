@@ -702,6 +702,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                         .map(datetime_to_timestamp_ms),
                 },
                 had_in_flight_run,
+                normal_retry_count: run_manifest
+                    .as_ref()
+                    .map(|run| run.normal_retry_count)
+                    .unwrap_or_default(),
                 harness_kind,
                 recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
             });
@@ -827,6 +831,7 @@ fn recovered_run_from_manifests(
     Some(RecoveredRun {
         worker_id,
         conversation: conversation_metadata_from_manifest(conversation_manifest),
+        normal_retry_count: run_manifest.normal_retry_count,
     })
 }
 
@@ -961,7 +966,8 @@ impl RuntimeWorkerBackend {
                 }
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
-            let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt);
+            let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
+                .with_normal_retry_count(run.normal_retry_count);
             let mut run_manifest = match workspace_manager
                 .start_run(&ensured.handle, &run_descriptor)
                 .await

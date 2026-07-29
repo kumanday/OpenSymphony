@@ -544,11 +544,15 @@ async fn start_run_executes_before_run_in_workspace_and_persists_manifest() {
         .expect("workspace should exist");
 
     let run_manifest = manager
-        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("run-1", 1).with_normal_retry_count(2),
+        )
         .await
         .expect("before_run hook should succeed");
 
     assert_eq!(run_manifest.status, RunStatus::Prepared);
+    assert_eq!(run_manifest.normal_retry_count, 2);
     assert_eq!(run_manifest.hooks.len(), 1);
     assert_eq!(run_manifest.hooks[0].kind, HookKind::BeforeRun);
     assert_eq!(run_manifest.hooks[0].status, HookExecutionStatus::Succeeded);
@@ -568,6 +572,7 @@ async fn start_run_executes_before_run_in_workspace_and_persists_manifest() {
         .expect("run manifest read should succeed")
         .expect("run manifest should exist");
     assert_eq!(persisted.status, RunStatus::Prepared);
+    assert_eq!(persisted.normal_retry_count, 2);
     assert_eq!(persisted.sanitized_workspace_key, "feature_42");
 }
 

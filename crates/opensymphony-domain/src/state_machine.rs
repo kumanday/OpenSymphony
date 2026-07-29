@@ -201,6 +201,11 @@ impl IssueExecution {
         self.workspace.as_ref()
     }
 
+    pub fn clear_workspace(&mut self) {
+        self.workspace = None;
+        self.conversation = None;
+    }
+
     pub fn state(&self) -> &SchedulerState {
         &self.state
     }
