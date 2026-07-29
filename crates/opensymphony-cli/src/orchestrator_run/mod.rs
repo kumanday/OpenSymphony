@@ -288,19 +288,9 @@ fn root_lock_owner_alive(marker: &Path) -> bool {
     }
 }
 
-struct StrictRunMarker {
-    path: PathBuf,
-}
-
-impl Drop for StrictRunMarker {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 fn acquire_strict_run_marker(
     runtime: &RunRuntimeConfig,
-) -> Result<Option<StrictRunMarker>, RunCommandError> {
+) -> Result<Option<super::migration::StrictRunMarkerGuard>, RunCommandError> {
     if !runtime.central_config {
         return Ok(None);
     }
@@ -308,33 +298,12 @@ fn acquire_strict_run_marker(
         return Ok(None);
     };
     let marker = super::migration::strict_run_marker_path(config_path);
-    if let Some(parent) = marker.parent() {
-        fs::create_dir_all(parent).map_err(|source| RunCommandError::StrictRunMarker {
-            path: marker.clone(),
-            detail: format!("failed to create marker directory: {source}"),
-        })?;
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
+    super::migration::claim_strict_run_marker(config_path, &runtime.config_generation)
+        .map(Some)
         .map_err(|source| RunCommandError::StrictRunMarker {
-            path: marker.clone(),
-            detail: source.to_string(),
-        })?;
-    if let Err(source) = writeln!(
-        file,
-        "pid={}\ngeneration={}",
-        std::process::id(),
-        runtime.config_generation
-    ) {
-        let _ = fs::remove_file(&marker);
-        return Err(RunCommandError::StrictRunMarker {
             path: marker,
-            detail: format!("failed to initialize marker: {source}"),
-        });
-    }
-    Ok(Some(StrictRunMarker { path: marker }))
+            detail: source.to_string(),
+        })
 }
 
 pub async fn run_command(args: RunArgs) -> ExitCode {
@@ -417,7 +386,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         );
     }
 
-    let memory_server = start_runtime_memory_server(&runtime).await?;
+    let mut memory_server = start_runtime_memory_server(&runtime).await?;
     let memory_env = memory_server.as_ref().map(|server| RuntimeMemoryEnv {
         endpoint: server.endpoint().to_string(),
         token: runtime
@@ -529,9 +498,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         _ = tokio::signal::ctrl_c() => {
             info!("received shutdown signal");
             server_task.abort();
-            if let Some(server) = &memory_server {
-                server.abort();
-            }
+            shutdown_memory_server(&mut memory_server).await?;
             if let Some(mut supervisor) = supervisor {
                 let _ = supervisor.stop();
             }
@@ -540,19 +507,30 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         result = &mut server_task => {
             match result {
                 Ok(Ok(())) => {
+                    shutdown_memory_server(&mut memory_server).await?;
                     if let Some(mut supervisor) = supervisor {
                         let _ = supervisor.stop();
                     }
-                    if let Some(server) = &memory_server {
-                        server.abort();
-                    }
                     return Ok(());
                 }
-                Ok(Err(error)) => return Err(RunCommandError::Serve(error)),
-                Err(error) => return Err(RunCommandError::Serve(io::Error::other(error.to_string()))),
+                Ok(Err(error)) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(error));
+                }
+                Err(error) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                }
             }
         }
-        result = scheduler.bootstrap(now_timestamp()) => result?,
+        result = scheduler.bootstrap(now_timestamp()) => match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                server_task.abort();
+                shutdown_memory_server(&mut memory_server).await?;
+                return Err(RunCommandError::SchedulerConfig(error));
+            }
+        },
     };
     let mut auto_capture_completed_issues = terminal_issue_identifiers(&bootstrap_snapshot);
     push_recent_event(
@@ -591,8 +569,14 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             result = &mut server_task => {
                 match result {
                     Ok(Ok(())) => break,
-                    Ok(Err(error)) => return Err(RunCommandError::Serve(error)),
-                    Err(error) => return Err(RunCommandError::Serve(io::Error::other(error.to_string()))),
+                    Ok(Err(error)) => {
+                        shutdown_memory_server(&mut memory_server).await?;
+                        return Err(RunCommandError::Serve(error));
+                    }
+                    Err(error) => {
+                        shutdown_memory_server(&mut memory_server).await?;
+                        return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                    }
                 }
             }
             result = async {
@@ -695,13 +679,21 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     server_task.abort();
-    if let Some(server) = &memory_server {
-        server.abort();
-    }
+    shutdown_memory_server(&mut memory_server).await?;
     if let Some(mut supervisor) = supervisor {
         let _ = supervisor.stop();
     }
 
+    Ok(())
+}
+
+async fn shutdown_memory_server(
+    memory_server: &mut Option<super::memory::MemoryServerHandle>,
+) -> Result<(), RunCommandError> {
+    if let Some(server) = memory_server.take() {
+        server.abort();
+        server.wait().await?;
+    }
     Ok(())
 }
 

@@ -118,10 +118,12 @@ activity marker. Owner PIDs allow stale lock and marker recovery after an
 unclean exit; apply removes stale markers only after it owns the lock. Rollback
 also fingerprints the migrated catalog and refuses to restore the legacy
 generation after post-migration memory has changed, preserving that evidence.
-Central-config runs publish the same destination-specific
-`.opensymphony/migration/strict-run.active` marker for their full process
-lifetime; rollback checks this marker before restoring the legacy generation
-and normal shutdown removes it. Recovery treats a terminal successful run as
+Central-config runs publish a destination-hashed
+`.opensymphony/migration/strict-run-<destination>.active` marker for their full
+process lifetime; rollback claims the same marker before restoring the legacy
+generation, so startup and rollback cannot interleave, and normal shutdown
+removes it. Stale markers are reclaimed only when their owner PID is no longer
+live. Recovery treats a terminal successful run as
 successful even when its retry count reached the configured limit, while a
 pending retry is parked if a lowered limit would make it exceed the current
 budget. Failed interrupt requests keep the execution owned until a later

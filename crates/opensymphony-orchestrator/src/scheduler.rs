@@ -2073,6 +2073,7 @@ where
             self.insert_execution(issue_id, execution);
             return Ok(());
         }
+        let was_retry_exhausted = retry_exhausted_release(&execution);
         if execution.status() == SchedulerStatus::Released
             && reason == ReleaseReason::TrackerTerminal
         {
@@ -2080,13 +2081,21 @@ where
         } else if execution.status() != SchedulerStatus::Released {
             execution = execution.release(observed_at, reason, None)?;
         }
-        let retain_failed =
-            reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
+        // A retry-exhausted release can be reconciled after the tracker moves
+        // to a terminal state. Preserve its failed-cleanup policy even though
+        // the externally visible release reason becomes TrackerTerminal.
+        let cleanup_reason = if was_retry_exhausted {
+            ReleaseReason::RetryExhausted
+        } else {
+            reason
+        };
+        let retain_failed = cleanup_reason == ReleaseReason::RetryExhausted
+            && self.workspace.retain_failed_workspaces();
         if cleanup_terminal
             && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
-            && let Err(error) = if reason == ReleaseReason::RetryExhausted {
+            && let Err(error) = if cleanup_reason == ReleaseReason::RetryExhausted {
                 self.workspace.cleanup_failed_workspace(&workspace).await
             } else {
                 self.workspace.cleanup_workspace(&workspace, true).await

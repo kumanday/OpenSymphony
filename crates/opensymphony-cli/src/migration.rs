@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -20,6 +21,9 @@ use super::orchestrator_run::config::{
     CentralConfigError, load_central_config, looks_like_central_config,
     validate_central_config_text,
 };
+
+#[cfg(unix)]
+use rustix::process::{Pid, test_kill_process};
 
 #[derive(Debug, Args)]
 pub struct MigrationArgs {
@@ -349,7 +353,90 @@ fn migration_root(target_config: &Path) -> PathBuf {
 }
 
 pub(crate) fn strict_run_marker_path(target_config: &Path) -> PathBuf {
-    migration_root(target_config).join("strict-run.active")
+    let target_config = normalize_path(target_config);
+    let key = sha256(target_config.display().to_string().as_bytes());
+    migration_root(&target_config).join(format!(
+        "strict-run-{}.active",
+        &key.trim_start_matches("sha256:")[..16]
+    ))
+}
+
+pub(crate) struct StrictRunMarkerGuard {
+    path: PathBuf,
+}
+
+impl Drop for StrictRunMarkerGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub(crate) fn claim_strict_run_marker(
+    target_config: &Path,
+    generation: &str,
+) -> std::io::Result<StrictRunMarkerGuard> {
+    let marker = strict_run_marker_path(target_config);
+    if marker.exists() && !strict_run_marker_owner_alive(&marker) {
+        match fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)?;
+    if let Err(error) = writeln!(file, "pid={}\ngeneration={generation}", std::process::id()) {
+        let _ = fs::remove_file(&marker);
+        return Err(error);
+    }
+    Ok(StrictRunMarkerGuard { path: marker })
+}
+
+fn strict_run_marker_owner_alive(marker: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return true;
+    };
+    let Some(pid) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())
+    else {
+        return true;
+    };
+
+    #[cfg(unix)]
+    {
+        let Some(pid) = Pid::from_raw(pid) else {
+            return true;
+        };
+        match test_kill_process(pid) {
+            Ok(()) => true,
+            Err(error) if error == rustix::io::Errno::SRCH => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let Ok(output) = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+        else {
+            return true;
+        };
+        if !output.status.success() {
+            return true;
+        }
+        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<u32>().ok())
+                == Some(pid as u32)
+        })
+    }
 }
 
 fn migration_marker_path(target_config: &Path) -> PathBuf {
@@ -726,11 +813,20 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         });
     };
     let active_run_marker = strict_run_marker_path(&config_path);
-    if active_run_marker.exists() {
-        return Err(MigrationError::ActiveStrictRun {
-            path: active_run_marker,
-        });
-    }
+    let _strict_run_marker = match claim_strict_run_marker(&config_path, "rollback") {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(MigrationError::ActiveStrictRun {
+                path: active_run_marker,
+            });
+        }
+        Err(source) => {
+            return Err(MigrationError::Write {
+                path: active_run_marker,
+                source,
+            });
+        }
+    };
 
     let _memory_lock = acquire_memory_migration_lock(&marker.target_repo())?;
     verify_activated_files(&marker)?;
@@ -2129,6 +2225,27 @@ mod tests {
     }
 
     #[test]
+    fn strict_run_markers_reclaim_stale_owners_and_are_destination_namespaced() {
+        let root = tempfile::tempdir().expect("marker root should exist");
+        let first = root.path().join("first.yaml");
+        let second = root.path().join("second.yaml");
+        assert_ne!(
+            strict_run_marker_path(&first),
+            strict_run_marker_path(&second)
+        );
+
+        let marker = strict_run_marker_path(&first);
+        fs::create_dir_all(marker.parent().expect("marker parent should exist"))
+            .expect("marker parent should be created");
+        fs::write(&marker, "pid=2000000000\ngeneration=stale\n")
+            .expect("stale marker should be written");
+        let guard = claim_strict_run_marker(&first, "generation").expect("stale marker claim");
+        assert!(marker.is_file());
+        drop(guard);
+        assert!(!marker.exists());
+    }
+
+    #[test]
     fn rollback_verification_accepts_the_backed_up_partial_generation() {
         let root = tempfile::tempdir().expect("verification root should exist");
         let current = root.path().join("config.yaml");
@@ -2580,14 +2697,18 @@ mod tests {
             );
         }
 
-        let strict_run_marker = migration_root(&output_path).join("strict-run.active");
+        let strict_run_marker = strict_run_marker_path(&output_path);
         fs::create_dir_all(
             strict_run_marker
                 .parent()
                 .expect("strict run marker should have a parent"),
         )
         .expect("migration marker directory should exist");
-        fs::write(&strict_run_marker, "active\n").expect("strict run marker should be written");
+        fs::write(
+            &strict_run_marker,
+            format!("pid={}\ngeneration=active\n", std::process::id()),
+        )
+        .expect("strict run marker should be written");
         let blocked = rollback(RollbackArgs {
             config: Some(output_path.clone()),
         })

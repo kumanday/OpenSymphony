@@ -681,9 +681,13 @@ migration visible instead of restoring a legacy config that would hide them;
 remove or reconcile the divergent catalog only through an explicit recovery
 operation.
 
-Central-config `opensymphony run` holds a destination-specific
-`.opensymphony/migration/strict-run.active` marker until the process exits, so
-rollback cannot replace the active generation underneath a running instance.
+Central-config `opensymphony run` holds a destination-hashed
+`.opensymphony/migration/strict-run-<destination>.active` marker until the
+process exits. Rollback claims that same marker for its full restore, so it
+cannot replace the active generation underneath a running instance, and stale
+markers are reclaimed only after owner liveness is disproved. Graceful run
+shutdown awaits the memory-server task before returning, ensuring its activity
+marker and coordination lock are released.
 Lock ownership treats permission-denied Unix PIDs as live and uses `tasklist`
 for stale-lock recovery on Windows. Restart recovery preserves successful
 terminal workspaces according to the configured retention policy, rejects

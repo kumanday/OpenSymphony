@@ -1072,7 +1072,11 @@ fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) ->
     if conversation_manifest_is_codex(manifest) {
         return CODEX_APP_SERVER_KIND.to_string();
     }
-    "<unknown>".to_string()
+    // Manifests written before transport_target was introduced were all
+    // produced by the OpenHands-backed runtime. Keep recovery on that
+    // interrupt path instead of turning a missing optional field into an
+    // unknown harness that can never be stopped.
+    OPENHANDS_AGENT_SERVER_KIND.to_string()
 }
 
 fn recovered_run_from_manifests(
@@ -3758,10 +3762,13 @@ mod tests {
     }
 
     #[test]
-    fn recovered_harness_kind_is_unknown_without_transport_target() {
+    fn recovered_harness_kind_defaults_to_openhands_without_transport_target() {
         let manifest = sample_conversation_manifest("legacy-openhands");
 
-        assert_eq!(recovered_harness_kind_from_manifest(&manifest), "<unknown>");
+        assert_eq!(
+            recovered_harness_kind_from_manifest(&manifest),
+            OPENHANDS_AGENT_SERVER_KIND
+        );
     }
 
     #[test]

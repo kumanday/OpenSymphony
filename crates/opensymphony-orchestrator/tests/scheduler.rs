@@ -378,6 +378,7 @@ struct FakeWorkspace {
     cleared_retry_exhaustion: Vec<String>,
     ensured: Vec<String>,
     cleaned: Vec<(String, bool)>,
+    failed_cleaned: Vec<String>,
     cleanup_results: VecDeque<Result<(), FakeError>>,
     records: HashMap<String, WorkspaceRecord>,
     persisted_retry_counts: Vec<u32>,
@@ -425,6 +426,15 @@ impl WorkspaceBackend for FakeWorkspace {
         self.cleaned
             .push((workspace.workspace_key.to_string(), terminal));
         self.cleanup_results.pop_front().unwrap_or(Ok(()))
+    }
+
+    async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.failed_cleaned
+            .push(workspace.workspace_key.to_string());
+        self.cleanup_workspace(workspace, true).await
     }
 
     async fn persist_retry_count(
@@ -1539,6 +1549,88 @@ async fn terminal_cleanup_failure_after_worker_finish_keeps_execution_for_retry(
             ("COE-541".to_string(), true),
         ]
     );
+}
+
+#[tokio::test]
+async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-542", "COE-542", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        cleanup_results: VecDeque::from([Err(FakeError {
+            message: "failed cleanup should retry".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler.tick(ts(100)).await.expect("initial dispatch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(200),
+                Some("queue continuation".to_string()),
+                None,
+            ),
+        });
+    scheduler.tick(ts(200)).await.expect("queue continuation");
+    scheduler
+        .tick(ts(1_300))
+        .await
+        .expect("dispatch continuation");
+
+    let second_run = scheduler.worker().launches[1].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: second_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &second_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(1_400),
+                Some("exhaust retry budget".to_string()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(1_400))
+        .await
+        .expect("retry exhaustion should release");
+
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue("lin-542", "COE-542", "Done", 0)];
+    scheduler
+        .tick(ts(300_200))
+        .await
+        .expect("terminal transition should reconcile cleanup");
+
+    assert_eq!(
+        scheduler.workspace().failed_cleaned,
+        vec!["COE-542", "COE-542"]
+    );
+    assert!(matches!(
+        scheduler
+            .execution(&IssueId::new("lin-542").expect("issue id should be valid"))
+            .expect("execution should remain recorded")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::TrackerTerminal,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
