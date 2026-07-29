@@ -627,6 +627,8 @@ pub struct RunManifest {
     pub retry_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt_reason: Option<String>,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -652,6 +654,7 @@ impl RunManifest {
             retry_due_at: None,
             retry_reason: None,
             retry_error: None,
+            interrupt_reason: None,
             status: RunStatus::Preparing,
             created_at: now,
             updated_at: now,

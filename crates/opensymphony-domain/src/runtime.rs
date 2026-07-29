@@ -1018,6 +1018,10 @@ impl HarnessInterruptState {
         }
     }
 
+    pub fn replace_command(&mut self, command: HarnessInterruptCommand) {
+        self.command = command;
+    }
+
     pub fn acknowledge(&mut self, observed_at: TimestampMs) {
         if self.status != HarnessInterruptStatus::Requested {
             return;

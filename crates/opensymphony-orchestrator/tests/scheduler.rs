@@ -1292,6 +1292,7 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
             retry_reason: None,
             retry_error: None,
             harness_kind: Some("codex_app_server".to_string()),
+            interrupt_reason: None,
             recovered_run: Some(RecoveredRun {
                 worker_id: recovered_worker_id.clone(),
                 conversation: conversation(&recovered_worker_id),
@@ -2721,6 +2722,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             retry_reason: None,
             retry_error: None,
             harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-272".to_string(), recovered_workspace.clone())]),
@@ -2791,6 +2793,7 @@ async fn recovery_keeps_an_active_cancelled_run_released() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         ..Default::default()
@@ -2818,6 +2821,61 @@ async fn recovery_keeps_an_active_cancelled_run_released() {
 }
 
 #[tokio::test]
+async fn recovery_requeues_cancelled_merging_interrupt() {
+    let recovered_workspace = workspace_record("COE-272-MERGING", "/tmp/recovered/COE-272-MERGING");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            "lin-272-merging",
+            "COE-272-MERGING",
+            "Merging",
+            0,
+        )],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-272-merging", "COE-272-MERGING", "Merging"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: true,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: Some(HarnessInterruptReason::TrackerMergingSupersedesHumanReview),
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-272-merging".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.active_states.push("Merging".to_string());
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("merging cancellation recovery should succeed");
+
+    let issue_id = IssueId::new("lin-272-merging").expect("issue id should be valid");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .and_then(|execution| execution.current_run())
+            .map(|run| run.normal_retry_count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
 async fn pre_conversation_recovery_honors_retry_limit() {
     let recovered_workspace = workspace_record("COE-273", "/tmp/recovered/COE-273");
     let tracker = FakeTracker {
@@ -2839,6 +2897,7 @@ async fn pre_conversation_recovery_honors_retry_limit() {
             retry_reason: None,
             retry_error: None,
             harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-273".to_string(), recovered_workspace)]),
@@ -2887,6 +2946,7 @@ async fn recovery_advances_consumed_retry_budget_before_dispatch() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-274".to_string(), recovered_workspace)]),
@@ -2933,6 +2993,7 @@ async fn recovery_retries_an_interrupted_completed_initial_run() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-278".to_string(), recovered_workspace)]),
@@ -2981,6 +3042,7 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
             retry_reason: Some(RetryReason::Continuation),
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-276".to_string(), recovered_workspace)]),
@@ -3029,6 +3091,7 @@ async fn recovery_parks_pending_retry_when_current_limit_is_lowered() {
             retry_reason: Some(RetryReason::Failure),
             retry_error: Some("redacted failure".to_string()),
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-277".to_string(), recovered_workspace)]),
@@ -3172,6 +3235,7 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         ..Default::default()
@@ -3224,6 +3288,7 @@ async fn terminal_recovery_honors_failed_workspace_retention() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         ..Default::default()
@@ -3263,6 +3328,7 @@ async fn terminal_recovery_preserves_cancelled_workspace_policy() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         ..Default::default()
@@ -3313,6 +3379,7 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
             retry_reason: None,
             retry_error: None,
             harness_kind: None,
+            interrupt_reason: None,
             recovered_run: None,
         }],
         records: HashMap::from([("lin-532".to_string(), recovered_workspace.clone())]),
@@ -3514,6 +3581,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             retry_reason: None,
             retry_error: None,
             harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
             recovered_run: None,
         }],
         ..Default::default()

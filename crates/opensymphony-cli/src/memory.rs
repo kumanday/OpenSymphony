@@ -1929,12 +1929,15 @@ pub(crate) fn acquire_memory_coordination_lock(
         fs::create_dir_all(parent)?;
     }
     loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return initialize_memory_coordination_lock(file, &path),
+        match super::orchestrator_run::publish_initialized_marker(
+            &path,
+            &format!("pid={}\n", process::id()),
+        ) {
+            Ok(_) => {
+                return Ok(MemoryCoordinationLock {
+                    path: path.to_path_buf(),
+                });
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 if memory_lock_owner_is_stale(&path) {
                     let quarantine = stale_memory_lock_path(&path);
@@ -1965,6 +1968,7 @@ fn memory_coordination_root(config: &MemoryConfig) -> PathBuf {
     }
 }
 
+#[cfg(test)]
 fn initialize_memory_coordination_lock(
     mut file: fs::File,
     path: &Path,

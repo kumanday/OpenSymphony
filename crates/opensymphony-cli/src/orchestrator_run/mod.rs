@@ -8,6 +8,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration,
@@ -157,11 +158,49 @@ pub(crate) struct RuntimeRootOwnership {
 #[derive(Debug)]
 struct RuntimeRootLock {
     marker: PathBuf,
+    registry_marker: PathBuf,
     _file: File,
 }
 
 struct RootOwnershipSerialization {
     path: PathBuf,
+}
+
+static ATOMIC_MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Publish a fully initialized marker without ever exposing an empty final
+/// path.  A hard link is used instead of rename so an existing owner cannot
+/// be replaced by a concurrent claimant.
+pub(crate) fn publish_initialized_marker(path: &Path, contents: &str) -> io::Result<File> {
+    let sequence = ATOMIC_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = path.with_file_name(format!(
+        ".{}.staging-{}-{sequence}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("marker"),
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)?;
+    if let Err(error) = file
+        .write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
+    match fs::hard_link(&staging, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(staging);
+            Ok(file)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(staging);
+            Err(error)
+        }
+    }
 }
 
 impl Drop for RootOwnershipSerialization {
@@ -172,9 +211,15 @@ impl Drop for RootOwnershipSerialization {
 
 impl Drop for RuntimeRootOwnership {
     fn drop(&mut self) {
-        for RuntimeRootLock { marker, _file } in self.locks.drain(..) {
+        for RuntimeRootLock {
+            marker,
+            registry_marker,
+            _file,
+        } in self.locks.drain(..)
+        {
             drop(_file);
             let _ = fs::remove_file(marker);
+            let _ = fs::remove_file(registry_marker);
         }
     }
 }
@@ -246,23 +291,19 @@ pub(crate) fn acquire_root_ownership(
             }
             ancestor = path.parent();
         }
-        if let Some(marker) = find_live_descendant_root_marker(&root)? {
+        if let Some((_, owned_root)) = find_live_registered_root_marker(&root, &BTreeSet::new())? {
             return Err(RunCommandError::RootOwnership {
                 detail: format!(
                     "{} contains the owned nested root {}",
                     root.display(),
-                    marker.parent().unwrap_or(&marker).display()
+                    owned_root.display()
                 ),
             });
         }
         let marker = root.join(".opensymphony-instance.lock");
         let file = loop {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&marker)
-            {
-                Ok(file) => break initialize_root_marker(file, &marker)?,
+            match initialize_root_marker_atomic(&marker) {
+                Ok(file) => break file,
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
                     if root_lock_owner_alive(&marker) {
                         return Err(RunCommandError::RootOwnership {
@@ -296,38 +337,19 @@ pub(crate) fn acquire_root_ownership(
                 }
             }
         };
+        let registry_marker = match claim_root_registry_marker(&root) {
+            Ok(marker) => marker,
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&marker);
+                return Err(error);
+            }
+        };
         ownership.locks.push(RuntimeRootLock {
             marker,
+            registry_marker,
             _file: file,
         });
-    }
-
-    // The initial hierarchy scan prevents most conflicts, while this second
-    // scan closes the race where two instances create nested markers between
-    // one another's scans.  A deterministic marker-path winner lets one
-    // contender keep its claim and forces the other to release every claim it
-    // acquired in this call, so both instances cannot proceed.
-    let own_markers = ownership
-        .locks
-        .iter()
-        .map(|lock| lock.marker.clone())
-        .collect::<BTreeSet<_>>();
-    for lock in &ownership.locks {
-        if let Some(conflicting_marker) = find_conflicting_root_marker(&lock.marker, &own_markers)?
-            && conflicting_marker < lock.marker
-        {
-            let conflicting_root = conflicting_marker
-                .parent()
-                .unwrap_or(&conflicting_marker)
-                .display();
-            return Err(RunCommandError::RootOwnership {
-                detail: format!(
-                    "{} lost the overlapping root ownership race to {}",
-                    lock.marker.parent().unwrap_or(&lock.marker).display(),
-                    conflicting_root
-                ),
-            });
-        }
     }
 
     Ok(ownership)
@@ -444,92 +466,96 @@ fn root_marker_blocks(marker: &Path) -> bool {
     metadata.file_type().is_symlink() || root_lock_owner_alive(marker)
 }
 
-fn find_live_descendant_root_marker(root: &Path) -> Result<Option<PathBuf>, RunCommandError> {
-    let entries = fs::read_dir(root).map_err(|source| RunCommandError::RootOwnership {
-        detail: format!(
-            "failed to inspect nested roots below {}: {source}",
-            root.display()
-        ),
+fn root_ownership_registry_path() -> PathBuf {
+    std::env::temp_dir().join("opensymphony-runtime-root-ownership-registry")
+}
+
+fn claim_root_registry_marker(root: &Path) -> Result<PathBuf, RunCommandError> {
+    let registry = root_ownership_registry_path();
+    fs::create_dir_all(&registry).map_err(|source| RunCommandError::RootOwnership {
+        detail: format!("failed to create {}: {source}", registry.display()),
     })?;
+    let sequence = ATOMIC_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let marker = registry.join(format!("root-{}-{sequence}.active", std::process::id()));
+    publish_initialized_marker(
+        &marker,
+        &format!("pid={}\nroot={}\n", std::process::id(), root.display()),
+    )
+    .map(|_| marker.clone())
+    .map_err(|source| RunCommandError::RootOwnership {
+        detail: format!("failed to publish {}: {source}", marker.display()),
+    })
+}
+
+fn find_live_registered_root_marker(
+    root: &Path,
+    own_registry_markers: &BTreeSet<PathBuf>,
+) -> Result<Option<(PathBuf, PathBuf)>, RunCommandError> {
+    let registry = root_ownership_registry_path();
+    let entries = match fs::read_dir(&registry) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(RunCommandError::RootOwnership {
+                detail: format!("failed to inspect {}: {source}", registry.display()),
+            });
+        }
+    };
     for entry in entries {
         let entry = entry.map_err(|source| RunCommandError::RootOwnership {
-            detail: format!(
-                "failed to inspect nested roots below {}: {source}",
-                root.display()
-            ),
+            detail: format!("failed to inspect {}: {source}", registry.display()),
         })?;
-        let path = entry.path();
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| RunCommandError::RootOwnership {
-                detail: format!(
-                    "failed to inspect nested root path {}: {source}",
-                    path.display()
-                ),
-            })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let marker = entry.path();
+        if own_registry_markers.contains(&marker) {
             continue;
         }
-        let marker = path.join(".opensymphony-instance.lock");
-        if root_marker_blocks(&marker) {
-            return Ok(Some(marker));
-        }
-        if let Some(marker) = find_live_descendant_root_marker(&path)? {
-            return Ok(Some(marker));
-        }
-    }
-    Ok(None)
-}
-
-fn find_conflicting_root_marker(
-    marker: &Path,
-    own_markers: &BTreeSet<PathBuf>,
-) -> Result<Option<PathBuf>, RunCommandError> {
-    let root = marker.parent().unwrap_or(marker);
-    let mut ancestor = root.parent();
-    while let Some(path) = ancestor {
-        let candidate = path.join(".opensymphony-instance.lock");
-        if !own_markers.contains(&candidate) && root_marker_blocks(&candidate) {
-            return Ok(Some(candidate));
-        }
-        ancestor = path.parent();
-    }
-
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(current) = pending.pop() {
-        let entries = fs::read_dir(&current).map_err(|source| RunCommandError::RootOwnership {
-            detail: format!(
-                "failed to inspect nested roots below {}: {source}",
-                current.display()
-            ),
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| RunCommandError::RootOwnership {
-                detail: format!(
-                    "failed to inspect nested roots below {}: {source}",
-                    current.display()
-                ),
+        let metadata =
+            fs::symlink_metadata(&marker).map_err(|source| RunCommandError::RootOwnership {
+                detail: format!("failed to inspect {}: {source}", marker.display()),
             })?;
-            let path = entry.path();
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|source| RunCommandError::RootOwnership {
-                    detail: format!(
-                        "failed to inspect nested root path {}: {source}",
-                        path.display()
-                    ),
-                })?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                continue;
-            }
-            let candidate = path.join(".opensymphony-instance.lock");
-            if !own_markers.contains(&candidate) && root_marker_blocks(&candidate) {
-                return Ok(Some(candidate));
-            }
-            pending.push(path);
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let contents =
+            fs::read_to_string(&marker).map_err(|source| RunCommandError::RootOwnership {
+                detail: format!("failed to read {}: {source}", marker.display()),
+            })?;
+        let Some(pid) = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())
+        else {
+            return Err(RunCommandError::RootOwnership {
+                detail: format!("ownership registry marker {} has no PID", marker.display()),
+            });
+        };
+        if !process_owner_alive(pid) {
+            let _ = fs::remove_file(&marker);
+            continue;
+        }
+        let Some(owned_root) = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("root=").map(PathBuf::from))
+        else {
+            return Err(RunCommandError::RootOwnership {
+                detail: format!("ownership registry marker {} has no root", marker.display()),
+            });
+        };
+        if paths_overlap(root, &owned_root) {
+            return Ok(Some((marker, owned_root)));
         }
     }
     Ok(None)
 }
 
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn initialize_root_marker_atomic(marker: &Path) -> io::Result<File> {
+    publish_initialized_marker(marker, &format!("pid={}\n", std::process::id()))
+}
+
+#[cfg(test)]
 fn initialize_root_marker(mut file: File, marker: &Path) -> Result<File, RunCommandError> {
     if let Err(source) = writeln!(file, "pid={}", std::process::id()) {
         drop(file);

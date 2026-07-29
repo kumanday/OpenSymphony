@@ -16,9 +16,9 @@ use crate::opensymphony_codex::{
     turn_status,
 };
 use crate::opensymphony_domain::{
-    ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, RetryEntry, RetryReason, RuntimeStreamState, TimestampMs,
-    TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
+    IssueState, IssueStateCategory, NormalizedIssue, RetryEntry, RetryReason, RuntimeStreamState,
+    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
@@ -837,6 +837,10 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     .as_ref()
                     .and_then(|run| run.retry_error.clone()),
                 harness_kind,
+                interrupt_reason: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.interrupt_reason.as_deref())
+                    .and_then(interrupt_reason_from_manifest),
                 recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
             });
         }
@@ -908,6 +912,35 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         // The queued retry marker must survive until start_run writes the
         // replacement manifest. Clearing it here creates a crash window
         // between scheduler preparation and worker launch.
+        Ok(())
+    }
+
+    async fn persist_interrupt_reason(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        reason: HarnessInterruptReason,
+    ) -> Result<(), Self::Error> {
+        let Some((handle, _)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
+            }));
+        };
+        let Some(mut manifest) = self.manager.load_run_manifest(&handle).await? else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "run manifest is missing"),
+            }));
+        };
+        manifest.interrupt_reason = Some(reason.as_str().to_owned());
+        manifest.updated_at = chrono::Utc::now();
+        self.manager.write_run_manifest(&handle, &manifest).await?;
         Ok(())
     }
 
@@ -1033,6 +1066,17 @@ fn retry_reason_for_manifest(reason: RetryReason) -> String {
         RetryReason::Reconciliation => "reconciliation",
     }
     .to_owned()
+}
+
+fn interrupt_reason_from_manifest(value: &str) -> Option<HarnessInterruptReason> {
+    match value {
+        "operator_cancel" => Some(HarnessInterruptReason::OperatorCancel),
+        "tracker_merging_supersedes_human_review" => {
+            Some(HarnessInterruptReason::TrackerMergingSupersedesHumanReview)
+        }
+        "scheduler_abort" => Some(HarnessInterruptReason::SchedulerAbort),
+        _ => None,
+    }
 }
 
 fn retry_reason_from_manifest(value: &str) -> Option<RetryReason> {

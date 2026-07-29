@@ -122,6 +122,7 @@ pub struct RecoveryRecord {
     pub retry_reason: Option<RetryReason>,
     pub retry_error: Option<String>,
     pub harness_kind: Option<String>,
+    pub interrupt_reason: Option<HarnessInterruptReason>,
     pub recovered_run: Option<RecoveredRun>,
 }
 
@@ -330,6 +331,14 @@ pub trait WorkspaceBackend {
         &mut self,
         _workspace: &WorkspaceRecord,
         _retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_interrupt_reason(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        _reason: HarnessInterruptReason,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -664,6 +673,8 @@ where
             HarnessInterruptExpectedNextState::Paused,
             observed_at,
         )?;
+
+        self.persist_interrupt_intent(&execution).await?;
 
         if queued {
             execution.observe_runtime_event(
@@ -1059,9 +1070,50 @@ where
                 } else if record.cancelled_run && !record.pending_retry {
                     let execution = self
                         .remove_execution(&issue_id)
-                        .expect("active recovery execution should be present")
-                        .release(observed_at, ReleaseReason::Cancelled, None)?;
-                    self.insert_execution(issue_id.clone(), execution);
+                        .expect("active recovery execution should be present");
+                    if record.interrupt_reason
+                        == Some(HarnessInterruptReason::TrackerMergingSupersedesHumanReview)
+                        && normalized_state_name(&normalized.state.name) == MERGING_STATE
+                    {
+                        let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                        if self.retry_count_exceeds_limit(normal_retry_count) {
+                            self.persist_retry_exhaustion(&record.issue, normal_retry_count)
+                                .await?;
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.release(
+                                    observed_at,
+                                    ReleaseReason::RetryExhausted,
+                                    None,
+                                )?,
+                            );
+                            self.mark_recovered_retry_exhausted(
+                                &issue_id,
+                                normal_retry_count,
+                                observed_at,
+                            )?;
+                        } else {
+                            let retry = RetryEntry {
+                                issue_id: normalized.id.clone(),
+                                identifier: normalized.identifier.clone(),
+                                attempt: RetryAttempt::new(normal_retry_count)?,
+                                normal_retry_count,
+                                scheduled_at: observed_at,
+                                due_at: observed_at,
+                                reason: RetryReason::Continuation,
+                                error: None,
+                            };
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.restore_retry(retry)?,
+                            );
+                        }
+                    } else {
+                        self.insert_execution(
+                            issue_id.clone(),
+                            execution.release(observed_at, ReleaseReason::Cancelled, None)?,
+                        );
+                    }
                 } else if record.pending_retry {
                     let normal_retry_count = record.normal_retry_count.saturating_add(1);
                     // A retry whose count equals the configured maximum is
@@ -1403,6 +1455,7 @@ where
             observed_at,
         )?;
         if let Some(command) = command {
+            self.persist_interrupt_intent(&execution).await?;
             let result = self.worker.interrupt_worker(command).await;
             Self::apply_interrupt_result(
                 &mut execution,
@@ -1526,6 +1579,27 @@ where
             })),
         )?;
         Ok(Some(command))
+    }
+
+    async fn persist_interrupt_intent(
+        &mut self,
+        execution: &IssueExecution,
+    ) -> Result<(), SchedulerError> {
+        let Some(workspace) = execution.workspace().cloned() else {
+            return Ok(());
+        };
+        let Some(reason) = execution
+            .interrupt()
+            .map(|interrupt| interrupt.command.reason)
+        else {
+            return Ok(());
+        };
+        self.workspace
+            .persist_interrupt_reason(&workspace, reason)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })
     }
 
     fn apply_interrupt_result(
@@ -2251,6 +2325,7 @@ where
                 HarnessInterruptExpectedNextState::Released,
                 observed_at,
             )?;
+            self.persist_interrupt_intent(execution).await?;
             if queued {
                 match self.worker.interrupt_worker(command).await {
                     Ok(acknowledgement) if acknowledgement.timed_out => {

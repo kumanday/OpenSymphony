@@ -206,6 +206,8 @@ struct ActivationMarker {
     memory_catalog_root: Option<PathBuf>,
     #[serde(default)]
     memory_catalog_generation: Option<String>,
+    #[serde(default)]
+    memory_catalog_copy_in_progress: bool,
 }
 
 impl ActivationMarker {
@@ -276,6 +278,20 @@ async fn active_target_central_config(
         .map(|path| absolute_path(&cwd, path))
         .unwrap_or_else(|| repo.join("config.yaml"));
     let target_config = migration_target_config(paths, &cwd, &source_config);
+    let activation = load_activation_marker(&target_config)?;
+    if let Some((activation_marker, marker)) = activation.as_ref()
+        && marker.memory_catalog_copy_in_progress
+    {
+        ensure_memory_migration_inactive(&marker.target_repo())?;
+        return Ok(Some(ActiveCentralConfig {
+            source_config: marker.source_config.clone(),
+            target_config: target_config.clone(),
+            target_repo: marker.target_repo(),
+            workflow: marker.workflow_path.clone(),
+            generation: marker.generation.clone(),
+            activation_marker: activation_marker.clone(),
+        }));
+    }
     if !target_config.is_file() {
         return Ok(None);
     }
@@ -286,7 +302,7 @@ async fn active_target_central_config(
     if !looks_like_central_config(&raw) {
         return Ok(None);
     }
-    let marker = load_activation_marker(&target_config)?;
+    let marker = activation;
     if target_config != source_config && marker.is_none() {
         return Err(MigrationError::DestinationConflict {
             path: target_config,
@@ -432,18 +448,11 @@ pub(crate) fn claim_strict_run_marker(
                 Err(error) => return Err(error),
             }
         }
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-        {
-            Ok(mut file) => {
-                if let Err(error) =
-                    writeln!(file, "pid={}\ngeneration={generation}", std::process::id())
-                {
-                    let _ = fs::remove_file(&marker);
-                    return Err(error);
-                }
+        match super::orchestrator_run::publish_initialized_marker(
+            &marker,
+            &format!("pid={}\ngeneration={generation}\n", std::process::id()),
+        ) {
+            Ok(_) => {
                 return Ok(StrictRunMarkerGuard { path: marker });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -837,18 +846,15 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let workflow_stage = stage_path(&source.workflow_path, &generation);
     write_file_with_mode(&central_stage, generated.as_bytes(), config_mode)?;
     let central = load_central_config(&central_stage).await?;
-    memory_locks
-        .acquire_catalog_lock(&source.target_repo, central.memory_catalog_root.as_deref())?;
-    preserve_legacy_memory(&source.target_repo, central.memory_catalog_root.as_deref())?;
     let memory_catalog_root = central.memory_catalog_root.clone();
-    let memory_catalog_generation = memory_catalog_root
+    let memory_catalog_generation_before = memory_catalog_root
         .as_deref()
         .map(memory_catalog_generation)
         .transpose()?;
     let workflow_body = workflow_body(&source)?;
     write_file_with_mode(&workflow_stage, &workflow_body, workflow_mode)?;
 
-    let marker = ActivationMarker {
+    let mut marker = ActivationMarker {
         source_config: source.source_config.clone(),
         config_path: target_config.clone(),
         workflow_path: source.workflow_path.clone(),
@@ -859,8 +865,9 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         had_workflow,
         config_mode,
         workflow_mode,
-        memory_catalog_root,
-        memory_catalog_generation,
+        memory_catalog_root: memory_catalog_root.clone(),
+        memory_catalog_generation: memory_catalog_generation_before,
+        memory_catalog_copy_in_progress: true,
     };
     let marker_path = migration_marker_path(&target_config);
     let marker_stage = stage_path(&marker_path, &generation);
@@ -874,6 +881,16 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
         return Err(error);
     }
+    memory_locks.acquire_catalog_lock(&source.target_repo, memory_catalog_root.as_deref())?;
+    preserve_legacy_memory(&source.target_repo, memory_catalog_root.as_deref())?;
+    marker.memory_catalog_generation = memory_catalog_root
+        .as_deref()
+        .map(memory_catalog_generation)
+        .transpose()?;
+    marker.memory_catalog_copy_in_progress = false;
+    let marker_raw = serde_yaml::to_string(&marker).map_err(MigrationError::SerializeConfig)?;
+    write_file(&marker_stage, marker_raw.as_bytes())?;
+    replace_staged_file(&marker_stage, &marker_path)?;
     if let Err(error) = replace_staged_file(&central_stage, &target_config) {
         return recover_failed_apply(
             &marker_path,
@@ -2815,6 +2832,7 @@ mod tests {
             workflow_mode: None,
             memory_catalog_root: Some(catalog.clone()),
             memory_catalog_generation: Some(expected),
+            memory_catalog_copy_in_progress: false,
         };
 
         assert!(matches!(

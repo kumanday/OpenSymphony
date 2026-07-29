@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use crate::opensymphony_workspace::{
     CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
-    HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor, IssueLifecycleState,
-    PromptCaptureDescriptor, PromptKind, RunDescriptor, RunStatus, SessionContextArtifact,
-    WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
+    IssueLifecycleState, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunStatus,
+    SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -574,6 +574,58 @@ async fn start_run_executes_before_run_in_workspace_and_persists_manifest() {
     assert_eq!(persisted.status, RunStatus::Prepared);
     assert_eq!(persisted.normal_retry_count, 2);
     assert_eq!(persisted.sanitized_workspace_key, "feature_42");
+}
+
+#[tokio::test]
+async fn run_manifest_redacts_hook_credentials_before_persisting() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-547-hook-redaction"))
+        .await
+        .expect("workspace should exist");
+    let mut manifest = manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("run-hook-redaction", 1),
+        )
+        .await
+        .expect("run should start");
+    let now = chrono::Utc::now();
+    manifest.hooks.push(HookExecutionRecord {
+        kind: HookKind::BeforeRun,
+        command: "echo access_token=sk-live-hook".to_string(),
+        cwd: ensured.handle.workspace_path().to_path_buf(),
+        best_effort: false,
+        status: HookExecutionStatus::Succeeded,
+        started_at: now,
+        finished_at: now,
+        duration_ms: 1,
+        exit_code: Some(0),
+        stdout: "{\"account_id\":\"acct_hook\"}".to_string(),
+        stderr: "refresh_token: rt-hook".to_string(),
+    });
+    manager
+        .write_run_manifest(&ensured.handle, &manifest)
+        .await
+        .expect("manifest should persist");
+
+    let persisted = manager
+        .load_run_manifest(&ensured.handle)
+        .await
+        .expect("run manifest should load")
+        .expect("run manifest should exist");
+    let hook = persisted.hooks.last().expect("hook should persist");
+    for value in [&hook.command, &hook.stdout, &hook.stderr] {
+        assert!(!value.contains("sk-live-hook"));
+        assert!(!value.contains("acct_hook"));
+        assert!(!value.contains("rt-hook"));
+    }
 }
 
 #[tokio::test]

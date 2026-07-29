@@ -301,8 +301,17 @@ impl IssueExecution {
         };
         if let Some(interrupt) = &self.interrupt {
             match interrupt.status {
-                HarnessInterruptStatus::Requested | HarnessInterruptStatus::Acknowledged => {
+                HarnessInterruptStatus::Requested => {
                     return Ok((interrupt.command.clone(), false));
+                }
+                HarnessInterruptStatus::Acknowledged => {
+                    // The stop already reached the harness, so a superseding
+                    // operator intent does not need another remote request.
+                    // Keep the acknowledgement state but replace the command
+                    // so recovery and the next outcome honor the new intent.
+                    let interrupt = self.interrupt.as_mut().expect("interrupt is present");
+                    interrupt.replace_command(command.clone());
+                    return Ok((command, false));
                 }
                 HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut => {
                     self.interrupt = Some(HarnessInterruptState::requested(

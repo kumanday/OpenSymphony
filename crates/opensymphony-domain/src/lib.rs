@@ -388,6 +388,41 @@ mod tests {
     }
 
     #[test]
+    fn acknowledged_interrupt_replaces_command_without_losing_stop_state() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(60),
+        ));
+        must(execution.acknowledge_interrupt(ts(61)));
+
+        let (command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-2".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(62),
+        ));
+
+        assert!(!queued);
+        assert_eq!(command.reason, HarnessInterruptReason::OperatorCancel);
+        assert_eq!(command.turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Acknowledged)
+        );
+        assert_eq!(
+            execution
+                .interrupt()
+                .map(|interrupt| interrupt.command.reason),
+            Some(HarnessInterruptReason::OperatorCancel)
+        );
+    }
+
+    #[test]
     fn interrupt_idempotency_does_not_cross_reopened_runs() {
         let issue = sample_issue();
         let workspace = sample_workspace();

@@ -428,6 +428,11 @@ impl WorkspaceManager {
             .retry_error
             .as_deref()
             .map(redact_runtime_diagnostic);
+        for hook in &mut sanitized.hooks {
+            hook.command = redact_runtime_diagnostic(&hook.command);
+            hook.stdout = redact_runtime_diagnostic(&hook.stdout);
+            hook.stderr = redact_runtime_diagnostic(&hook.stderr);
+        }
         self.write_manifest(workspace, &workspace.run_manifest_path(), &sanitized)
             .await
     }
