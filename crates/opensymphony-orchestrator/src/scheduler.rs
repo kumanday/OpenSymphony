@@ -1007,6 +1007,8 @@ where
                 ReleaseReason::RetryExhausted,
                 None,
             )?;
+            let mut execution = execution;
+            execution.set_retry_count_override(record.normal_retry_count);
             self.insert_execution(issue.id.clone(), execution);
         }
 
@@ -1827,6 +1829,10 @@ where
                 .and_then(IssueExecution::retry)
                 .map(|retry| retry.normal_retry_count)
             {
+                // Keep the durable pending-retry marker intact until the
+                // worker's start_run preparation writes the replacement run
+                // manifest. A crash before start_workers must recover the
+                // queued retry rather than an advanced, unqueued count.
                 self.workspace
                     .persist_retry_count(&workspace, normal_retry_count)
                     .await
@@ -2219,6 +2225,14 @@ where
             )?;
             if queued {
                 match self.worker.interrupt_worker(command).await {
+                    Ok(acknowledgement) if acknowledgement.timed_out => {
+                        execution.timeout_interrupt(
+                            observed_at,
+                            acknowledgement.detail.unwrap_or_else(|| {
+                                "worker interrupt acknowledgement timed out".to_string()
+                            }),
+                        )?;
+                    }
                     Ok(acknowledgement) if acknowledgement.accepted => {
                         execution.acknowledge_interrupt(observed_at)?;
                         remote_stopped = true;

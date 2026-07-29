@@ -782,9 +782,7 @@ fn resolve_central_config(
         .openhands
         .front_matter
         .as_ref()
-        .is_some_and(|front_matter| {
-            openhands_environment_has_literal_secret(&front_matter.local_server.env)
-        })
+        .is_some_and(openhands_front_matter_has_literal_secret)
     {
         return Err(CentralConfigError::LiteralSecret);
     }
@@ -843,7 +841,6 @@ fn resolve_central_config(
         None
     };
 
-    let mut aliases = BTreeSet::new();
     let mut checkout_roots: Vec<PathBuf> = Vec::new();
     for (repository_id, repository) in &config.repositories {
         validate_repository(repository_id, repository, config_root)?;
@@ -867,11 +864,6 @@ fn resolve_central_config(
         }
         for alias in &repository.aliases {
             required_literal(alias, "repositories.aliases")?;
-            if !aliases.insert(alias.clone()) {
-                return Err(CentralConfigError::DuplicateAlias {
-                    alias: alias.clone(),
-                });
-            }
         }
         if let Some(checkout_path) = repository.checkout_path.as_deref() {
             let checkout_path =
@@ -1028,6 +1020,7 @@ fn resolve_central_config(
     };
     let active_project_set = config.routing.active_project_set.as_deref();
     let mut integration_instructions = None;
+    let mut active_repositories = BTreeSet::new();
     match mode {
         CentralRoutingMode::LegacySingle => {
             let repository = config
@@ -1043,6 +1036,7 @@ fn resolve_central_config(
             if repository_entry.checkout_path.is_none() {
                 return Err(CentralConfigError::MissingLegacyCheckout { repository });
             }
+            active_repositories.insert(repository.clone());
             if config.linear_projects.len() == 1
                 && !config
                     .linear_projects
@@ -1093,6 +1087,7 @@ fn resolve_central_config(
                             field: format!("linear_projects.{project}.repositories"),
                         });
                     }
+                    active_repositories.insert(repository.clone());
                 }
             }
             if let Some(instructions) = project_set.integration_instructions.as_deref() {
@@ -1118,6 +1113,7 @@ fn resolve_central_config(
             }
         }
     }
+    validate_active_repository_aliases(&config, &active_repositories)?;
 
     let legacy_repository_instruction_path = if mode == CentralRoutingMode::LegacySingle {
         let repository = config
@@ -1505,26 +1501,65 @@ fn required_literal(value: &str, field: &'static str) -> Result<String, CentralC
         .ok_or(CentralConfigError::EmptyField { field })
 }
 
-fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> bool {
-    env.iter().any(|(name, value)| {
-        let name = name.to_ascii_lowercase();
-        let secret_name = [
-            "access_token",
-            "api_key",
-            "apikey",
-            "authorization",
-            "access_key",
-            "accesskey",
-            "credential",
-            "password",
-            "pat",
-            "secret",
-            "token",
-        ]
-        .iter()
-        .any(|part| name == *part || name.ends_with(&format!("_{part}")));
-        secret_name && !is_central_credential_reference(value)
-    })
+fn openhands_front_matter_has_literal_secret(front_matter: &OpenHandsFrontMatter) -> bool {
+    let Ok(value) = serde_yaml::to_value(front_matter) else {
+        return true;
+    };
+    openhands_yaml_value_has_literal_secret(&value)
+}
+
+fn openhands_yaml_value_has_literal_secret(value: &serde_yaml::Value) -> bool {
+    if let Some(mapping) = value.as_mapping() {
+        return mapping.iter().any(|(key, value)| {
+            let secret_name = key.as_str().is_some_and(openhands_secret_field_name)
+                && value
+                    .as_str()
+                    .is_some_and(|value| !is_central_credential_reference(value));
+            secret_name || openhands_yaml_value_has_literal_secret(value)
+        });
+    }
+    value
+        .as_sequence()
+        .is_some_and(|values| values.iter().any(openhands_yaml_value_has_literal_secret))
+}
+
+fn openhands_secret_field_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "access_token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "access_key",
+        "accesskey",
+        "credential",
+        "password",
+        "pat",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|part| name == *part || name.ends_with(&format!("_{part}")))
+}
+
+fn validate_active_repository_aliases(
+    config: &CentralConfigFile,
+    active_repositories: &BTreeSet<String>,
+) -> Result<(), CentralConfigError> {
+    let mut aliases = BTreeSet::new();
+    for repository_id in active_repositories {
+        let Some(repository) = config.repositories.get(repository_id) else {
+            continue;
+        };
+        for alias in &repository.aliases {
+            if !aliases.insert(alias.clone()) {
+                return Err(CentralConfigError::DuplicateAlias {
+                    alias: alias.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_central_credential_reference(value: &str) -> bool {
@@ -2121,12 +2156,37 @@ scheduler:
     #[test]
     fn central_config_rejects_duplicate_aliases() {
         let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
         let source =
             central_fixture(root.path()).replace("aliases: [core]", "aliases: [core, core]");
 
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("duplicate aliases should fail");
         assert!(matches!(error, CentralConfigError::DuplicateAlias { .. }));
+    }
+
+    #[test]
+    fn central_config_allows_alias_reuse_in_inactive_project_sets() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "  suite:\n    tracker_profile: linear\n    integration_instructions: integration.md\n    projects: [core]",
+                "  suite:\n    tracker_profile: linear\n    integration_instructions: integration.md\n    projects: [core]\n  inactive:\n    tracker_profile: linear\n    projects: [inactive]",
+            )
+            .replace(
+                "linear_projects:\n  core:",
+                "linear_projects:\n  inactive:\n    provider_project_id: inactive-project\n    repositories: [inactive-repo]\n  core:",
+            )
+            .replace(
+                "repositories:\n  core-repo:",
+                "repositories:\n  inactive-repo:\n    aliases: [core]\n    remote:\n      provider: github\n      locator: example/inactive\n      clone: git@github.com:example/inactive.git\n    target_branch: develop\n    credential: github-ssh\n    review_profile: github-standard\n    instructions:\n      path: AGENTS.md\n  core-repo:",
+            );
+
+        resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("aliases in inactive project sets should not collide");
     }
 
     #[test]
@@ -2285,6 +2345,25 @@ scheduler:
 
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("PAT-shaped OpenHands credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_nested_openhands_tool_secret() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              refresh_token: literal-secret\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("nested OpenHands credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
     }

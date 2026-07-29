@@ -2472,6 +2472,60 @@ async fn failed_stall_interrupt_remains_running_until_stop_is_acknowledged() {
 }
 
 #[tokio::test]
+async fn timed_out_stall_interrupt_is_recorded_as_timed_out() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-276", "COE-276", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("remote stop acknowledgement timed out".to_string()),
+            timed_out: true,
+        }));
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
+            detail: Some("remote stop acknowledged".to_string()),
+            timed_out: false,
+        }));
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    scheduler
+        .tick(ts(250))
+        .await
+        .expect("timed-out stalled stop attempt should be retained");
+
+    let issue_id = IssueId::new("lin-276").expect("issue id should be valid");
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("timed-out execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::Running);
+    assert_eq!(
+        execution
+            .interrupt()
+            .expect("interrupt should be recorded")
+            .status,
+        HarnessInterruptStatus::TimedOut
+    );
+    assert!(scheduler.worker().aborted.is_empty());
+
+    scheduler
+        .tick(ts(350))
+        .await
+        .expect("acknowledged retry stop attempt should release the worker");
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+}
+
+#[tokio::test]
 async fn runtime_events_extend_stall_deadlines_before_retrying_a_stalled_worker() {
     let tracker = FakeTracker {
         active: vec![

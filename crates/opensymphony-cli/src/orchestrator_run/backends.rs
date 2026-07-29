@@ -902,35 +902,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
 
     async fn persist_retry_count(
         &mut self,
-        workspace: &crate::opensymphony_domain::WorkspaceRecord,
-        normal_retry_count: u32,
+        _workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _normal_retry_count: u32,
     ) -> Result<(), Self::Error> {
-        let Some((handle, _)) = self
-            .manager
-            .list_all_workspaces()
-            .await?
-            .into_iter()
-            .find(|(handle, _)| handle.workspace_path() == workspace.path)
-        else {
-            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
-                path: workspace.path.join(".opensymphony/run.json"),
-                source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
-            }));
-        };
-        let Some(mut manifest) = self.manager.load_run_manifest(&handle).await? else {
-            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
-                path: handle.run_manifest_path(),
-                source: io::Error::new(io::ErrorKind::NotFound, "run manifest is missing"),
-            }));
-        };
-        manifest.normal_retry_count = normal_retry_count;
-        manifest.pending_retry = false;
-        manifest.retry_scheduled_at = None;
-        manifest.retry_due_at = None;
-        manifest.retry_reason = None;
-        manifest.retry_error = None;
-        manifest.updated_at = chrono::Utc::now();
-        self.manager.write_run_manifest(&handle, &manifest).await?;
+        // The queued retry marker must survive until start_run writes the
+        // replacement manifest. Clearing it here creates a crash window
+        // between scheduler preparation and worker launch.
         Ok(())
     }
 

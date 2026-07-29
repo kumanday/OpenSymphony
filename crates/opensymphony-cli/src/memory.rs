@@ -930,6 +930,7 @@ fn apply_central_memory_root(
         config.memory_root = memory_root.clone();
         config.index_path = memory_root.join("memory.duckdb");
     }
+    config.containment_root = Some(central.state_root);
     Ok(())
 }
 
@@ -941,6 +942,7 @@ fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryErr
     };
     evolved.memory_root = config.memory_root.clone();
     evolved.index_path = config.index_path.clone();
+    evolved.containment_root = config.containment_root.clone();
     Ok(evolved)
 }
 
