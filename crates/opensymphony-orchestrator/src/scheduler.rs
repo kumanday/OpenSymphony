@@ -1204,7 +1204,10 @@ where
                 self.persist_retry_exhaustion(&issue, record.normal_retry_count)
                     .await?;
             }
-            let execution = execution.release(observed_at, reason, None)?;
+            let mut execution = execution.release(observed_at, reason, None)?;
+            if reason == ReleaseReason::RetryExhausted {
+                execution.set_retry_count_override(record.normal_retry_count);
+            }
             self.executions.entry(issue.id.clone()).or_insert(execution);
         }
 
@@ -2575,6 +2578,7 @@ where
 
     async fn flush_pending_retry_exhaustion_persistence(&mut self) -> Result<(), SchedulerError> {
         let pending = std::mem::take(&mut self.pending_retry_exhaustion_persistence);
+        let mut first_error = None;
         for (issue_id, record) in pending {
             if let Err(error) = self
                 .workspace
@@ -2583,14 +2587,15 @@ where
             {
                 self.pending_retry_exhaustion_persistence
                     .insert(issue_id, record);
-                return Err(SchedulerError::Workspace {
-                    detail: error.to_string(),
-                });
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
+                continue;
             }
             self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
                 .await;
         }
-        Ok(())
+        first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
     }
 
     async fn cleanup_retry_exhausted_workspace_if_ready(&mut self, issue_id: &IssueId) {

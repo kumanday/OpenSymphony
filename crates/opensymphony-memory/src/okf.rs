@@ -300,10 +300,10 @@ pub fn export_okf_bundle(
         )));
     }
     let output_path = output
-        .map(|path| resolve_path(containment_root, path))
-        .unwrap_or_else(|| containment_root.join(format!("okf-export-{visibility}")));
-    ensure_okf_contained(containment_root, &output_path)?;
-    ensure_export_output_has_no_symlink_components(config, &output_path)?;
+        .map(|path| resolve_path(&config.repo_root, path))
+        .unwrap_or_else(|| config.repo_root.join(format!("okf-export-{visibility}")));
+    ensure_okf_contained(&config.repo_root, &output_path)?;
+    ensure_export_output_has_no_symlink_components(config, &config.repo_root, &output_path)?;
     let output_path = canonicalize_existing_prefix(&output_path)?;
     ensure_output_target_not_symlink(&output_path)?;
     if paths_overlap(&output_path, &source_root) {
@@ -652,9 +652,9 @@ fn ensure_output_target_not_symlink(path: &Path) -> Result<(), MemoryError> {
 
 fn ensure_export_output_has_no_symlink_components(
     config: &MemoryConfig,
+    containment_root: &Path,
     path: &Path,
 ) -> Result<(), MemoryError> {
-    let containment_root = config.containment_root.as_deref().unwrap_or(&config.repo_root);
     let repo_root = canonicalize_existing_prefix(containment_root)?;
     let output_path = if path.is_absolute() {
         path.to_path_buf()

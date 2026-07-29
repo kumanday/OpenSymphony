@@ -2011,7 +2011,13 @@ type: topic-doc
         let canonical_state = state
             .canonicalize()
             .expect("state root should canonicalize");
-        assert_eq!(export.output_path, canonical_state.join("export"));
+        assert_eq!(
+            export.output_path,
+            repo.path()
+                .canonicalize()
+                .expect("repo root should canonicalize")
+                .join("export")
+        );
 
         let repo_bundle = repo.path().join("repo-export");
         copy_dir_recursive(&source, &repo_bundle);

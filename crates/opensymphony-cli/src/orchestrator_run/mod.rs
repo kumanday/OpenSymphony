@@ -8,7 +8,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
@@ -180,6 +180,13 @@ fn acquire_runtime_root_ownership(
 pub(crate) fn acquire_root_ownership(
     roots: impl IntoIterator<Item = PathBuf>,
 ) -> Result<RuntimeRootOwnership, RunCommandError> {
+    static ROOT_OWNERSHIP_SERIALIZATION: OnceLock<Mutex<()>> = OnceLock::new();
+    let _serialization_guard = ROOT_OWNERSHIP_SERIALIZATION
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| RunCommandError::RootOwnership {
+            detail: "runtime root ownership serialization was poisoned".to_owned(),
+        })?;
     let mut canonical_roots = BTreeSet::new();
     for root in roots {
         fs::create_dir_all(&root).map_err(|source| RunCommandError::RootOwnership {

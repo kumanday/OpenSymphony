@@ -1541,6 +1541,11 @@ fn openhands_secret_field_name(name: &str) -> bool {
         "authorization",
         "access_key",
         "accesskey",
+        "account_id",
+        "accountid",
+        "account_identifier",
+        "account_identity",
+        "chatgpt_account_id",
         "credential",
         "password",
         "pat",
@@ -2375,6 +2380,25 @@ scheduler:
             .expect_err("nested OpenHands credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_literal_openhands_account_identity() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              chatgpt_account_id: acct_123\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("literal OpenHands account identities must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("acct_123"));
     }
 
     #[test]

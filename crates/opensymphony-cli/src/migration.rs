@@ -592,6 +592,7 @@ fn resume_partial_apply(
             })?;
             return Ok(ActiveMigrationResolution::Restored);
         }
+        verify_partial_apply_inputs(&marker)?;
         replace_staged_file(&workflow_stage, &marker.workflow_path)?;
         return Ok(ActiveMigrationResolution::Complete);
     }
@@ -622,6 +623,34 @@ fn resume_partial_apply(
         source,
     })?;
     Ok(ActiveMigrationResolution::Restored)
+}
+
+fn verify_partial_apply_inputs(marker: &ActivationMarker) -> Result<(), MigrationError> {
+    verify_current_generation(&marker.config_path, &marker.generation)?;
+    if !marker.had_workflow {
+        return Err(MigrationError::ActivatedFileChanged {
+            path: marker.workflow_path.clone(),
+        });
+    }
+    let backup_workflow =
+        fs::read(marker.backup_dir.join("WORKFLOW.md")).map_err(|source| MigrationError::Read {
+            path: marker.backup_dir.join("WORKFLOW.md"),
+            source,
+        })?;
+    verify_current_generation(&marker.workflow_path, &sha256(&backup_workflow))
+}
+
+fn verify_current_generation(path: &Path, expected_generation: &str) -> Result<(), MigrationError> {
+    let contents = fs::read(path).map_err(|_| MigrationError::ActivatedFileChanged {
+        path: path.to_path_buf(),
+    })?;
+    if sha256(&contents) == expected_generation {
+        Ok(())
+    } else {
+        Err(MigrationError::ActivatedFileChanged {
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
