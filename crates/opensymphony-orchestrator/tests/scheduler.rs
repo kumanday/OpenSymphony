@@ -532,6 +532,7 @@ impl WorkerBackend for FakeWorker {
             .unwrap_or(Ok(WorkerInterruptAcknowledgement {
                 accepted: true,
                 detail: None,
+                timed_out: false,
             }))
     }
 }
@@ -871,6 +872,7 @@ async fn operator_cancel_interrupts_active_worker_once() {
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: Some("operator cancel acknowledged".to_string()),
+            timed_out: false,
         }));
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
@@ -944,6 +946,7 @@ async fn acknowledged_operator_cancel_releases_without_retrying_cancelled_run() 
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: Some("operator cancel acknowledged".to_string()),
+            timed_out: false,
         }));
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
@@ -1011,6 +1014,7 @@ async fn acknowledged_operator_cancel_releases_without_retrying_completed_run() 
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: Some("operator cancel acknowledged".to_string()),
+            timed_out: false,
         }));
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
@@ -2287,12 +2291,14 @@ async fn failed_terminal_interrupt_is_retried_before_cleanup() {
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: false,
             detail: Some("remote stop was temporarily unavailable".to_string()),
+            timed_out: false,
         }));
     worker
         .interrupt_results
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: Some("remote stop acknowledged".to_string()),
+            timed_out: false,
         }));
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
@@ -2354,12 +2360,14 @@ async fn failed_nonterminal_interrupt_keeps_execution_owned_until_acknowledged()
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: false,
             detail: Some("remote stop was temporarily unavailable".to_string()),
+            timed_out: false,
         }));
     worker
         .interrupt_results
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: Some("remote stop acknowledged".to_string()),
+            timed_out: false,
         }));
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
@@ -2417,12 +2425,14 @@ async fn failed_stall_interrupt_remains_running_until_stop_is_acknowledged() {
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: false,
             detail: Some("remote stop was temporarily unavailable".to_string()),
+            timed_out: false,
         }));
     worker
         .interrupt_results
         .push_back(Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: Some("remote stop acknowledged".to_string()),
+            timed_out: false,
         }));
     let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
 
@@ -2599,6 +2609,60 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
         Some(1)
     );
     assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_keeps_an_active_cancelled_run_released() {
+    let recovered_workspace =
+        workspace_record("COE-272-CANCELLED", "/tmp/recovered/COE-272-CANCELLED");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            "lin-272-cancelled",
+            "COE-272-CANCELLED",
+            "In Progress",
+            0,
+        )],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-272-cancelled", "COE-272-CANCELLED", "In Progress"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: true,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("cancelled recovery should succeed");
+
+    let issue_id = IssueId::new("lin-272-cancelled").expect("issue id should be valid");
+    assert!(scheduler.worker().launches.is_empty());
+    assert!(matches!(
+        scheduler
+            .execution(&issue_id)
+            .expect("execution should remain visible")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::Cancelled,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2974,6 +3038,7 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
         .execution(&IssueId::new("lin-273").expect("issue id should be valid"))
         .expect("recovered execution should remain tracked");
     assert_eq!(execution.status(), SchedulerStatus::Released);
+    assert_eq!(execution.retry_count_override(), Some(1));
     assert!(matches!(
         execution.state(),
         crate::opensymphony_orchestrator::SchedulerState::Released {

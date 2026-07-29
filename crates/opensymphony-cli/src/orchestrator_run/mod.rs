@@ -191,10 +191,48 @@ pub(crate) fn acquire_root_ownership(
         canonical_roots.insert(root);
     }
 
+    let canonical_roots_vec = canonical_roots.iter().collect::<Vec<_>>();
+    for (index, root) in canonical_roots_vec.iter().enumerate() {
+        for other in canonical_roots_vec.iter().skip(index + 1) {
+            if root.starts_with(other) || other.starts_with(*root) {
+                return Err(RunCommandError::RootOwnership {
+                    detail: format!(
+                        "configured roots {} and {} overlap",
+                        root.display(),
+                        other.display()
+                    ),
+                });
+            }
+        }
+    }
+
     let mut ownership = RuntimeRootOwnership {
         locks: Vec::with_capacity(canonical_roots.len()),
     };
     for root in canonical_roots {
+        let mut ancestor = root.parent();
+        while let Some(path) = ancestor {
+            let marker = path.join(".opensymphony-instance.lock");
+            if root_marker_blocks(&marker) {
+                return Err(RunCommandError::RootOwnership {
+                    detail: format!(
+                        "{} is nested below the owned root {}",
+                        root.display(),
+                        path.display()
+                    ),
+                });
+            }
+            ancestor = path.parent();
+        }
+        if let Some(marker) = find_live_descendant_root_marker(&root)? {
+            return Err(RunCommandError::RootOwnership {
+                detail: format!(
+                    "{} contains the owned nested root {}",
+                    root.display(),
+                    marker.parent().unwrap_or(&marker).display()
+                ),
+            });
+        }
         let marker = root.join(".opensymphony-instance.lock");
         let file = loop {
             match OpenOptions::new()
@@ -243,6 +281,51 @@ pub(crate) fn acquire_root_ownership(
     }
 
     Ok(ownership)
+}
+
+fn root_marker_blocks(marker: &Path) -> bool {
+    let metadata = match fs::symlink_metadata(marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    metadata.file_type().is_symlink() || root_lock_owner_alive(marker)
+}
+
+fn find_live_descendant_root_marker(root: &Path) -> Result<Option<PathBuf>, RunCommandError> {
+    let entries = fs::read_dir(root).map_err(|source| RunCommandError::RootOwnership {
+        detail: format!(
+            "failed to inspect nested roots below {}: {source}",
+            root.display()
+        ),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| RunCommandError::RootOwnership {
+            detail: format!(
+                "failed to inspect nested roots below {}: {source}",
+                root.display()
+            ),
+        })?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| RunCommandError::RootOwnership {
+                detail: format!(
+                    "failed to inspect nested root path {}: {source}",
+                    path.display()
+                ),
+            })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let marker = path.join(".opensymphony-instance.lock");
+        if root_marker_blocks(&marker) {
+            return Ok(Some(marker));
+        }
+        if let Some(marker) = find_live_descendant_root_marker(&path)? {
+            return Ok(Some(marker));
+        }
+    }
+    Ok(None)
 }
 
 fn initialize_root_marker(mut file: File, marker: &Path) -> Result<File, RunCommandError> {
@@ -1166,6 +1249,40 @@ mod tests {
             "a failed later acquisition must release earlier roots"
         );
         drop(blocker);
+    }
+
+    #[test]
+    fn runtime_root_ownership_rejects_nested_configured_roots() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let parent = root.path().join("workspaces");
+        let child = parent.join("other-instance");
+
+        let result = acquire_root_ownership([parent.clone(), child.clone()]);
+
+        assert!(matches!(result, Err(RunCommandError::RootOwnership { .. })));
+        assert!(!parent.join(".opensymphony-instance.lock").exists());
+        assert!(!child.join(".opensymphony-instance.lock").exists());
+    }
+
+    #[test]
+    fn runtime_root_ownership_rejects_live_nested_owner_in_either_order() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let parent = root.path().join("workspaces");
+        let child = parent.join("other-instance");
+
+        let child_owner = acquire_root_ownership([child.clone()]).expect("child owner");
+        assert!(matches!(
+            acquire_root_ownership([parent.clone()]),
+            Err(RunCommandError::RootOwnership { .. })
+        ));
+        drop(child_owner);
+
+        let parent_owner = acquire_root_ownership([parent.clone()]).expect("parent owner");
+        assert!(matches!(
+            acquire_root_ownership([child]),
+            Err(RunCommandError::RootOwnership { .. })
+        ));
+        drop(parent_owner);
     }
 
     #[tokio::test]

@@ -216,6 +216,7 @@ pub enum WorkerAbortReason {
 pub struct WorkerInterruptAcknowledgement {
     pub accepted: bool,
     pub detail: Option<String>,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +377,7 @@ pub trait WorkerBackend {
                 "harness `{}` does not expose a scheduler-side interrupt channel",
                 command.harness_kind
             )),
+            timed_out: false,
         })
     }
 }
@@ -982,6 +984,8 @@ where
                     ReleaseReason::RetryExhausted,
                     None,
                 )?;
+                let mut execution = execution;
+                execution.set_retry_count_override(record.normal_retry_count);
                 self.insert_execution(normalized.id.clone(), execution);
                 continue;
             }
@@ -1028,7 +1032,11 @@ where
                     } else if self.retry_limit_reached(record.normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                             .await?;
-                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
                     } else {
                         let normal_retry_count = record.normal_retry_count.saturating_add(1);
                         let retry = RetryEntry {
@@ -1046,6 +1054,12 @@ where
                             .expect("active recovery execution should be present");
                         self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
                     }
+                } else if record.cancelled_run && !record.pending_retry {
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present")
+                        .release(observed_at, ReleaseReason::Cancelled, None)?;
+                    self.insert_execution(issue_id.clone(), execution);
                 } else if record.pending_retry {
                     let normal_retry_count = record.normal_retry_count.saturating_add(1);
                     // A retry whose count equals the configured maximum is
@@ -1054,7 +1068,11 @@ where
                     if self.retry_count_exceeds_limit(normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, normal_retry_count)
                             .await?;
-                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            normal_retry_count,
+                            observed_at,
+                        )?;
                     } else {
                         let retry = RetryEntry {
                             issue_id: normalized.id.clone(),
@@ -1075,7 +1093,11 @@ where
                     if self.retry_limit_reached(record.normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                             .await?;
-                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
                     } else {
                         let normal_retry_count = record.normal_retry_count.saturating_add(1);
                         let retry = RetryEntry {
@@ -1096,13 +1118,21 @@ where
                 } else if self.retry_limit_reached(record.normal_retry_count) {
                     self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                         .await?;
-                    self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                    self.mark_recovered_retry_exhausted(
+                        &issue_id,
+                        record.normal_retry_count,
+                        observed_at,
+                    )?;
                 } else if record.normal_retry_count > 0 {
                     let normal_retry_count = record.normal_retry_count.saturating_add(1);
                     if self.retry_count_exceeds_limit(normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                             .await?;
-                        self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
                         continue;
                     }
                     let retry = RetryEntry {
@@ -1503,6 +1533,14 @@ where
         result: Result<WorkerInterruptAcknowledgement, M::Error>,
     ) -> Result<(), SchedulerError> {
         match result {
+            Ok(acknowledgement) if acknowledgement.timed_out => {
+                execution.timeout_interrupt(
+                    observed_at,
+                    acknowledgement.detail.unwrap_or_else(|| {
+                        "worker interrupt acknowledgement timed out".to_string()
+                    }),
+                )?;
+            }
             Ok(acknowledgement) if acknowledgement.accepted => {
                 execution.acknowledge_interrupt(observed_at)?;
                 if let Some(detail) = acknowledgement.detail {
@@ -1600,6 +1638,7 @@ where
     fn mark_recovered_retry_exhausted(
         &mut self,
         issue_id: &IssueId,
+        normal_retry_count: u32,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
         let Some(execution) = self.remove_execution(issue_id) else {
@@ -1609,7 +1648,8 @@ where
             self.insert_execution(issue_id.clone(), execution);
             return Ok(());
         }
-        let execution = execution.release(observed_at, ReleaseReason::RetryExhausted, None)?;
+        let mut execution = execution.release(observed_at, ReleaseReason::RetryExhausted, None)?;
+        execution.set_retry_count_override(normal_retry_count);
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
     }
@@ -2451,6 +2491,7 @@ where
 
     async fn flush_pending_retry_persistence(&mut self) -> Result<(), SchedulerError> {
         let pending = std::mem::take(&mut self.pending_retry_persistence);
+        let mut first_error = None;
         for (issue_id, retry) in pending {
             let workspace = self
                 .executions
@@ -2465,12 +2506,12 @@ where
                 .await
             {
                 self.pending_retry_persistence.insert(issue_id, retry);
-                return Err(SchedulerError::Workspace {
-                    detail: error.to_string(),
-                });
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
     }
 
     async fn persist_retry_if_queued(&mut self, issue_id: &IssueId) -> Result<(), SchedulerError> {
@@ -2850,6 +2891,13 @@ fn acknowledged_operator_cancel_terminal(
 
 fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
     retry_exhausted_release(execution)
+        || matches!(
+            execution.state(),
+            crate::opensymphony_orchestrator::SchedulerState::Released {
+                reason: ReleaseReason::Cancelled,
+                ..
+            }
+        )
         || matches!(
             execution
                 .last_worker_outcome()

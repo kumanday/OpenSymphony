@@ -91,6 +91,8 @@ enum MigrationError {
     WorkspaceRootState { path: PathBuf },
     #[error("migration cannot preserve a credential-bearing repository remote")]
     CredentialBearingRemote,
+    #[error("migration refuses symlinked input {path}")]
+    SymlinkInput { path: PathBuf },
     #[error("central config destination {path} is not an activation of this migration")]
     DestinationConflict { path: PathBuf },
     #[error("activated migration file changed after apply: {path}")]
@@ -380,11 +382,27 @@ pub(crate) struct StrictRunMarkerGuard {
 
 impl StrictRunMarkerGuard {
     pub(crate) fn update_generation(&self, generation: &str) -> std::io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
-        writeln!(file, "pid={}\ngeneration={generation}", std::process::id())
+        let sequence = STRICT_STALE_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = self.path.with_file_name(format!(
+            ".{}.generation-{sequence}.tmp",
+            self.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("strict-run.active")
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            writeln!(file, "pid={}\ngeneration={generation}", std::process::id())?;
+            replace_staged_file(&temporary, &self.path)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 }
 
@@ -639,6 +657,7 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
         });
     }
     let target_config = migration_target_config(&paths, &current_dir()?, &source.source_config);
+    reject_symlink_input(&target_config)?;
     let report = build_report(
         "preflight",
         &source,
@@ -1065,6 +1084,25 @@ fn collect_memory_catalog_entries(
     Ok(())
 }
 
+fn reject_symlink_input(path: &Path) -> Result<(), MigrationError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(MigrationError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(MigrationError::SymlinkInput {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> {
     let cwd = current_dir()?;
     let repo = absolute_path(&cwd, &paths.repo);
@@ -1073,6 +1111,7 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
         .as_ref()
         .map(|path| absolute_path(&cwd, path))
         .unwrap_or_else(|| repo.join("config.yaml"));
+    reject_symlink_input(&source_config)?;
     let config_source = if source_config.is_file() {
         fs::read_to_string(&source_config).map_err(|source| MigrationError::Read {
             path: source_config.clone(),
@@ -1111,6 +1150,7 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
     ensure_memory_migration_inactive(&target_repo)?;
     ensure_legacy_memory_quiescent(&target_repo)?;
     let workflow_path = target_repo.join("WORKFLOW.md");
+    reject_symlink_input(&workflow_path)?;
     let workflow_source = fs::read_to_string(&workflow_path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             MigrationError::MissingInput {
@@ -2521,6 +2561,57 @@ mod tests {
         assert!(marker.is_file());
         drop(guard);
         assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_symlinked_legacy_inputs_before_apply() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let real_config = root.path().join("real-config.yaml");
+        let config = root.path().join("config.yaml");
+        let real_workflow = root.path().join("real-WORKFLOW.md");
+        let workflow = root.path().join("WORKFLOW.md");
+        fs::write(&real_config, "control_plane:\n  bind: 127.0.0.1:2468\n")
+            .expect("real config should be written");
+        fs::write(
+            &real_workflow,
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n",
+        )
+        .expect("real workflow should be written");
+        symlink(&real_config, &config).expect("config symlink should be created");
+        symlink(&real_workflow, &workflow).expect("workflow symlink should be created");
+
+        let error = load_source(&MigrationPaths {
+            config: Some(config.clone()),
+            repo: root.path().to_path_buf(),
+            output: None,
+        })
+        .expect_err("migration should reject symlinked inputs");
+        assert!(matches!(error, MigrationError::SymlinkInput { path } if path == config));
+        assert!(
+            fs::symlink_metadata(&config)
+                .expect("config metadata should remain available")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            fs::symlink_metadata(&workflow)
+                .expect("workflow metadata should remain available")
+                .file_type()
+                .is_symlink()
+        );
+
+        fs::remove_file(&config).expect("config symlink should be removable");
+        fs::copy(&real_config, &config).expect("regular config should be restored");
+        let error = load_source(&MigrationPaths {
+            config: Some(config),
+            repo: root.path().to_path_buf(),
+            output: None,
+        })
+        .expect_err("migration should reject a symlinked workflow");
+        assert!(matches!(error, MigrationError::SymlinkInput { path } if path == workflow));
     }
 
     #[cfg(unix)]

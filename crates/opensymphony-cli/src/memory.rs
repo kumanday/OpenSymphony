@@ -92,12 +92,12 @@ impl Drop for MemoryCoordinationLock {
     }
 }
 
-type MemoryWriterGate = Arc<Mutex<()>>;
+type MemoryWriterGate = Arc<Mutex<Option<MemoryCoordinationLock>>>;
 
 #[allow(dead_code)]
 enum MemoryWriterGuard {
     File(MemoryCoordinationLock),
-    Shared(OwnedMutexGuard<()>),
+    Shared(OwnedMutexGuard<Option<MemoryCoordinationLock>>),
 }
 const AST_MCP_TOOL_NAMES: &[&str] = &[
     "code.ast.status",
@@ -707,6 +707,12 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         command,
     } = args;
     let selected_central_config = selected_central_config_path(&repo_root, config_path.as_deref())?;
+    if memory_command_writes(&command) {
+        reject_project_set_memory_write(
+            selected_central_config.as_deref(),
+            command_name(&command),
+        )?;
+    }
     if let Some(endpoint) = env::var("OPENSYMPHONY_MEMORY_ENDPOINT")
         .ok()
         .and_then(|value| non_empty(&value))
@@ -800,6 +806,51 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
             run_import_okf(&config, args)
         }
     }
+}
+
+fn memory_command_writes(command: &MemoryCommand) -> bool {
+    matches!(
+        command,
+        MemoryCommand::Capture(_)
+            | MemoryCommand::Import(_)
+            | MemoryCommand::SyncDocs(_)
+            | MemoryCommand::Reindex(_)
+            | MemoryCommand::ExportOkf(_)
+            | MemoryCommand::ImportOkf(_)
+    )
+}
+
+fn command_name(command: &MemoryCommand) -> &'static str {
+    match command {
+        MemoryCommand::Capture(_) => "memory capture",
+        MemoryCommand::Import(_) => "memory import",
+        MemoryCommand::SyncDocs(_) => "memory sync-docs",
+        MemoryCommand::Reindex(_) => "memory reindex",
+        MemoryCommand::ExportOkf(_) => "memory export-okf",
+        MemoryCommand::ImportOkf(_) => "memory import-okf",
+        _ => "memory operation",
+    }
+}
+
+fn reject_project_set_memory_write(
+    central_config_path: Option<&Path>,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    let Some(central_config_path) = central_config_path else {
+        return Ok(());
+    };
+    let raw = fs::read_to_string(central_config_path).map_err(|source| MemoryError::ReadFile {
+        path: central_config_path.to_path_buf(),
+        source,
+    })?;
+    let central = validate_central_config_text(central_config_path, &raw)
+        .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    if central.mode == CentralRoutingMode::ProjectSet {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory write operation `{operation}` does not support project_set central routing until strict routing is enabled"
+        )));
+    }
+    Ok(())
 }
 
 async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
@@ -1824,7 +1875,7 @@ async fn start_memory_server_with_auth(
         let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
-    let writer_gate = Arc::new(Mutex::new(()));
+    let writer_gate = Arc::new(Mutex::new(Some(coordination_lock)));
     let state = MemoryServerState {
         config,
         auth,
@@ -1839,6 +1890,7 @@ async fn start_memory_server_with_auth(
         .route("/mcp", axum::routing::post(memory_server_mcp))
         .with_state(state);
     let (shutdown, mut shutdown_rx) = watch::channel(false);
+    let writer_gate_for_task = Arc::clone(&writer_gate);
     let task = tokio::spawn(async move {
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -1847,7 +1899,8 @@ async fn start_memory_server_with_auth(
             .await
             .map_err(|error| format!("memory server failed: {error}"));
         let _ = fs::remove_file(&activity_marker);
-        drop(coordination_lock);
+        let mut lock = writer_gate_for_task.lock().await;
+        lock.take();
         result
     });
     Ok(MemoryServerHandle {
@@ -2330,6 +2383,9 @@ async fn call_memory_tool_with_workspace(
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     if central_config_path.is_some() && resolved_workflow.is_none() && name == "memory.context" {
         let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
+    }
+    if is_memory_writer_tool(name) {
+        reject_project_set_memory_write(central_config_path, name)?;
     }
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
         return Err(MemoryError::InvalidInput(
@@ -5854,6 +5910,9 @@ mod tests {
         let error = super::load_central_resolved_workflow(repo.path(), Some(&central))
             .expect_err("project_set memory commands must be gated");
         assert!(error.to_string().contains("do not support project_set"));
+        let error = super::reject_project_set_memory_write(Some(&central), "memory sync-docs")
+            .expect_err("project_set memory writes must be rejected");
+        assert!(error.to_string().contains("memory sync-docs"));
 
         let config = MemoryConfig::load(repo.path(), None).expect("memory config should load");
         let error = super::run_context(
@@ -6512,6 +6571,32 @@ mod tests {
         drop(lock);
         acquire_memory_writer_lock(&second)
             .expect("catalog lock should be released after the first writer exits");
+    }
+
+    #[tokio::test]
+    async fn memory_server_writer_gate_keeps_filesystem_lock_until_guards_drain() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let coordination_lock = super::acquire_memory_coordination_lock(&config.repo_root)
+            .expect("coordination lock should be acquired");
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(Some(coordination_lock)));
+        let writer_guard = gate.clone().lock_owned().await;
+        let releasing_gate = gate.clone();
+        let release_task = tokio::spawn(async move {
+            let mut lock = releasing_gate.lock().await;
+            lock.take();
+        });
+
+        assert!(
+            super::acquire_memory_coordination_lock(&config.repo_root).is_err(),
+            "the filesystem lock must remain held while a writer guard is active"
+        );
+        drop(writer_guard);
+        release_task
+            .await
+            .expect("the server shutdown lock release should complete");
+        super::acquire_memory_coordination_lock(&config.repo_root)
+            .expect("the filesystem lock should release after guards drain");
     }
 
     #[test]
@@ -8866,7 +8951,7 @@ Public memory concept.
             central_config_path: None,
             resolved_workflow: None,
             config_generation: Some("sha256:pinned-generation".to_string()),
-            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         let axum::Json(payload) = memory_server_health(axum::extract::State(state)).await;

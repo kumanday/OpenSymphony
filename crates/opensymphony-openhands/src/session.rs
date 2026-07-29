@@ -113,6 +113,7 @@ pub struct OpenHandsInterruptAcknowledgement {
     pub reconciled_events: usize,
     pub execution_status: Option<String>,
     pub diagnostic: Option<String>,
+    pub timed_out: bool,
 }
 
 #[async_trait]
@@ -1258,6 +1259,7 @@ impl IssueSessionRunner {
                     reconciled_events,
                     execution_status: stream.state_mirror().execution_status().map(str::to_owned),
                     diagnostic,
+                    timed_out: false,
                 });
             }
 
@@ -1288,6 +1290,7 @@ impl IssueSessionRunner {
                                 self.config.runtime_stream.readiness_timeout
                             ),
                         }),
+                        timed_out: true,
                     });
                 }
             };

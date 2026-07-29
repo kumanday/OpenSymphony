@@ -199,6 +199,8 @@ pub struct IssueSnapshot {
     pub workspace: Option<WorkspaceRecord>,
     pub conversation: Option<ConversationMetadata>,
     pub retry: Option<RetrySnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count_override: Option<u32>,
     pub last_worker_outcome: Option<WorkerOutcomeRecord>,
     pub recent_worker_outcomes: Vec<WorkerOutcomeRecord>,
 }
@@ -211,6 +213,7 @@ impl From<&IssueExecution> for IssueSnapshot {
             workspace: execution.workspace().cloned(),
             conversation: execution.conversation().cloned(),
             retry: execution.retry().map(RetrySnapshot::from),
+            retry_count_override: execution.retry_count_override(),
             last_worker_outcome: execution.last_worker_outcome().cloned(),
             recent_worker_outcomes: execution.recent_worker_outcomes().to_vec(),
         }

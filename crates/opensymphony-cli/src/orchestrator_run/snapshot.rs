@@ -220,6 +220,7 @@ fn map_issue(
             .retry
             .as_ref()
             .map(|retry| retry.normal_retry_count)
+            .or(issue.retry_count_override)
             .or_else(|| {
                 (issue.runtime.release_reason
                     == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted))
@@ -641,6 +642,7 @@ tracker:
                     next_activity_sequence: 0,
                 }),
                 retry: None,
+                retry_count_override: None,
                 last_worker_outcome: None,
                 recent_worker_outcomes: Vec::new(),
             }],
@@ -734,6 +736,7 @@ tracker:
             workspace: None,
             conversation: None,
             retry: None,
+            retry_count_override: None,
             last_worker_outcome: None,
             recent_worker_outcomes: Vec::new(),
         }

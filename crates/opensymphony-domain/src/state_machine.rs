@@ -166,6 +166,8 @@ pub struct IssueExecution {
     state: SchedulerState,
     last_worker_outcome: Option<WorkerOutcomeRecord>,
     recent_worker_outcomes: Vec<WorkerOutcomeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry_count_override: Option<u32>,
 }
 
 impl IssueExecution {
@@ -178,6 +180,7 @@ impl IssueExecution {
             state: SchedulerState::Unclaimed { since: observed_at },
             last_worker_outcome: None,
             recent_worker_outcomes: Vec::new(),
+            retry_count_override: None,
         }
     }
 
@@ -220,6 +223,14 @@ impl IssueExecution {
 
     pub fn recent_worker_outcomes(&self) -> &[WorkerOutcomeRecord] {
         &self.recent_worker_outcomes
+    }
+
+    pub fn retry_count_override(&self) -> Option<u32> {
+        self.retry_count_override
+    }
+
+    pub fn set_retry_count_override(&mut self, retry_count: u32) {
+        self.retry_count_override = Some(retry_count);
     }
 
     pub fn current_run(&self) -> Option<&RunAttempt> {

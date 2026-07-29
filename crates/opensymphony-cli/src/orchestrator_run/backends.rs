@@ -958,7 +958,11 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     format!("retry-pending-{}", handle.workspace_key()),
                     retry.attempt.get(),
                 )
-                .with_normal_retry_count(retry.normal_retry_count);
+                // Recovery increments a pending manifest's count when it
+                // reconstructs the queued retry. Store the predecessor here
+                // so a launch failure before run.json gets exactly one
+                // retry attempt after restart.
+                .with_normal_retry_count(retry.normal_retry_count.saturating_sub(1));
                 let mut manifest = RunManifest::new(&handle, &run);
                 // The failed launch never produced an executable run manifest.
                 // Create a non-in-flight marker so recovery sees the durable
@@ -2494,6 +2498,7 @@ async fn send_codex_stdio_interrupt(
     Ok(WorkerInterruptAcknowledgement {
         accepted: true,
         detail: Some(detail),
+        timed_out: false,
     })
 }
 
@@ -3392,6 +3397,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
                         .map(|status| format!("OpenHands interrupt acknowledged with `{status}`"))
                 })
                 .or_else(|| Some("OpenHands interrupt acknowledged".to_string())),
+            timed_out: acknowledgement.timed_out,
         })
     }
 }
@@ -5805,7 +5811,9 @@ mod tests {
             .expect("run manifest should exist");
         assert_eq!(manifest.status, RunStatus::PreparationFailed);
         assert!(manifest.pending_retry);
-        assert_eq!(manifest.normal_retry_count, 1);
+        // The pending manifest is synthetic: recovery increments its stored
+        // predecessor once when reconstructing the queued retry.
+        assert_eq!(manifest.normal_retry_count, 0);
         assert_eq!(manifest.retry_due_at, Some(1_200));
     }
 

@@ -111,25 +111,22 @@ fn redact_authorization_headers(input: &str) -> String {
         {
             value_end += 1;
         }
-        let scheme = &redacted[value_start..value_end];
-        if scheme.eq_ignore_ascii_case("bearer") {
-            let mut token_start = value_end;
-            while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
-                token_start += 1;
-            }
-            let mut token_end = token_start;
-            while token_end < bytes.len()
-                && !bytes[token_end].is_ascii_whitespace()
-                && !matches!(bytes[token_end], b',' | b';' | b'}' | b']' | b'&')
-            {
-                token_end += 1;
-            }
-            if token_start < token_end {
-                redacted.replace_range(token_start..token_end, "[redacted]");
-                search_from = token_start + "[redacted]".len();
-            } else {
-                search_from = value_end;
-            }
+        let mut token_start = value_end;
+        while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
+            token_start += 1;
+        }
+        let mut token_end = token_start;
+        while token_end < bytes.len()
+            && !bytes[token_end].is_ascii_whitespace()
+            && !matches!(bytes[token_end], b',' | b';' | b'}' | b']' | b'&')
+        {
+            token_end += 1;
+        }
+        if token_start < token_end {
+            let scheme = &redacted[value_start..value_end];
+            let replacement = format!("{scheme} [redacted]");
+            redacted.replace_range(value_start..token_end, &replacement);
+            search_from = value_start + replacement.len();
         } else if value_start < value_end {
             redacted.replace_range(value_start..value_end, "[redacted]");
             search_from = value_start + "[redacted]".len();
@@ -964,6 +961,18 @@ mod tests {
         assert!(!value.contains("first"));
         assert!(!value.contains("second"));
         assert!(!value.contains("third"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_credentials_after_non_bearer_authorization_schemes() {
+        let value = redact_runtime_diagnostic(
+            "Authorization: Basic dXNlcjpwYXNz Authorization: token ghp_secret authorization=Digest digest-secret",
+        );
+
+        assert!(!value.contains("dXNlcjpwYXNz"));
+        assert!(!value.contains("ghp_secret"));
+        assert!(!value.contains("digest-secret"));
+        assert!(value.contains("[redacted]"));
     }
 
     #[test]
