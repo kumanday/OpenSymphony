@@ -676,6 +676,76 @@ impl RuntimeWorkspaceBackend {
     }
 }
 
+impl RuntimeWorkspaceBackend {
+    async fn cleanup_workspace_with_policy(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        terminal: bool,
+        force_remove: bool,
+    ) -> Result<(), CliWorkspaceError> {
+        if terminal && (force_remove || !self.terminal_cleanup_paths.contains(&workspace.path)) {
+            let Some(handle) = self
+                .manager
+                .list_all_workspaces()
+                .await?
+                .into_iter()
+                .find_map(|(handle, _)| {
+                    (handle.workspace_path() == workspace.path).then_some(handle)
+                })
+            else {
+                return Ok(());
+            };
+            let manifest_path = handle.conversation_manifest_path();
+            if let Some(raw_manifest) = self
+                .manager
+                .read_text_artifact(&handle, &manifest_path)
+                .await?
+            {
+                match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+                    Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
+                        if let Err(error) = archive_terminal_codex_thread(
+                            &self.manager,
+                            &handle,
+                            &mut manifest,
+                            &self.codex_bin,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                thread_id = %manifest.conversation_id,
+                                %error,
+                                "preserving terminal Codex workspace for archive retry"
+                            );
+                            return Err(CliWorkspaceError::CodexLifecycle(error));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            issue = %handle.identifier(),
+                            manifest = %manifest_path.display(),
+                            %error,
+                            "continuing terminal cleanup with invalid conversation manifest"
+                        );
+                    }
+                }
+            }
+            if force_remove {
+                self.manager
+                    .cleanup_failed_terminal_workspace(&handle)
+                    .await?;
+            } else {
+                self.manager
+                    .cleanup(&handle, IssueLifecycleState::Terminal)
+                    .await?;
+            }
+            self.terminal_cleanup_paths.insert(workspace.path.clone());
+        }
+        Ok(())
+    }
+}
+
 impl WorkspaceBackend for RuntimeWorkspaceBackend {
     type Error = CliWorkspaceError;
 
@@ -792,60 +862,16 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        if terminal && !self.terminal_cleanup_paths.contains(&workspace.path) {
-            let Some(handle) = self
-                .manager
-                .list_all_workspaces()
-                .await?
-                .into_iter()
-                .find_map(|(handle, _)| {
-                    (handle.workspace_path() == workspace.path).then_some(handle)
-                })
-            else {
-                return Ok(());
-            };
-            let manifest_path = handle.conversation_manifest_path();
-            if let Some(raw_manifest) = self
-                .manager
-                .read_text_artifact(&handle, &manifest_path)
-                .await?
-            {
-                match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
-                    Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
-                        if let Err(error) = archive_terminal_codex_thread(
-                            &self.manager,
-                            &handle,
-                            &mut manifest,
-                            &self.codex_bin,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                issue = %handle.identifier(),
-                                thread_id = %manifest.conversation_id,
-                                %error,
-                                "preserving terminal Codex workspace for archive retry"
-                            );
-                            return Err(CliWorkspaceError::CodexLifecycle(error));
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            issue = %handle.identifier(),
-                            manifest = %manifest_path.display(),
-                            %error,
-                            "continuing terminal cleanup with invalid conversation manifest"
-                        );
-                    }
-                }
-            }
-            self.manager
-                .cleanup(&handle, IssueLifecycleState::Terminal)
-                .await?;
-            self.terminal_cleanup_paths.insert(workspace.path.clone());
-        }
-        Ok(())
+        self.cleanup_workspace_with_policy(workspace, terminal, false)
+            .await
+    }
+
+    async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(workspace, true, true)
+            .await
     }
 
     async fn persist_retry_count(
@@ -4423,6 +4449,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["before_remove", "before_remove"]
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_failed_cleanup_overrides_terminal_workspace_retention() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                hooks: HookConfig::default(),
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+
+        backend
+            .cleanup_failed_workspace(&workspace)
+            .await
+            .expect("failed cleanup should remove retained terminal workspace");
+        assert!(!ensured.handle.workspace_path().exists());
     }
 
     #[tokio::test]

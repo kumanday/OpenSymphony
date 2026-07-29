@@ -741,6 +741,16 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         });
     }
 
+    // Restore the repository workflow first. The central config remains
+    // active while this succeeds, so an interrupted rollback still leaves a
+    // runnable central generation instead of a stripped legacy workflow.
+    if marker.had_workflow {
+        restore_file(
+            &marker.backup_dir.join("WORKFLOW.md"),
+            &marker.workflow_path,
+            marker.workflow_mode,
+        )?;
+    }
     if marker.had_config {
         restore_file(
             &marker.backup_dir.join("config.yaml"),
@@ -752,13 +762,6 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
             path: marker.config_path.clone(),
             source,
         })?;
-    }
-    if marker.had_workflow {
-        restore_file(
-            &marker.backup_dir.join("WORKFLOW.md"),
-            &marker.workflow_path,
-            marker.workflow_mode,
-        )?;
     }
     fs::remove_file(&marker_path).map_err(|source| MigrationError::Write {
         path: marker_path.clone(),
@@ -1426,6 +1429,116 @@ fn acquire_memory_migration_lock(
 }
 
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), MigrationError> {
+    validate_directory_contents(source, destination)?;
+    copy_directory_contents_unchecked(source, destination)
+}
+
+fn validate_directory_contents(source: &Path, destination: &Path) -> Result<(), MigrationError> {
+    let entries = fs::read_dir(source).map_err(|source_error| MigrationError::Read {
+        path: source.to_path_buf(),
+        source: source_error,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source_error| MigrationError::Read {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|source_error| MigrationError::Read {
+                path: source_path.clone(),
+                source: source_error,
+            })?;
+        if file_type.is_symlink() {
+            return Err(MigrationError::Write {
+                path: source_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "legacy memory store contains a symlink",
+                ),
+            });
+        }
+        if file_type.is_dir() {
+            match fs::symlink_metadata(&destination_path) {
+                Ok(metadata)
+                    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() =>
+                {
+                    validate_directory_contents(&source_path, &destination_path)?;
+                }
+                Ok(_) => {
+                    return Err(MigrationError::Write {
+                        path: destination_path,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "legacy memory directory conflicts with an existing central entry",
+                        ),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    validate_directory_contents(&source_path, &destination_path)?;
+                }
+                Err(source_error) => {
+                    return Err(MigrationError::Read {
+                        path: destination_path,
+                        source: source_error,
+                    });
+                }
+            }
+        } else if file_type.is_file() {
+            match fs::symlink_metadata(&destination_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(metadata)
+                    if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+                {
+                    let source_contents =
+                        fs::read(&source_path).map_err(|source_error| MigrationError::Read {
+                            path: source_path.clone(),
+                            source: source_error,
+                        })?;
+                    let destination_contents =
+                        fs::read(&destination_path).map_err(|source_error| {
+                            MigrationError::Read {
+                                path: destination_path.clone(),
+                                source: source_error,
+                            }
+                        })?;
+                    if source_contents != destination_contents {
+                        return Err(MigrationError::Write {
+                            path: destination_path,
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::AlreadyExists,
+                                "legacy memory file conflicts with an existing central catalog entry",
+                            ),
+                        });
+                    }
+                }
+                Ok(_) => {
+                    return Err(MigrationError::Write {
+                        path: destination_path,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "legacy memory file conflicts with an existing central entry",
+                        ),
+                    });
+                }
+                Err(source_error) => {
+                    return Err(MigrationError::Read {
+                        path: destination_path,
+                        source: source_error,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_contents_unchecked(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), MigrationError> {
     fs::create_dir_all(destination).map_err(|source_error| MigrationError::Write {
         path: destination.to_path_buf(),
         source: source_error,
@@ -1461,7 +1574,7 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Migr
                 Ok(metadata)
                     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() =>
                 {
-                    copy_directory_contents(&source_path, &destination_path)?;
+                    copy_directory_contents_unchecked(&source_path, &destination_path)?;
                 }
                 Ok(_) => {
                     return Err(MigrationError::Write {
@@ -1473,7 +1586,7 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Migr
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    copy_directory_contents(&source_path, &destination_path)?;
+                    copy_directory_contents_unchecked(&source_path, &destination_path)?;
                 }
                 Err(source_error) => {
                     return Err(MigrationError::Read {
@@ -2005,6 +2118,27 @@ mod tests {
             fs::read_to_string(destination.join("issues/COE-1.md"))
                 .expect("destination capsule should remain"),
             "newer\n"
+        );
+    }
+
+    #[test]
+    fn migration_preflights_all_legacy_memory_conflicts_before_copying() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let source = repo.join(".opensymphony/memory");
+        let destination = root.path().join("state/memory");
+        fs::create_dir_all(source.join("nested")).expect("legacy memory tree should exist");
+        fs::write(source.join("first.md"), "first\n").expect("first capsule should exist");
+        fs::write(source.join("nested/second.md"), "second\n")
+            .expect("second capsule should exist");
+        fs::create_dir_all(destination.join("nested")).expect("destination tree should exist");
+        fs::write(destination.join("nested/second.md"), "conflicting\n")
+            .expect("conflicting capsule should exist");
+
+        assert!(preserve_legacy_memory(&repo, Some(&destination)).is_err());
+        assert!(
+            !destination.join("first.md").exists(),
+            "a late conflict must not leave earlier entries copied"
         );
     }
 

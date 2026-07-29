@@ -1920,6 +1920,73 @@ async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace()
 }
 
 #[tokio::test]
+async fn failed_terminal_interrupt_is_retried_before_cleanup() {
+    let issue = tracker_issue("lin-271", "COE-271", "In Progress", 0);
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("remote stop was temporarily unavailable".to_string()),
+        }));
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
+            detail: Some("remote stop acknowledged".to_string()),
+        }));
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue("lin-271", "COE-271", "Done", 0)];
+
+    scheduler
+        .tick(ts(300_200))
+        .await
+        .expect("first terminal reconciliation should retain the run");
+    let issue_id = IssueId::new("lin-271").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("run should remain tracked")
+            .status(),
+        SchedulerStatus::Running
+    );
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert!(scheduler.worker().aborted.is_empty());
+    assert!(scheduler.workspace().cleaned.is_empty());
+
+    scheduler
+        .tick(ts(600_400))
+        .await
+        .expect("second terminal reconciliation should retry the stop");
+    assert_eq!(scheduler.worker().interrupts.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![("COE-271".to_string(), true)]
+    );
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("released run should remain tracked")
+            .status(),
+        SchedulerStatus::Released
+    );
+}
+
+#[tokio::test]
 async fn runtime_events_extend_stall_deadlines_before_retrying_a_stalled_worker() {
     let tracker = FakeTracker {
         active: vec![

@@ -280,7 +280,19 @@ impl IssueExecution {
             return Err(StateTransitionError::ConversationNotAttached);
         };
         if let Some(interrupt) = &self.interrupt {
-            return Ok((interrupt.command.clone(), false));
+            match interrupt.status {
+                HarnessInterruptStatus::Requested | HarnessInterruptStatus::Acknowledged => {
+                    return Ok((interrupt.command.clone(), false));
+                }
+                HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut => {
+                    let command = interrupt.command.clone();
+                    self.interrupt = Some(HarnessInterruptState::requested(
+                        command.clone(),
+                        requested_at,
+                    ));
+                    return Ok((command, true));
+                }
+            }
         }
 
         self.interrupt = Some(HarnessInterruptState::requested(

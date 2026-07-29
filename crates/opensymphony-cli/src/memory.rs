@@ -17,7 +17,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard},
+    sync::{Mutex, OwnedMutexGuard, watch},
     task::JoinHandle,
 };
 
@@ -1642,17 +1642,13 @@ async fn run_serve(
 pub(crate) struct MemoryServerHandle {
     endpoint: String,
     task: Option<JoinHandle<Result<(), String>>>,
-    activity_marker: Option<PathBuf>,
-    _coordination_lock: Option<MemoryCoordinationLock>,
+    shutdown: watch::Sender<bool>,
     writer_gate: MemoryWriterGate,
 }
 
 impl Drop for MemoryServerHandle {
     fn drop(&mut self) {
         self.abort();
-        if let Some(path) = self.activity_marker.take() {
-            let _ = fs::remove_file(path);
-        }
     }
 }
 
@@ -1670,9 +1666,7 @@ impl MemoryServerHandle {
     }
 
     pub(crate) fn abort(&self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
+        let _ = self.shutdown.send(true);
     }
 
     pub(crate) async fn wait(mut self) -> Result<(), MemoryError> {
@@ -1809,16 +1803,22 @@ async fn start_memory_server_with_auth(
         .route("/health", axum::routing::get(memory_server_health))
         .route("/mcp", axum::routing::post(memory_server_mcp))
         .with_state(state);
+    let (shutdown, mut shutdown_rx) = watch::channel(false);
     let task = tokio::spawn(async move {
-        axum::serve(listener, app)
+        let result = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.changed().await;
+            })
             .await
-            .map_err(|error| format!("memory server failed: {error}"))
+            .map_err(|error| format!("memory server failed: {error}"));
+        let _ = fs::remove_file(&activity_marker);
+        drop(coordination_lock);
+        result
     });
     Ok(MemoryServerHandle {
         endpoint: format!("http://{local_addr}/mcp"),
         task: Some(task),
-        activity_marker: Some(activity_marker),
-        _coordination_lock: Some(coordination_lock),
+        shutdown,
         writer_gate,
     })
 }
@@ -6325,7 +6325,10 @@ mod tests {
             .expect("AST response");
         assert!(ast["result"]["markdown"].as_str().is_some());
         handle.abort();
-        drop(handle);
+        handle
+            .wait()
+            .await
+            .expect("memory server should shut down gracefully");
         assert!(!activity_marker.exists());
     }
 
@@ -6375,7 +6378,10 @@ mod tests {
         .expect("stale marker should be reclaimed");
         assert!(marker_path.is_file());
         handle.abort();
-        drop(handle);
+        handle
+            .wait()
+            .await
+            .expect("memory server should shut down gracefully");
         assert!(!marker_path.exists());
     }
 

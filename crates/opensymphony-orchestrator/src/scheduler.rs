@@ -291,6 +291,13 @@ pub trait WorkspaceBackend {
         terminal: bool,
     ) -> Result<(), Self::Error>;
 
+    async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace(workspace, true).await
+    }
+
     async fn persist_retry_count(
         &mut self,
         _workspace: &WorkspaceRecord,
@@ -1055,7 +1062,7 @@ where
                     })?;
                 if let Err(error) = self
                     .workspace
-                    .cleanup_workspace(&record.workspace, true)
+                    .cleanup_failed_workspace(&record.workspace)
                     .await
                 {
                     tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
@@ -1111,7 +1118,7 @@ where
             if let Some(workspace) = retry_cleanup_workspace
                 && !self.workspace.retain_failed_workspaces()
             {
-                match self.workspace.cleanup_workspace(&workspace, true).await {
+                match self.workspace.cleanup_failed_workspace(&workspace).await {
                     Ok(()) => {
                         if let Some(execution) = self.executions.get_mut(&normalized.id) {
                             execution.clear_workspace();
@@ -2004,7 +2011,11 @@ where
             && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
-            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
+            && let Err(error) = if reason == ReleaseReason::RetryExhausted {
+                self.workspace.cleanup_failed_workspace(&workspace).await
+            } else {
+                self.workspace.cleanup_workspace(&workspace, true).await
+            }
         {
             tracing::warn!(
                 issue = %issue_id,
@@ -2060,6 +2071,13 @@ where
                     interrupt.status == HarnessInterruptStatus::Acknowledged
                 });
             }
+        }
+        if !remote_stopped {
+            // Keep the local worker metadata/task until the harness confirms
+            // that it stopped. The next reconciliation can retry the same
+            // interrupt instead of leaving a remote run alive after its local
+            // task was discarded.
+            return Ok(false);
         }
         self.worker_metadata.remove(&run.worker_id);
         self.worker
@@ -2206,7 +2224,12 @@ where
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
         {
-            match self.workspace.cleanup_workspace(&workspace, true).await {
+            let cleanup = if reason == ReleaseReason::RetryExhausted {
+                self.workspace.cleanup_failed_workspace(&workspace).await
+            } else {
+                self.workspace.cleanup_workspace(&workspace, true).await
+            };
+            match cleanup {
                 Ok(()) => execution.clear_workspace(),
                 Err(error) => {
                     tracing::warn!(

@@ -210,9 +210,38 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         state: IssueLifecycleState,
     ) -> Result<CleanupOutcome, WorkspaceError> {
+        self.cleanup_with_terminal_removal(
+            workspace,
+            state,
+            self.config.cleanup.remove_terminal_workspaces,
+        )
+        .await
+    }
+
+    /// Remove a failed terminal workspace even when ordinary terminal
+    /// workspaces are retained by configuration. Retry exhaustion has its own
+    /// `retain_failed` policy at the scheduler layer.
+    pub async fn cleanup_failed_terminal_workspace(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
+        self.cleanup_with_terminal_removal(workspace, IssueLifecycleState::Terminal, true)
+            .await
+    }
+
+    async fn cleanup_with_terminal_removal(
+        &self,
+        workspace: &WorkspaceHandle,
+        state: IssueLifecycleState,
+        remove_terminal_workspaces: bool,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
         if !path_exists(workspace.workspace_path()).await? {
             return Ok(CleanupOutcome {
-                decision: self.cleanup_decision(state),
+                decision: if state == IssueLifecycleState::Terminal && remove_terminal_workspaces {
+                    CleanupDecision::Remove
+                } else {
+                    CleanupDecision::Retain
+                },
                 before_remove: None,
             });
         }
@@ -229,7 +258,11 @@ impl WorkspaceManager {
             Ok(record) => record,
             Err(failure) => Some(failure.record),
         };
-        let decision = self.cleanup_decision(state);
+        let decision = if remove_terminal_workspaces {
+            CleanupDecision::Remove
+        } else {
+            CleanupDecision::Retain
+        };
 
         if decision == CleanupDecision::Remove {
             match fs::remove_dir_all(workspace.workspace_path()).await {

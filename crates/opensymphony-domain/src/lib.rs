@@ -485,6 +485,40 @@ mod tests {
     }
 
     #[test]
+    fn failed_or_timed_out_interrupt_can_be_retried_for_the_same_run() {
+        for timed_out in [false, true] {
+            let mut execution = running_execution();
+            let (command, queued) = must(execution.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::SchedulerAbort,
+                HarnessInterruptExpectedNextState::Released,
+                ts(60),
+            ));
+            assert!(queued);
+            if timed_out {
+                must(execution.timeout_interrupt(ts(61), "ack timeout"));
+            } else {
+                must(execution.fail_interrupt(ts(61), "adapter refused interrupt"));
+            }
+
+            let (retry_command, retry_queued) = must(execution.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::SchedulerAbort,
+                HarnessInterruptExpectedNextState::Released,
+                ts(62),
+            ));
+            assert!(retry_queued);
+            assert_eq!(retry_command, command);
+            assert_eq!(
+                execution.interrupt().map(|interrupt| interrupt.status),
+                Some(HarnessInterruptStatus::Requested)
+            );
+        }
+    }
+
+    #[test]
     fn cancel_failed_outcome_marks_requested_interrupt_failed() {
         let mut execution = running_execution();
         must(execution.request_interrupt(

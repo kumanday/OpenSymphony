@@ -4395,8 +4395,17 @@ async fn get_run_detail(
         ControlPlaneIssueRuntimeState::Failed => (RunStatus::Released, RunLifecycleState::Failed),
     };
 
+    // Tracker state is authoritative when a parked execution is later moved
+    // directly to a terminal state. The scheduler keeps the original
+    // TrackerInactive release reason on an already-released execution, but a
+    // terminal tracker state must not render that run as cancelled/failed.
+    let terminal_tracker_state = issue.runtime_state == ControlPlaneIssueRuntimeState::Completed;
     let release_reason = if issue.cancel_failed {
         Some(ReleaseReason::CancelFailed)
+    } else if terminal_tracker_state
+        && issue.release_reason == Some(DomainReleaseReason::TrackerInactive)
+    {
+        Some(ReleaseReason::TrackerTerminal)
     } else if let Some(reason) = issue.release_reason {
         Some(match reason {
             DomainReleaseReason::Completed => ReleaseReason::Completed,
