@@ -2355,6 +2355,19 @@ async fn resolve_rehydrate_runtime(
     current_dir: &Path,
     explicit_config_path: Option<&Path>,
 ) -> Result<RehydrateRuntimeConfig, String> {
+    resolve_rehydrate_runtime_with_environment(
+        current_dir,
+        explicit_config_path,
+        &ProcessEnvironment,
+    )
+    .await
+}
+
+async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
+    current_dir: &Path,
+    explicit_config_path: Option<&Path>,
+    environment: &E,
+) -> Result<RehydrateRuntimeConfig, String> {
     let config_path =
         orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
             .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
@@ -2427,7 +2440,7 @@ async fn resolve_rehydrate_runtime(
         })
         .unwrap_or(workflow_def);
     let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
-        workflow_def.resolve_with_process_env(&target_repo)
+        workflow_def.resolve(&target_repo, environment)
     } else {
         workflow_def.resolve(
             &target_repo,
@@ -2546,7 +2559,7 @@ fn build_rehydrate_client(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::Duration};
+    use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
     use crate::opensymphony_domain::{
         ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
@@ -2560,7 +2573,7 @@ mod tests {
         central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
         executable_suffixes, find_cargo_workspace_root, project_set_doctor_mutation_blocked,
         resolve_doctor_runtime, resolve_doctor_workflow, resolve_rehydrate_runtime,
-        sample_snapshot, spawn_demo_updates,
+        resolve_rehydrate_runtime_with_environment, sample_snapshot, spawn_demo_updates,
     };
 
     #[test]
@@ -2878,9 +2891,14 @@ openhands:
         )
         .expect("central config should exist");
 
-        let runtime = resolve_rehydrate_runtime(temp_dir.path(), Some(&central))
-            .await
-            .expect("rehydrate runtime should resolve the central instruction path");
+        let environment = BTreeMap::from([("LINEAR_API_KEY".to_owned(), "test-key".to_owned())]);
+        let runtime = resolve_rehydrate_runtime_with_environment(
+            temp_dir.path(),
+            Some(&central),
+            &environment,
+        )
+        .await
+        .expect("rehydrate runtime should resolve the central instruction path");
 
         assert_eq!(runtime.workflow.config.tracker.project_slug, "project");
     }
