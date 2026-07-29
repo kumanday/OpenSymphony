@@ -1043,6 +1043,10 @@ where
                             record.interrupt_reason,
                             observed_at,
                         )?;
+                        if record.interrupt_reason.is_some() {
+                            self.retry_recovered_interrupt(&issue_id, observed_at)
+                                .await?;
+                        }
                     } else if self.retry_limit_reached(record.normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                             .await?;
@@ -1716,6 +1720,54 @@ where
                 harness_kind.filter(|kind| !kind.trim().is_empty()),
             ),
         );
+        self.insert_execution(issue_id.clone(), execution);
+        Ok(())
+    }
+
+    async fn retry_recovered_interrupt(
+        &mut self,
+        issue_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(mut execution) = self.remove_execution(issue_id) else {
+            return Ok(());
+        };
+        let Some(interrupt) = execution.interrupt().cloned() else {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        };
+        if !matches!(
+            interrupt.status,
+            HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut
+        ) {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        }
+
+        let request = execution.request_interrupt(
+            interrupt.command.harness_kind,
+            interrupt.command.turn_id,
+            interrupt.command.reason,
+            interrupt.command.expected_next_state,
+            observed_at,
+        );
+        let (command, queued) = match request {
+            Ok(request) => request,
+            Err(error) => {
+                self.insert_execution(issue_id.clone(), execution);
+                return Err(error.into());
+            }
+        };
+        if queued {
+            let reason = command.reason;
+            let result = self.worker.interrupt_worker(command).await;
+            if let Err(error) =
+                Self::apply_interrupt_result(&mut execution, reason, observed_at, result)
+            {
+                self.insert_execution(issue_id.clone(), execution);
+                return Err(error);
+            }
+        }
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
     }

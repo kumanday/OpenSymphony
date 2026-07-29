@@ -606,6 +606,7 @@ fn resume_partial_apply(
     let workflow_stage = stage_path(&marker.workflow_path, &marker.generation);
     if marker.memory_catalog_copy_in_progress && workflow_stage.is_file() {
         let config_stage = stage_path(&marker.config_path, &marker.generation);
+        verify_legacy_apply_inputs(&marker)?;
         let config_target = marker.config_path.clone();
         let workflow_target = marker.workflow_path.clone();
         verify_current_generation(&config_stage, &marker.generation)?;
@@ -679,6 +680,39 @@ fn resume_partial_apply(
         source,
     })?;
     Ok(ActiveMigrationResolution::Restored)
+}
+
+fn verify_legacy_apply_inputs(marker: &ActivationMarker) -> Result<(), MigrationError> {
+    verify_legacy_file(
+        &marker.config_path,
+        &marker.backup_dir.join("config.yaml"),
+        marker.had_config,
+    )?;
+    verify_legacy_file(
+        &marker.workflow_path,
+        &marker.backup_dir.join("WORKFLOW.md"),
+        marker.had_workflow,
+    )
+}
+
+fn verify_legacy_file(
+    path: &Path,
+    backup_path: &Path,
+    had_original: bool,
+) -> Result<(), MigrationError> {
+    if !had_original {
+        if path.exists() {
+            return Err(MigrationError::ActivatedFileChanged {
+                path: path.to_path_buf(),
+            });
+        }
+        return Ok(());
+    }
+    let backup = fs::read(backup_path).map_err(|source| MigrationError::Read {
+        path: backup_path.to_path_buf(),
+        source,
+    })?;
+    verify_current_generation(path, &sha256(&backup))
 }
 
 fn resume_in_progress_catalog_copy(
@@ -3002,6 +3036,43 @@ mod tests {
             marker.memory_catalog_generation,
             Some(memory_catalog_generation(&catalog).expect("catalog generation should hash"))
         );
+    }
+
+    #[test]
+    fn interrupted_catalog_copy_rejects_edited_legacy_inputs() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let backup_dir = repo.join(".opensymphony/migration/backups");
+        let config = repo.join("config.yaml");
+        let workflow = repo.join("WORKFLOW.md");
+        fs::create_dir_all(&backup_dir).expect("backup directory should exist");
+        fs::write(&config, "legacy config\n").expect("legacy config should exist");
+        fs::write(&workflow, "legacy workflow\n").expect("legacy workflow should exist");
+        fs::write(backup_dir.join("config.yaml"), "legacy config\n")
+            .expect("config backup should exist");
+        fs::write(backup_dir.join("WORKFLOW.md"), "legacy workflow\n")
+            .expect("workflow backup should exist");
+        let marker = ActivationMarker {
+            source_config: config.clone(),
+            config_path: config.clone(),
+            workflow_path: workflow,
+            backup_dir,
+            generation: "sha256:generation".to_owned(),
+            workflow_generation: "sha256:workflow".to_owned(),
+            had_config: true,
+            had_workflow: true,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: None,
+            memory_catalog_generation: None,
+            memory_catalog_copy_in_progress: true,
+        };
+
+        fs::write(&config, "operator edit\n").expect("operator edit should be written");
+        assert!(matches!(
+            verify_legacy_apply_inputs(&marker),
+            Err(MigrationError::ActivatedFileChanged { path }) if path == config
+        ));
     }
 
     #[test]

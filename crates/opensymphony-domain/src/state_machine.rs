@@ -347,7 +347,7 @@ impl IssueExecution {
         let Some(conversation) = &self.conversation else {
             return Err(StateTransitionError::ConversationNotAttached);
         };
-        self.interrupt = Some(HarnessInterruptState::requested(
+        let mut interrupt = HarnessInterruptState::requested(
             HarnessInterruptCommand {
                 run_id: run.issue_identifier.to_string(),
                 issue_id: self.issue.id.clone(),
@@ -358,7 +358,16 @@ impl IssueExecution {
                 expected_next_state,
             },
             requested_at,
-        ));
+        );
+        // The persisted workspace record only stores the intent, not whether
+        // the remote request reached the harness. Treat recovery as an
+        // unconfirmed request so the scheduler will retry it instead of
+        // mistaking it for an already-dispatched request.
+        interrupt.fail(
+            requested_at,
+            "interrupt request requires retry after recovery",
+        );
+        self.interrupt = Some(interrupt);
         Ok(())
     }
 

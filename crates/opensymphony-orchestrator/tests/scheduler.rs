@@ -3664,7 +3664,12 @@ async fn recovered_in_flight_run_restores_persisted_interrupt_intent() {
         interrupt.command.expected_next_state,
         crate::opensymphony_domain::HarnessInterruptExpectedNextState::Paused
     );
-    assert_eq!(interrupt.status, HarnessInterruptStatus::Requested);
+    assert_eq!(interrupt.status, HarnessInterruptStatus::Acknowledged);
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(
+        scheduler.worker().interrupts[0].reason,
+        HarnessInterruptReason::OperatorCancel
+    );
 }
 
 #[tokio::test]

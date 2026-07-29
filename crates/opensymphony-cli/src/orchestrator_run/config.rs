@@ -1575,7 +1575,7 @@ fn validate_openhands_env_references(
                 continue;
             };
             let field = format!("{}.{}", path, key);
-            let normalized_key = key.to_ascii_lowercase().replace('-', "_");
+            let normalized_key = normalize_secret_field_name(key);
             if normalized_key.ends_with("_env") && !value.is_null() {
                 let Some(value) = value.as_str() else {
                     return Err(CentralConfigError::InvalidReference { field });
@@ -2545,6 +2545,25 @@ scheduler:
 
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("hyphenated environment selectors must use environment names");
+        assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+        assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_camel_case_openhands_environment_selectors() {
+        let root = tempfile::tempdir().expect("temporary config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              accessTokenEnv: literal-secret\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("camelCase environment selectors must use environment names");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
         assert!(!error.to_string().contains("literal-secret"));
     }
