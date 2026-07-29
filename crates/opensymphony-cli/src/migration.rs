@@ -64,6 +64,8 @@ enum MigrationError {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("failed to expand legacy config value in {path}: {detail}")]
+    ResolveConfig { path: PathBuf, detail: String },
     #[error("failed to parse workflow {path}: {source}")]
     ParseWorkflow {
         path: PathBuf,
@@ -155,6 +157,19 @@ struct ActivationMarker {
     generation: String,
     had_config: bool,
     had_workflow: bool,
+    #[serde(default)]
+    config_mode: Option<u32>,
+    #[serde(default)]
+    workflow_mode: Option<u32>,
+}
+
+impl ActivationMarker {
+    fn target_repo(&self) -> PathBuf {
+        self.workflow_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    }
 }
 
 #[derive(Debug)]
@@ -167,6 +182,15 @@ struct SourceContext {
     workflow: WorkflowDefinition,
     config: LegacyConfigProbe,
     remote: String,
+}
+
+struct ActiveCentralConfig {
+    source_config: PathBuf,
+    target_config: PathBuf,
+    target_repo: PathBuf,
+    workflow: PathBuf,
+    generation: String,
+    activation_marker: PathBuf,
 }
 
 pub async fn run(args: MigrationArgs) -> std::process::ExitCode {
@@ -190,7 +214,97 @@ pub async fn run(args: MigrationArgs) -> std::process::ExitCode {
     }
 }
 
+async fn active_target_central_config(
+    paths: &MigrationPaths,
+) -> Result<Option<ActiveCentralConfig>, MigrationError> {
+    let cwd = current_dir()?;
+    let repo = absolute_path(&cwd, &paths.repo);
+    let source_config = paths
+        .config
+        .as_ref()
+        .map(|path| absolute_path(&cwd, path))
+        .unwrap_or_else(|| repo.join("config.yaml"));
+    let target_config = migration_target_config(paths, &cwd, &source_config);
+    if !target_config.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&target_config).map_err(|source| MigrationError::Read {
+        path: target_config.clone(),
+        source,
+    })?;
+    if !looks_like_central_config(&raw) {
+        return Ok(None);
+    }
+    let central = load_central_config(&target_config).await?;
+    let activation_marker = target_config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".opensymphony/migration/activation.yaml");
+    let marker = if activation_marker.is_file() {
+        let marker_raw =
+            fs::read_to_string(&activation_marker).map_err(|source| MigrationError::Read {
+                path: activation_marker.clone(),
+                source,
+            })?;
+        Some(
+            serde_yaml::from_str::<ActivationMarker>(&marker_raw).map_err(|source| {
+                MigrationError::ParseActivation {
+                    path: activation_marker.clone(),
+                    source,
+                }
+            })?,
+        )
+    } else {
+        None
+    };
+    let (target_repo, workflow) = marker
+        .map(|marker| (marker.target_repo(), marker.workflow_path))
+        .unwrap_or_else(|| (repo.clone(), repo.join("WORKFLOW.md")));
+    Ok(Some(ActiveCentralConfig {
+        source_config,
+        target_config,
+        target_repo,
+        workflow,
+        generation: central.generation,
+        activation_marker,
+    }))
+}
+
+fn active_report(
+    operation: &'static str,
+    active: &ActiveCentralConfig,
+    preflight_only: bool,
+) -> MigrationReport {
+    MigrationReport {
+        operation,
+        source_config: active.source_config.clone(),
+        target_repo: active.target_repo.clone(),
+        workflow: active.workflow.clone(),
+        target_config: Some(active.target_config.clone()),
+        central_config_already_active: true,
+        preflight_only,
+        config_generation: Some(active.generation.clone()),
+        recognized_front_matter: Vec::new(),
+        hardcoded_clone_hooks: Vec::new(),
+        literal_secret_detected: false,
+        credential_bearing_remote_detected: false,
+        backup: None,
+        activation_marker: Some(active.activation_marker.clone()),
+    }
+}
+
+fn migration_target_config(paths: &MigrationPaths, cwd: &Path, source: &Path) -> PathBuf {
+    paths
+        .output
+        .as_deref()
+        .map(|path| absolute_path(cwd, path))
+        .unwrap_or_else(|| source.to_path_buf())
+}
+
 async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
+    if let Some(active) = active_target_central_config(&paths).await? {
+        return Ok(active_report("preflight", &active, true));
+    }
     let source = load_source(&paths)?;
     if looks_like_central_config(&source.config_source) {
         let central = load_central_config(&source.source_config).await?;
@@ -223,6 +337,9 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
 }
 
 async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
+    if let Some(active) = active_target_central_config(&paths).await? {
+        return Ok(active_report("apply", &active, false));
+    }
     let source = load_source(&paths)?;
     if looks_like_central_config(&source.config_source) {
         let central = load_central_config(&source.source_config).await?;
@@ -270,10 +387,7 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
     }
 
     let cwd = current_dir()?;
-    let target_config = paths
-        .output
-        .map(|path| absolute_path(&cwd, &path))
-        .unwrap_or_else(|| source.source_config.clone());
+    let target_config = migration_target_config(&paths, &cwd, &source.source_config);
     let generated = generate_central_config(&source)?;
     let generation = sha256(generated.as_bytes());
     let migration_root = target_config
@@ -289,6 +403,15 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
     })?;
     let had_config = target_config.is_file();
     let had_workflow = source.workflow_path.is_file();
+    let config_mode = file_mode(&target_config).map_err(|source_error| MigrationError::Read {
+        path: target_config.clone(),
+        source: source_error,
+    })?;
+    let workflow_mode =
+        file_mode(&source.workflow_path).map_err(|source_error| MigrationError::Read {
+            path: source.workflow_path.clone(),
+            source: source_error,
+        })?;
     if had_config {
         fs::copy(&target_config, backup_dir.join("config.yaml")).map_err(|source_error| {
             MigrationError::Write {
@@ -308,9 +431,9 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
 
     let central_stage = stage_path(&target_config, &generation);
     let workflow_stage = stage_path(&source.workflow_path, &generation);
-    write_file(&central_stage, generated.as_bytes())?;
+    write_file_with_mode(&central_stage, generated.as_bytes(), config_mode)?;
     load_central_config(&central_stage).await?;
-    write_file(&workflow_stage, workflow_body(&source))?;
+    write_file_with_mode(&workflow_stage, workflow_body(&source), workflow_mode)?;
 
     let marker = ActivationMarker {
         config_path: target_config.clone(),
@@ -319,6 +442,8 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
         generation: generation.clone(),
         had_config,
         had_workflow,
+        config_mode,
+        workflow_mode,
     };
     let marker_path = migration_root.join("activation.yaml");
     let marker_stage = stage_path(&marker_path, &generation);
@@ -389,7 +514,11 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
     }
 
     if marker.had_config {
-        restore_file(&marker.backup_dir.join("config.yaml"), &marker.config_path)?;
+        restore_file(
+            &marker.backup_dir.join("config.yaml"),
+            &marker.config_path,
+            marker.config_mode,
+        )?;
     } else if marker.config_path.is_file() {
         fs::remove_file(&marker.config_path).map_err(|source| MigrationError::Write {
             path: marker.config_path.clone(),
@@ -400,6 +529,7 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         restore_file(
             &marker.backup_dir.join("WORKFLOW.md"),
             &marker.workflow_path,
+            marker.workflow_mode,
         )?;
     }
     fs::remove_file(&marker_path).map_err(|source| MigrationError::Write {
@@ -462,7 +592,15 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
     let target_repo = config
         .target_repo
         .as_deref()
-        .map(|path| resolve_repo_path(config_root, path))
+        .map(|path| {
+            super::expand_env_tokens(path)
+                .map_err(|error| MigrationError::ResolveConfig {
+                    path: source_config.clone(),
+                    detail: error.to_string(),
+                })
+                .map(|path| resolve_repo_path(config_root, &path))
+        })
+        .transpose()?
         .unwrap_or(repo);
     let workflow_path = target_repo.join("WORKFLOW.md");
     let workflow_source = fs::read_to_string(&workflow_path).map_err(|source| {
@@ -540,7 +678,7 @@ fn build_report(
     .into_iter()
     .filter_map(|(name, value)| {
         value
-            .filter(|value| value.to_ascii_lowercase().contains("git clone"))
+            .filter(|value| hook_creates_repository(value))
             .map(|_| name)
     })
     .collect();
@@ -582,6 +720,8 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
     if remote_has_credentials(&source.remote) {
         return Err(MigrationError::CredentialBearingRemote);
     }
+    let linear_credential_variable =
+        tracker_credential_variable(source.workflow.front_matter.tracker.api_key.as_deref())?;
     let project = source
         .workflow
         .front_matter
@@ -619,11 +759,23 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         .and_then(|value| integer_value(value).parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(10);
+    let instance_id = format!(
+        "legacy-{}-{}",
+        safe_id(
+            source
+                .target_repo
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("repository")
+        ),
+        &sha256(source.target_repo.display().to_string().as_bytes())[7..23]
+    );
+    let state_root = format!("~/.opensymphony/state/{instance_id}");
     let root = json!({
         "schema_version": 1,
         "instance": {
-            "id": format!("legacy-{}", safe_id(source.target_repo.file_name().and_then(|name| name.to_str()).unwrap_or("repository"))),
-            "state_root": "~/.opensymphony/state/legacy-migrated",
+            "id": instance_id,
+            "state_root": state_root,
         },
         "routing": {
             "mode": "legacy_single",
@@ -657,7 +809,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             }
         },
         "credentials": {
-            "linear-api-key": {"kind": "environment", "variable": "LINEAR_API_KEY"},
+            "linear-api-key": {"kind": "environment", "variable": linear_credential_variable},
             "legacy-git": {"kind": "ssh-agent"},
         },
         "review_profiles": {
@@ -681,7 +833,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         },
         "integration": {"policy": "builtin:legacy-single", "use_shared_git_worktrees": false},
         "memory": {
-            "catalog_root": "~/.opensymphony/state/legacy-migrated/memory",
+            "catalog_root": format!("{state_root}/memory"),
             "auto_capture": source.config.memory.auto_capture.unwrap_or(true),
             "auto_archive": source.config.memory.auto_archive.unwrap_or(false),
             "serve": source.config.memory.serve.unwrap_or_else(|| source.target_repo.join(".opensymphony/memory").is_dir()),
@@ -693,6 +845,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "tool_dir": source.config.openhands.tool_dir.clone(),
             "transport_base_url": source.workflow.front_matter.openhands.transport.base_url.clone(),
             "transport_session_api_key_env": source.workflow.front_matter.openhands.transport.session_api_key_env.clone(),
+            "front_matter": source.workflow.front_matter.openhands.clone(),
         },
         "compatibility": {"allow_repo_local_config": false},
     });
@@ -747,12 +900,55 @@ fn git_remote(repo: &Path) -> Result<String, MigrationError> {
 }
 
 fn remote_has_credentials(value: &str) -> bool {
+    if value.contains('?') || value.contains('#') {
+        return true;
+    }
     if let Ok(url) = url::Url::parse(value) {
-        return !url.username().is_empty() || url.password().is_some();
+        return !url.username().is_empty()
+            || url.password().is_some()
+            || !url.query().unwrap_or_default().is_empty()
+            || !url.fragment().unwrap_or_default().is_empty();
     }
     value
         .split_once('@')
         .is_some_and(|(user, host)| user != "git" || host.is_empty())
+}
+
+fn hook_creates_repository(value: &str) -> bool {
+    let normalized = value
+        .replace("\\\r\n", " ")
+        .replace("\\\n", " ")
+        .to_ascii_lowercase();
+    normalized
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        })
+        .filter(|token| !token.is_empty())
+        .any(|token| token == "clone" || token == "init")
+}
+
+fn tracker_credential_variable(value: Option<&str>) -> Result<String, MigrationError> {
+    let Some(value) = value else {
+        return Ok("LINEAR_API_KEY".to_owned());
+    };
+    let Some(variable) = value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return Err(MigrationError::LiteralSecret);
+    };
+    if variable.is_empty()
+        || !variable.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        || !variable
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase() || character == '_')
+    {
+        return Err(MigrationError::LiteralSecret);
+    }
+    Ok(variable.to_owned())
 }
 
 fn safe_id(value: &str) -> String {
@@ -781,6 +977,14 @@ fn stage_path(path: &Path, generation: &str) -> PathBuf {
 }
 
 fn write_file(path: &Path, contents: &[u8]) -> Result<(), MigrationError> {
+    write_file_with_mode(path, contents, None)
+}
+
+fn write_file_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+) -> Result<(), MigrationError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| MigrationError::Write {
             path: parent.to_path_buf(),
@@ -790,16 +994,20 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<(), MigrationError> {
     fs::write(path, contents).map_err(|source| MigrationError::Write {
         path: path.to_path_buf(),
         source,
+    })?;
+    set_file_mode(path, mode).map_err(|source| MigrationError::Write {
+        path: path.to_path_buf(),
+        source,
     })
 }
 
-fn restore_file(backup: &Path, target: &Path) -> Result<(), MigrationError> {
+fn restore_file(backup: &Path, target: &Path, mode: Option<u32>) -> Result<(), MigrationError> {
     let contents = fs::read(backup).map_err(|source| MigrationError::Read {
         path: backup.to_path_buf(),
         source,
     })?;
     let stage = stage_path(target, &sha256(&contents));
-    write_file(&stage, &contents)?;
+    write_file_with_mode(&stage, &contents, mode)?;
     fs::rename(&stage, target).map_err(|source| MigrationError::Write {
         path: target.to_path_buf(),
         source,
@@ -808,18 +1016,39 @@ fn restore_file(backup: &Path, target: &Path) -> Result<(), MigrationError> {
 
 fn resolve_repo_path(base: &Path, value: &str) -> PathBuf {
     let value = if value == "~" {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
+        super::open_user_home_dir().unwrap_or_default()
     } else if let Some(value) = value.strip_prefix("~/") {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join(value)
+        super::open_user_home_dir().unwrap_or_default().join(value)
     } else {
         PathBuf::from(value)
     };
     absolute_path(base, &value)
+}
+
+fn file_mode(path: &Path) -> Result<Option<u32>, std::io::Error> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(Some(fs::metadata(path)?.permissions().mode()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
+fn set_file_mode(path: &Path, mode: Option<u32>) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    let _ = (path, mode);
+    Ok(())
 }
 
 fn absolute_path(base: &Path, path: &Path) -> PathBuf {
@@ -869,6 +1098,40 @@ mod tests {
         assert!(!serialized.contains("super-secret-canary"));
     }
 
+    #[test]
+    fn clone_hook_detection_covers_git_and_gh_variants() {
+        assert!(hook_creates_repository(
+            "git -c protocol.version=2 clone URL ."
+        ));
+        assert!(hook_creates_repository("gh repo \\\nclone owner/repo ."));
+        assert!(hook_creates_repository("git \\\nclone URL ."));
+        assert!(!hook_creates_repository("printf '%s\\n' ready"));
+    }
+
+    #[test]
+    fn migration_preserves_supported_credential_indirection() {
+        assert_eq!(
+            tracker_credential_variable(Some("${MY_LINEAR_TOKEN}"))
+                .expect("custom credential variable should migrate"),
+            "MY_LINEAR_TOKEN"
+        );
+        assert!(matches!(
+            tracker_credential_variable(Some("literal-secret")),
+            Err(MigrationError::LiteralSecret)
+        ));
+    }
+
+    #[test]
+    fn migration_rejects_query_credentials_in_remotes() {
+        assert!(remote_has_credentials(
+            "https://example.com/repo.git?access_token=secret"
+        ));
+        assert!(remote_has_credentials(
+            "git@github.com:example/repo.git#secret"
+        ));
+        assert!(!remote_has_credentials("git@github.com:example/repo.git"));
+    }
+
     #[tokio::test]
     async fn apply_and_rollback_restore_legacy_files() {
         let root = tempfile::tempdir().expect("migration root should exist");
@@ -883,26 +1146,62 @@ mod tests {
             .status()
             .expect("git remote should be configured");
         let config_path = root.path().join("config.yaml");
+        let output_path = root.path().join("central.yaml");
         let workflow_path = root.path().join("WORKFLOW.md");
         let old_config = "control_plane:\n  bind: 127.0.0.1:2468\n";
-        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n\n# Implementation instructions\n";
+        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\n---\n\n# Implementation instructions\n";
         fs::write(&config_path, old_config).expect("legacy config should be written");
         fs::write(&workflow_path, old_workflow).expect("legacy workflow should be written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+                .expect("config permissions should be set");
+            fs::set_permissions(&workflow_path, fs::Permissions::from_mode(0o640))
+                .expect("workflow permissions should be set");
+        }
 
         let report = apply(MigrationPaths {
             config: Some(config_path.clone()),
             repo: root.path().to_path_buf(),
-            output: None,
+            output: Some(output_path.clone()),
         })
         .await
         .expect("migration should apply");
         assert!(report.activation_marker.is_some());
         let migrated_config =
-            fs::read_to_string(&config_path).expect("central config should exist");
+            fs::read_to_string(&output_path).expect("central config should exist");
+        assert_eq!(
+            fs::read_to_string(&config_path).expect("legacy source config should remain"),
+            old_config
+        );
         let migrated_workflow = fs::read_to_string(&workflow_path).expect("workflow should exist");
         assert!(migrated_config.contains("legacy_single"));
+        assert!(migrated_config.contains("custom-openhands"));
+        assert!(migrated_config.contains("CUSTOM_OPENAI_KEY"));
+        assert!(migrated_config.contains("reconnect_max_ms"));
         assert!(migrated_workflow.contains("Implementation instructions"));
         assert!(!migrated_config.contains("super-secret"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path)
+                    .expect("migrated config should exist")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&workflow_path)
+                    .expect("migrated workflow should exist")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
 
         let strict_run_marker = root
             .path()
@@ -919,24 +1218,48 @@ mod tests {
         let repeated = apply(MigrationPaths {
             config: Some(config_path.clone()),
             repo: root.path().to_path_buf(),
-            output: None,
+            output: Some(output_path.clone()),
         })
         .await
         .expect("repeat apply should be idempotent");
         assert!(repeated.central_config_already_active);
 
         rollback(RollbackArgs {
-            config: Some(config_path.clone()),
+            config: Some(output_path.clone()),
         })
         .await
         .expect("rollback should restore the prior files");
         assert_eq!(
-            fs::read_to_string(config_path).expect("config should restore"),
+            fs::read_to_string(&config_path).expect("config should restore"),
             old_config
         );
+        assert!(
+            !output_path.is_file(),
+            "separate central output should be removed on rollback"
+        );
         assert_eq!(
-            fs::read_to_string(workflow_path).expect("workflow should restore"),
+            fs::read_to_string(&workflow_path).expect("workflow should restore"),
             old_workflow
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path)
+                    .expect("config should restore")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&workflow_path)
+                    .expect("workflow should restore")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
     }
 }

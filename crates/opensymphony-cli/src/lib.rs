@@ -436,7 +436,8 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
     let config_path = match &args.config {
         Some(path) => path.clone(),
         None => {
-            let candidate = cwd.join(DEFAULT_DOCTOR_CONFIG_FILE);
+            let candidate = orchestrator_run::config::select_config_path(&cwd, None)
+                .unwrap_or_else(|| cwd.join(DEFAULT_DOCTOR_CONFIG_FILE));
             if candidate.exists() {
                 candidate
             } else {
@@ -478,19 +479,60 @@ pub async fn run_doctor_command(
 ) -> ExitCode {
     let mut checks = Vec::new();
 
-    let config = match load_config(&config_path).await {
-        Ok(config) => {
-            checks.push(CheckResult::pass(
-                "config",
-                format!("parsed {}", config_path.display()),
-            ));
-            config
-        }
+    let raw_config = match fs::read_to_string(&config_path).await {
+        Ok(raw) => raw,
         Err(error) => {
-            checks.push(CheckResult::fail("config", error));
+            checks.push(CheckResult::fail(
+                "config",
+                format!("failed to read {}: {error}", config_path.display()),
+            ));
             print_checks(&checks);
             return ExitCode::from(1);
         }
+    };
+    let central_config = if orchestrator_run::config::looks_like_central_config(&raw_config) {
+        match orchestrator_run::config::load_central_config(&config_path).await {
+            Ok(config) => Some(config),
+            Err(error) => {
+                checks.push(CheckResult::fail("config", error.to_string()));
+                print_checks(&checks);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
+    let config = match central_config.as_ref() {
+        Some(central) => {
+            checks.push(CheckResult::pass(
+                "config",
+                format!("parsed central config {}", config_path.display()),
+            ));
+            DoctorConfig {
+                target_repo: central.target_repo().map(|path| path.display().to_string()),
+                openhands: OpenHandsDoctorConfig {
+                    tool_dir: central.tool_dir().map(|path| path.display().to_string()),
+                    probe_model: None,
+                    probe_api_key_env: None,
+                    probe_llm_base_url_env: None,
+                },
+                linear: LinearDoctorConfig { enabled: true },
+            }
+        }
+        None => match load_config(&config_path).await {
+            Ok(config) => {
+                checks.push(CheckResult::pass(
+                    "config",
+                    format!("parsed {}", config_path.display()),
+                ));
+                config
+            }
+            Err(error) => {
+                checks.push(CheckResult::fail("config", error));
+                print_checks(&checks);
+                return ExitCode::from(1);
+            }
+        },
     };
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -525,7 +567,14 @@ pub async fn run_doctor_command(
             }
         }
     };
-    let runtime = resolve_doctor_runtime(&config, config_root, &target_repo);
+    let runtime = resolve_doctor_runtime(
+        &config,
+        config_root,
+        &target_repo,
+        central_config
+            .as_ref()
+            .map(|central| &central.workflow_front_matter),
+    );
 
     // For repo check, try to find the cargo workspace root from the config_root
     // This allows the doctor to work with non-Rust projects (no Cargo.toml at target_repo)
@@ -1091,6 +1140,7 @@ fn resolve_doctor_runtime(
     config: &DoctorConfig,
     config_root: &Path,
     default_target_repo: &Path,
+    central_front_matter: Option<&crate::opensymphony_workflow::WorkflowFrontMatter>,
 ) -> Result<DoctorRuntimeConfig, String> {
     let target_repo = config
         .target_repo
@@ -1100,6 +1150,13 @@ fn resolve_doctor_runtime(
     let workflow_path = target_repo.join("WORKFLOW.md");
     let workflow = WorkflowDefinition::load_from_path(&workflow_path)
         .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
+    let workflow = central_front_matter
+        .cloned()
+        .map(|front_matter| WorkflowDefinition {
+            front_matter,
+            prompt_template: workflow.prompt_template.clone(),
+        })
+        .unwrap_or(workflow);
     let workflow = resolve_doctor_workflow(&workflow, &target_repo, config.linear.enabled)
         .map_err(|error| format!("failed to resolve {}: {error}", workflow_path.display()))?;
 
@@ -2237,39 +2294,53 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 }
 
 async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntimeConfig, String> {
-    let config_path = current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE);
-    let (target_repo, tool_dir) = if config_path.is_file() {
+    let config_path = orchestrator_run::config::select_config_path(current_dir, None)
+        .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
+    let (target_repo, tool_dir, central_front_matter) = if config_path.is_file() {
         let raw = fs::read_to_string(&config_path)
             .await
             .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
-        let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
-            .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
-        config.target_repo = config
-            .target_repo
-            .take()
-            .map(|value| resolve_rehydrate_value(&config_path, value))
-            .transpose()?;
-        config.openhands.tool_dir = config
-            .openhands
-            .tool_dir
-            .take()
-            .map(|value| resolve_rehydrate_value(&config_path, value))
-            .transpose()?;
+        if orchestrator_run::config::looks_like_central_config(&raw) {
+            let central = orchestrator_run::config::load_central_config(&config_path)
+                .await
+                .map_err(|error| error.to_string())?;
+            (
+                central
+                    .target_repo()
+                    .unwrap_or_else(|| current_dir.to_path_buf()),
+                central.tool_dir(),
+                Some(central.workflow_front_matter.clone()),
+            )
+        } else {
+            let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
+                .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
+            config.target_repo = config
+                .target_repo
+                .take()
+                .map(|value| resolve_rehydrate_value(&config_path, value))
+                .transpose()?;
+            config.openhands.tool_dir = config
+                .openhands
+                .tool_dir
+                .take()
+                .map(|value| resolve_rehydrate_value(&config_path, value))
+                .transpose()?;
 
-        let config_root = config_path.parent().unwrap_or(current_dir);
-        let target_repo = config
-            .target_repo
-            .as_deref()
-            .map(|value| resolve_path(config_root, value))
-            .unwrap_or_else(|| current_dir.to_path_buf());
-        let tool_dir = config
-            .openhands
-            .tool_dir
-            .as_deref()
-            .map(|value| resolve_path(config_root, value));
-        (target_repo, tool_dir)
+            let config_root = config_path.parent().unwrap_or(current_dir);
+            let target_repo = config
+                .target_repo
+                .as_deref()
+                .map(|value| resolve_path(config_root, value))
+                .unwrap_or_else(|| current_dir.to_path_buf());
+            let tool_dir = config
+                .openhands
+                .tool_dir
+                .as_deref()
+                .map(|value| resolve_path(config_root, value));
+            (target_repo, tool_dir, None)
+        }
     } else {
-        (current_dir.to_path_buf(), None)
+        (current_dir.to_path_buf(), None, None)
     };
 
     let workflow_path = target_repo.join("WORKFLOW.md");
@@ -2285,6 +2356,12 @@ async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntim
         .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
     let workflow_def = WorkflowDefinition::parse(&workflow_content)
         .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+    let workflow_def = central_front_matter
+        .map(|front_matter| WorkflowDefinition {
+            front_matter,
+            prompt_template: workflow_def.prompt_template.clone(),
+        })
+        .unwrap_or(workflow_def);
     let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
         workflow_def.resolve_with_process_env(&target_repo)
     } else {

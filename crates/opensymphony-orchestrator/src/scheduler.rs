@@ -43,6 +43,7 @@ pub struct SchedulerConfig {
     pub max_turns: u32,
     pub max_concurrent_agents_by_state: BTreeMap<String, u32>,
     pub retry_policy: RetryPolicy,
+    pub max_retry_attempts: Option<u32>,
     pub stall_timeout_ms: Option<u64>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -91,6 +92,7 @@ impl SchedulerConfig {
                 max_backoff_ms: DurationMs::new(workflow.config.agent.max_retry_backoff_ms),
                 ..RetryPolicy::default()
             },
+            max_retry_attempts: None,
             stall_timeout_ms: workflow.config.agent.stall_timeout_ms,
             active_states: workflow.config.tracker.active_states.clone(),
             terminal_states: workflow.config.tracker.terminal_states.clone(),
@@ -1848,6 +1850,25 @@ where
                     .release_finished_execution(execution, observed_at, reason, Some(outcome))
                     .await;
             }
+        }
+
+        let retry_count = execution
+            .current_run()
+            .map(|run| run.normal_retry_count)
+            .unwrap_or_default();
+        if self
+            .config
+            .max_retry_attempts
+            .is_some_and(|max_attempts| retry_count >= max_attempts)
+        {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::RetryExhausted,
+                    Some(outcome),
+                )
+                .await;
         }
 
         self.queue_retry_for_outcome(execution, outcome, observed_at)

@@ -122,7 +122,7 @@ pub struct RoutingFrontMatter {
     pub model_profile_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsFrontMatter {
     #[serde(default)]
@@ -137,14 +137,14 @@ pub struct OpenHandsFrontMatter {
     pub legacy_linear_bridge: Option<serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsTransportFrontMatter {
     pub base_url: Option<String>,
     pub session_api_key_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsLocalServerFrontMatter {
     pub enabled: Option<bool>,
@@ -155,7 +155,7 @@ pub struct OpenHandsLocalServerFrontMatter {
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsConversationFrontMatter {
     pub reuse_policy: Option<String>,
@@ -166,7 +166,7 @@ pub struct OpenHandsConversationFrontMatter {
     pub agent: Option<OpenHandsConversationAgentFrontMatter>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OpenHandsConfirmationPolicyFrontMatter {
     pub kind: Option<String>,
     #[serde(flatten)]
@@ -178,7 +178,7 @@ pub struct OpenHandsConfirmationPolicy {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OpenHandsConversationAgentFrontMatter {
     pub kind: Option<String>,
     pub llm: Option<OpenHandsLlmFrontMatter>,
@@ -190,7 +190,7 @@ pub struct OpenHandsConversationAgentFrontMatter {
     pub options: BTreeMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsConversationToolFrontMatter {
     pub name: String,
@@ -198,7 +198,7 @@ pub struct OpenHandsConversationToolFrontMatter {
     pub params: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsConversationCondenserFrontMatter {
     pub enabled: Option<bool>,
@@ -206,7 +206,7 @@ pub struct OpenHandsConversationCondenserFrontMatter {
     pub keep_first: Option<IntegerLike>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OpenHandsLlmFrontMatter {
     pub model: Option<String>,
     pub api_key_env: Option<String>,
@@ -217,7 +217,7 @@ pub struct OpenHandsLlmFrontMatter {
     pub options: BTreeMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsSubscriptionCredentialFrontMatter {
     pub vendor: Option<String>,
@@ -229,7 +229,7 @@ pub struct OpenHandsSubscriptionCredentialFrontMatter {
     pub force_login: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenHandsWebSocketFrontMatter {
     pub enabled: Option<bool>,
@@ -240,7 +240,7 @@ pub struct OpenHandsWebSocketFrontMatter {
     pub query_param_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum IntegerLike {
     Integer(i64),

@@ -18,6 +18,11 @@ credential references, review profiles, scheduler, integration, workspace, and
 memory-catalog policy. Relative paths resolve from the central config file.
 Remote values may contain no credentials, repository aliases are unique, and
 strict unknown fields fail before tracker polling or workspace creation.
+The `openhands.front_matter` subsection carries the complete typed OpenHands
+transport, local-server, conversation/LLM, subscription-reference, and
+WebSocket profile when a workflow is migrated. `scheduler.retry.max_attempts`
+is enforced as the maximum number of automatic retries; omitted values retain
+the legacy retry behavior.
 
 The supported routing variants are explicit:
 
@@ -51,9 +56,12 @@ risks, and secret/remote-risk booleans without printing their values. `apply`
 backs up the legacy config and workflow, writes central config and the
 implementation-only workflow body through same-directory staging, and records
 an activation marker. A marker is written after validation and staging but
-before replacement so an interrupted apply remains recoverable. `rollback`
+before replacement so an interrupted apply remains recoverable. Applying again
+with a separate `--output` detects the active destination generation before
+creating a backup or rewriting the source. `rollback`
 restores the backup and refuses to run while the instance's strict-run marker
-is active. Repeating `apply` after activation is a no-op.
+is active; it restores the original file permissions as well as file contents.
+Repeating `apply` after activation is a no-op.
 
 ## Bootstrap
 

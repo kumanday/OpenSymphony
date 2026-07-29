@@ -45,7 +45,6 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-const DEFAULT_CONFIG_FILE: &str = "config.yaml";
 const RECENT_HISTORY_LIMIT: usize = 8;
 const RECENT_EVENT_SCAN_LIMIT: usize = 100;
 const DEBUG_ATTACH_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
@@ -98,6 +97,8 @@ enum DebugCommandError {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("central config validation failed: {0}")]
+    CentralConfig(#[from] super::orchestrator_run::config::CentralConfigError),
     #[error("failed to expand {path}: {detail}")]
     ResolveConfig { path: PathBuf, detail: String },
     #[error("failed to load workflow {path}: {source}")]
@@ -804,10 +805,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
     let current_dir = env::current_dir().map_err(DebugCommandError::CurrentDir)?;
     let config_path = match &args.config {
         Some(path) => Some(resolve_cli_path(&current_dir, path)),
-        None => {
-            let default = current_dir.join(DEFAULT_CONFIG_FILE);
-            default.is_file().then_some(default)
-        }
+        None => super::orchestrator_run::config::select_config_path(&current_dir, None),
     };
 
     let repo_root_hint = super::find_cargo_workspace_root(&current_dir);
@@ -822,25 +820,50 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         current_dir.clone()
     };
 
-    let (target_repo, configured_tool_dir) = if let Some(path) = config_path.as_ref() {
-        let config = load_config(path).await?;
-        let config_root = path.parent().unwrap_or(&current_dir);
-        let target_repo = config
-            .target_repo
-            .as_deref()
-            .map(|value| resolve_config_path(path, config_root, value))
-            .transpose()?
-            .unwrap_or_else(|| default_target_repo.clone());
-        let tool_dir = config
-            .openhands
-            .tool_dir
-            .as_deref()
-            .map(|value| resolve_config_path(path, config_root, value))
-            .transpose()?;
-        (target_repo, tool_dir)
-    } else {
-        (default_target_repo, None)
-    };
+    let (target_repo, configured_tool_dir, central_front_matter) =
+        if let Some(path) = config_path.as_ref() {
+            let raw =
+                fs::read_to_string(path)
+                    .await
+                    .map_err(|source| DebugCommandError::ReadConfig {
+                        path: path.clone(),
+                        source,
+                    })?;
+            if super::orchestrator_run::config::looks_like_central_config(&raw) {
+                let central = super::orchestrator_run::config::load_central_config(path).await?;
+                let target_repo = central
+                    .target_repo()
+                    .unwrap_or_else(|| default_target_repo.clone());
+                (
+                    target_repo,
+                    central.tool_dir(),
+                    Some(central.workflow_front_matter.clone()),
+                )
+            } else {
+                let config = serde_yaml::from_str::<DebugConfigFile>(&raw).map_err(|source| {
+                    DebugCommandError::ParseConfig {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let config_root = path.parent().unwrap_or(&current_dir);
+                let target_repo = config
+                    .target_repo
+                    .as_deref()
+                    .map(|value| resolve_config_path(path, config_root, value))
+                    .transpose()?
+                    .unwrap_or_else(|| default_target_repo.clone());
+                let tool_dir = config
+                    .openhands
+                    .tool_dir
+                    .as_deref()
+                    .map(|value| resolve_config_path(path, config_root, value))
+                    .transpose()?;
+                (target_repo, tool_dir, None)
+            }
+        } else {
+            (default_target_repo, None, None)
+        };
 
     let workflow_path = target_repo.join("WORKFLOW.md");
     let workflow = WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
@@ -849,7 +872,12 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
             source,
         }
     })?;
-    let workflow = workflow
+    let workflow = central_front_matter
+        .map(|front_matter| WorkflowDefinition {
+            front_matter,
+            prompt_template: workflow.prompt_template.clone(),
+        })
+        .unwrap_or(workflow)
         .resolve_with_process_env(&target_repo)
         .map_err(|source| DebugCommandError::ResolveWorkflow {
             path: workflow_path.clone(),
@@ -865,19 +893,6 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         workflow,
         tool_dir: configured_tool_dir,
         conversation_store,
-    })
-}
-
-async fn load_config(path: &Path) -> Result<DebugConfigFile, DebugCommandError> {
-    let raw = fs::read_to_string(path)
-        .await
-        .map_err(|source| DebugCommandError::ReadConfig {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    serde_yaml::from_str(&raw).map_err(|source| DebugCommandError::ParseConfig {
-        path: path.to_path_buf(),
-        source,
     })
 }
 

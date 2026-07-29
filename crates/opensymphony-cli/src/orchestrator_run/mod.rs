@@ -240,12 +240,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         memory_env.clone(),
         linear_worker_env,
     );
-    let mut scheduler = Scheduler::new(
-        tracker,
-        workspace,
-        worker,
-        SchedulerConfig::from_workflow(&runtime.workflow)?,
-    );
+    let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
+    scheduler_config.max_retry_attempts = runtime.retry_max_attempts;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config);
 
     let mut recent_events = VecDeque::new();
     push_recent_event(

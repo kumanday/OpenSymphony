@@ -5507,6 +5507,7 @@ Run the scheduler.
             bind: "127.0.0.1:3000".parse().expect("bind should parse"),
             tool_dir: None,
             openhands_conversation_store: None,
+            retry_max_attempts: None,
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,

@@ -37,6 +37,7 @@ fn scheduler_config() -> SchedulerConfig {
         max_turns: 4,
         max_concurrent_agents_by_state: BTreeMap::new(),
         retry_policy: Default::default(),
+        max_retry_attempts: None,
         stall_timeout_ms: Some(100),
         active_states: vec!["In Progress".to_string()],
         terminal_states: vec!["Done".to_string(), "Canceled".to_string()],

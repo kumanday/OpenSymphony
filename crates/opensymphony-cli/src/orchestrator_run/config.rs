@@ -10,9 +10,9 @@ use std::{
 use crate::opensymphony_memory::DEFAULT_PRIVATE_MEMORY_CONFIG_FILE;
 use crate::opensymphony_openhands::OpenHandsConversationStorePaths;
 use crate::opensymphony_workflow::{
-    AgentFrontMatter, HooksFrontMatter, IntegerLike, OpenHandsFrontMatter,
-    OpenHandsTransportFrontMatter, PollingFrontMatter, ResolvedWorkflow, RoutingFrontMatter,
-    TrackerFrontMatter, WorkflowDefinition, WorkflowFrontMatter, WorkspaceFrontMatter,
+    AgentFrontMatter, HooksFrontMatter, IntegerLike, OpenHandsFrontMatter, PollingFrontMatter,
+    ResolvedWorkflow, RoutingFrontMatter, TrackerFrontMatter, WorkflowDefinition,
+    WorkflowFrontMatter, WorkspaceFrontMatter,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -269,6 +269,8 @@ struct CentralOpenHandsFile {
     transport_base_url: Option<String>,
     #[serde(default)]
     transport_session_api_key_env: Option<String>,
+    #[serde(default)]
+    front_matter: Option<OpenHandsFrontMatter>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -293,8 +295,23 @@ pub struct ResolvedCentralConfig {
     pub repository: Option<String>,
     pub integration_instructions: Option<ResolvedIntegrationInstructions>,
     pub generation: String,
+    pub retry_max_attempts: Option<u32>,
     runtime: RunConfigFile,
     pub workflow_front_matter: WorkflowFrontMatter,
+}
+
+impl ResolvedCentralConfig {
+    pub(crate) fn target_repo(&self) -> Option<PathBuf> {
+        self.runtime.target_repo.as_deref().map(PathBuf::from)
+    }
+
+    pub(crate) fn tool_dir(&self) -> Option<PathBuf> {
+        self.runtime
+            .openhands
+            .tool_dir
+            .as_deref()
+            .map(PathBuf::from)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +413,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) bind: SocketAddr,
     pub(super) tool_dir: Option<PathBuf>,
     pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
+    pub(super) retry_max_attempts: Option<u32>,
     pub(super) memory: RunMemoryConfig,
 }
 
@@ -404,44 +422,53 @@ pub(super) async fn resolve_runtime_config(
 ) -> Result<RunRuntimeConfig, RunCommandError> {
     let cwd = env::current_dir().map_err(RunCommandError::CurrentDir)?;
     let config_path = select_config_path(&cwd, args.config.as_deref());
-    let (config, config_generation, central_workspace_root, central_workflow_front_matter) =
-        match &config_path {
-            Some(path) => {
-                let raw = fs::read_to_string(path).await.map_err(|source| {
-                    RunCommandError::ReadConfig {
+    let (
+        config,
+        config_generation,
+        central_workspace_root,
+        central_workflow_front_matter,
+        retry_max_attempts,
+    ) = match &config_path {
+        Some(path) => {
+            let raw =
+                fs::read_to_string(path)
+                    .await
+                    .map_err(|source| RunCommandError::ReadConfig {
                         path: path.clone(),
                         source,
-                    }
-                })?;
-                if looks_like_central_config(&raw) {
-                    let central = resolve_central_config(path, &raw)?;
-                    if central.mode == CentralRoutingMode::ProjectSet {
-                        return Err(RunCommandError::StrictRoutingDisabled {
-                            generation: central.generation,
-                        });
-                    }
-                    (
-                        central.runtime,
-                        central.generation,
-                        central.workspace_root,
-                        Some(central.workflow_front_matter),
-                    )
-                } else {
-                    (
-                        parse_legacy_run_config(path, &raw)?,
-                        generation_hash(raw.as_bytes()),
-                        None,
-                        None,
-                    )
+                    })?;
+            if looks_like_central_config(&raw) {
+                let central = resolve_central_config(path, &raw)?;
+                if central.mode == CentralRoutingMode::ProjectSet {
+                    return Err(RunCommandError::StrictRoutingDisabled {
+                        generation: central.generation,
+                    });
                 }
+                (
+                    central.runtime,
+                    central.generation,
+                    central.workspace_root,
+                    Some(central.workflow_front_matter),
+                    central.retry_max_attempts,
+                )
+            } else {
+                (
+                    parse_legacy_run_config(path, &raw)?,
+                    generation_hash(raw.as_bytes()),
+                    None,
+                    None,
+                    None,
+                )
             }
-            None => (
-                RunConfigFile::default(),
-                "legacy-unconfigured".to_string(),
-                None,
-                None,
-            ),
-        };
+        }
+        None => (
+            RunConfigFile::default(),
+            "legacy-unconfigured".to_string(),
+            None,
+            None,
+            None,
+        ),
+    };
     let config_root = config_path
         .as_deref()
         .and_then(Path::parent)
@@ -543,19 +570,18 @@ pub(super) async fn resolve_runtime_config(
         bind,
         tool_dir,
         openhands_conversation_store,
+        retry_max_attempts,
         memory,
     })
 }
 
-fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return Some(resolve_relative_to(cwd, path));
     }
 
-    if let Some(home) = env::var_os("HOME") {
-        let candidate = PathBuf::from(home)
-            .join(DEFAULT_USER_CONFIG_DIR)
-            .join(DEFAULT_CONFIG_FILE);
+    if let Some(home) = super::super::open_user_home_dir() {
+        let candidate = home.join(DEFAULT_USER_CONFIG_DIR).join(DEFAULT_CONFIG_FILE);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -767,7 +793,7 @@ fn resolve_central_config(
             }
         }
     }
-    if let Some(scheduler) = config.scheduler.as_ref() {
+    let retry_max_attempts = if let Some(scheduler) = config.scheduler.as_ref() {
         if scheduler.max_concurrent_tasks == 0
             || scheduler
                 .retry
@@ -778,8 +804,18 @@ fn resolve_central_config(
                 field: "scheduler".to_owned(),
             });
         }
-        let _ = scheduler.retry.max_attempts;
-    }
+        scheduler
+            .retry
+            .max_attempts
+            .map(|attempts| {
+                u32::try_from(attempts).map_err(|_| CentralConfigError::InvalidReference {
+                    field: "scheduler.retry.max_attempts".to_owned(),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
     if let Some(integration) = config.integration.as_ref() {
         required_literal(&integration.policy, "integration.policy")?;
         let _ = integration.use_shared_git_worktrees;
@@ -893,6 +929,7 @@ fn resolve_central_config(
         repository: config.routing.repository,
         integration_instructions,
         generation: generation_hash(&generation_input),
+        retry_max_attempts,
         runtime,
         workflow_front_matter,
     })
@@ -902,19 +939,70 @@ fn central_workflow_front_matter(
     config: &CentralConfigFile,
     workspace_root: Option<&Path>,
 ) -> Result<WorkflowFrontMatter, CentralConfigError> {
-    let tracker = config.tracker_profiles.values().next().ok_or_else(|| {
-        CentralConfigError::InvalidReference {
-            field: "tracker_profiles".to_owned(),
+    let (tracker, project_slug) = match config.routing.mode.trim() {
+        "legacy_single" => {
+            if config.tracker_profiles.len() != 1 {
+                return Err(CentralConfigError::InvalidReference {
+                    field: "routing.repository.tracker_profile".to_owned(),
+                });
+            }
+            if config.linear_projects.len() != 1 {
+                return Err(CentralConfigError::InvalidReference {
+                    field: "routing.repository.linear_project".to_owned(),
+                });
+            }
+            (
+                config
+                    .tracker_profiles
+                    .values()
+                    .next()
+                    .expect("length checked"),
+                config
+                    .linear_projects
+                    .values()
+                    .next()
+                    .expect("length checked")
+                    .provider_project_id
+                    .clone(),
+            )
         }
-    })?;
-    let project_slug = config
-        .linear_projects
-        .values()
-        .next()
-        .map(|project| project.provider_project_id.clone())
-        .ok_or_else(|| CentralConfigError::InvalidReference {
-            field: "linear_projects".to_owned(),
-        })?;
+        "project_set" => {
+            let project_set_id = config
+                .routing
+                .active_project_set
+                .as_deref()
+                .ok_or_else(|| CentralConfigError::InvalidReference {
+                    field: "routing.active_project_set".to_owned(),
+                })?;
+            let project_set = config.project_sets.get(project_set_id).ok_or_else(|| {
+                CentralConfigError::InvalidReference {
+                    field: "routing.active_project_set".to_owned(),
+                }
+            })?;
+            let tracker = config
+                .tracker_profiles
+                .get(&project_set.tracker_profile)
+                .ok_or_else(|| CentralConfigError::InvalidReference {
+                    field: format!("project_sets.{project_set_id}.tracker_profile"),
+                })?;
+            let project_id = project_set.projects.first().ok_or_else(|| {
+                CentralConfigError::InvalidReference {
+                    field: format!("project_sets.{project_set_id}.projects"),
+                }
+            })?;
+            let project = config.linear_projects.get(project_id).ok_or_else(|| {
+                CentralConfigError::InvalidReference {
+                    field: format!("project_sets.{project_set_id}.projects"),
+                }
+            })?;
+            (tracker, project.provider_project_id.clone())
+        }
+        _ => {
+            return Err(CentralConfigError::InvalidReference {
+                field: "routing.mode".to_owned(),
+            });
+        }
+    };
     let api_key = config
         .credentials
         .get(&tracker.credential)
@@ -992,12 +1080,16 @@ fn central_workflow_front_matter(
             model_env: None,
             model_profile_env: None,
         },
-        openhands: OpenHandsFrontMatter {
-            transport: OpenHandsTransportFrontMatter {
-                base_url: config.openhands.transport_base_url.clone(),
-                session_api_key_env: config.openhands.transport_session_api_key_env.clone(),
-            },
-            ..OpenHandsFrontMatter::default()
+        openhands: {
+            let mut openhands = config.openhands.front_matter.clone().unwrap_or_default();
+            if config.openhands.transport_base_url.is_some() {
+                openhands.transport.base_url = config.openhands.transport_base_url.clone();
+            }
+            if config.openhands.transport_session_api_key_env.is_some() {
+                openhands.transport.session_api_key_env =
+                    config.openhands.transport_session_api_key_env.clone();
+            }
+            openhands
         },
         ..WorkflowFrontMatter::default()
     };
@@ -1088,10 +1180,17 @@ fn validate_repository(
 
 fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if let Ok(url) = Url::parse(value) {
-        if !url.username().is_empty() || url.password().is_some() {
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
             return Err(CentralConfigError::CredentialBearingRemote);
         }
         return Ok(());
+    }
+    if value.contains('?') || value.contains('#') {
+        return Err(CentralConfigError::CredentialBearingRemote);
     }
     if let Some((user, host)) = value.split_once('@')
         && (user != "git" || host.is_empty())
@@ -1131,7 +1230,8 @@ fn resolve_central_path(
     } else {
         config_root.join(value)
     };
-    let path = normalize_path(&path);
+    let path = canonicalize_existing_prefix(&normalize_path(&path))
+        .ok_or(CentralConfigError::InvalidRoot)?;
     if !path.is_absolute() {
         return Err(CentralConfigError::InvalidRoot);
     }
@@ -1157,12 +1257,9 @@ fn expand_central_value(config_root: &Path, value: &str) -> Result<PathBuf, Cent
     let value =
         super::super::expand_env_tokens(value).map_err(|_| CentralConfigError::InvalidRoot)?;
     let value = if value == "~" {
-        env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or(CentralConfigError::InvalidRoot)?
+        super::super::open_user_home_dir().ok_or(CentralConfigError::InvalidRoot)?
     } else if let Some(value) = value.strip_prefix("~/") {
-        env::var_os("HOME")
-            .map(PathBuf::from)
+        super::super::open_user_home_dir()
             .ok_or(CentralConfigError::InvalidRoot)?
             .join(value)
     } else {
@@ -1189,10 +1286,28 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut unresolved = Vec::new();
+    let mut existing = path.to_path_buf();
+    while !existing.exists() {
+        unresolved.push(existing.file_name()?.to_os_string());
+        existing = existing.parent()?.to_path_buf();
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for component in unresolved.iter().rev() {
+        resolved.push(component);
+    }
+    Some(normalize_path(&resolved))
+}
+
 fn is_contained(parent: &Path, child: &Path) -> bool {
-    normalize_path(child)
-        .strip_prefix(normalize_path(parent))
-        .is_ok()
+    let Some(parent) = canonicalize_existing_prefix(parent) else {
+        return false;
+    };
+    let Some(child) = canonicalize_existing_prefix(child) else {
+        return false;
+    };
+    child.strip_prefix(parent).is_ok()
 }
 
 fn ensure_non_overlapping(left: &Path, right: &Path) -> Result<(), CentralConfigError> {
@@ -1435,7 +1550,10 @@ memory:
                 .as_ref()
                 .expect("integration instructions should resolve")
                 .path,
-            root.path().join("integration.md")
+            root.path()
+                .canonicalize()
+                .expect("central root should canonicalize")
+                .join("integration.md")
         );
     }
 
@@ -1475,6 +1593,76 @@ memory:
     }
 
     #[test]
+    fn central_config_rejects_remote_query_and_fragment_data() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        for suffix in ["?access_token=secret", "#secret"] {
+            let source = central_fixture(root.path()).replace(
+                "locator: kumanday/OpenSymphony",
+                &format!("locator: https://github.com/kumanday/OpenSymphony{suffix}"),
+            );
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("remote query and fragment data should fail");
+            assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
+        }
+    }
+
+    #[test]
+    fn central_legacy_mode_rejects_ambiguous_tracker_and_project_candidates() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path())
+            .replace(
+                "mode: project_set\n  active_project_set: suite",
+                "mode: legacy_single\n  repository: core-repo",
+            )
+            .replace(
+                "project_sets:\n",
+                "  another:\n    provider: linear\n    credential: linear-key\nproject_sets:\n",
+            );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("legacy mode should reject ambiguous candidates");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "routing.repository.tracker_profile"
+        ));
+    }
+
+    #[test]
+    fn central_config_preserves_complete_openhands_profile() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    local_server:\n      enabled: true\n      command: [custom-openhands]\n    conversation:\n      agent:\n        llm:\n          model: custom/model\n          api_key_env: CUSTOM_OPENAI_KEY\n    websocket:\n      reconnect_max_ms: 9876\n",
+            central_fixture(root.path())
+        );
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("complete OpenHands profile should resolve");
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .openhands
+                .local_server
+                .command,
+            Some(vec!["custom-openhands".to_owned()])
+        );
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .openhands
+                .conversation
+                .agent
+                .as_ref()
+                .and_then(|agent| agent.llm.as_ref())
+                .and_then(|llm| llm.api_key_env.as_deref()),
+            Some("CUSTOM_OPENAI_KEY")
+        );
+    }
+
+    #[test]
     fn central_config_rejects_overlapping_state_and_workspace_roots() {
         let root = tempfile::tempdir().expect("central config root should exist");
         let source = central_fixture(root.path()).replace(
@@ -1498,6 +1686,30 @@ memory:
             central_fixture(root.path()).replace("integration.md", "checkout/integration.md");
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("checkout-local integration instructions should fail");
+        assert!(matches!(
+            error,
+            CentralConfigError::IntegrationInsideCheckout
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn central_config_resolves_symlinked_integration_paths_before_containment() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout should be created");
+        std::fs::write(
+            checkout.join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        symlink(&checkout, root.path().join("checkout-link")).expect("symlink should be created");
+        let source =
+            central_fixture(root.path()).replace("integration.md", "checkout-link/integration.md");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("symlinked checkout-local instructions should fail");
         assert!(matches!(
             error,
             CentralConfigError::IntegrationInsideCheckout

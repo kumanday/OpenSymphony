@@ -629,7 +629,11 @@ credential-bearing remote values are never printed or serialized.
 If apply is interrupted after staging or replacement, run
 `opensymphony migrate rollback --config <central-config>` once the strict-run
 marker is absent. Rollback restores the backed-up runnable generation and
-leaves the backup evidence in place.
+leaves the backup evidence in place. Migration rejects repository-creation
+hooks, query/fragment-bearing remotes, and ambiguous credential expressions
+before activation. After front matter is moved, `doctor`, `debug`, and
+`rehydrate` load the central policy so operational recovery continues to use
+the migrated OpenHands and tracker settings.
 
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
