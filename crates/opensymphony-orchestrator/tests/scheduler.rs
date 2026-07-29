@@ -1497,6 +1497,67 @@ async fn failures_schedule_exponential_backoff() {
 }
 
 #[tokio::test]
+async fn tracker_inactive_failed_execution_reopens_after_reactivation() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-271", "COE-271", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    let run = scheduler.worker().launches[0].run.clone();
+    scheduler.tracker_mut().states.insert(
+        "lin-271".to_owned(),
+        tracker_state_snapshot("lin-271", "COE-271", "Backlog", "backlog", 200),
+    );
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("failed while tracker was inactive".to_owned()),
+                Some("boom".to_owned()),
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("inactive failure should release the execution");
+
+    let issue_id = IssueId::new("lin-271").expect("issue id should be valid");
+    assert!(matches!(
+        scheduler
+            .execution(&issue_id)
+            .expect("execution should remain")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::TrackerInactive,
+            ..
+        }
+    ));
+
+    scheduler.tracker_mut().active = vec![tracker_issue("lin-271", "COE-271", "In Progress", 0)];
+    scheduler.tracker_mut().states.insert(
+        "lin-271".to_owned(),
+        tracker_state_snapshot("lin-271", "COE-271", "In Progress", "started", 60_200),
+    );
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect("reactivated failed execution should dispatch");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+}
+
+#[tokio::test]
 async fn retry_limit_counts_failures_and_prevents_redispatch() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-270", "COE-270", "In Progress", 0)],

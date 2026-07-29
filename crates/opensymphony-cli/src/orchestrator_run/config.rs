@@ -98,6 +98,12 @@ struct CentralRoutingFile {
     model: Option<String>,
     #[serde(default)]
     model_profile: Option<String>,
+    #[serde(default)]
+    harness_env: Option<String>,
+    #[serde(default)]
+    model_env: Option<String>,
+    #[serde(default)]
+    model_profile_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -621,13 +627,14 @@ fn parse_legacy_run_config(path: &Path, raw: &str) -> Result<RunConfigFile, RunC
 }
 
 pub async fn load_central_config(path: &Path) -> Result<ResolvedCentralConfig, CentralConfigError> {
-    let raw = fs::read_to_string(path)
+    let path = absolute_config_path(path)?;
+    let raw = fs::read_to_string(&path)
         .await
         .map_err(|source| CentralConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-    resolve_central_config(path, &raw)
+    resolve_central_config(&path, &raw)
 }
 
 pub(crate) fn validate_central_config_text(
@@ -641,9 +648,10 @@ fn resolve_central_config(
     path: &Path,
     raw: &str,
 ) -> Result<ResolvedCentralConfig, CentralConfigError> {
+    let path = absolute_config_path(path)?;
     let config = serde_yaml::from_str::<CentralConfigFile>(raw).map_err(|source| {
         CentralConfigError::Parse {
-            path: path.to_path_buf(),
+            path: path.clone(),
             source,
         }
     })?;
@@ -653,6 +661,20 @@ fn resolve_central_config(
 
     let config_root = path.parent().unwrap_or_else(|| Path::new("."));
     let instance_id = required_literal(&config.instance.id, "instance.id")?;
+    for (field, value) in [
+        ("routing.harness_env", config.routing.harness_env.as_deref()),
+        ("routing.model_env", config.routing.model_env.as_deref()),
+        (
+            "routing.model_profile_env",
+            config.routing.model_profile_env.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            validate_central_env_name(value).map_err(|_| CentralConfigError::InvalidReference {
+                field: field.to_owned(),
+            })?;
+        }
+    }
     let state_root = resolve_central_path(
         config_root,
         &config.instance.state_root,
@@ -1117,9 +1139,9 @@ fn central_workflow_front_matter(
             harness: config.routing.harness.clone(),
             model: config.routing.model.clone(),
             model_profile: config.routing.model_profile.clone(),
-            harness_env: None,
-            model_env: None,
-            model_profile_env: None,
+            harness_env: config.routing.harness_env.clone(),
+            model_env: config.routing.model_env.clone(),
+            model_profile_env: config.routing.model_profile_env.clone(),
         },
         openhands: {
             let mut openhands = config.openhands.front_matter.clone().unwrap_or_default();
@@ -1143,6 +1165,18 @@ fn central_integer(value: u64, field: &'static str) -> Result<IntegerLike, Centr
             field: field.to_owned(),
         }
     })
+}
+
+fn absolute_config_path(path: &Path) -> Result<PathBuf, CentralConfigError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|source| CentralConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn central_legacy_runtime_config(
@@ -1221,7 +1255,9 @@ fn validate_repository(
 
 fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if let Ok(url) = Url::parse(value) {
-        if !url.username().is_empty()
+        let conventional_ssh_user =
+            url.scheme().eq_ignore_ascii_case("ssh") && url.username().eq_ignore_ascii_case("git");
+        if (!url.username().is_empty() && !conventional_ssh_user)
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
@@ -1520,6 +1556,9 @@ instance:
 routing:
   mode: project_set
   active_project_set: suite
+  harness_env: TEST_HARNESS
+  model_env: TEST_MODEL
+  model_profile_env: TEST_MODEL_PROFILE
 tracker_profiles:
   linear:
     provider: linear
@@ -1576,6 +1615,75 @@ scheduler:
     }
 
     #[test]
+    fn central_config_resolves_relative_config_path_once() {
+        let source = r#"schema_version: 1
+instance:
+  id: relative-instance
+  state_root: state
+routing:
+  mode: legacy_single
+  repository: repo
+tracker_profiles:
+  linear:
+    provider: linear
+    credential: linear-key
+    active_states: [Todo]
+    terminal_states: [Done]
+linear_projects:
+  project:
+    provider_project_id: project
+    repositories: [repo]
+repositories:
+  repo:
+    aliases: [repo]
+    remote:
+      provider: git
+      locator: example/repo
+      clone: git@github.com:example/repo.git
+    target_branch: develop
+    credential: git-key
+    review_profile: review
+    instructions:
+      path: AGENTS.md
+    checkout_path: checkout
+credentials:
+  linear-key:
+    kind: environment
+    variable: LINEAR_API_KEY
+  git-key:
+    kind: ssh-agent
+review_profiles:
+  review:
+    provider: git
+    credential: git-key
+workspace:
+  root: workspace
+memory:
+  catalog_root: state/memory
+scheduler:
+  max_concurrent_tasks: 1
+"#;
+        let resolved = resolve_central_config(Path::new("configs/config.yaml"), source)
+            .expect("relative central config path should resolve");
+        assert!(resolved.state_root.ends_with("configs/state"));
+        assert_eq!(
+            resolved
+                .workspace_root
+                .as_ref()
+                .expect("workspace root should resolve")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("workspace")
+        );
+        assert!(
+            resolved
+                .target_repo()
+                .expect("legacy repository should resolve")
+                .ends_with("configs/checkout")
+        );
+    }
+
+    #[test]
     fn central_config_resolves_paths_and_hashes_integration_instructions() {
         let root = tempfile::tempdir().expect("central config root should exist");
         std::fs::write(
@@ -1597,6 +1705,26 @@ scheduler:
                 .and_then(|limits| limits.get("Todo")),
             Some(IntegerLike::Integer(1))
         ));
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .routing
+                .harness_env
+                .as_deref(),
+            Some("TEST_HARNESS")
+        );
+        assert_eq!(
+            resolved.workflow_front_matter.routing.model_env.as_deref(),
+            Some("TEST_MODEL")
+        );
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .routing
+                .model_profile_env
+                .as_deref(),
+            Some("TEST_MODEL_PROFILE")
+        );
         assert!(resolved.generation.starts_with("sha256:"));
         assert_eq!(
             resolved

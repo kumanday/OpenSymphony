@@ -77,6 +77,8 @@ enum MigrationError {
     LiteralSecret,
     #[error("migration cannot preserve a credential-bearing repository remote")]
     CredentialBearingRemote,
+    #[error("central config destination {path} is not an activation of this migration")]
+    DestinationConflict { path: PathBuf },
     #[error("workflow {path} does not declare an exact `Target branch:`")]
     MissingTargetBranch { path: PathBuf },
     #[error("workflow field {field} is not a valid unsigned integer: {value}")]
@@ -156,6 +158,8 @@ struct LegacyMemoryProbe {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ActivationMarker {
+    #[serde(default)]
+    source_config: PathBuf,
     config_path: PathBuf,
     workflow_path: PathBuf,
     backup_dir: PathBuf,
@@ -240,8 +244,28 @@ async fn active_target_central_config(
     if !looks_like_central_config(&raw) {
         return Ok(None);
     }
+    let marker = load_activation_marker(&target_config)?;
+    if target_config != source_config && marker.is_none() {
+        return Err(MigrationError::DestinationConflict {
+            path: target_config,
+        });
+    }
+    if target_config != source_config
+        && let Some((_, marker)) = marker.as_ref()
+    {
+        let source = load_source(paths)?;
+        let source_matches = marker.config_path == target_config
+            && marker.workflow_path == source.workflow_path
+            && (marker.source_config.as_os_str().is_empty()
+                || marker.source_config == source.source_config);
+        if !source_matches {
+            return Err(MigrationError::DestinationConflict {
+                path: target_config,
+            });
+        }
+    }
     let central = load_central_config(&target_config).await?;
-    let (activation_marker, marker) = load_activation_marker(&target_config)?.map_or(
+    let (activation_marker, marker) = marker.map_or(
         (migration_marker_path(&target_config), None),
         |(path, marker)| (path, Some(marker)),
     );
@@ -375,9 +399,19 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
         });
     }
     let target_config = migration_target_config(&paths, &current_dir()?, &source.source_config);
+    let report = build_report(
+        "preflight",
+        &source,
+        Some(target_config.clone()),
+        None,
+        true,
+    );
+    if report.literal_secret_detected || report.credential_bearing_remote_detected {
+        return Ok(report);
+    }
     let generated = generate_central_config(&source)?;
     validate_central_config_text(&target_config, &generated)?;
-    Ok(build_report("preflight", &source, None, None, true))
+    Ok(report)
 }
 
 async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
@@ -478,6 +512,7 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
     write_file_with_mode(&workflow_stage, workflow_body(&source), workflow_mode)?;
 
     let marker = ActivationMarker {
+        source_config: source.source_config.clone(),
         config_path: target_config.clone(),
         workflow_path: source.workflow_path.clone(),
         backup_dir: backup_dir.clone(),
@@ -500,32 +535,38 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
         return Err(error);
     }
     if let Err(error) = replace_staged_file(&central_stage, &target_config) {
-        let _ = restore_or_remove_after_failed_apply(
-            &target_config,
-            &backup_dir.join("config.yaml"),
-            had_config,
-            config_mode,
+        return recover_failed_apply(
+            &marker_path,
+            &[&central_stage, &workflow_stage, &marker_stage],
+            error,
+            vec![restore_or_remove_after_failed_apply(
+                &target_config,
+                &backup_dir.join("config.yaml"),
+                had_config,
+                config_mode,
+            )],
         );
-        let _ = fs::remove_file(&marker_path);
-        remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
-        return Err(error);
     }
     if let Err(error) = replace_staged_file(&workflow_stage, &source.workflow_path) {
-        let _ = restore_or_remove_after_failed_apply(
-            &target_config,
-            &backup_dir.join("config.yaml"),
-            had_config,
-            config_mode,
+        return recover_failed_apply(
+            &marker_path,
+            &[&central_stage, &workflow_stage, &marker_stage],
+            error,
+            vec![
+                restore_or_remove_after_failed_apply(
+                    &target_config,
+                    &backup_dir.join("config.yaml"),
+                    had_config,
+                    config_mode,
+                ),
+                restore_or_remove_after_failed_apply(
+                    &source.workflow_path,
+                    &backup_dir.join("WORKFLOW.md"),
+                    had_workflow,
+                    workflow_mode,
+                ),
+            ],
         );
-        let _ = restore_or_remove_after_failed_apply(
-            &source.workflow_path,
-            &backup_dir.join("WORKFLOW.md"),
-            had_workflow,
-            workflow_mode,
-        );
-        let _ = fs::remove_file(&marker_path);
-        remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
-        return Err(error);
     }
 
     Ok(MigrationReport {
@@ -865,6 +906,11 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         &source.source_config,
         "memory.bind",
     )?;
+    let memory_token_env = expand_legacy_bind(
+        source.config.memory.token_env.as_deref(),
+        &source.source_config,
+        "memory.token_env",
+    )?;
     let root = json!({
         "schema_version": 1,
         "instance": {
@@ -877,6 +923,9 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "harness": source.workflow.front_matter.routing.harness.clone(),
             "model": source.workflow.front_matter.routing.model.clone(),
             "model_profile": source.workflow.front_matter.routing.model_profile.clone(),
+            "harness_env": source.workflow.front_matter.routing.harness_env.clone(),
+            "model_env": source.workflow.front_matter.routing.model_env.clone(),
+            "model_profile_env": source.workflow.front_matter.routing.model_profile_env.clone(),
         },
         "tracker_profiles": {
             "legacy-linear": {
@@ -933,7 +982,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "auto_archive": source.config.memory.auto_archive.unwrap_or(false),
             "serve": source.config.memory.serve.unwrap_or_else(|| source.target_repo.join(".opensymphony/memory").is_dir()),
             "bind": memory_bind,
-            "token_env": source.config.memory.token_env.clone(),
+            "token_env": memory_token_env,
         },
         "control_plane": {"bind": control_plane_bind.unwrap_or_else(|| "127.0.0.1:2468".to_owned())},
         "openhands": {
@@ -998,7 +1047,9 @@ fn remote_has_credentials(value: &str) -> bool {
         return true;
     }
     if let Ok(url) = url::Url::parse(value) {
-        return !url.username().is_empty()
+        let conventional_ssh_user =
+            url.scheme().eq_ignore_ascii_case("ssh") && url.username().eq_ignore_ascii_case("git");
+        return (!url.username().is_empty() && !conventional_ssh_user)
             || url.password().is_some()
             || !url.query().unwrap_or_default().is_empty()
             || !url.fragment().unwrap_or_default().is_empty();
@@ -1177,6 +1228,25 @@ fn restore_or_remove_after_failed_apply(
     }
 }
 
+fn recover_failed_apply(
+    marker_path: &Path,
+    staged_files: &[&Path],
+    original_error: MigrationError,
+    restorations: Vec<Result<(), MigrationError>>,
+) -> Result<MigrationReport, MigrationError> {
+    remove_staged_files(staged_files);
+    if let Some(error) = restorations.into_iter().find_map(Result::err) {
+        // Keep the marker so a later rollback can retry recovery after the
+        // filesystem problem is resolved.
+        return Err(error);
+    }
+    fs::remove_file(marker_path).map_err(|source| MigrationError::Write {
+        path: marker_path.to_path_buf(),
+        source,
+    })?;
+    Err(original_error)
+}
+
 fn resolve_repo_path(base: &Path, value: &str) -> PathBuf {
     let value = if value == "~" {
         super::open_user_home_dir().unwrap_or_default()
@@ -1306,7 +1376,47 @@ mod tests {
         assert!(remote_has_credentials(
             "git@github.com:example/repo.git#secret"
         ));
+        assert!(!remote_has_credentials(
+            "ssh://git@github.com/example/repo.git"
+        ));
+        assert!(remote_has_credentials(
+            "ssh://deploy@github.com/example/repo.git"
+        ));
         assert!(!remote_has_credentials("git@github.com:example/repo.git"));
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_redacted_unsafe_inputs_without_writing() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init should run");
+        Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:example/repo.git"])
+            .current_dir(root.path())
+            .status()
+            .expect("git remote should be configured");
+        fs::write(
+            root.path().join("WORKFLOW.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\n  api_key: secret-canary\n---\n\nTarget branch: develop\n",
+        )
+        .expect("workflow should be written");
+
+        let report = preflight(MigrationPaths {
+            config: None,
+            repo: root.path().to_path_buf(),
+            output: None,
+        })
+        .await
+        .expect("unsafe preflight should return a report");
+        let serialized = serde_json::to_string(&report).expect("report should serialize");
+        assert!(report.literal_secret_detected);
+        assert!(!report.credential_bearing_remote_detected);
+        assert!(!serialized.contains("secret-canary"));
+        assert!(!root.path().join("config.yaml").exists());
+        assert!(!root.path().join(".opensymphony").exists());
     }
 
     #[tokio::test]
@@ -1325,8 +1435,9 @@ mod tests {
         let config_path = root.path().join("config.yaml");
         let output_path = root.path().join("central/central.yaml");
         let workflow_path = root.path().join("WORKFLOW.md");
-        let old_config = "control_plane:\n  bind: 127.0.0.1:2468\n";
-        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ../.legacy-workspaces\nagent:\n  max_concurrent_agents_by_state:\n    In Progress: 1\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\n---\n\nTarget branch: develop\n\n# Implementation instructions\n";
+        let old_config =
+            "control_plane:\n  bind: 127.0.0.1:2468\nmemory:\n  token_env: MEMORY_TOKEN_ENV\n";
+        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ../.legacy-workspaces\nagent:\n  max_concurrent_agents_by_state:\n    In Progress: 1\nrouting:\n  harness_env: CUSTOM_HARNESS\n  model_env: CUSTOM_MODEL\n  model_profile_env: CUSTOM_MODEL_PROFILE\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\n---\n\nTarget branch: develop\n\n# Implementation instructions\n";
         fs::write(&config_path, old_config).expect("legacy config should be written");
         fs::write(&workflow_path, old_workflow).expect("legacy workflow should be written");
         #[cfg(unix)]
@@ -1356,6 +1467,9 @@ mod tests {
         assert!(migrated_config.contains("legacy_single"));
         assert!(migrated_config.contains("custom-openhands"));
         assert!(migrated_config.contains("CUSTOM_OPENAI_KEY"));
+        assert!(migrated_config.contains("CUSTOM_HARNESS"));
+        assert!(migrated_config.contains("CUSTOM_MODEL_PROFILE"));
+        assert!(migrated_config.contains("MEMORY_TOKEN_ENV"));
         assert!(migrated_config.contains("reconnect_max_ms"));
         assert!(migrated_config.contains("max_concurrent_agents_by_state"));
         assert!(
@@ -1371,6 +1485,22 @@ mod tests {
         );
         assert!(migrated_workflow.contains("Implementation instructions"));
         assert!(!migrated_config.contains("super-secret"));
+
+        let conflicting_output = root.path().join("central/conflicting.yaml");
+        fs::copy(&output_path, &conflicting_output)
+            .expect("conflicting central destination should be copied");
+        let conflict = apply(MigrationPaths {
+            config: Some(config_path.clone()),
+            repo: root.path().to_path_buf(),
+            output: Some(conflicting_output),
+        })
+        .await
+        .expect_err("unmarked central destination should conflict");
+        assert!(matches!(
+            conflict,
+            MigrationError::DestinationConflict { .. }
+        ));
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

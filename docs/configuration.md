@@ -223,6 +223,8 @@ Important fields:
 | `tracker.project_slug` | Linear `Project.slugId` from the project URL | - | `my-project-5250e49b61f4` |
 | `WORKFLOW.md` `Target branch:` | Local branch name agents use as `origin/<target-branch>` for syncs and PR bases | - | `develop`, `main`, `release/next` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
+| `routing.*_env` | Optional environment-variable selectors for harness, model, and model profile | `OPENSYMPHONY_*` | `MY_HARNESS` |
+| `memory.token_env` | Name of the environment variable used by the memory service | `OPENSYMPHONY_MEMORY_TOKEN` | `MEMORY_TOKEN` |
 | `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
 | `openhands.conversation.agent.llm.credential_mode` | LLM credential adapter | - | `api_key` or `openai_subscription` |
 

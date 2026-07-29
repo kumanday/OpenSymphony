@@ -2239,21 +2239,34 @@ fn acknowledged_operator_cancel_terminal(
 }
 
 fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
-    matches!(
-        execution
-            .last_worker_outcome()
-            .map(|outcome| outcome.outcome),
-        Some(
-            WorkerOutcomeKind::Detached
-                | WorkerOutcomeKind::CancelFailed
-                | WorkerOutcomeKind::Failed
-                | WorkerOutcomeKind::TimedOut
-                | WorkerOutcomeKind::Stalled
-                | WorkerOutcomeKind::Cancelled,
+    let retry_exhausted = matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    );
+    retry_exhausted
+        && matches!(
+            execution
+                .last_worker_outcome()
+                .map(|outcome| outcome.outcome),
+            Some(
+                WorkerOutcomeKind::Failed
+                    | WorkerOutcomeKind::TimedOut
+                    | WorkerOutcomeKind::Stalled
+                    | WorkerOutcomeKind::Cancelled,
+            )
         )
-    ) || execution
-        .last_worker_outcome()
-        .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
+        || matches!(
+            execution
+                .last_worker_outcome()
+                .map(|outcome| outcome.outcome),
+            Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
+        )
+        || execution
+            .last_worker_outcome()
+            .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
 }
 
 fn tracker_merging_interrupt_cancelled(
