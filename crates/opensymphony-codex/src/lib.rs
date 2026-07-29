@@ -945,7 +945,7 @@ fn codex_token_usage(params: &Value) -> Option<CodexTokenUsage> {
     let total_tokens = if explicit_total_tokens > 0 {
         explicit_total_tokens
     } else {
-        input_tokens + output_tokens + cache_read_tokens
+        input_tokens + output_tokens
     };
     if input_tokens == 0 && output_tokens == 0 && cache_read_tokens == 0 && total_tokens == 0 {
         return None;

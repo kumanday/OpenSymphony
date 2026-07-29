@@ -2916,7 +2916,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const snapshot = this.state.snapshot;
     const totalTokens = snapshot
       ? snapshot.metrics.total_input_tokens
-        + snapshot.metrics.total_cache_read_tokens
         + snapshot.metrics.total_output_tokens
       : 0;
     const metrics = snapshot
@@ -3684,7 +3683,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       `<div><span>Input</span><strong>${formatNumber(run.input_tokens)}</strong></div>`,
       `<div><span>Cache</span><strong>${formatNumber(run.cache_read_tokens)}</strong></div>`,
       `<div><span>Output</span><strong>${formatNumber(run.output_tokens)}</strong></div>`,
-      `<div><span>Total</span><strong>${formatNumber(run.input_tokens + run.cache_read_tokens + run.output_tokens)}</strong></div>`,
+      `<div><span>Total</span><strong>${formatNumber(run.input_tokens + run.output_tokens)}</strong></div>`,
       run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : "",
       run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : "",
     ].filter(Boolean).join("");

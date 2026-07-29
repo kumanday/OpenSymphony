@@ -390,7 +390,7 @@ describe("Run detail views", () => {
     expect(metricText).toContain("Input100");
     expect(metricText).toContain("Cache25");
     expect(metricText).toContain("Output50");
-    expect(metricText).toContain("Total175");
+    expect(metricText).toContain("Total150");
     expect(root.querySelector("[data-testid='run-branch']")?.textContent).toContain("feat/coe-414-run-detail");
     const pr = root.querySelector("a[href='https://github.com/kumanday/OpenSymphony/pull/414']") as HTMLAnchorElement;
     expect(pr).not.toBeNull();
