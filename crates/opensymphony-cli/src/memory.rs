@@ -512,7 +512,7 @@ pub(crate) async fn auto_capture_terminal(
     } else {
         let capture_report = write_capture_plan(&config, &capture_plan, false)?;
         warnings.extend(capture_report.warnings);
-        match load_memory_config(repo_root, None) {
+        match reload_memory_config(&config) {
             Ok(config) => config,
             Err(error) => {
                 capture_completed = false;
@@ -587,6 +587,7 @@ pub(crate) async fn auto_capture_terminal(
                                 Some(workflow_path),
                                 conversation_store,
                                 &archive_report.archived,
+                                resolved_workflow,
                             )
                             .await
                             {
@@ -661,6 +662,7 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         config: config_path,
         command,
     } = args;
+    let selected_central_config = selected_central_config_path(&repo_root, config_path.as_deref())?;
     if let Some(endpoint) = env::var("OPENSYMPHONY_MEMORY_ENDPOINT")
         .ok()
         .and_then(|value| non_empty(&value))
@@ -672,7 +674,13 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         MemoryCommand::Init(args) => run_init(&repo_root, config_path.as_deref(), args),
         MemoryCommand::Capture(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_capture(&repo_root, &config, args).await
+            run_capture(
+                &repo_root,
+                &config,
+                selected_central_config.as_deref(),
+                args,
+            )
+            .await
         }
         MemoryCommand::Import(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
@@ -708,7 +716,13 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Context(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_context(&repo_root, &config, args).await
+            run_context(
+                &repo_root,
+                &config,
+                selected_central_config.as_deref(),
+                args,
+            )
+            .await
         }
         MemoryCommand::Serve(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
@@ -743,6 +757,11 @@ fn load_memory_config(
     repo_root: &Path,
     config_path: Option<&Path>,
 ) -> Result<MemoryConfig, MemoryError> {
+    if let Some(central_path) = selected_central_config_path(repo_root, config_path)? {
+        let mut config = MemoryConfig::load(repo_root, None)?;
+        apply_central_memory_root(&mut config, &central_path)?;
+        return Ok(config);
+    }
     let mut config = MemoryConfig::load(repo_root, config_path)?;
     if config_path.is_some() {
         return Ok(config);
@@ -757,13 +776,49 @@ fn load_memory_config(
     if !looks_like_central_config(&raw) {
         return Ok(config);
     }
-    let central = validate_central_config_text(&central_path, &raw)
+    apply_central_memory_root(&mut config, &central_path)?;
+    Ok(config)
+}
+
+fn selected_central_config_path(
+    repo_root: &Path,
+    explicit_path: Option<&Path>,
+) -> Result<Option<PathBuf>, MemoryError> {
+    let Some(config_path) = select_config_path(repo_root, explicit_path) else {
+        return Ok(None);
+    };
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+        path: config_path.clone(),
+        source,
+    })?;
+    Ok(looks_like_central_config(&raw).then_some(config_path))
+}
+
+fn apply_central_memory_root(
+    config: &mut MemoryConfig,
+    central_path: &Path,
+) -> Result<(), MemoryError> {
+    let raw = fs::read_to_string(central_path).map_err(|source| MemoryError::ReadFile {
+        path: central_path.to_path_buf(),
+        source,
+    })?;
+    let central = validate_central_config_text(central_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
     if let Some(memory_root) = central.memory_catalog_root {
         config.memory_root = memory_root.clone();
         config.index_path = memory_root.join("memory.duckdb");
     }
-    Ok(config)
+    Ok(())
+}
+
+fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryError> {
+    let mut evolved = MemoryConfig::load(&config.repo_root, Some(&config.config_path))?;
+    evolved.memory_root = config.memory_root.clone();
+    evolved.index_path = config.index_path.clone();
+    Ok(evolved)
 }
 
 fn run_init(
@@ -795,6 +850,7 @@ fn run_init(
 async fn run_capture(
     repo_root: &Path,
     config: &MemoryConfig,
+    central_config_path: Option<&Path>,
     args: CaptureArgs,
 ) -> Result<(), MemoryError> {
     let identifiers = collect_issue_ids(
@@ -812,7 +868,7 @@ async fn run_capture(
         identifiers: identifiers.clone(),
         ..IssueSelection::default()
     };
-    let source = load_linear_source(repo_root, None, &identifiers).await?;
+    let source = load_linear_source(repo_root, None, central_config_path, &identifiers).await?;
     let write = !args.dry_run;
     let plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
     print_or_write_capture_plan(config, &plan, args.force)?;
@@ -1013,18 +1069,20 @@ fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
 async fn run_context(
     repo_root: &Path,
     config: &MemoryConfig,
+    central_config_path: Option<&Path>,
     args: ContextArgs,
 ) -> Result<(), MemoryError> {
     let mut warnings = Vec::new();
-    let source = match load_linear_context_source(repo_root, None, &args.issue).await {
-        Ok(source) => source,
-        Err(error) => {
-            warnings.push(format!(
+    let source =
+        match load_linear_context_source(repo_root, None, central_config_path, &args.issue).await {
+            Ok(source) => source,
+            Err(error) => {
+                warnings.push(format!(
                 "live Linear context lookup failed; continuing with indexed memory only: {error}"
             ));
-            SourceFile::default()
-        }
-    };
+                SourceFile::default()
+            }
+        };
     let options = MemoryContextOptions {
         issue: args.issue,
         explicit_includes: args.include,
@@ -2737,7 +2795,7 @@ async fn call_memory_capture_tool(
     {
         load_source_file(&repo_existing_path(config, &source_file)?)?
     } else {
-        load_linear_source(&config.repo_root, None, &identifiers).await?
+        load_linear_source(&config.repo_root, None, None, &identifiers).await?
     };
     let selection = IssueSelection {
         identifiers,
@@ -3984,6 +4042,7 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         path: PathBuf::from("."),
         source,
     })?;
+    let selected_central_config = selected_central_config_path(&repo_root, args.config.as_deref())?;
     let config = load_memory_config(&repo_root, args.config.as_deref())?;
     let identifiers = collect_issue_ids(
         None,
@@ -4031,7 +4090,13 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         println!("Dry run only. Re-run without `--dry-run` to archive eligible Linear issues.");
         return Ok(());
     }
-    let report = archive_in_linear(&repo_root, args.workflow.as_deref(), &plan).await?;
+    let report = archive_in_linear(
+        &repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        &plan,
+    )
+    .await?;
     if !report.archived.is_empty() {
         mark_archived(&config, &report.archived)?;
     }
@@ -4039,6 +4104,7 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         &repo_root,
         args.workflow.as_deref(),
         &report.archived,
+        selected_central_config.as_deref(),
     )
     .await?;
     println!("Archived {} Linear issue(s).", report.archived.len());
@@ -4073,11 +4139,18 @@ async fn run_archive_with_live_capture(
     identifiers: Vec<String>,
     write: bool,
 ) -> Result<(), MemoryError> {
+    let selected_central_config = selected_central_config_path(repo_root, args.config.as_deref())?;
     let selection = IssueSelection {
         identifiers: identifiers.clone(),
         ..IssueSelection::default()
     };
-    let source = load_linear_source(repo_root, args.workflow.as_deref(), &identifiers).await?;
+    let source = load_linear_source(
+        repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        &identifiers,
+    )
+    .await?;
     let capture_plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
 
     if !write {
@@ -4104,8 +4177,21 @@ async fn run_archive_with_live_capture(
         println!("\n{}", render_archive_plan(config, &archive_plan));
     }
 
-    let report = archive_in_linear(repo_root, args.workflow.as_deref(), &archive_plan).await?;
-    finish_archive_write(repo_root, args.workflow.as_deref(), config, report).await
+    let report = archive_in_linear(
+        repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        &archive_plan,
+    )
+    .await?;
+    finish_archive_write(
+        repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        config,
+        report,
+    )
+    .await
 }
 
 fn archive_plan_after_capture(
@@ -4174,15 +4260,20 @@ fn archive_plan_after_capture(
 async fn finish_archive_write(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     config: &MemoryConfig,
     report: LinearArchiveReport,
 ) -> Result<(), MemoryError> {
     if !report.archived.is_empty() {
         mark_archived(config, &report.archived)?;
     }
-    let conversation_report =
-        archive_openhands_conversations_from_config(repo_root, workflow_path, &report.archived)
-            .await?;
+    let conversation_report = archive_openhands_conversations_from_config(
+        repo_root,
+        workflow_path,
+        &report.archived,
+        central_config_path,
+    )
+    .await?;
     println!("Archived {} Linear issue(s).", report.archived.len());
     for issue_key in &report.archived {
         println!("- {issue_key}");
@@ -4245,9 +4336,16 @@ async fn archive_openhands_conversations_from_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
     issue_keys: &[String],
+    central_config_path: Option<&Path>,
 ) -> Result<ConversationArchiveReport, MemoryError> {
-    let store = conversation_store_from_run_config(repo_root, workflow_path)?;
-    let context = conversation_archive_context(repo_root, workflow_path, store.as_ref())?;
+    let store = conversation_store_from_run_config(repo_root, workflow_path, central_config_path)?;
+    let context = conversation_archive_context(
+        repo_root,
+        workflow_path,
+        central_config_path,
+        None,
+        store.as_ref(),
+    )?;
     archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
 }
 
@@ -4256,20 +4354,32 @@ async fn archive_openhands_conversations_for_issues(
     workflow_path: Option<&Path>,
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     issue_keys: &[String],
+    resolved_workflow: Option<&ResolvedWorkflow>,
 ) -> Result<ConversationArchiveReport, MemoryError> {
-    let context = conversation_archive_context(repo_root, workflow_path, conversation_store)?;
+    let context = conversation_archive_context(
+        repo_root,
+        workflow_path,
+        None,
+        resolved_workflow,
+        conversation_store,
+    )?;
     archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
 }
 
 fn conversation_archive_context<'a>(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
+    resolved_workflow: Option<&ResolvedWorkflow>,
     conversation_store: Option<&'a OpenHandsConversationStorePaths>,
 ) -> Result<Option<ConversationArchiveContext<'a>>, MemoryError> {
     let Some(conversation_store) = conversation_store else {
         return Ok(None);
     };
-    let workflow = load_resolved_workflow(repo_root, workflow_path)?;
+    let workflow = match resolved_workflow {
+        Some(workflow) => workflow.clone(),
+        None => load_resolved_workflow_with_config(repo_root, workflow_path, central_config_path)?,
+    };
     let manager = WorkspaceManager::new(WorkspaceManagerConfig {
         root: workflow.config.workspace.root.clone(),
         hooks: HookConfig::default(),
@@ -4461,8 +4571,11 @@ fn print_conversation_archive_report(report: &ConversationArchiveReport) {
 fn conversation_store_from_run_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
 ) -> Result<Option<OpenHandsConversationStorePaths>, MemoryError> {
-    let config_path = repo_root.join("config.yaml");
+    let config_path = central_config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| repo_root.join("config.yaml"));
     if !config_path.is_file() {
         return Ok(None);
     }
@@ -4515,10 +4628,14 @@ fn expand_config_path(
     Ok(super::resolve_path(config_root, &expanded))
 }
 
-fn load_resolved_workflow(
+fn load_resolved_workflow_with_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
 ) -> Result<ResolvedWorkflow, MemoryError> {
+    if let Some(workflow) = load_central_resolved_workflow(repo_root, central_config_path)? {
+        return Ok(workflow);
+    }
     let workflow_path = workflow_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
@@ -4730,9 +4847,11 @@ struct LinearArchiveReport {
 async fn archive_in_linear(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     plan: &ArchivePlan,
 ) -> Result<LinearArchiveReport, MemoryError> {
-    let client = linear_client_from_workflow(repo_root, workflow_path)?;
+    let client =
+        linear_client_from_workflow_with_config(repo_root, workflow_path, central_config_path)?;
     archive_in_linear_with_client(&client, plan).await
 }
 
@@ -4756,6 +4875,17 @@ fn linear_client_from_workflow(
     repo_root: &Path,
     workflow_path: Option<&Path>,
 ) -> Result<LinearClient, MemoryError> {
+    linear_client_from_workflow_with_config(repo_root, workflow_path, None)
+}
+
+fn linear_client_from_workflow_with_config(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
+) -> Result<LinearClient, MemoryError> {
+    if let Some(resolved) = load_central_resolved_workflow(repo_root, central_config_path)? {
+        return linear_client_from_resolved_workflow(&resolved);
+    }
     let workflow_path = workflow_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
@@ -4770,43 +4900,35 @@ fn linear_client_from_workflow(
     };
     match workflow_result {
         Ok(resolved) => linear_client_from_resolved_workflow(&resolved),
-        Err(workflow_error) => {
-            if let Some(client) = linear_client_from_central_config(repo_root)? {
-                Ok(client)
-            } else {
-                Err(MemoryError::InvalidInput(format!(
-                    "failed to resolve workflow: {workflow_error}"
-                )))
-            }
-        }
+        Err(workflow_error) => Err(MemoryError::InvalidInput(format!(
+            "failed to resolve workflow: {workflow_error}"
+        ))),
     }
 }
 
-fn linear_client_from_central_config(
+fn load_central_resolved_workflow(
     repo_root: &Path,
-) -> Result<Option<LinearClient>, MemoryError> {
-    let Some(config_path) = select_config_path(repo_root, None) else {
+    explicit_path: Option<&Path>,
+) -> Result<Option<ResolvedWorkflow>, MemoryError> {
+    let Some(config_path) = selected_central_config_path(repo_root, explicit_path)? else {
         return Ok(None);
     };
     let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
         path: config_path.clone(),
         source,
     })?;
-    if !looks_like_central_config(&raw) {
-        return Ok(None);
-    }
     let central = validate_central_config_text(&config_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
     let workflow = WorkflowDefinition {
         front_matter: central.workflow_front_matter,
         prompt_template: String::new(),
     };
-    let resolved = workflow
+    workflow
         .resolve_with_process_env(config_path.parent().unwrap_or(repo_root))
+        .map(Some)
         .map_err(|error| {
             MemoryError::InvalidInput(format!("failed to resolve central config tracker: {error}"))
-        })?;
-    linear_client_from_resolved_workflow(&resolved).map(Some)
+        })
 }
 
 fn linear_client_from_resolved_workflow(
@@ -4826,18 +4948,22 @@ fn linear_client_from_resolved_workflow(
 async fn load_linear_source(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     identifiers: &[String],
 ) -> Result<SourceFile, MemoryError> {
-    let client = linear_client_from_workflow(repo_root, workflow_path)?;
+    let client =
+        linear_client_from_workflow_with_config(repo_root, workflow_path, central_config_path)?;
     load_linear_source_from_client(&client, identifiers).await
 }
 
 async fn load_linear_context_source(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     issue_key: &str,
 ) -> Result<SourceFile, MemoryError> {
-    let client = linear_client_from_workflow(repo_root, workflow_path)?;
+    let client =
+        linear_client_from_workflow_with_config(repo_root, workflow_path, central_config_path)?;
     let normalized_issue = issue_key.trim();
     if normalized_issue.is_empty() {
         return Err(MemoryError::InvalidInput(

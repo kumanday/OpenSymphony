@@ -315,23 +315,25 @@ fn active_report(
 }
 
 fn migration_target_config(paths: &MigrationPaths, cwd: &Path, source: &Path) -> PathBuf {
-    paths
+    let target = paths
         .output
         .as_deref()
         .map(|path| absolute_path(cwd, path))
-        .unwrap_or_else(|| source.to_path_buf())
+        .unwrap_or_else(|| source.to_path_buf());
+    normalize_path(&target)
 }
 
 fn migration_root(target_config: &Path) -> PathBuf {
-    target_config
+    normalize_path(target_config)
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".opensymphony/migration")
 }
 
 fn migration_marker_path(target_config: &Path) -> PathBuf {
+    let target_config = normalize_path(target_config);
     let key = sha256(target_config.display().to_string().as_bytes());
-    migration_root(target_config).join(format!(
+    migration_root(&target_config).join(format!(
         "activation-{}.yaml",
         &key.trim_start_matches("sha256:")[..16]
     ))
@@ -570,7 +572,8 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let central_stage = stage_path(&target_config, &generation);
     let workflow_stage = stage_path(&source.workflow_path, &generation);
     write_file_with_mode(&central_stage, generated.as_bytes(), config_mode)?;
-    load_central_config(&central_stage).await?;
+    let central = load_central_config(&central_stage).await?;
+    preserve_legacy_memory(&source.target_repo, central.memory_catalog_root.as_deref())?;
     let workflow_body = workflow_body(&source)?;
     write_file_with_mode(&workflow_stage, &workflow_body, workflow_mode)?;
 
@@ -719,23 +722,51 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
 }
 
 fn verify_activated_files(marker: &ActivationMarker) -> Result<(), MigrationError> {
-    verify_activated_file(&marker.config_path, &marker.generation)?;
+    verify_activated_file(
+        &marker.config_path,
+        &marker.generation,
+        &marker.backup_dir.join("config.yaml"),
+        marker.had_config,
+    )?;
     if !marker.workflow_generation.is_empty() {
-        verify_activated_file(&marker.workflow_path, &marker.workflow_generation)?;
+        verify_activated_file(
+            &marker.workflow_path,
+            &marker.workflow_generation,
+            &marker.backup_dir.join("WORKFLOW.md"),
+            marker.had_workflow,
+        )?;
     }
     Ok(())
 }
 
-fn verify_activated_file(path: &Path, generation: &str) -> Result<(), MigrationError> {
-    let contents = fs::read(path).map_err(|_| MigrationError::ActivatedFileChanged {
-        path: path.to_path_buf(),
-    })?;
-    if sha256(&contents) != generation {
+fn verify_activated_file(
+    path: &Path,
+    generation: &str,
+    backup_path: &Path,
+    had_original: bool,
+) -> Result<(), MigrationError> {
+    let Ok(contents) = fs::read(path) else {
+        if !had_original {
+            return Ok(());
+        }
         return Err(MigrationError::ActivatedFileChanged {
             path: path.to_path_buf(),
         });
+    };
+    let current_generation = sha256(&contents);
+    if current_generation == generation {
+        return Ok(());
     }
-    Ok(())
+    if had_original
+        && fs::read(backup_path)
+            .ok()
+            .is_some_and(|backup| sha256(&backup) == current_generation)
+    {
+        return Ok(());
+    }
+    Err(MigrationError::ActivatedFileChanged {
+        path: path.to_path_buf(),
+    })
 }
 
 fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> {
@@ -878,7 +909,7 @@ fn build_report(
             .tracker
             .api_key
             .as_deref()
-            .is_some_and(|value| !value.contains("${")),
+            .is_some_and(|value| credential_variable(value).is_none()),
         credential_bearing_remote_detected: remote_has_credentials(&source.remote),
         backup,
         activation_marker: None,
@@ -892,7 +923,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         .tracker
         .api_key
         .as_deref()
-        .is_some_and(|value| !value.contains("${"))
+        .is_some_and(|value| credential_variable(value).is_none())
     {
         return Err(MigrationError::LiteralSecret);
     }
@@ -1171,6 +1202,75 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
+fn preserve_legacy_memory(
+    target_repo: &Path,
+    central_memory_root: Option<&Path>,
+) -> Result<(), MigrationError> {
+    let Some(destination) = central_memory_root else {
+        return Ok(());
+    };
+    let source = target_repo.join(".opensymphony/memory");
+    if !source.is_dir() || paths_overlap(&source, destination) {
+        return Ok(());
+    }
+    let has_entries = fs::read_dir(&source)
+        .map_err(|source_error| MigrationError::Read {
+            path: source.clone(),
+            source: source_error,
+        })?
+        .next()
+        .is_some();
+    if !has_entries {
+        return Ok(());
+    }
+    copy_directory_contents(&source, destination)
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), MigrationError> {
+    fs::create_dir_all(destination).map_err(|source_error| MigrationError::Write {
+        path: destination.to_path_buf(),
+        source: source_error,
+    })?;
+    let entries = fs::read_dir(source).map_err(|source_error| MigrationError::Read {
+        path: source.to_path_buf(),
+        source: source_error,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source_error| MigrationError::Read {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|source_error| MigrationError::Read {
+                path: source_path.clone(),
+                source: source_error,
+            })?;
+        if file_type.is_symlink() {
+            return Err(MigrationError::Write {
+                path: source_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "legacy memory store contains a symlink",
+                ),
+            });
+        }
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() && !destination_path.exists() {
+            fs::copy(&source_path, &destination_path).map_err(|source_error| {
+                MigrationError::Write {
+                    path: destination_path.clone(),
+                    source: source_error,
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn migrated_stall_timeout_ms(value: &crate::opensymphony_workflow::IntegerLike) -> Option<u64> {
     let parsed = integer_value(value).parse::<i64>().ok()?;
     Some(if parsed <= 0 { 0 } else { parsed as u64 })
@@ -1289,12 +1389,17 @@ fn tracker_credential_variable(value: Option<&str>) -> Result<String, MigrationE
     let Some(value) = value else {
         return Ok("LINEAR_API_KEY".to_owned());
     };
-    let Some(variable) = value
-        .strip_prefix("${")
-        .and_then(|value| value.strip_suffix('}'))
-    else {
+    let Some(variable) = credential_variable(value) else {
         return Err(MigrationError::LiteralSecret);
     };
+    Ok(variable.to_owned())
+}
+
+fn credential_variable(value: &str) -> Option<&str> {
+    let variable = value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'))?;
     if variable.is_empty()
         || !variable.chars().all(|character| {
             character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
@@ -1304,9 +1409,9 @@ fn tracker_credential_variable(value: Option<&str>) -> Result<String, MigrationE
             .next()
             .is_some_and(|character| character.is_ascii_uppercase() || character == '_')
     {
-        return Err(MigrationError::LiteralSecret);
+        return None;
     }
-    Ok(variable.to_owned())
+    Some(variable)
 }
 
 fn safe_id(value: &str) -> String {
@@ -1506,11 +1611,26 @@ fn set_file_mode(path: &Path, mode: Option<u32>) -> Result<(), std::io::Error> {
 }
 
 fn absolute_path(base: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
         base.join(path)
+    };
+    normalize_path(&joined)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
     }
+    normalized
 }
 
 fn current_dir() -> Result<PathBuf, MigrationError> {
@@ -1550,6 +1670,74 @@ mod tests {
         let serialized = serde_json::to_string(&report).expect("report should serialize");
         assert!(report.literal_secret_detected);
         assert!(!serialized.contains("super-secret-canary"));
+    }
+
+    #[test]
+    fn migration_accepts_braced_and_unbraced_credential_references() {
+        assert_eq!(
+            tracker_credential_variable(Some("${LINEAR_API_KEY}"))
+                .expect("braced references should be supported"),
+            "LINEAR_API_KEY"
+        );
+        assert_eq!(
+            tracker_credential_variable(Some("$LINEAR_API_KEY"))
+                .expect("unbraced references should be supported"),
+            "LINEAR_API_KEY"
+        );
+        assert!(tracker_credential_variable(Some("literal-secret")).is_err());
+    }
+
+    #[test]
+    fn activation_markers_use_normalized_destination_paths() {
+        let dotted = Path::new("/tmp/coe-547/./config.yaml");
+        let normalized = Path::new("/tmp/coe-547/config.yaml");
+        assert_eq!(
+            migration_marker_path(dotted),
+            migration_marker_path(normalized)
+        );
+    }
+
+    #[test]
+    fn rollback_verification_accepts_the_backed_up_partial_generation() {
+        let root = tempfile::tempdir().expect("verification root should exist");
+        let current = root.path().join("config.yaml");
+        let backup = root.path().join("backup.yaml");
+        fs::write(&current, "legacy\n").expect("legacy file should be written");
+        fs::write(&backup, "legacy\n").expect("backup file should be written");
+        verify_activated_file(&current, &sha256(b"central\n"), &backup, true)
+            .expect("the backed-up generation should be accepted during rollback");
+        fs::write(&current, "unexpected\n").expect("changed file should be written");
+        assert!(matches!(
+            verify_activated_file(&current, &sha256(b"central\n"), &backup, true),
+            Err(MigrationError::ActivatedFileChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn migration_copies_existing_legacy_memory_without_overwriting_destination() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let source = root.path().join("repo/.opensymphony/memory");
+        let destination = root.path().join("state/memory");
+        fs::create_dir_all(&source).expect("legacy memory root should exist");
+        fs::create_dir_all(source.join("issues")).expect("issue directory should exist");
+        fs::write(source.join("issues/COE-1.md"), "capsule\n")
+            .expect("legacy capsule should be written");
+        preserve_legacy_memory(&root.path().join("repo"), Some(&destination))
+            .expect("legacy memory should be copied");
+        assert_eq!(
+            fs::read_to_string(destination.join("issues/COE-1.md"))
+                .expect("copied capsule should exist"),
+            "capsule\n"
+        );
+        fs::write(destination.join("issues/COE-1.md"), "newer\n")
+            .expect("destination capsule should be writable");
+        preserve_legacy_memory(&root.path().join("repo"), Some(&destination))
+            .expect("repeat preservation should be safe");
+        assert_eq!(
+            fs::read_to_string(destination.join("issues/COE-1.md"))
+                .expect("destination capsule should remain"),
+            "newer\n"
+        );
     }
 
     #[test]

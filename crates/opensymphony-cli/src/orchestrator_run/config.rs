@@ -1016,6 +1016,32 @@ fn central_workflow_front_matter(
     config: &CentralConfigFile,
     workspace_root: Option<&Path>,
 ) -> Result<WorkflowFrontMatter, CentralConfigError> {
+    if let (Some(top_level), Some(nested)) = (
+        config.openhands.transport_base_url.as_deref(),
+        config
+            .openhands
+            .front_matter
+            .as_ref()
+            .and_then(|front_matter| front_matter.transport.base_url.as_deref()),
+    ) && top_level != nested
+    {
+        return Err(CentralConfigError::InvalidReference {
+            field: "openhands.transport_base_url".to_owned(),
+        });
+    }
+    if let (Some(top_level), Some(nested)) = (
+        config.openhands.transport_session_api_key_env.as_deref(),
+        config
+            .openhands
+            .front_matter
+            .as_ref()
+            .and_then(|front_matter| front_matter.transport.session_api_key_env.as_deref()),
+    ) && top_level != nested
+    {
+        return Err(CentralConfigError::InvalidReference {
+            field: "openhands.transport_session_api_key_env".to_owned(),
+        });
+    }
     let (tracker, project_slug) = match config.routing.mode.trim() {
         "legacy_single" => {
             if config.tracker_profiles.len() != 1 {
@@ -1912,6 +1938,24 @@ scheduler:
                 .and_then(|llm| llm.api_key_env.as_deref()),
             Some("CUSTOM_OPENAI_KEY")
         );
+    }
+
+    #[test]
+    fn central_config_rejects_conflicting_openhands_transport_definitions() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  transport_base_url: https://one.example\n  front_matter:\n    transport:\n      base_url: https://two.example\n",
+            central_fixture(root.path())
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("conflicting transport definitions should fail");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "openhands.transport_base_url"
+        ));
     }
 
     #[test]
