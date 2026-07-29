@@ -9,11 +9,12 @@ use crate::opensymphony_domain::{
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptStatus, HealthStatus, IdentifierError, IssueExecution, IssueId,
     IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
-    OrchestratorSnapshot, ReleaseReason, RetryCalculationError, RetryEntry, RetryPolicy,
-    RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
-    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef,
-    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
-    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry,
+    RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus,
+    StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
+    WorkspaceRecord,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -302,6 +303,10 @@ pub trait WorkspaceBackend {
         _issue: &NormalizedIssue,
         _normal_retry_count: u32,
     ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn clear_retry_exhaustion(&mut self, _issue_id: &IssueId) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -942,6 +947,14 @@ where
 
         for record in self.pending_retry_exhaustion.take().unwrap_or_default() {
             let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) else {
+                if tracker_snapshot.contains_terminal(record.issue.id.as_str()) {
+                    self.workspace
+                        .clear_retry_exhaustion(&record.issue.id)
+                        .await
+                        .map_err(|error| SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        })?;
+                }
                 continue;
             };
             let normalized = normalize_tracker_issue(active_issue, &self.config)?;
@@ -959,7 +972,11 @@ where
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
-                self.upsert_active_execution(normalized, observed_at, Some(record.workspace))?;
+                self.upsert_active_execution(
+                    normalized.clone(),
+                    observed_at,
+                    Some(record.workspace),
+                )?;
                 if record.had_in_flight_run {
                     self.restore_recovered_run(
                         &issue_id,
@@ -975,11 +992,32 @@ where
                             detail: error.to_string(),
                         })?;
                     self.mark_recovered_retry_exhausted(&issue_id, observed_at)?;
+                } else if record.normal_retry_count > 0 {
+                    let retry = RetryEntry {
+                        issue_id: normalized.id.clone(),
+                        identifier: normalized.identifier.clone(),
+                        attempt: RetryAttempt::new(record.normal_retry_count)?,
+                        normal_retry_count: record.normal_retry_count,
+                        scheduled_at: observed_at,
+                        due_at: observed_at,
+                        reason: RetryReason::Reconciliation,
+                        error: None,
+                    };
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
                 }
                 continue;
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
+                self.workspace
+                    .clear_retry_exhaustion(&issue_id)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
                 if let Err(error) = self
                     .workspace
                     .cleanup_workspace(&record.workspace, true)
@@ -1071,6 +1109,12 @@ where
             if let Some(terminal_state_name) =
                 tracker_snapshot.terminal_state_name(issue_id.as_str())
             {
+                self.workspace
+                    .clear_retry_exhaustion(&issue_id)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
                 let Some(existing) = self.executions.get(&issue_id) else {
                     continue;
                 };
@@ -1816,11 +1860,21 @@ where
                 continue;
             };
 
-            self.abort_worker(&run.worker_id, WorkerAbortReason::Stalled)
+            let remote_stopped = self
+                .abort_worker(
+                    &mut execution,
+                    &run,
+                    WorkerAbortReason::Stalled,
+                    observed_at,
+                )
                 .await?;
             let outcome = WorkerOutcomeRecord::from_run(
                 &run,
-                WorkerOutcomeKind::Stalled,
+                if remote_stopped {
+                    WorkerOutcomeKind::Stalled
+                } else {
+                    WorkerOutcomeKind::Detached
+                },
                 observed_at,
                 Some("worker exceeded the configured stall timeout".to_string()),
                 Some("scheduler stall timeout reached".to_string()),
@@ -1879,10 +1933,21 @@ where
         };
 
         execution.refresh_issue(issue)?;
+        let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()
             && let Some(abort_reason) = abort_reason
         {
-            self.abort_worker(&run.worker_id, abort_reason).await?;
+            remote_stopped = self
+                .abort_worker(&mut execution, &run, abort_reason, observed_at)
+                .await?;
+        }
+        if cleanup_terminal && !remote_stopped {
+            warn!(
+                issue = %issue_id,
+                "retaining terminal workspace because the harness did not acknowledge its stop request"
+            );
+            self.insert_execution(issue_id, execution);
+            return Ok(());
         }
         if execution.status() != SchedulerStatus::Released {
             execution = execution.release(observed_at, reason, None)?;
@@ -1890,6 +1955,7 @@ where
         let retain_failed =
             reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
         if cleanup_terminal
+            && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
@@ -1906,16 +1972,57 @@ where
 
     async fn abort_worker(
         &mut self,
-        worker_id: &WorkerId,
+        execution: &mut IssueExecution,
+        run: &RunAttempt,
         reason: WorkerAbortReason,
-    ) -> Result<(), SchedulerError> {
-        self.worker_metadata.remove(worker_id);
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let harness_kind = self
+            .worker_metadata
+            .get(&run.worker_id)
+            .and_then(|metadata| metadata.harness_kind.clone())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let mut remote_stopped = execution.conversation().is_none();
+        if execution.conversation().is_some() {
+            let (command, queued) = execution.request_interrupt(
+                harness_kind,
+                None,
+                HarnessInterruptReason::SchedulerAbort,
+                HarnessInterruptExpectedNextState::Released,
+                observed_at,
+            )?;
+            if queued {
+                match self.worker.interrupt_worker(command).await {
+                    Ok(acknowledgement) if acknowledgement.accepted => {
+                        execution.acknowledge_interrupt(observed_at)?;
+                        remote_stopped = true;
+                    }
+                    Ok(acknowledgement) => {
+                        execution.fail_interrupt(
+                            observed_at,
+                            acknowledgement.detail.unwrap_or_else(|| {
+                                "worker interrupt request was not accepted".to_string()
+                            }),
+                        )?;
+                    }
+                    Err(error) => {
+                        execution.fail_interrupt(observed_at, error.to_string())?;
+                    }
+                }
+            } else {
+                remote_stopped = execution.interrupt().is_some_and(|interrupt| {
+                    interrupt.status == HarnessInterruptStatus::Acknowledged
+                });
+            }
+        }
+        self.worker_metadata.remove(&run.worker_id);
         self.worker
-            .abort_worker(worker_id, reason)
+            .abort_worker(&run.worker_id, reason)
             .await
             .map_err(|error| SchedulerError::Worker {
                 detail: error.to_string(),
-            })
+            })?;
+        Ok(remote_stopped)
     }
 
     async fn resolve_finished_execution(

@@ -503,6 +503,7 @@ pub(crate) async fn auto_capture_terminal(
         .cloned()
         .map(Ok)
         .unwrap_or_else(|| load_memory_config(repo_root, None))?;
+    let _coordination_lock = acquire_memory_writer_lock(&config)?;
     let client = match resolved_workflow {
         Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
         None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
@@ -704,6 +705,7 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         ),
         MemoryCommand::Capture(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_capture(
                 &repo_root,
                 &config,
@@ -714,10 +716,12 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Import(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_import(&config, args)
         }
         MemoryCommand::SyncDocs(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_sync_docs(&config, args)
         }
         MemoryCommand::Status(args) => {
@@ -764,14 +768,17 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Reindex(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_reindex(&config, args)
         }
         MemoryCommand::ExportOkf(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_export_okf(&config, args)
         }
         MemoryCommand::ImportOkf(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_import_okf(&config, args)
         }
     }
@@ -891,6 +898,11 @@ fn run_init(
         return Ok(());
     }
 
+    let _coordination_lock =
+        acquire_memory_coordination_lock(repo_root).map_err(|source| MemoryError::WriteFile {
+            path: memory_migration_lock_path(repo_root),
+            source,
+        })?;
     write_memory_init_plan(&plan)?;
     println!("Wrote memory configuration: {}", plan.config_path.display());
     if plan.gitignore_before.as_deref() == Some(plan.gitignore_after.as_str()) {
@@ -1827,6 +1839,15 @@ pub(crate) fn acquire_memory_coordination_lock(
             Err(error) => return Err(error),
         }
     }
+}
+
+fn acquire_memory_writer_lock(
+    config: &MemoryConfig,
+) -> Result<MemoryCoordinationLock, MemoryError> {
+    acquire_memory_coordination_lock(&config.repo_root).map_err(|source| MemoryError::WriteFile {
+        path: memory_migration_lock_path(&config.repo_root),
+        source,
+    })
 }
 
 fn stale_memory_lock_path(path: &Path) -> PathBuf {
@@ -4343,6 +4364,9 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         ));
     }
     let write = !args.dry_run;
+    let _coordination_lock = write
+        .then(|| acquire_memory_writer_lock(&config))
+        .transpose()?;
 
     if !args.from_memory {
         if identifiers.is_empty() {
@@ -5252,6 +5276,7 @@ fn linear_client_from_resolved_workflow(
         resolved.config.tracker.project_slug.clone(),
     );
     linear_config.base_url = resolved.config.tracker.endpoint.clone();
+    linear_config.project_id = resolved.config.tracker.project_id.clone();
     linear_config.active_states = resolved.config.tracker.active_states.clone();
     linear_config.terminal_states = resolved.config.tracker.terminal_states.clone();
     LinearClient::new(linear_config)

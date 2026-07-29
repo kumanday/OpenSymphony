@@ -18,9 +18,11 @@ credential references, review profiles, scheduler, integration, workspace, and
 memory-catalog policy. Relative paths resolve from the central config file.
 Remote values may contain no credentials, repository aliases are unique, and
 strict unknown fields fail before tracker polling or workspace creation.
-Central-config detection requires a non-empty `instance` section together with
-`routing.mode`; a legacy file containing only `schema_version` remains on the
-legacy parser. `compatibility.allow_repo_local_config` is currently unsupported
+Any central-only key such as `instance`, `routing`, `tracker_profiles`, or
+`repositories` selects the strict central parser, even when its discriminator
+is malformed; those files fail closed instead of falling through to legacy
+current-directory discovery. A legacy file containing only `schema_version`
+remains on the legacy parser. `compatibility.allow_repo_local_config` is currently unsupported
 and must remain `false`; setting it to `true` fails validation rather than
 silently discarding repository-local orchestration settings.
 The `openhands.front_matter` subsection carries the complete typed OpenHands
@@ -33,7 +35,9 @@ successful, cancelled, and tracker-terminal releases still clean up their
 workspaces.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
-exhausted one. Once the limit is reached, the instance state root records a
+exhausted one. Recovery restores persisted non-exhausted retry counts before
+redispatch, while terminal tracker reconciliation removes stale exhaustion
+markers. Once the limit is reached, the instance state root records a
 retry-exhaustion marker before a disposable failed workspace is removed; the
 marker keeps the issue parked across a later run.
 
@@ -86,11 +90,13 @@ is active; it restores the original file permissions as well as file contents.
 Repeating a complete `apply` is a no-op; a partially published activation
 promotes its staged workflow or restores the backup before retrying.
 When preserving a legacy `.opensymphony/memory` tree, preflight refuses an
-active memory writer without changing files. Apply and the local memory server
-claim the same atomic coordination lock, and the server holds it for its
-lifetime while publishing an activity marker. Owner PIDs allow stale lock and
-marker recovery after an unclean exit; apply removes stale markers only after
-it owns the lock.
+active memory writer without changing files. Apply, direct CLI memory writers,
+automatic capture, archive, and the local memory server claim the same atomic
+coordination lock; the server holds it for its lifetime while publishing an
+activity marker. Owner PIDs allow stale lock and marker recovery after an
+unclean exit; apply removes stale markers only after it owns the lock. Rollback
+also fingerprints the migrated catalog and refuses to restore the legacy
+generation after post-migration memory has changed, preserving that evidence.
 
 ## Bootstrap
 
@@ -247,6 +253,7 @@ Important fields:
 
 | Field | Description | Env Var | Example |
 |-------|-------------|---------|---------|
+| `tracker.project_id` | Linear `Project.id` used to resolve the provider project before issue polling | - | `2b7c...` |
 | `tracker.project_slug` | Linear `Project.slugId` from the project URL | - | `my-project-5250e49b61f4` |
 | `WORKFLOW.md` `Target branch:` | Local branch name agents use as `origin/<target-branch>` for syncs and PR bases | - | `develop`, `main`, `release/next` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |

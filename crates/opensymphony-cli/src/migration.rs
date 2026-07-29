@@ -85,6 +85,10 @@ enum MigrationError {
     DestinationConflict { path: PathBuf },
     #[error("activated migration file changed after apply: {path}")]
     ActivatedFileChanged { path: PathBuf },
+    #[error(
+        "migrated memory catalog changed after apply; rollback is blocked to preserve it: {path}"
+    )]
+    MemoryCatalogChanged { path: PathBuf },
     #[error("workflow {path} does not declare an exact `Target branch:`")]
     MissingTargetBranch { path: PathBuf },
     #[error("workflow field {field} is not a valid unsigned integer: {value}")]
@@ -182,6 +186,10 @@ struct ActivationMarker {
     config_mode: Option<u32>,
     #[serde(default)]
     workflow_mode: Option<u32>,
+    #[serde(default)]
+    memory_catalog_root: Option<PathBuf>,
+    #[serde(default)]
+    memory_catalog_generation: Option<String>,
 }
 
 impl ActivationMarker {
@@ -585,6 +593,11 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     write_file_with_mode(&central_stage, generated.as_bytes(), config_mode)?;
     let central = load_central_config(&central_stage).await?;
     preserve_legacy_memory(&source.target_repo, central.memory_catalog_root.as_deref())?;
+    let memory_catalog_root = central.memory_catalog_root.clone();
+    let memory_catalog_generation = memory_catalog_root
+        .as_deref()
+        .map(memory_catalog_generation)
+        .transpose()?;
     let workflow_body = workflow_body(&source)?;
     write_file_with_mode(&workflow_stage, &workflow_body, workflow_mode)?;
 
@@ -599,6 +612,8 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         had_workflow,
         config_mode,
         workflow_mode,
+        memory_catalog_root,
+        memory_catalog_generation,
     };
     let marker_path = migration_marker_path(&target_config);
     let marker_stage = stage_path(&marker_path, &generation);
@@ -685,6 +700,15 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
     }
 
     verify_activated_files(&marker)?;
+    if let (Some(root), Some(expected)) = (
+        marker.memory_catalog_root.as_deref(),
+        marker.memory_catalog_generation.as_deref(),
+    ) && memory_catalog_generation(root)? != expected
+    {
+        return Err(MigrationError::MemoryCatalogChanged {
+            path: root.to_path_buf(),
+        });
+    }
 
     if marker.had_config {
         restore_file(
@@ -778,6 +802,75 @@ fn verify_activated_file(
     Err(MigrationError::ActivatedFileChanged {
         path: path.to_path_buf(),
     })
+}
+
+fn memory_catalog_generation(root: &Path) -> Result<String, MigrationError> {
+    if !root.exists() {
+        return Ok(sha256(b"<absent>"));
+    }
+    let mut entries = Vec::new();
+    collect_memory_catalog_entries(root, root, &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest_input = Vec::new();
+    for (relative, kind, contents) in entries {
+        digest_input.extend_from_slice(relative.as_bytes());
+        digest_input.push(0);
+        digest_input.push(kind);
+        digest_input.push(0);
+        digest_input.extend_from_slice(&contents);
+        digest_input.push(0);
+    }
+    Ok(sha256(&digest_input))
+}
+
+fn collect_memory_catalog_entries(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<(String, u8, Vec<u8>)>,
+) -> Result<(), MigrationError> {
+    let read_dir = fs::read_dir(current).map_err(|source| MigrationError::Read {
+        path: current.to_path_buf(),
+        source,
+    })?;
+    for entry in read_dir {
+        let entry = entry.map_err(|source| MigrationError::Read {
+            path: current.to_path_buf(),
+            source,
+        })?;
+        if entry.file_name() == super::memory::MEMORY_ACTIVITY_MARKER {
+            continue;
+        }
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let file_type = entry.file_type().map_err(|source| MigrationError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_symlink() {
+            return Err(MigrationError::Write {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "memory catalog contains a symlink",
+                ),
+            });
+        }
+        if file_type.is_dir() {
+            entries.push((relative, b'd', Vec::new()));
+            collect_memory_catalog_entries(root, &path, entries)?;
+        } else if file_type.is_file() {
+            let contents = fs::read(&path).map_err(|source| MigrationError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            entries.push((relative, b'f', contents));
+        }
+    }
+    Ok(())
 }
 
 fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> {
@@ -2257,6 +2350,28 @@ mod tests {
             MigrationError::ActivatedFileChanged { .. }
         ));
         fs::write(&output_path, active_config).expect("active config should be restored");
+
+        let memory_root = marker
+            .memory_catalog_root
+            .clone()
+            .expect("generated migrations should record the central memory root");
+        fs::create_dir_all(&memory_root).expect("central memory root should be creatable");
+        fs::write(memory_root.join("post-migration.md"), "new evidence\n")
+            .expect("post-migration memory should be writable");
+        let changed_memory = rollback(RollbackArgs {
+            config: Some(output_path.clone()),
+        })
+        .await
+        .expect_err("rollback must preserve post-migration memory");
+        assert!(matches!(
+            changed_memory,
+            MigrationError::MemoryCatalogChanged { .. }
+        ));
+        assert!(
+            output_path.is_file(),
+            "blocked rollback must keep central config"
+        );
+        fs::remove_dir_all(&memory_root).expect("test memory catalog should be removed");
 
         rollback(RollbackArgs {
             config: Some(output_path.clone()),

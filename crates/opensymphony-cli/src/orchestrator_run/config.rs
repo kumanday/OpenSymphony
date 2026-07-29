@@ -642,21 +642,24 @@ pub fn looks_like_central_config(raw: &str) -> bool {
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
-    mapping
-        .get(serde_yaml::Value::String("instance".to_owned()))
-        .and_then(serde_yaml::Value::as_mapping)
-        .is_some_and(|instance| {
-            !instance.is_empty()
-                && mapping
-                    .get(serde_yaml::Value::String("routing".to_owned()))
-                    .and_then(serde_yaml::Value::as_mapping)
-                    .is_some_and(|routing| {
-                        routing
-                            .get(serde_yaml::Value::String("mode".to_owned()))
-                            .and_then(serde_yaml::Value::as_str)
-                            .is_some_and(|mode| !mode.trim().is_empty())
-                    })
-        })
+    [
+        "instance",
+        "routing",
+        "tracker_profiles",
+        "project_sets",
+        "linear_projects",
+        "repositories",
+        "credentials",
+        "review_profiles",
+        "workspace",
+        "scheduler",
+        "hooks",
+        "integration",
+        "memory_catalog",
+        "compatibility",
+    ]
+    .iter()
+    .any(|key| mapping.contains_key(serde_yaml::Value::String((*key).to_owned())))
 }
 
 fn parse_legacy_run_config(path: &Path, raw: &str) -> Result<RunConfigFile, RunCommandError> {
@@ -1141,6 +1144,7 @@ fn central_workflow_front_matter(
             kind: Some(tracker.provider.clone()),
             endpoint: tracker.endpoint.clone(),
             api_key,
+            project_id: Some(project_slug.clone()),
             project_slug: Some(project_slug),
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
@@ -1854,10 +1858,11 @@ scheduler:
     #[test]
     fn central_config_discriminator_requires_instance_and_routing_mode() {
         assert!(!looks_like_central_config("schema_version: 1\n"));
-        assert!(!looks_like_central_config("instance:\n  id: legacy\n"));
-        assert!(!looks_like_central_config(
+        assert!(looks_like_central_config("instance:\n  id: legacy\n"));
+        assert!(looks_like_central_config(
             "routing:\n  mode: legacy_single\n"
         ));
+        assert!(looks_like_central_config("routing:\n  mode: [broken]\n"));
         assert!(looks_like_central_config(
             "schema_version: 1\ninstance:\n  id: central\nrouting:\n  mode: legacy_single\n"
         ));

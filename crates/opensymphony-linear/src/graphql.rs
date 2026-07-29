@@ -636,6 +636,20 @@ query ProjectBySlug($slug: String!) {
 }
 "#;
 
+pub(super) const PROJECT_BY_ID_QUERY: &str = r#"
+query ProjectById($id: ID!) {
+  projects(filter: { id: { eq: $id } }, first: 1) {
+    nodes {
+      id
+      name
+      slugId
+      url
+      content
+    }
+  }
+}
+"#;
+
 pub(super) const PROJECT_UPDATE_CONTENT_MUTATION: &str = r#"
 mutation UpdateProjectContent($id: String!, $content: String!) {
   projectUpdate(id: $id, input: { content: $content }) {
@@ -794,6 +808,11 @@ pub(super) struct ProjectBySlugVariables {
 }
 
 #[derive(Debug, Serialize)]
+pub(super) struct ProjectByIdVariables {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct ProjectUpdateContentVariables {
     pub id: String,
     pub content: String,
@@ -847,6 +866,11 @@ pub(super) struct IssueArchiveData {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ProjectBySlugData {
+    pub projects: ProjectsConnection,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectByIdData {
     pub projects: ProjectsConnection,
 }
 

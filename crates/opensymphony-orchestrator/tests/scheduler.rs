@@ -9,13 +9,13 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
-    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryReason,
-    RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
-    TrackerIssue, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
-    decide_issue_route,
+    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason,
+    RetryExhaustionRecord, RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig,
+    SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue, TrackerIssueState,
+    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason,
+    WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey,
+    WorkspaceRecord, decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -374,6 +374,8 @@ impl TrackerBackend for FakeTracker {
 #[derive(Default)]
 struct FakeWorkspace {
     recoveries: Vec<RecoveryRecord>,
+    retry_exhaustion: Vec<RetryExhaustionRecord>,
+    cleared_retry_exhaustion: Vec<String>,
     ensured: Vec<String>,
     cleaned: Vec<(String, bool)>,
     cleanup_results: VecDeque<Result<(), FakeError>>,
@@ -408,6 +410,12 @@ impl WorkspaceBackend for FakeWorkspace {
         Ok(self.recoveries.clone())
     }
 
+    async fn recover_retry_exhaustion(
+        &mut self,
+    ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
+        Ok(self.retry_exhaustion.clone())
+    }
+
     async fn cleanup_workspace(
         &mut self,
         workspace: &WorkspaceRecord,
@@ -424,6 +432,11 @@ impl WorkspaceBackend for FakeWorkspace {
         normal_retry_count: u32,
     ) -> Result<(), Self::Error> {
         self.persisted_retry_counts.push(normal_retry_count);
+        Ok(())
+    }
+
+    async fn clear_retry_exhaustion(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
+        self.cleared_retry_exhaustion.push(issue_id.to_string());
         Ok(())
     }
 
@@ -1872,6 +1885,11 @@ async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace()
         scheduler.worker().aborted[0].1,
         WorkerAbortReason::TrackerTerminal
     );
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(
+        scheduler.worker().interrupts[0].reason,
+        HarnessInterruptReason::SchedulerAbort
+    );
     assert_eq!(
         scheduler.workspace().cleaned,
         vec![("COE-270".to_string(), true)]
@@ -2011,6 +2029,71 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
         recovered_workspace.path
     );
     assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_restores_non_exhausted_retry_budget_before_dispatch() {
+    let recovered_workspace = workspace_record("COE-274", "/tmp/recovered/COE-274");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-274", "COE-274", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-274", "COE-274", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            had_in_flight_run: false,
+            normal_retry_count: 1,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-274".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("recovery should restore the retry budget");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0]
+            .run
+            .attempt
+            .map(|attempt| attempt.get()),
+        Some(1)
+    );
+    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
+}
+
+#[tokio::test]
+async fn terminal_retry_marker_is_cleared_when_tracker_state_is_terminal() {
+    let tracker = FakeTracker {
+        terminal: vec![tracker_issue("lin-275", "COE-275", "Done", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        retry_exhaustion: vec![RetryExhaustionRecord {
+            issue: normalized_issue("lin-275", "COE-275", "Done"),
+            normal_retry_count: 2,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("terminal retry marker recovery should succeed");
+
+    assert_eq!(
+        scheduler.workspace().cleared_retry_exhaustion,
+        vec!["lin-275".to_string()]
+    );
 }
 
 #[tokio::test]

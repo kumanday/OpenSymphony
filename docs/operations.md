@@ -522,10 +522,13 @@ Memory capture does not archive Linear issues.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema
-migrations. Run capture, import, OKF import/export, docs sync, or reindex-style
-admin operations serially if a local DuckDB writer is active. Prefer the CLI or
-MCP admin surface for maintenance; direct file or DuckDB access is an offline
-recovery and diagnostics fallback only.
+migrations. Capture, import, OKF import/export, docs sync, reindex, archive,
+automatic terminal capture, and code-intelligence persistence acquire the
+instance coordination lock before writing. The local MCP server holds that
+same lock for its lifetime, so migration and direct writers cannot copy or
+index a torn catalog. Prefer the CLI or MCP admin surface for maintenance;
+direct file or DuckDB access is an offline recovery and diagnostics fallback
+only.
 
 For worker or tool access, `opensymphony run` starts the read-only memory server
 when memory is initialized and `memory.serve` is not disabled. The supervised
@@ -653,6 +656,12 @@ checkout.
 After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
 policy so operational recovery continues to use the migrated OpenHands and
 tracker settings.
+
+Rollback refuses to proceed when the central catalog fingerprint differs from
+the activation marker. This deliberate safety stop keeps captures made after
+migration visible instead of restoring a legacy config that would hide them;
+remove or reconcile the divergent catalog only through an explicit recovery
+operation.
 
 Activation markers are namespaced by the absolute central-config destination,
 so separate instances cannot overwrite or consume one another's rollback

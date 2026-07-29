@@ -947,6 +947,7 @@ pub enum WorkerOutcomeKind {
 pub enum HarnessInterruptReason {
     OperatorCancel,
     TrackerMergingSupersedesHumanReview,
+    SchedulerAbort,
 }
 
 impl HarnessInterruptReason {
@@ -954,6 +955,7 @@ impl HarnessInterruptReason {
         match self {
             Self::OperatorCancel => "operator_cancel",
             Self::TrackerMergingSupersedesHumanReview => "tracker_merging_supersedes_human_review",
+            Self::SchedulerAbort => "scheduler_abort",
         }
     }
 }

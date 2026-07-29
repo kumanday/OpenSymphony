@@ -337,6 +337,18 @@ impl IssueExecution {
         }
     }
 
+    pub fn restore_retry(mut self, retry: RetryEntry) -> Result<Self, StateTransitionError> {
+        self.validate_retry_binding(&retry)?;
+        if !matches!(self.state, SchedulerState::Unclaimed { .. }) {
+            return Err(StateTransitionError::InvalidTransition {
+                from: self.status(),
+                action: TransitionAction::QueueRetry,
+            });
+        }
+        self.state = SchedulerState::RetryQueued { retry };
+        Ok(self)
+    }
+
     pub fn attach_workspace(
         &mut self,
         workspace: WorkspaceRecord,

@@ -270,6 +270,7 @@ pub(super) fn build_linear_client(
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
+    config.project_id = tracker.project_id.clone();
     config.active_states = tracker.active_states.clone();
     config.terminal_states = tracker.terminal_states.clone();
     LinearClient::new(config)
@@ -918,6 +919,22 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             }
         }
         Ok(())
+    }
+
+    async fn clear_retry_exhaustion(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue_id.as_str())?;
+        let path = self
+            .retry_state_root
+            .join("retry-exhaustion")
+            .join(format!("{key}.json"));
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(CliWorkspaceError::RetryState(format!(
+                "failed to clear {}: {error}",
+                path.display()
+            ))),
+        }
     }
 
     fn retain_failed_workspaces(&self) -> bool {
@@ -3234,8 +3251,12 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .interrupt(&command)
             .await
             .map_err(|error| CliWorkerError::InterruptFailed(openhands_error_detail(&error)))?;
+        let accepted = acknowledgement
+            .execution_status
+            .as_deref()
+            .is_some_and(openhands_execution_stopped);
         Ok(WorkerInterruptAcknowledgement {
-            accepted: true,
+            accepted,
             detail: acknowledgement
                 .diagnostic
                 .or_else(|| {
@@ -3246,6 +3267,10 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 .or_else(|| Some("OpenHands interrupt acknowledged".to_string())),
         })
     }
+}
+
+fn openhands_execution_stopped(status: &str) -> bool {
+    matches!(status, "paused" | "idle" | "finished" | "error" | "stuck")
 }
 
 fn openhands_error_detail(error: &OpenHandsError) -> String {
@@ -5852,6 +5877,14 @@ Run the scheduler.
         assert!(error.to_string().contains(
             "harness `experimental_worker` does not expose a scheduler-side interrupt channel"
         ));
+    }
+
+    #[test]
+    fn openhands_interrupt_acknowledgement_requires_a_stopped_state() {
+        assert!(openhands_execution_stopped("paused"));
+        assert!(openhands_execution_stopped("finished"));
+        assert!(!openhands_execution_stopped("running"));
+        assert!(!openhands_execution_stopped("waiting"));
     }
 
     #[tokio::test]
