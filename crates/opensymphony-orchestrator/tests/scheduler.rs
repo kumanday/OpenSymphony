@@ -1497,6 +1497,93 @@ async fn failures_schedule_exponential_backoff() {
 }
 
 #[tokio::test]
+async fn retry_limit_counts_failures_and_prevents_redispatch() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-270", "COE-270", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial dispatch should succeed");
+    let issue_id = IssueId::new("lin-270").expect("issue id should be valid");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("first failure".to_owned()),
+                Some("boom".to_owned()),
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("first failure should queue retry");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("execution should exist")
+            .retry()
+            .expect("retry should be queued")
+            .normal_retry_count,
+        1
+    );
+
+    scheduler
+        .tick(ts(10_200))
+        .await
+        .expect("retry dispatch should succeed");
+    let second_run = scheduler.worker().launches[1].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: second_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &second_run,
+                WorkerOutcomeKind::Failed,
+                ts(10_400),
+                Some("second failure".to_owned()),
+                Some("still broken".to_owned()),
+            ),
+        });
+    scheduler
+        .tick(ts(10_400))
+        .await
+        .expect("retry exhaustion should release the execution");
+
+    let released = scheduler
+        .execution(&issue_id)
+        .expect("released execution should remain recorded");
+    assert_eq!(released.status(), SchedulerStatus::Released);
+    assert!(matches!(
+        released.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+
+    scheduler
+        .tick(ts(70_400))
+        .await
+        .expect("exhausted execution should remain parked");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+}
+
+#[tokio::test]
 async fn per_state_capacity_releases_slot_after_worker_finishes() {
     let tracker = FakeTracker {
         active: vec![

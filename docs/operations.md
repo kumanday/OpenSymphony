@@ -635,6 +635,10 @@ before activation. After front matter is moved, `doctor`, `debug`, and
 `rehydrate` load the central policy so operational recovery continues to use
 the migrated OpenHands and tracker settings.
 
+Activation markers are namespaced by the absolute central-config destination,
+so separate instances cannot overwrite or consume one another's rollback
+record.
+
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.

@@ -55,10 +55,12 @@ opensymphony migrate rollback --config /path/to/repo/config.yaml
 risks, and secret/remote-risk booleans without printing their values. `apply`
 backs up the legacy config and workflow, writes central config and the
 implementation-only workflow body through same-directory staging, and records
-an activation marker. A marker is written after validation and staging but
-before replacement so an interrupted apply remains recoverable. Applying again
-with a separate `--output` detects the active destination generation before
-creating a backup or rewriting the source. `rollback`
+an activation marker specific to the central config destination. A marker is
+written after validation and staging but before replacement so an interrupted
+apply remains recoverable. Relative legacy workspace roots are resolved against
+the target repository, and migration requires an exact `Target branch:` line.
+Applying again with a separate `--output` detects the active destination
+generation before creating a backup or rewriting the source. `rollback`
 restores the backup and refuses to run while the instance's strict-run marker
 is active; it restores the original file permissions as well as file contents.
 Repeating `apply` after activation is a no-op.

@@ -196,6 +196,8 @@ struct CentralWorkspaceFile {
 struct CentralSchedulerFile {
     max_concurrent_tasks: u64,
     #[serde(default)]
+    max_concurrent_agents_by_state: BTreeMap<String, u64>,
+    #[serde(default)]
     retry: CentralRetryFile,
     #[serde(default)]
     poll_interval_ms: Option<u64>,
@@ -628,6 +630,13 @@ pub async fn load_central_config(path: &Path) -> Result<ResolvedCentralConfig, C
     resolve_central_config(path, &raw)
 }
 
+pub(crate) fn validate_central_config_text(
+    path: &Path,
+    raw: &str,
+) -> Result<ResolvedCentralConfig, CentralConfigError> {
+    resolve_central_config(path, raw)
+}
+
 fn resolve_central_config(
     path: &Path,
     raw: &str,
@@ -755,6 +764,16 @@ fn resolve_central_config(
                 field: format!("tracker_profiles.{tracker_id}.credential"),
             });
         }
+        if config
+            .credentials
+            .get(&tracker.credential)
+            .and_then(|credential| credential.variable.as_deref())
+            .is_none()
+        {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("tracker_profiles.{tracker_id}.credential.variable"),
+            });
+        }
         let _ = (
             &tracker.endpoint,
             &tracker.active_states,
@@ -802,6 +821,15 @@ fn resolve_central_config(
         {
             return Err(CentralConfigError::InvalidReference {
                 field: "scheduler".to_owned(),
+            });
+        }
+        if scheduler
+            .max_concurrent_agents_by_state
+            .iter()
+            .any(|(state, limit)| state.trim().is_empty() || *limit == 0)
+        {
+            return Err(CentralConfigError::InvalidReference {
+                field: "scheduler.max_concurrent_agents_by_state".to_owned(),
             });
         }
         scheduler
@@ -1070,7 +1098,20 @@ fn central_workflow_front_matter(
                 .and_then(|scheduler| scheduler.stall_timeout_ms)
                 .map(|value| central_integer(value, "scheduler.stall_timeout_ms"))
                 .transpose()?,
-            max_concurrent_agents_by_state: None,
+            max_concurrent_agents_by_state: config
+                .scheduler
+                .as_ref()
+                .map(|scheduler| {
+                    scheduler
+                        .max_concurrent_agents_by_state
+                        .iter()
+                        .map(|(state, limit)| {
+                            central_integer(*limit, "scheduler.max_concurrent_agents_by_state")
+                                .map(|value| (state.clone(), value))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, _>>()
+                })
+                .transpose()?,
         },
         routing: RoutingFrontMatter {
             harness: config.routing.harness.clone(),
@@ -1525,6 +1566,10 @@ workspace:
   root: {root}/workspace
 memory:
   catalog_root: {root}/state/memory
+scheduler:
+  max_concurrent_tasks: 2
+  max_concurrent_agents_by_state:
+    Todo: 1
 "#,
             root = root.display()
         )
@@ -1543,6 +1588,15 @@ memory:
             .expect("central fixture should resolve");
 
         assert_eq!(resolved.mode, CentralRoutingMode::ProjectSet);
+        assert!(matches!(
+            resolved
+                .workflow_front_matter
+                .agent
+                .max_concurrent_agents_by_state
+                .as_ref()
+                .and_then(|limits| limits.get("Todo")),
+            Some(IntegerLike::Integer(1))
+        ));
         assert!(resolved.generation.starts_with("sha256:"));
         assert_eq!(
             resolved
@@ -1590,6 +1644,15 @@ memory:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("credential-bearing remote locator should fail");
         assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
+    }
+
+    #[test]
+    fn central_config_rejects_tracker_credentials_without_environment_variable() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path()).replace("    variable: LINEAR_API_KEY\n", "");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("tracker credentials without a variable should fail");
+        assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
     }
 
     #[test]

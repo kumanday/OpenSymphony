@@ -2243,7 +2243,14 @@ fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
         execution
             .last_worker_outcome()
             .map(|outcome| outcome.outcome),
-        Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
+        Some(
+            WorkerOutcomeKind::Detached
+                | WorkerOutcomeKind::CancelFailed
+                | WorkerOutcomeKind::Failed
+                | WorkerOutcomeKind::TimedOut
+                | WorkerOutcomeKind::Stalled
+                | WorkerOutcomeKind::Cancelled,
+        )
     ) || execution
         .last_worker_outcome()
         .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))

@@ -860,6 +860,7 @@ mod tests {
             policy,
         ));
         assert_eq!(first_failure.attempt.get(), 1);
+        assert_eq!(first_failure.normal_retry_count, 2);
         assert_eq!(first_failure.due_at, ts(10_100));
 
         let capped_policy = RetryPolicy {

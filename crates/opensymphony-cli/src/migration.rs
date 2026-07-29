@@ -14,6 +14,7 @@ use crate::opensymphony_workflow::WorkflowDefinition;
 
 use super::orchestrator_run::config::{
     CentralConfigError, load_central_config, looks_like_central_config,
+    validate_central_config_text,
 };
 
 #[derive(Debug, Args)]
@@ -76,6 +77,10 @@ enum MigrationError {
     LiteralSecret,
     #[error("migration cannot preserve a credential-bearing repository remote")]
     CredentialBearingRemote,
+    #[error("workflow {path} does not declare an exact `Target branch:`")]
+    MissingTargetBranch { path: PathBuf },
+    #[error("workflow field {field} is not a valid unsigned integer: {value}")]
+    InvalidNumericSetting { field: String, value: String },
     #[error("failed to serialize generated central config: {0}")]
     SerializeConfig(#[source] serde_yaml::Error),
     #[error("failed to write {path}: {source}")]
@@ -236,27 +241,10 @@ async fn active_target_central_config(
         return Ok(None);
     }
     let central = load_central_config(&target_config).await?;
-    let activation_marker = target_config
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".opensymphony/migration/activation.yaml");
-    let marker = if activation_marker.is_file() {
-        let marker_raw =
-            fs::read_to_string(&activation_marker).map_err(|source| MigrationError::Read {
-                path: activation_marker.clone(),
-                source,
-            })?;
-        Some(
-            serde_yaml::from_str::<ActivationMarker>(&marker_raw).map_err(|source| {
-                MigrationError::ParseActivation {
-                    path: activation_marker.clone(),
-                    source,
-                }
-            })?,
-        )
-    } else {
-        None
-    };
+    let (activation_marker, marker) = load_activation_marker(&target_config)?.map_or(
+        (migration_marker_path(&target_config), None),
+        |(path, marker)| (path, Some(marker)),
+    );
     let (target_repo, workflow) = marker
         .map(|marker| (marker.target_repo(), marker.workflow_path))
         .unwrap_or_else(|| (repo.clone(), repo.join("WORKFLOW.md")));
@@ -301,6 +289,59 @@ fn migration_target_config(paths: &MigrationPaths, cwd: &Path, source: &Path) ->
         .unwrap_or_else(|| source.to_path_buf())
 }
 
+fn migration_root(target_config: &Path) -> PathBuf {
+    target_config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".opensymphony/migration")
+}
+
+fn migration_marker_path(target_config: &Path) -> PathBuf {
+    let key = sha256(target_config.display().to_string().as_bytes());
+    migration_root(target_config).join(format!(
+        "activation-{}.yaml",
+        &key.trim_start_matches("sha256:")[..16]
+    ))
+}
+
+fn parse_activation_marker(path: &Path) -> Result<ActivationMarker, MigrationError> {
+    let marker_raw = fs::read_to_string(path).map_err(|source| MigrationError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_yaml::from_str::<ActivationMarker>(&marker_raw).map_err(|source| {
+        MigrationError::ParseActivation {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+fn load_activation_marker(
+    target_config: &Path,
+) -> Result<Option<(PathBuf, ActivationMarker)>, MigrationError> {
+    let target_path = migration_marker_path(target_config);
+    if target_path.is_file() {
+        return Ok(Some((
+            target_path.clone(),
+            parse_activation_marker(&target_path)?,
+        )));
+    }
+
+    // Keep reading the pre-namespace marker for one-way compatibility, but never
+    // let a marker for another central config control this target's rollback.
+    let legacy_path = migration_root(target_config).join("activation.yaml");
+    if !legacy_path.is_file() {
+        return Ok(None);
+    }
+    let marker = parse_activation_marker(&legacy_path)?;
+    if marker.config_path == target_config {
+        Ok(Some((legacy_path, marker)))
+    } else {
+        Ok(None)
+    }
+}
+
 async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     if let Some(active) = active_target_central_config(&paths).await? {
         return Ok(active_report("preflight", &active, true));
@@ -333,10 +374,14 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
             activation_marker: None,
         });
     }
+    let target_config = migration_target_config(&paths, &current_dir()?, &source.source_config);
+    let generated = generate_central_config(&source)?;
+    validate_central_config_text(&target_config, &generated)?;
     Ok(build_report("preflight", &source, None, None, true))
 }
 
 async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
+    let _ = preflight(paths.clone()).await?;
     if let Some(active) = active_target_central_config(&paths).await? {
         return Ok(active_report("apply", &active, false));
     }
@@ -390,10 +435,7 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
     let generated = generate_central_config(&source)?;
     let generation = sha256(generated.as_bytes());
-    let migration_root = target_config
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".opensymphony/migration");
+    let migration_root = migration_root(&target_config);
     let backup_dir = migration_root
         .join("backups")
         .join(generation.trim_start_matches("sha256:"));
@@ -445,25 +487,46 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
         config_mode,
         workflow_mode,
     };
-    let marker_path = migration_root.join("activation.yaml");
+    let marker_path = migration_marker_path(&target_config);
     let marker_stage = stage_path(&marker_path, &generation);
     let marker_raw = serde_yaml::to_string(&marker).map_err(MigrationError::SerializeConfig)?;
     write_file(&marker_stage, marker_raw.as_bytes())?;
-    fs::rename(&marker_stage, &marker_path).map_err(|source_error| MigrationError::Write {
-        path: marker_path.clone(),
-        source: source_error,
-    })?;
 
-    fs::rename(&central_stage, &target_config).map_err(|source_error| MigrationError::Write {
-        path: target_config.clone(),
-        source: source_error,
-    })?;
-    fs::rename(&workflow_stage, &source.workflow_path).map_err(|source_error| {
-        MigrationError::Write {
-            path: source.workflow_path.clone(),
-            source: source_error,
-        }
-    })?;
+    // Publish the activation record before replacing either runnable file.  A
+    // process interruption after this point leaves the recoverable backup and
+    // marker available to rollback rather than an untracked mixed generation.
+    if let Err(error) = replace_staged_file(&marker_stage, &marker_path) {
+        remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
+        return Err(error);
+    }
+    if let Err(error) = replace_staged_file(&central_stage, &target_config) {
+        let _ = restore_or_remove_after_failed_apply(
+            &target_config,
+            &backup_dir.join("config.yaml"),
+            had_config,
+            config_mode,
+        );
+        let _ = fs::remove_file(&marker_path);
+        remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
+        return Err(error);
+    }
+    if let Err(error) = replace_staged_file(&workflow_stage, &source.workflow_path) {
+        let _ = restore_or_remove_after_failed_apply(
+            &target_config,
+            &backup_dir.join("config.yaml"),
+            had_config,
+            config_mode,
+        );
+        let _ = restore_or_remove_after_failed_apply(
+            &source.workflow_path,
+            &backup_dir.join("WORKFLOW.md"),
+            had_workflow,
+            workflow_mode,
+        );
+        let _ = fs::remove_file(&marker_path);
+        remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
+        return Err(error);
+    }
 
     Ok(MigrationReport {
         operation: "apply",
@@ -489,23 +552,12 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         .config
         .map(|path| absolute_path(&cwd, &path))
         .unwrap_or_else(|| cwd.join("config.yaml"));
-    let migration_root = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".opensymphony/migration");
-    let marker_path = migration_root.join("activation.yaml");
-    if !marker_path.is_file() {
-        return Err(MigrationError::MissingActivation { path: marker_path });
-    }
-    let marker_raw = fs::read_to_string(&marker_path).map_err(|source| MigrationError::Read {
-        path: marker_path.clone(),
-        source,
-    })?;
-    let marker: ActivationMarker =
-        serde_yaml::from_str(&marker_raw).map_err(|source| MigrationError::ParseActivation {
-            path: marker_path.clone(),
-            source,
-        })?;
+    let migration_root = migration_root(&config_path);
+    let Some((marker_path, marker)) = load_activation_marker(&config_path)? else {
+        return Err(MigrationError::MissingActivation {
+            path: migration_marker_path(&config_path),
+        });
+    };
     let active_run_marker = migration_root.join("strict-run.active");
     if active_run_marker.exists() {
         return Err(MigrationError::ActiveStrictRun {
@@ -729,14 +781,35 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         .project_slug
         .clone()
         .unwrap_or_else(|| "legacy-project".to_owned());
-    let target_branch = target_branch(&source.workflow.prompt_template);
-    let workspace_root = source
-        .workflow
-        .front_matter
-        .workspace
-        .root
-        .clone()
-        .unwrap_or_else(|| "~/.opensymphony/workspaces/legacy-migrated".to_owned());
+    let target_branch = target_branch(&source.workflow.prompt_template).ok_or_else(|| {
+        MigrationError::MissingTargetBranch {
+            path: source.workflow_path.clone(),
+        }
+    })?;
+    let instance_id = format!(
+        "legacy-{}-{}",
+        safe_id(
+            source
+                .target_repo
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("repository")
+        ),
+        &sha256(source.target_repo.display().to_string().as_bytes())[7..23]
+    );
+    let workspace_root = match source.workflow.front_matter.workspace.root.as_deref() {
+        Some(value) => {
+            let value =
+                super::expand_env_tokens(value).map_err(|error| MigrationError::ResolveConfig {
+                    path: source.workflow_path.clone(),
+                    detail: format!("workspace.root: {error}"),
+                })?;
+            resolve_repo_path(&source.target_repo, &value)
+                .display()
+                .to_string()
+        }
+        None => format!("~/.opensymphony/workspaces/{instance_id}"),
+    };
     let instruction_path = if source.target_repo.join("AGENTS.md").is_file() {
         "AGENTS.md"
     } else {
@@ -759,18 +832,39 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         .and_then(|value| integer_value(value).parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(10);
-    let instance_id = format!(
-        "legacy-{}-{}",
-        safe_id(
-            source
-                .target_repo
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("repository")
-        ),
-        &sha256(source.target_repo.display().to_string().as_bytes())[7..23]
-    );
     let state_root = format!("~/.opensymphony/state/{instance_id}");
+    let max_concurrent_agents_by_state = source
+        .workflow
+        .front_matter
+        .agent
+        .max_concurrent_agents_by_state
+        .as_ref()
+        .map(|limits| {
+            limits
+                .iter()
+                .map(|(state, value)| {
+                    integer_value(value)
+                        .parse::<u64>()
+                        .map(|value| (state.clone(), value))
+                        .map_err(|_| MigrationError::InvalidNumericSetting {
+                            field: format!("agent.max_concurrent_agents_by_state.{state}"),
+                            value: integer_value(value),
+                        })
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let control_plane_bind = expand_legacy_bind(
+        source.config.control_plane.bind.as_deref(),
+        &source.source_config,
+        "control_plane.bind",
+    )?;
+    let memory_bind = expand_legacy_bind(
+        source.config.memory.bind.as_deref(),
+        &source.source_config,
+        "memory.bind",
+    )?;
     let root = json!({
         "schema_version": 1,
         "instance": {
@@ -818,6 +912,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         "workspace": {"root": workspace_root, "retain_failed": true, "cleanup_after_parent_finalization": false},
         "scheduler": {
             "max_concurrent_tasks": max_concurrent_tasks,
+            "max_concurrent_agents_by_state": max_concurrent_agents_by_state,
             "max_turns": source.workflow.front_matter.agent.max_turns.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
             "max_retry_backoff_ms": source.workflow.front_matter.agent.max_retry_backoff_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
             "stall_timeout_ms": source.workflow.front_matter.agent.stall_timeout_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
@@ -837,10 +932,10 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "auto_capture": source.config.memory.auto_capture.unwrap_or(true),
             "auto_archive": source.config.memory.auto_archive.unwrap_or(false),
             "serve": source.config.memory.serve.unwrap_or_else(|| source.target_repo.join(".opensymphony/memory").is_dir()),
-            "bind": source.config.memory.bind.clone(),
+            "bind": memory_bind,
             "token_env": source.config.memory.token_env.clone(),
         },
-        "control_plane": {"bind": source.config.control_plane.bind.clone().unwrap_or_else(|| "127.0.0.1:2468".to_owned())},
+        "control_plane": {"bind": control_plane_bind.unwrap_or_else(|| "127.0.0.1:2468".to_owned())},
         "openhands": {
             "tool_dir": source.config.openhands.tool_dir.clone(),
             "transport_base_url": source.workflow.front_matter.openhands.transport.base_url.clone(),
@@ -862,13 +957,12 @@ fn workflow_body(source: &SourceContext) -> &[u8] {
     }
 }
 
-fn target_branch(prompt: &str) -> String {
+fn target_branch(prompt: &str) -> Option<String> {
     prompt
         .lines()
         .find_map(|line| line.trim().strip_prefix("Target branch:"))
         .map(|value| value.trim().trim_matches('`').to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "develop".to_owned())
 }
 
 fn integer_value(value: &crate::opensymphony_workflow::IntegerLike) -> String {
@@ -918,13 +1012,47 @@ fn hook_creates_repository(value: &str) -> bool {
     let normalized = value
         .replace("\\\r\n", " ")
         .replace("\\\n", " ")
+        .replace("&&", ";")
+        .replace("||", ";")
         .to_ascii_lowercase();
     normalized
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        .split([';', '\n'])
+        .map(str::split_whitespace)
+        .any(|mut tokens| {
+            let tokens = tokens
+                .by_ref()
+                .map(|token| {
+                    token.trim_matches(|character: char| {
+                        matches!(character, '&' | '|' | ';' | '(' | ')' | '\'' | '"')
+                    })
+                })
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>();
+            let Some(command) = tokens.first().copied() else {
+                return false;
+            };
+            match command {
+                "git" => tokens[1..]
+                    .iter()
+                    .any(|token| matches!(*token, "clone" | "init")),
+                "gh" => tokens.get(1..3) == Some(["repo", "clone"].as_slice()),
+                _ => false,
+            }
         })
-        .filter(|token| !token.is_empty())
-        .any(|token| token == "clone" || token == "init")
+}
+
+fn expand_legacy_bind(
+    value: Option<&str>,
+    path: &Path,
+    field: &str,
+) -> Result<Option<String>, MigrationError> {
+    value
+        .map(super::expand_env_tokens)
+        .transpose()
+        .map_err(|error| MigrationError::ResolveConfig {
+            path: path.to_path_buf(),
+            detail: format!("{field}: {error}"),
+        })
 }
 
 fn tracker_credential_variable(value: Option<&str>) -> Result<String, MigrationError> {
@@ -1008,10 +1136,45 @@ fn restore_file(backup: &Path, target: &Path, mode: Option<u32>) -> Result<(), M
     })?;
     let stage = stage_path(target, &sha256(&contents));
     write_file_with_mode(&stage, &contents, mode)?;
-    fs::rename(&stage, target).map_err(|source| MigrationError::Write {
+    replace_staged_file(&stage, target)
+}
+
+fn replace_staged_file(stage: &Path, target: &Path) -> Result<(), MigrationError> {
+    #[cfg(windows)]
+    if target.exists() {
+        fs::remove_file(target).map_err(|source| MigrationError::Write {
+            path: target.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::rename(stage, target).map_err(|source| MigrationError::Write {
         path: target.to_path_buf(),
         source,
     })
+}
+
+fn remove_staged_files(paths: &[&Path]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn restore_or_remove_after_failed_apply(
+    target: &Path,
+    backup: &Path,
+    had_original: bool,
+    mode: Option<u32>,
+) -> Result<(), MigrationError> {
+    if had_original {
+        restore_file(backup, target, mode)
+    } else if target.is_file() {
+        fs::remove_file(target).map_err(|source| MigrationError::Write {
+            path: target.to_path_buf(),
+            source,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn resolve_repo_path(base: &Path, value: &str) -> PathBuf {
@@ -1022,7 +1185,18 @@ fn resolve_repo_path(base: &Path, value: &str) -> PathBuf {
     } else {
         PathBuf::from(value)
     };
-    absolute_path(base, &value)
+    let path = absolute_path(base, &value);
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn file_mode(path: &Path) -> Result<Option<u32>, std::io::Error> {
@@ -1105,6 +1279,9 @@ mod tests {
         ));
         assert!(hook_creates_repository("gh repo \\\nclone owner/repo ."));
         assert!(hook_creates_repository("git \\\nclone URL ."));
+        assert!(hook_creates_repository("cd repo && git clone URL ."));
+        assert!(!hook_creates_repository("npm init -y"));
+        assert!(!hook_creates_repository("cargo init --name clone"));
         assert!(!hook_creates_repository("printf '%s\\n' ready"));
     }
 
@@ -1146,10 +1323,10 @@ mod tests {
             .status()
             .expect("git remote should be configured");
         let config_path = root.path().join("config.yaml");
-        let output_path = root.path().join("central.yaml");
+        let output_path = root.path().join("central/central.yaml");
         let workflow_path = root.path().join("WORKFLOW.md");
         let old_config = "control_plane:\n  bind: 127.0.0.1:2468\n";
-        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\n---\n\n# Implementation instructions\n";
+        let old_workflow = "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ../.legacy-workspaces\nagent:\n  max_concurrent_agents_by_state:\n    In Progress: 1\nopenhands:\n  local_server:\n    enabled: true\n    command: [custom-openhands]\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n  websocket:\n    reconnect_max_ms: 9876\n---\n\nTarget branch: develop\n\n# Implementation instructions\n";
         fs::write(&config_path, old_config).expect("legacy config should be written");
         fs::write(&workflow_path, old_workflow).expect("legacy workflow should be written");
         #[cfg(unix)]
@@ -1180,6 +1357,18 @@ mod tests {
         assert!(migrated_config.contains("custom-openhands"));
         assert!(migrated_config.contains("CUSTOM_OPENAI_KEY"));
         assert!(migrated_config.contains("reconnect_max_ms"));
+        assert!(migrated_config.contains("max_concurrent_agents_by_state"));
+        assert!(
+            migrated_config.contains(
+                &root
+                    .path()
+                    .parent()
+                    .expect("temporary root should have a parent")
+                    .join(".legacy-workspaces")
+                    .display()
+                    .to_string()
+            )
+        );
         assert!(migrated_workflow.contains("Implementation instructions"));
         assert!(!migrated_config.contains("super-secret"));
         #[cfg(unix)]
@@ -1203,12 +1392,16 @@ mod tests {
             );
         }
 
-        let strict_run_marker = root
-            .path()
-            .join(".opensymphony/migration/strict-run.active");
+        let strict_run_marker = migration_root(&output_path).join("strict-run.active");
+        fs::create_dir_all(
+            strict_run_marker
+                .parent()
+                .expect("strict run marker should have a parent"),
+        )
+        .expect("migration marker directory should exist");
         fs::write(&strict_run_marker, "active\n").expect("strict run marker should be written");
         let blocked = rollback(RollbackArgs {
-            config: Some(config_path.clone()),
+            config: Some(output_path.clone()),
         })
         .await
         .expect_err("rollback should be blocked by an active strict run");

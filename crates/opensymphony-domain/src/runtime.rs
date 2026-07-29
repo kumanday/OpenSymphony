@@ -775,7 +775,7 @@ impl RetryEntry {
             issue_id: issue.id.clone(),
             identifier: issue.identifier.clone(),
             attempt,
-            normal_retry_count,
+            normal_retry_count: normal_retry_count.saturating_add(1),
             scheduled_at,
             due_at: scheduled_at.saturating_add(policy.failure_delay(attempt)),
             reason,
