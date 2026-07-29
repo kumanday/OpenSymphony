@@ -275,7 +275,7 @@ describe("Run detail views", () => {
     handle.destroy();
   });
 
-  it("opens a diff symbol when the optional run overlay is unavailable", async () => {
+  it("opens a diff symbol in the baseline graph when the run overlay is unavailable", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const transport = buildTransport(runDetail);
@@ -294,6 +294,9 @@ describe("Run detail views", () => {
       transport,
       codeGraphAdapter: {
         ...createFixtureCodeGraphAdapter(),
+        getRunGraphSnapshot: async () => {
+          throw new Error("unexpected run-scoped graph request");
+        },
         getFileOutline: async () => ({ ...codeGraphFixtureOutlines[0], run_id: runDetail.run_id }),
         getRunDiffOverlay: async () => {
           throw new Error("diff overlay unavailable");
@@ -308,6 +311,7 @@ describe("Run detail views", () => {
     expect(root.querySelector("[data-code-mode='neighborhood']")?.classList.contains("is-selected")).toBe(true);
     const app = handle as unknown as { state: { codeGraph: { selectedNodeIds: string[] } } };
     await flushUntil(() => app.state.codeGraph.selectedNodeIds.includes("symbol:graphReducer"));
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent).toContain("Baseline");
     await handle.destroy();
   });
 

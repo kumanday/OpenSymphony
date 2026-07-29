@@ -2008,7 +2008,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         repoId,
         symbolKey: symbolKey ?? null,
         path: path ?? null,
-        runId: run.run_id,
+        runId: overlay ? run.run_id : null,
         baseRevision: overlay?.base_revision ?? null,
         headRevision: overlay?.head_revision ?? null,
       });
