@@ -1598,13 +1598,7 @@ mod tests {
         assert!(migrated_config.contains("CUSTOM_HARNESS"));
         assert!(migrated_config.contains("CUSTOM_MODEL_PROFILE"));
         assert!(migrated_config.contains("MEMORY_TOKEN_ENV"));
-        assert!(migrated_config.contains(
-            &root
-                .path()
-                .join("managed-tools")
-                .display()
-                .to_string()
-        ));
+        assert!(migrated_config.contains(&root.path().join("managed-tools").display().to_string()));
         assert!(!migrated_config.contains("max_attempts"));
         assert!(migrated_config.contains("serve: false"));
         assert!(migrated_config.contains("reconnect_max_ms"));
