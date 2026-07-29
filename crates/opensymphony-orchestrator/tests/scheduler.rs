@@ -537,6 +537,48 @@ impl WorkerBackend for FakeWorker {
 }
 
 #[tokio::test]
+async fn launch_failure_persists_retry_metadata_before_returning_error() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-267", "COE-267", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        persist_retry_pending_results: VecDeque::from([Err(FakeError {
+            message: "launch retry marker write failed".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let worker = FakeWorker {
+        launch_results: VecDeque::from([Err(FakeError {
+            message: "worker launch failed".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    assert!(scheduler.tick(ts(100)).await.is_err());
+    let issue_id = IssueId::new("lin-267").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("launch failure retry should remain tracked")
+            .status(),
+        SchedulerStatus::RetryQueued
+    );
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 0);
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("launch retry marker should be retried");
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 1);
+}
+
+#[tokio::test]
 async fn rate_limit_cooldown_skips_linear_reads_but_keeps_worker_updates_flowing() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-500", "COE-500", "In Progress", 0)],

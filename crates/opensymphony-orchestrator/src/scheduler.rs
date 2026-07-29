@@ -1855,7 +1855,8 @@ where
                 }
             }
 
-            self.insert_execution(issue_id, execution);
+            self.insert_execution(issue_id.clone(), execution);
+            self.persist_retry_if_queued(&issue_id).await?;
         }
 
         Ok(())
@@ -1916,27 +1917,11 @@ where
                             continue;
                         }
                     };
-                    let retry = execution.retry().cloned();
-                    self.insert_execution(issue_id, execution);
-                    if let Some(retry) = retry {
-                        let issue_id = retry.issue_id.clone();
-                        let workspace = self
-                            .executions
-                            .get(&issue_id)
-                            .and_then(|execution| execution.workspace().cloned());
-                        if let Some(workspace) = workspace
-                            && let Err(error) = self
-                                .workspace
-                                .persist_retry_pending(&workspace, &retry)
-                                .await
-                        {
-                            self.pending_retry_persistence.insert(issue_id, retry);
-                            if first_error.is_none() {
-                                first_error = Some(SchedulerError::Workspace {
-                                    detail: error.to_string(),
-                                });
-                            }
-                        }
+                    self.insert_execution(issue_id.clone(), execution);
+                    if let Err(error) = self.persist_retry_if_queued(&issue_id).await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
                     }
                 }
                 WorkerUpdate::ConversationMetadataUpdate {
@@ -2039,7 +2024,8 @@ where
             execution = self
                 .resolve_finished_execution(execution, outcome, observed_at)
                 .await?;
-            self.insert_execution(issue_id, execution);
+            self.insert_execution(issue_id.clone(), execution);
+            self.persist_retry_if_queued(&issue_id).await?;
         }
 
         Ok(())
@@ -2437,6 +2423,29 @@ where
                     detail: error.to_string(),
                 });
             }
+        }
+        Ok(())
+    }
+
+    async fn persist_retry_if_queued(&mut self, issue_id: &IssueId) -> Result<(), SchedulerError> {
+        let Some((retry, workspace)) = self.executions.get(issue_id).and_then(|execution| {
+            execution
+                .retry()
+                .cloned()
+                .zip(execution.workspace().cloned())
+        }) else {
+            return Ok(());
+        };
+        if let Err(error) = self
+            .workspace
+            .persist_retry_pending(&workspace, &retry)
+            .await
+        {
+            self.pending_retry_persistence
+                .insert(issue_id.clone(), retry);
+            return Err(SchedulerError::Workspace {
+                detail: error.to_string(),
+            });
         }
         Ok(())
     }
