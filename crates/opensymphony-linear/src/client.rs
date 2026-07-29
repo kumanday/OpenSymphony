@@ -3,7 +3,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot, TrackerIssueSummary};
+use crate::opensymphony_domain::{
+    TrackerErrorCategory, TrackerIssue, TrackerIssueStateSnapshot, TrackerIssueSummary,
+};
 use reqwest::{
     Client, StatusCode,
     header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER},
@@ -326,9 +328,17 @@ impl LinearClient {
                 relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
                 label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
             };
-            let response: IssueByIdentifierData = self
+            let response: IssueByIdentifierData = match self
                 .execute_graphql(ISSUE_BY_IDENTIFIER_QUERY, json!(variables))
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) if error.category() == TrackerErrorCategory::NotFound => {
+                    missing_issue_ids.push(identifier.clone());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let Some(issue) = response.issue else {
                 missing_issue_ids.push(identifier.clone());
                 continue;

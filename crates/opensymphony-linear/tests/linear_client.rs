@@ -1364,7 +1364,7 @@ fn issue_by_identifier_response(
 }
 
 fn issue_not_found_response() -> String {
-    r#"{"data":{"issue":null}}"#.to_string()
+    r#"{"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INPUT_ERROR","statusCode":400,"type":"invalid input","userError":true,"userPresentableMessage":"Could not find referenced Issue."},"path":["issue"]}],"data":{"issue":null}}"#.to_string()
 }
 
 #[derive(Debug, Clone)]
