@@ -18,11 +18,19 @@ credential references, review profiles, scheduler, integration, workspace, and
 memory-catalog policy. Relative paths resolve from the central config file.
 Remote values may contain no credentials, repository aliases are unique, and
 strict unknown fields fail before tracker polling or workspace creation.
+Central-config detection requires a non-empty `instance` section together with
+`routing.mode`; a legacy file containing only `schema_version` remains on the
+legacy parser. `compatibility.allow_repo_local_config` is currently unsupported
+and must remain `false`; setting it to `true` fails validation rather than
+silently discarding repository-local orchestration settings.
 The `openhands.front_matter` subsection carries the complete typed OpenHands
 transport, local-server, conversation/LLM, subscription-reference, and
 WebSocket profile when a workflow is migrated. `scheduler.retry.max_attempts`
 is enforced as the maximum number of automatic retries; omitted values retain
 the legacy retry behavior.
+`workspace.retain_failed` applies only to failed or retry-exhausted outcomes:
+successful, cancelled, and tracker-terminal releases still clean up their
+workspaces.
 
 The supported routing variants are explicit:
 
@@ -36,8 +44,9 @@ routing:
 `project_set` validates the multi-repository model but remains disabled until
 its later release gates pass; it fails before starting the scheduler rather
 than silently falling back to the current directory. Operational recovery
-commands (`debug` and `rehydrate`) reject the same gated mode instead of
-selecting an unrelated checkout for workflow or conversation-store discovery.
+commands (`debug` and `rehydrate`), plus doctor live probes and rehydration,
+reject the same gated mode before selecting an unrelated checkout for workflow
+or conversation-store discovery.
 `rehydrate` also accepts `--config <path>` when an instance is not the default
 home configuration. `memory init` refuses to treat a selected central config
 as a repository-local memory file; initialize the local memory config instead.
@@ -72,9 +81,11 @@ is active; it restores the original file permissions as well as file contents.
 Repeating a complete `apply` is a no-op; a partially published activation
 promotes its staged workflow or restores the backup before retrying.
 When preserving a legacy `.opensymphony/memory` tree, preflight refuses an
-active memory writer and apply takes a recoverable migration lock before
-copying; the local memory server honors that lock and publishes an activity
-marker while it is running.
+active memory writer without changing files. Apply and the local memory server
+claim the same atomic coordination lock, and the server holds it for its
+lifetime while publishing an activity marker. Owner PIDs allow stale lock and
+marker recovery after an unclean exit; apply removes stale markers only after
+it owns the lock.
 
 ## Bootstrap
 

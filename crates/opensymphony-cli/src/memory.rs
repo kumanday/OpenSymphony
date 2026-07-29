@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::Write,
+    io::{self, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
@@ -13,6 +13,9 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
+
+#[cfg(unix)]
+use rustix::process::{Pid, test_kill_process};
 
 use crate::{
     opensymphony_code_intel::{
@@ -61,6 +64,23 @@ const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
 pub(crate) const MEMORY_ACTIVITY_MARKER: &str = ".opensymphony-memory.active";
 pub(crate) const MEMORY_MIGRATION_LOCK: &str = "memory.migration.lock";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryActivityStatus {
+    Absent,
+    Live,
+    Stale,
+}
+
+pub(crate) struct MemoryCoordinationLock {
+    path: PathBuf,
+}
+
+impl Drop for MemoryCoordinationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 const AST_MCP_TOOL_NAMES: &[&str] = &[
     "code.ast.status",
     "code.ast.outline",
@@ -1586,6 +1606,7 @@ pub(crate) struct MemoryServerHandle {
     endpoint: String,
     task: Option<JoinHandle<Result<(), String>>>,
     activity_marker: Option<PathBuf>,
+    _coordination_lock: Option<MemoryCoordinationLock>,
 }
 
 impl Drop for MemoryServerHandle {
@@ -1675,17 +1696,39 @@ async fn start_memory_server_with_auth(
     central_config_path: Option<PathBuf>,
 ) -> Result<MemoryServerHandle, MemoryError> {
     let activity_marker = memory_activity_marker_path(&config.memory_root);
-    let migration_lock = memory_migration_lock_path(&config.repo_root);
-    if migration_lock.exists() {
-        return Err(MemoryError::InvalidInput(format!(
-            "memory migration is active at {}; stop the migration before starting the memory server",
-            migration_lock.display()
-        )));
-    }
+    let coordination_lock =
+        acquire_memory_coordination_lock(&config.repo_root).map_err(|source| {
+            MemoryError::InvalidInput(format!(
+                "memory migration or server activity is already active at {}; {source}",
+                memory_migration_lock_path(&config.repo_root).display()
+            ))
+        })?;
     fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
         path: config.memory_root.clone(),
         source,
     })?;
+    match memory_activity_status(&config.memory_root).map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "failed to inspect memory server activity marker {}: {source}",
+            activity_marker.display()
+        ))
+    })? {
+        MemoryActivityStatus::Absent => {}
+        MemoryActivityStatus::Stale => {
+            fs::remove_file(&activity_marker).map_err(|source| {
+                MemoryError::InvalidInput(format!(
+                    "failed to remove stale memory activity marker {}: {source}",
+                    activity_marker.display()
+                ))
+            })?;
+        }
+        MemoryActivityStatus::Live => {
+            return Err(MemoryError::InvalidInput(format!(
+                "memory server is already active at {}",
+                activity_marker.display()
+            )));
+        }
+    }
     let mut marker = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1730,6 +1773,7 @@ async fn start_memory_server_with_auth(
         endpoint: format!("http://{local_addr}/mcp"),
         task: Some(task),
         activity_marker: Some(activity_marker),
+        _coordination_lock: Some(coordination_lock),
     })
 }
 
@@ -1739,6 +1783,89 @@ pub(crate) fn memory_activity_marker_path(memory_root: &Path) -> PathBuf {
 
 pub(crate) fn memory_migration_lock_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".opensymphony").join(MEMORY_MIGRATION_LOCK)
+}
+
+pub(crate) fn acquire_memory_coordination_lock(
+    repo_root: &Path,
+) -> io::Result<MemoryCoordinationLock> {
+    let path = memory_migration_lock_path(repo_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                writeln!(file, "pid={}", process::id())?;
+                return Ok(MemoryCoordinationLock { path });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if memory_lock_owner_is_stale(&path) {
+                    fs::remove_file(&path)?;
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub(crate) fn memory_lock_is_stale(repo_root: &Path) -> bool {
+    let path = memory_migration_lock_path(repo_root);
+    path.exists() && memory_lock_owner_is_stale(&path)
+}
+
+pub(crate) fn memory_activity_status(memory_root: &Path) -> io::Result<MemoryActivityStatus> {
+    let path = memory_activity_marker_path(memory_root);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(MemoryActivityStatus::Absent);
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(pid) = raw.lines().find_map(|line| {
+        line.strip_prefix("pid=")
+            .and_then(|value| value.parse().ok())
+    }) else {
+        return Ok(MemoryActivityStatus::Live);
+    };
+    Ok(if process_is_alive(pid) {
+        MemoryActivityStatus::Live
+    } else {
+        MemoryActivityStatus::Stale
+    })
+}
+
+fn memory_lock_owner_is_stale(path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    raw.lines()
+        .find_map(|line| {
+            line.strip_prefix("pid=")
+                .and_then(|value| value.parse().ok())
+        })
+        .is_some_and(|pid| !process_is_alive(pid))
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid > i32::MAX as u32 {
+            return false;
+        }
+        Pid::from_raw(pid as _).is_some_and(|pid| test_kill_process(pid).is_ok())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 async fn memory_server_health(
@@ -6107,6 +6234,28 @@ mod tests {
         assert!(
             matches!(error, MemoryError::InvalidInput(message) if message.contains("migration"))
         );
+    }
+
+    #[tokio::test]
+    async fn memory_server_reclaims_stale_activity_marker() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let marker_path = super::memory_activity_marker_path(&config.memory_root);
+        std::fs::create_dir_all(&config.memory_root).expect("memory root");
+        std::fs::write(&marker_path, "pid=2000000000\n").expect("stale marker");
+
+        let handle = super::start_memory_server_with_workspace_root(
+            config,
+            "127.0.0.1:0".parse().expect("address"),
+            None,
+            None,
+        )
+        .await
+        .expect("stale marker should be reclaimed");
+        assert!(marker_path.is_file());
+        handle.abort();
+        drop(handle);
+        assert!(!marker_path.exists());
     }
 
     #[test]

@@ -275,6 +275,18 @@ pub trait WorkspaceBackend {
         workspace: &WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error>;
+
+    async fn persist_retry_count(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        _normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn retain_failed_workspaces(&self) -> bool {
+        false
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -987,7 +999,9 @@ where
                 .get(&normalized.id)
                 .filter(|execution| retry_exhausted_release(execution))
                 .and_then(|execution| execution.workspace().cloned());
-            if let Some(workspace) = retry_cleanup_workspace {
+            if let Some(workspace) = retry_cleanup_workspace
+                && !self.workspace.retain_failed_workspaces()
+            {
                 match self.workspace.cleanup_workspace(&workspace, true).await {
                     Ok(()) => {
                         if let Some(execution) = self.executions.get_mut(&normalized.id) {
@@ -1819,7 +1833,10 @@ where
         if execution.status() != SchedulerStatus::Released {
             execution = execution.release(observed_at, reason, None)?;
         }
+        let retain_failed =
+            reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
         if cleanup_terminal
+            && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
         {
@@ -1924,6 +1941,7 @@ where
         }
 
         self.queue_retry_for_outcome(execution, outcome, observed_at)
+            .await
     }
 
     async fn refresh_finished_issue_state(
@@ -1963,7 +1981,12 @@ where
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
         );
         let mut execution = execution.release(observed_at, reason, outcome)?;
-        if cleanup_terminal && let Some(workspace) = execution.workspace().cloned() {
+        let retain_failed =
+            reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
+        if cleanup_terminal
+            && !retain_failed
+            && let Some(workspace) = execution.workspace().cloned()
+        {
             match self.workspace.cleanup_workspace(&workspace, true).await {
                 Ok(()) => execution.clear_workspace(),
                 Err(error) => {
@@ -1978,8 +2001,8 @@ where
         Ok(execution)
     }
 
-    fn queue_retry_for_outcome(
-        &self,
+    async fn queue_retry_for_outcome(
+        &mut self,
         execution: IssueExecution,
         outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
@@ -2010,6 +2033,14 @@ where
                 self.config.retry_policy,
             )?,
         };
+        if let Some(workspace) = execution.workspace() {
+            self.workspace
+                .persist_retry_count(workspace, retry.normal_retry_count)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+        }
         Ok(execution.queue_retry(retry, outcome)?)
     }
 

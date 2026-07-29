@@ -166,7 +166,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let workspace_manager = Arc::new(crate::opensymphony_workspace::WorkspaceManager::new(
         build_workspace_manager_config_with_retention(&runtime.workflow, runtime.retain_failed),
     )?);
-    let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
+    let workspace = RuntimeWorkspaceBackend::new_with_retention(
+        workspace_manager.clone(),
+        &runtime.workflow,
+        runtime.retain_failed,
+    );
     let selected_openhands = selected_openhands_harness(&runtime);
     let managed_local_preparation = if selected_openhands {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())

@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    env,
+    env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
@@ -135,6 +135,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
     codex_bin: String,
+    retain_failed: bool,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -493,12 +494,17 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
 pub(super) fn build_workspace_manager_config(
     workflow: &ResolvedWorkflow,
 ) -> WorkspaceManagerConfig {
-    build_workspace_manager_config_with_retention(workflow, true)
+    let mut config = build_workspace_manager_config_with_retention(workflow, true);
+    // Unit tests exercise backend behavior without the scheduler's
+    // outcome-aware cleanup decision, so keep their fixtures available for
+    // manifest assertions.
+    config.cleanup.remove_terminal_workspaces = false;
+    config
 }
 
 pub(super) fn build_workspace_manager_config_with_retention(
     workflow: &ResolvedWorkflow,
-    retain_failed: bool,
+    _retain_failed: bool,
 ) -> WorkspaceManagerConfig {
     let hooks = &workflow.config.hooks;
     WorkspaceManagerConfig {
@@ -511,7 +517,11 @@ pub(super) fn build_workspace_manager_config_with_retention(
             timeout: Duration::from_millis(hooks.timeout_ms),
         },
         cleanup: CleanupConfig {
-            remove_terminal_workspaces: !retain_failed,
+            // Retention is decided by the scheduler from the terminal outcome.
+            // The manager must keep normal terminal cleanup enabled so a
+            // successful or cancelled issue is not retained just because the
+            // failed-workspace policy is enabled.
+            remove_terminal_workspaces: true,
         },
     }
 }
@@ -620,7 +630,16 @@ impl TrackerBackend for RuntimeTrackerBackend {
 }
 
 impl RuntimeWorkspaceBackend {
+    #[cfg(test)]
     pub(super) fn new(manager: Arc<WorkspaceManager>, workflow: &ResolvedWorkflow) -> Self {
+        Self::new_with_retention(manager, workflow, true)
+    }
+
+    pub(super) fn new_with_retention(
+        manager: Arc<WorkspaceManager>,
+        workflow: &ResolvedWorkflow,
+        retain_failed: bool,
+    ) -> Self {
         Self {
             manager,
             active_states: workflow
@@ -639,6 +658,7 @@ impl RuntimeWorkspaceBackend {
                 .collect(),
             terminal_cleanup_paths: HashSet::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            retain_failed,
         }
     }
 }
@@ -772,6 +792,39 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             self.terminal_cleanup_paths.insert(workspace.path.clone());
         }
         Ok(())
+    }
+
+    async fn persist_retry_count(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        let Some((handle, _)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
+            }));
+        };
+        let Some(mut manifest) = self.manager.load_run_manifest(&handle).await? else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: handle.run_manifest_path(),
+                source: io::Error::new(io::ErrorKind::NotFound, "run manifest is missing"),
+            }));
+        };
+        manifest.normal_retry_count = normal_retry_count;
+        manifest.updated_at = chrono::Utc::now();
+        self.manager.write_run_manifest(&handle, &manifest).await?;
+        Ok(())
+    }
+
+    fn retain_failed_workspaces(&self) -> bool {
+        self.retain_failed
     }
 }
 
@@ -5709,14 +5762,14 @@ Run the scheduler.
     }
 
     #[test]
-    fn workspace_manager_config_applies_failed_workspace_retention() {
+    fn workspace_manager_config_keeps_terminal_cleanup_outcome_aware() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workflow = sample_workflow(
             &tempdir.path().join("repo"),
             &tempdir.path().join("workspaces"),
         );
         assert!(
-            !build_workspace_manager_config_with_retention(&workflow, true)
+            build_workspace_manager_config_with_retention(&workflow, true)
                 .cleanup
                 .remove_terminal_workspaces
         );

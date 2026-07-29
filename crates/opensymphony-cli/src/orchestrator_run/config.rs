@@ -636,14 +636,21 @@ pub fn looks_like_central_config(raw: &str) -> bool {
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
-    mapping.contains_key(serde_yaml::Value::String("schema_version".to_owned()))
-        || mapping.contains_key(serde_yaml::Value::String("instance".to_owned()))
-        || mapping
-            .get(serde_yaml::Value::String("routing".to_owned()))
-            .and_then(serde_yaml::Value::as_mapping)
-            .is_some_and(|routing| {
-                routing.contains_key(serde_yaml::Value::String("mode".to_owned()))
-            })
+    mapping
+        .get(serde_yaml::Value::String("instance".to_owned()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .is_some_and(|instance| {
+            !instance.is_empty()
+                && mapping
+                    .get(serde_yaml::Value::String("routing".to_owned()))
+                    .and_then(serde_yaml::Value::as_mapping)
+                    .is_some_and(|routing| {
+                        routing
+                            .get(serde_yaml::Value::String("mode".to_owned()))
+                            .and_then(serde_yaml::Value::as_str)
+                            .is_some_and(|mode| !mode.trim().is_empty())
+                    })
+        })
 }
 
 fn parse_legacy_run_config(path: &Path, raw: &str) -> Result<RunConfigFile, RunCommandError> {
@@ -908,7 +915,11 @@ fn resolve_central_config(
         required_literal(&integration.policy, "integration.policy")?;
         let _ = integration.use_shared_git_worktrees;
     }
-    let _ = config.compatibility.allow_repo_local_config;
+    if config.compatibility.allow_repo_local_config {
+        return Err(CentralConfigError::InvalidReference {
+            field: "compatibility.allow_repo_local_config".to_owned(),
+        });
+    }
 
     let mode = match config.routing.mode.trim() {
         "legacy_single" => CentralRoutingMode::LegacySingle,
@@ -919,11 +930,6 @@ fn resolve_central_config(
             });
         }
     };
-    if mode == CentralRoutingMode::ProjectSet && config.compatibility.allow_repo_local_config {
-        return Err(CentralConfigError::InvalidReference {
-            field: "compatibility.allow_repo_local_config".to_owned(),
-        });
-    }
     let active_project_set = config.routing.active_project_set.as_deref();
     let mut integration_instructions = None;
     match mode {
@@ -1837,6 +1843,40 @@ scheduler:
                 .expect("central root should canonicalize")
                 .join("integration.md")
         );
+    }
+
+    #[test]
+    fn central_config_discriminator_requires_instance_and_routing_mode() {
+        assert!(!looks_like_central_config("schema_version: 1\n"));
+        assert!(!looks_like_central_config("instance:\n  id: legacy\n"));
+        assert!(!looks_like_central_config(
+            "routing:\n  mode: legacy_single\n"
+        ));
+        assert!(looks_like_central_config(
+            "schema_version: 1\ninstance:\n  id: central\nrouting:\n  mode: legacy_single\n"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_unsupported_repo_local_compatibility() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path())
+            .replace(
+                "mode: project_set",
+                "mode: legacy_single\n  repository: core-repo",
+            )
+            .replace("  active_project_set: suite\n", "")
+            .replace(
+                "workspace:\n  root:",
+                "compatibility:\n  allow_repo_local_config: true\nworkspace:\n  root:",
+            );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("unsupported repository-local compatibility must fail closed");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "compatibility.allow_repo_local_config"
+        ));
     }
 
     #[test]

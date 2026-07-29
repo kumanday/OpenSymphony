@@ -378,6 +378,8 @@ struct FakeWorkspace {
     cleaned: Vec<(String, bool)>,
     cleanup_results: VecDeque<Result<(), FakeError>>,
     records: HashMap<String, WorkspaceRecord>,
+    persisted_retry_counts: Vec<u32>,
+    retain_failed: bool,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -414,6 +416,19 @@ impl WorkspaceBackend for FakeWorkspace {
         self.cleaned
             .push((workspace.workspace_key.to_string(), terminal));
         self.cleanup_results.pop_front().unwrap_or(Ok(()))
+    }
+
+    async fn persist_retry_count(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        self.persisted_retry_counts.push(normal_retry_count);
+        Ok(())
+    }
+
+    fn retain_failed_workspaces(&self) -> bool {
+        self.retain_failed
     }
 }
 
@@ -1245,6 +1260,7 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
     let retry = execution.retry().expect("retry metadata should exist");
     assert_eq!(retry.reason, RetryReason::Continuation);
     assert_eq!(retry.due_at, ts(1_200));
+    assert_eq!(scheduler.workspace().persisted_retry_counts, vec![1]);
 
     scheduler
         .tick(ts(1_300))
@@ -1273,7 +1289,10 @@ async fn retry_limit_parks_successful_continuations() {
         active: vec![tracker_issue("lin-269", "COE-269", "In Progress", 0)],
         ..Default::default()
     };
-    let workspace = FakeWorkspace::default();
+    let workspace = FakeWorkspace {
+        retain_failed: true,
+        ..Default::default()
+    };
     let worker = FakeWorker::default();
     let mut config = scheduler_config();
     config.max_retry_attempts = Some(1);
@@ -1341,6 +1360,7 @@ async fn retry_limit_parks_successful_continuations() {
         .await
         .expect("exhausted continuation should remain parked");
     assert_eq!(scheduler.worker().launches.len(), 2);
+    assert!(scheduler.workspace().cleaned.is_empty());
 }
 
 #[tokio::test]
