@@ -275,11 +275,14 @@ describe("Run detail views", () => {
     handle.destroy();
   });
 
-  it("opens a diff symbol in the baseline graph when the run overlay is unavailable", async () => {
+  it("indexes a missing run base before opening the workspace symbol graph", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const transport = buildTransport(runDetail);
     const codePath = codeGraphFixtureOutlines[0].path;
+    const fixtureAdapter = createFixtureCodeGraphAdapter();
+    let indexed = false;
+    let indexCalls = 0;
     Object.assign(transport, {
       runFiles: async () => [{ ...files[0], path: codePath }],
       runDiffs: async () => ({
@@ -293,9 +296,22 @@ describe("Run detail views", () => {
       mode: "web",
       transport,
       codeGraphAdapter: {
-        ...createFixtureCodeGraphAdapter(),
-        getRunGraphSnapshot: async () => {
-          throw new Error("unexpected run-scoped graph request");
+        ...fixtureAdapter,
+        indexRepo: async (repoId) => {
+          indexCalls += 1;
+          const report = await fixtureAdapter.indexRepo(repoId);
+          return {
+            ...report,
+            status: "accepted",
+            parsed_files: 0,
+            persisted_documents: 0,
+            persisted_symbols: 0,
+            persisted_edges: 0,
+          };
+        },
+        getRunGraphSnapshot: async (_runId, repoId, options) => {
+          if (!indexed) throw new Error("code_revision_not_found");
+          return fixtureAdapter.getGraphSnapshot(repoId ?? "opensymphony", options);
         },
         getFileOutline: async () => ({ ...codeGraphFixtureOutlines[0], run_id: runDetail.run_id }),
         getRunDiffOverlay: async () => {
@@ -308,10 +324,17 @@ describe("Run detail views", () => {
 
     (root.querySelector("[data-diff-symbol-action]") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
+    await flushUntil(() => indexCalls === 1);
+    expect(root.querySelector("[data-testid='code-graph-status']")?.textContent).toContain("Indexing repository");
     expect(root.querySelector("[data-code-mode='neighborhood']")?.classList.contains("is-selected")).toBe(true);
-    const app = handle as unknown as { state: { codeGraph: { selectedNodeIds: string[] } } };
+    const app = handle as unknown as {
+      pollCodeGraphIndex(): Promise<void>;
+      state: { codeGraph: { selectedNodeIds: string[] } };
+    };
+    indexed = true;
+    await app.pollCodeGraphIndex();
     await flushUntil(() => app.state.codeGraph.selectedNodeIds.includes("symbol:graphReducer"));
-    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent).toContain("Baseline");
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent).toContain("Workspace-composed");
     await handle.destroy();
   });
 

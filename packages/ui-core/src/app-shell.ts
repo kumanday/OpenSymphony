@@ -1301,6 +1301,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
+    if (this.state.codeGraph.selectedNodeIds.length === 0) {
+      const targetNode = this.state.codeGraph.symbolKey
+        ? snapshot.nodes.find((node) => node.symbol_key === this.state.codeGraph.symbolKey)
+        : this.state.codeGraph.path
+          ? snapshot.nodes.find((node) => node.path_display === this.state.codeGraph.path)
+          : undefined;
+      if (targetNode) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: targetNode.id });
+      }
+    }
     if (this.state.codeGraph.snapshot !== previousSnapshot && (!previousSnapshot || !sameCodeGraphTopology(previousSnapshot, snapshot))) {
       this.invalidateCodeGraphLayout();
     } else if (retainedReadyLayout) {
@@ -2008,7 +2018,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         repoId,
         symbolKey: symbolKey ?? null,
         path: path ?? null,
-        runId: overlay ? run.run_id : null,
+        runId: run.run_id,
         baseRevision: overlay?.base_revision ?? null,
         headRevision: overlay?.head_revision ?? null,
       });
@@ -2066,7 +2076,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!this.state.runCodeOverlay) await this.loadRunCodeOverlay(runId);
     if (this.state.runDetail?.run_id !== runId) return;
     const link = this.runCodeDeepLink(symbolKey, path);
-    if (link) await this.openCodeDeepLink(link);
+    if (link && !(await this.openCodeDeepLink(link)) && !this.state.runCodeOverlay) {
+      await this.startCodeGraphIndex();
+    }
   }
 
   private selectEvidenceView(view: AppState["evidenceView"]): void {
