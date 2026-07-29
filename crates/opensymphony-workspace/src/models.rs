@@ -187,6 +187,12 @@ fn redact_key_value(input: &str, key: &str) -> String {
         }
         let bytes = redacted.as_bytes();
         let mut delimiter = key_end;
+        if bytes
+            .get(delimiter)
+            .is_some_and(|character| *character == b'"' || *character == b'\'')
+        {
+            delimiter += 1;
+        }
         while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
             delimiter += 1;
         }
@@ -957,5 +963,16 @@ mod tests {
         assert!(!value.contains("first"));
         assert!(!value.contains("second"));
         assert!(!value.contains("third"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_quoted_json_credentials() {
+        let value = redact_runtime_diagnostic(
+            r#"{"access_token":"quoted-secret","api_key":"another-secret"}"#,
+        );
+
+        assert!(!value.contains("quoted-secret"));
+        assert!(!value.contains("another-secret"));
+        assert_eq!(value.matches("[redacted]").count(), 2);
     }
 }

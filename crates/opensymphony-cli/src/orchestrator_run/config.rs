@@ -373,6 +373,8 @@ pub enum CentralConfigError {
     OverlappingRoots { left: PathBuf, right: PathBuf },
     #[error("central config repository remote contains credentials")]
     CredentialBearingRemote,
+    #[error("central config contains a literal secret in OpenHands environment")]
+    LiteralSecret,
     #[error("central config repository instruction path must be relative and contained")]
     InvalidInstructionPath,
     #[error("central config integration instructions must be relative to the central config")]
@@ -775,6 +777,16 @@ fn resolve_central_config(
     })?;
     if config.schema_version != 1 {
         return Err(CentralConfigError::UnsupportedSchema);
+    }
+    if config
+        .openhands
+        .front_matter
+        .as_ref()
+        .is_some_and(|front_matter| {
+            openhands_environment_has_literal_secret(&front_matter.local_server.env)
+        })
+    {
+        return Err(CentralConfigError::LiteralSecret);
     }
 
     let config_root = path.parent().unwrap_or_else(|| Path::new("."));
@@ -1493,6 +1505,42 @@ fn required_literal(value: &str, field: &'static str) -> Result<String, CentralC
         .ok_or(CentralConfigError::EmptyField { field })
 }
 
+fn openhands_environment_has_literal_secret(env: &BTreeMap<String, String>) -> bool {
+    env.iter().any(|(name, value)| {
+        let name = name.to_ascii_lowercase();
+        let secret_name = [
+            "access_token",
+            "api_key",
+            "apikey",
+            "authorization",
+            "credential",
+            "password",
+            "secret",
+            "token",
+        ]
+        .iter()
+        .any(|part| name == *part || name.ends_with(&format!("_{part}")));
+        secret_name && !is_central_credential_reference(value)
+    })
+}
+
+fn is_central_credential_reference(value: &str) -> bool {
+    let variable = value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'));
+    variable.is_some_and(|variable| {
+        !variable.is_empty()
+            && variable.chars().all(|character| {
+                character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+            })
+            && variable
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_uppercase() || character == '_')
+    })
+}
+
 fn validate_central_env_name(value: &str) -> Result<(), ()> {
     let valid = !value.is_empty()
         && value.chars().all(|character| {
@@ -2198,6 +2246,25 @@ scheduler:
                 .and_then(|llm| llm.api_key_env.as_deref()),
             Some("CUSTOM_OPENAI_KEY")
         );
+    }
+
+    #[test]
+    fn central_config_rejects_literal_openhands_environment_secret() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    local_server:\n      env:\n        OPENAI_ACCESS_TOKEN: literal-secret\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("literal OpenHands credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("literal-secret"));
     }
 
     #[test]

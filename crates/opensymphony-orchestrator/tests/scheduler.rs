@@ -382,6 +382,8 @@ struct FakeWorkspace {
     cleanup_results: VecDeque<Result<(), FakeError>>,
     records: HashMap<String, WorkspaceRecord>,
     persisted_retry_counts: Vec<u32>,
+    persisted_retry_exhaustions: Vec<u32>,
+    persist_retry_exhaustion_results: VecDeque<Result<(), FakeError>>,
     persisted_retry_pending: usize,
     persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
     retain_failed: bool,
@@ -444,6 +446,18 @@ impl WorkspaceBackend for FakeWorkspace {
         normal_retry_count: u32,
     ) -> Result<(), Self::Error> {
         self.persisted_retry_counts.push(normal_retry_count);
+        Ok(())
+    }
+
+    async fn persist_retry_exhaustion(
+        &mut self,
+        _issue: &NormalizedIssue,
+        normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        if let Some(result) = self.persist_retry_exhaustion_results.pop_front() {
+            result?;
+        }
+        self.persisted_retry_exhaustions.push(normal_retry_count);
         Ok(())
     }
 
@@ -1150,6 +1164,7 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
             issue: normalized_issue("lin-492", "COE-492", "Human Review"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
@@ -1533,6 +1548,127 @@ async fn retry_state_survives_a_failed_manifest_persistence() {
             .status(),
         SchedulerStatus::RetryQueued
     );
+}
+
+#[tokio::test]
+async fn exhaustion_persistence_failure_keeps_released_execution_tracked() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-270", "COE-270", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        persist_retry_exhaustion_results: VecDeque::from([Err(FakeError {
+            message: "exhaustion marker write failed".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(0);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler.tick(ts(100)).await.expect("initial dispatch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("worker failed".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("released execution should survive deferred marker persistence");
+    let issue_id = IssueId::new("lin-270").expect("issue id should be valid");
+    assert_eq!(
+        scheduler
+            .execution(&issue_id)
+            .expect("exhausted execution should remain tracked")
+            .status(),
+        SchedulerStatus::Released
+    );
+    assert!(scheduler.workspace().persisted_retry_exhaustions.is_empty());
+
+    scheduler
+        .tick(ts(300))
+        .await
+        .expect("deferred exhaustion marker should retry");
+    assert_eq!(scheduler.workspace().persisted_retry_exhaustions, vec![0]);
+}
+
+#[tokio::test]
+async fn worker_updates_after_persistence_failure_are_not_dropped() {
+    let tracker = FakeTracker {
+        active: vec![
+            tracker_issue("lin-271-a", "COE-271-A", "In Progress", 0),
+            tracker_issue("lin-271-b", "COE-271-B", "In Progress", 1),
+        ],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        persist_retry_pending_results: VecDeque::from([Err(FakeError {
+            message: "first pending marker write failed".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler.tick(ts(100)).await.expect("initial dispatch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    let second_run = scheduler.worker().launches[1].run.clone();
+    scheduler.worker_mut().updates.extend([
+        WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("first worker failed".to_string()),
+                None,
+            ),
+        },
+        WorkerUpdate::Finished {
+            worker_id: second_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &second_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("second worker failed".to_string()),
+                None,
+            ),
+        },
+    ]);
+
+    assert!(scheduler.tick(ts(200)).await.is_err());
+    for issue_id in ["lin-271-a", "lin-271-b"] {
+        assert_eq!(
+            scheduler
+                .execution(&IssueId::new(issue_id).expect("issue id should be valid"))
+                .expect("both finished executions should remain tracked")
+                .status(),
+            SchedulerStatus::RetryQueued
+        );
+    }
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 1);
+
+    scheduler
+        .tick(ts(300))
+        .await
+        .expect("the deferred first marker should retry");
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 2);
 }
 
 #[tokio::test]
@@ -2362,6 +2498,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
             issue: normalized_issue("lin-272", "COE-272", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,
@@ -2424,6 +2561,7 @@ async fn pre_conversation_recovery_honors_retry_limit() {
             issue: normalized_issue("lin-273", "COE-273", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2459,7 +2597,7 @@ async fn pre_conversation_recovery_honors_retry_limit() {
 }
 
 #[tokio::test]
-async fn recovery_restores_non_exhausted_retry_budget_before_dispatch() {
+async fn recovery_advances_consumed_retry_budget_before_dispatch() {
     let recovered_workspace = workspace_record("COE-274", "/tmp/recovered/COE-274");
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-274", "COE-274", "In Progress", 0)],
@@ -2470,6 +2608,7 @@ async fn recovery_restores_non_exhausted_retry_budget_before_dispatch() {
             issue: normalized_issue("lin-274", "COE-274", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2497,9 +2636,9 @@ async fn recovery_restores_non_exhausted_retry_budget_before_dispatch() {
             .run
             .attempt
             .map(|attempt| attempt.get()),
-        Some(1)
+        Some(2)
     );
-    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
+    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 2);
 }
 
 #[tokio::test]
@@ -2514,6 +2653,7 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
             issue: normalized_issue("lin-276", "COE-276", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: false,
             pending_retry: true,
             normal_retry_count: 0,
@@ -2560,6 +2700,7 @@ async fn recovery_parks_pending_retry_when_current_limit_is_lowered() {
             issue: normalized_issue("lin-277", "COE-277", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: false,
             pending_retry: true,
             normal_retry_count: 1,
@@ -2701,6 +2842,7 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
             issue: normalized_issue("lin-273", "COE-273", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2750,6 +2892,7 @@ async fn terminal_recovery_honors_failed_workspace_retention() {
             issue: normalized_issue("lin-274", "COE-274", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 1,
@@ -2776,6 +2919,48 @@ async fn terminal_recovery_honors_failed_workspace_retention() {
 }
 
 #[tokio::test]
+async fn terminal_recovery_preserves_cancelled_workspace_policy() {
+    let recovered_workspace = workspace_record("COE-275", "/tmp/recovered/COE-275");
+    let tracker = FakeTracker {
+        terminal: vec![tracker_issue("lin-275", "COE-275", "Done", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-275", "COE-275", "In Progress"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            recovered_run: None,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("cancelled terminal recovery should succeed");
+
+    assert_eq!(
+        scheduler.workspace().cleaned,
+        vec![("COE-275".to_string(), true)]
+    );
+    assert!(scheduler.workspace().failed_cleaned.is_empty());
+}
+
+#[tokio::test]
 async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
     // A leftover workspace for a non-active (Backlog) issue is recovered and
     // parked at startup. When the issue later moves back into an active
@@ -2794,6 +2979,7 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
             issue: normalized_issue("lin-532", "COE-532", "Backlog"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: false,
             pending_retry: false,
             normal_retry_count: 0,
@@ -2993,6 +3179,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
             issue: normalized_issue("lin-283-a", "COE-283-A", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
+            cancelled_run: false,
             had_in_flight_run: true,
             pending_retry: false,
             normal_retry_count: 0,

@@ -158,8 +158,9 @@ struct RuntimeRootLock {
 
 impl Drop for RuntimeRootOwnership {
     fn drop(&mut self) {
-        for lock in self.locks.drain(..) {
-            let _ = fs::remove_file(lock.marker);
+        for RuntimeRootLock { marker, _file } in self.locks.drain(..) {
+            drop(_file);
+            let _ = fs::remove_file(marker);
         }
     }
 }

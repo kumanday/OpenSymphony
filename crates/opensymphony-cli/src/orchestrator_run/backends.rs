@@ -808,6 +808,9 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 successful_run: run_manifest
                     .as_ref()
                     .is_some_and(|run| run.status == RunStatus::Succeeded),
+                cancelled_run: run_manifest
+                    .as_ref()
+                    .is_some_and(|run| run.status == RunStatus::Cancelled),
                 had_in_flight_run,
                 pending_retry: run_manifest.as_ref().is_some_and(|run| run.pending_retry),
                 normal_retry_count: run_manifest
