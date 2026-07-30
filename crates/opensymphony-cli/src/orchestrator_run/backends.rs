@@ -1020,18 +1020,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 temporary.display()
             ))
         })?;
-        match fs::rename(&temporary, &path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&temporary).await;
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&temporary).await;
-                return Err(CliWorkspaceError::RetryState(format!(
-                    "failed to activate {}: {error}",
-                    path.display()
-                )));
-            }
+        if let Err(error) = replace_retry_exhaustion_marker(&temporary, &path).await {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(CliWorkspaceError::RetryState(format!(
+                "failed to activate {}: {error}",
+                path.display()
+            )));
         }
         Ok(())
     }
@@ -1054,6 +1048,60 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
 
     fn retain_failed_workspaces(&self) -> bool {
         self.retain_failed
+    }
+}
+
+async fn replace_retry_exhaustion_marker(temporary: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, destination).await
+    }
+
+    #[cfg(windows)]
+    {
+        let temporary = temporary.to_path_buf();
+        let destination = destination.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            replace_retry_exhaustion_marker_windows(&temporary, &destination)
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("marker replacement task failed: {error}")))?
+    }
+}
+
+#[cfg(windows)]
+fn replace_retry_exhaustion_marker_windows(temporary: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing_name: *const u16, new_name: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let existing = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers owned for the call.
+    let replaced = unsafe {
+        MoveFileExW(
+            existing.as_ptr(),
+            replacement.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -5861,6 +5909,10 @@ mod tests {
             .persist_retry_exhaustion(&issue, 3)
             .await
             .expect("retry exhaustion should persist");
+        backend
+            .persist_retry_exhaustion(&issue, 4)
+            .await
+            .expect("retry exhaustion should replace an existing marker");
         let records = backend
             .recover_retry_exhaustion()
             .await
@@ -5868,7 +5920,7 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].issue.identifier, issue.identifier);
-        assert_eq!(records[0].normal_retry_count, 3);
+        assert_eq!(records[0].normal_retry_count, 4);
         assert!(state_root.join("retry-exhaustion/COE-284.json").is_file());
         assert!(!workspace_root.join("COE-284").exists());
     }

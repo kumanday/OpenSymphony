@@ -180,8 +180,9 @@ static ATOMIC_MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// be replaced by a concurrent claimant.
 pub(crate) fn publish_initialized_marker(path: &Path, contents: &str) -> io::Result<File> {
     let sequence = ATOMIC_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let staging = path.with_file_name(format!(
-        ".{}.staging-{}-{sequence}",
+        ".{}.staging-{}-{timestamp}-{sequence}",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("marker"),
