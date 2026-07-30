@@ -509,6 +509,12 @@ fn find_live_registered_root_marker(
         if own_registry_markers.contains(&marker) {
             continue;
         }
+        let Some(name) = marker.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("root-") || !name.ends_with(".active") {
+            continue;
+        }
         let metadata =
             fs::symlink_metadata(&marker).map_err(|source| RunCommandError::RootOwnership {
                 detail: format!("failed to inspect {}: {source}", marker.display()),
@@ -1572,6 +1578,23 @@ mod tests {
             Err(RunCommandError::RootOwnership { .. })
         ));
         drop(parent_owner);
+    }
+
+    #[test]
+    fn runtime_root_ownership_ignores_incomplete_registry_staging_files() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let registry = root_ownership_registry_path();
+        fs::create_dir_all(&registry).expect("ownership registry should exist");
+        let staging = registry.join(format!(
+            ".root-{}-incomplete.active.staging-test",
+            std::process::id()
+        ));
+        fs::write(&staging, "").expect("incomplete staging marker should be written");
+
+        let ownership = acquire_root_ownership([root.path().join("workspace")])
+            .expect("incomplete registry staging files must be ignored");
+        drop(ownership);
+        fs::remove_file(staging).expect("staging marker should be removed");
     }
 
     #[tokio::test]
