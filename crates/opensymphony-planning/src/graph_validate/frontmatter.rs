@@ -47,6 +47,8 @@ pub struct TaskFrontmatter {
     pub parent: Option<String>,
     #[serde(default)]
     pub areas: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// Any additional fields the task file carries. Preserved so the
     /// validator can re-emit the original block after normalisation.
     #[serde(flatten)]
@@ -183,6 +185,14 @@ mod tests {
         );
         assert!(parsed.body.starts_with("# Heading"));
         assert!(parsed.body.contains("Body."));
+    }
+
+    #[test]
+    fn preserves_terminal_repository_binding_in_frontmatter() {
+        let text =
+            "---\nid: OSYM-885\ntitle: Canonical Repository Binding\nrepository: core\n---\nbody\n";
+        let parsed = parse_task_text(text, "test.md").expect("parse should succeed");
+        assert_eq!(parsed.frontmatter.repository.as_deref(), Some("core"));
     }
 
     #[test]

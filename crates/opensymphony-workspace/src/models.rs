@@ -7,6 +7,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome};
+
 /// Keep transient runtime diagnostics useful without allowing common
 /// credential-shaped values to become durable workspace metadata.
 pub fn redact_runtime_diagnostic(input: &str) -> String {
@@ -369,6 +371,7 @@ pub struct IssueDescriptor {
     pub title: String,
     pub current_state: String,
     pub last_seen_tracker_refresh_at: Option<DateTime<Utc>>,
+    pub repository_binding: Option<RepositoryBindingOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +379,7 @@ pub struct RunDescriptor {
     pub run_id: String,
     pub attempt: u32,
     pub normal_retry_count: u32,
+    pub repository_binding: Option<RepositoryBinding>,
 }
 
 impl RunDescriptor {
@@ -384,11 +388,20 @@ impl RunDescriptor {
             run_id: run_id.into(),
             attempt,
             normal_retry_count: 0,
+            repository_binding: None,
         }
     }
 
     pub fn with_normal_retry_count(mut self, normal_retry_count: u32) -> Self {
         self.normal_retry_count = normal_retry_count;
+        self
+    }
+
+    pub fn with_repository_binding(
+        mut self,
+        repository_binding: Option<RepositoryBinding>,
+    ) -> Self {
+        self.repository_binding = repository_binding;
         self
     }
 }
@@ -678,6 +691,8 @@ pub struct IssueManifest {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_tracker_refresh_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding: Option<RepositoryBindingOutcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -715,6 +730,8 @@ pub struct RunManifest {
     pub identifier: String,
     pub sanitized_workspace_key: String,
     pub workspace_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding: Option<RepositoryBinding>,
     pub attempt: u32,
     #[serde(default)]
     pub normal_retry_count: u32,
@@ -748,6 +765,7 @@ impl RunManifest {
             identifier: workspace.identifier().to_string(),
             sanitized_workspace_key: workspace.workspace_key().to_string(),
             workspace_path: workspace.workspace_path().to_path_buf(),
+            repository_binding: run.repository_binding.clone(),
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
             pending_retry: false,

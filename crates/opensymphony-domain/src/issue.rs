@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{IssueId, IssueIdentifier, TimestampMs, TrackerStateId};
+use super::{IssueId, IssueIdentifier, RepositoryBindingOutcome, TimestampMs, TrackerStateId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +53,8 @@ pub struct NormalizedIssue {
     pub project_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<IssueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding: Option<RepositoryBindingOutcome>,
     pub blocked_by: Vec<BlockerRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_issues: Vec<IssueRef>,

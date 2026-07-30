@@ -6122,6 +6122,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 last_seen_tracker_refresh_at: None,
+                repository_binding: None,
             })
             .expect("workspace manifest json"),
         )
@@ -6285,6 +6286,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 last_seen_tracker_refresh_at: None,
+                repository_binding: None,
             })
             .expect("manifest json"),
         )

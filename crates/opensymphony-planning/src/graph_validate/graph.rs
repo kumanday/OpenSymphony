@@ -287,6 +287,7 @@ mod tests {
             blocks: blocks.iter().map(|s| TaskId::new(*s)).collect(),
             sub_issues: vec![],
             task_file: Some(format!("docs/tasks/{}.md", id)),
+            repository: None,
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
             blocked_by: blocked_by.iter().map(|s| TaskId::new(*s)).collect(),
             blocks: vec![],
             task_file: Some(format!("docs/tasks/{}.md", id)),
+            repository: None,
         }
     }
 

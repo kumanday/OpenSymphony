@@ -566,6 +566,7 @@ fn build_publish_receipt(
                     linear_kind: TaskKind::Issue,
                     linear_milestone: milestone.name.clone(),
                     parent_task_id: None,
+                    repository: issue.repository.clone(),
                     blocked_by: issue.blocked_by.clone(),
                     blocks: issue.blocks.clone(),
                     review_comments,
@@ -591,6 +592,7 @@ fn build_publish_receipt(
                         linear_kind: TaskKind::SubIssue,
                         linear_milestone: milestone.name.clone(),
                         parent_task_id: Some(issue.task_id.clone()),
+                        repository: sub.repository.clone(),
                         blocked_by: sub.blocked_by.clone(),
                         blocks: sub.blocks.clone(),
                         review_comments: Vec::new(),
@@ -704,6 +706,7 @@ mod tests {
                     blocked_by: vec![],
                     blocks: vec![sub_val.clone()],
                     task_file: Some("docs/tasks/osym-733-impl.md".to_string()),
+                    repository: None,
                 },
                 PlannedSubIssue {
                     id: sub_val.clone(),
@@ -725,11 +728,13 @@ mod tests {
                     blocked_by: vec![sub_impl.clone()],
                     blocks: vec![],
                     task_file: Some("docs/tasks/osym-733-val.md".to_string()),
+                    repository: None,
                 },
             ],
             task_file: Some(
                 "docs/tasks/osym-733-milestone-issue-and-sub-issue-compiler.md".to_string(),
             ),
+            repository: None,
         };
 
         let mut tasks = Vec::new();

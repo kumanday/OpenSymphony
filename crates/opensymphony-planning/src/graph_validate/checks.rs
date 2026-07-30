@@ -428,6 +428,7 @@ mod tests {
             blocks: vec![],
             sub_issues: vec![],
             task_file: None,
+            repository: None,
         }
     }
 
@@ -556,6 +557,7 @@ mod tests {
             blocked_by: vec![],
             blocks: vec![],
             task_file: None,
+            repository: None,
         };
         let mut parent_issue = issue("I", &[]);
         parent_issue.acceptance_criteria = vec![

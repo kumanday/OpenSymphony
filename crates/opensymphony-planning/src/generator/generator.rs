@@ -361,6 +361,7 @@ impl PlanGenerator {
                                 blocks: issue.blocks.clone(),
                                 sub_issues,
                                 task_file: issue.task_file.clone(),
+                                repository: issue.repository.clone(),
                             }
                         } else {
                             issue.clone()
@@ -571,6 +572,7 @@ impl PlanGenerator {
                 blocks: Vec::new(),
                 sub_issues,
                 task_file: Some(format!("{}/{}.md", self.session.tasks_dir, issue_id)),
+                repository: None,
             });
         }
 
@@ -625,6 +627,7 @@ impl PlanGenerator {
             blocked_by: Vec::new(),
             blocks: vec![val_id.clone()],
             task_file: Some(format!("{}/{}.md", self.session.tasks_dir, impl_id)),
+            repository: None,
         });
 
         // Validation sub-issue is blocked by the implementation sub-issue
@@ -661,6 +664,7 @@ impl PlanGenerator {
             blocked_by: vec![impl_id],
             blocks: Vec::new(),
             task_file: Some(format!("{}/{}.md", self.session.tasks_dir, val_id)),
+            repository: None,
         });
 
         sub_issues
@@ -751,6 +755,7 @@ estimate: {estimate}
 blockedBy: [{blocked_by}]
 blocks: [{blocks}]
 parent: null
+repository: {repository}
 ---
 
 ## Summary
@@ -801,6 +806,7 @@ parent: null
                 .unwrap_or_else(|| "null".to_string()),
             blocked_by = render_id_list(&issue.blocked_by),
             blocks = render_id_list(&issue.blocks),
+            repository = issue.repository.as_deref().unwrap_or("null"),
             summary = collapse_markdown_line(&issue.summary),
             scope_in = render_bullets(&issue.scope_in),
             scope_out = render_optional_bullets(&issue.scope_out),
@@ -839,6 +845,7 @@ estimate: {estimate}
 blockedBy: [{blocked_by}]
 blocks: [{blocks}]
 parent: {parent}
+repository: {repository}
 ---
 
 ## Summary
@@ -890,6 +897,7 @@ parent: {parent}
             blocked_by = render_id_list(&sub_issue.blocked_by),
             blocks = render_id_list(&sub_issue.blocks),
             parent = parent_issue.id,
+            repository = sub_issue.repository.as_deref().unwrap_or("null"),
             summary = collapse_markdown_line(&sub_issue.summary),
             scope_in = render_bullets(&sub_issue.scope_in),
             scope_out = render_optional_bullets(&sub_issue.scope_out),
@@ -1304,6 +1312,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_b.clone(),
@@ -1323,6 +1332,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_c.clone(),
@@ -1342,6 +1352,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                 ],
                 acceptance_criteria: vec![],
@@ -1415,6 +1426,7 @@ mod tests {
                         blocks: vec![cycle_b.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_b.clone(),
@@ -1434,6 +1446,7 @@ mod tests {
                         blocks: vec![cycle_c.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_c.clone(),
@@ -1453,6 +1466,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                 ],
                 acceptance_criteria: vec![],
@@ -1527,6 +1541,7 @@ mod tests {
                         blocks: vec![cycle_b.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_b.clone(),
@@ -1546,6 +1561,7 @@ mod tests {
                         blocks: vec![cycle_c.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_c.clone(),
@@ -1565,6 +1581,7 @@ mod tests {
                         blocks: vec![cycle_a.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                 ],
                 acceptance_criteria: vec![],

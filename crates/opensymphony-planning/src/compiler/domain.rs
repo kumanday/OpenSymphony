@@ -125,6 +125,8 @@ pub struct LinearPublishEntity {
     pub linear_kind: TaskKind,
     pub linear_milestone: String,
     pub parent_task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub blocked_by: Vec<TaskId>,
     pub blocks: Vec<TaskId>,
     /// Review comment lanes preserved so draft preview can render them.
@@ -201,6 +203,8 @@ pub struct CompiledIssue {
     pub milestones: String,
     pub priority: u8,
     pub estimate: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub blocked_by: Vec<TaskId>,
     pub blocks: Vec<TaskId>,
     pub acceptance_criteria_count: usize,
@@ -222,6 +226,8 @@ pub struct CompiledSubIssue {
     pub milestones: String,
     pub priority: u8,
     pub estimate: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub blocked_by: Vec<TaskId>,
     pub blocks: Vec<TaskId>,
     pub acceptance_criteria_count: usize,
@@ -306,6 +312,7 @@ pub(crate) fn issue_to_compiled(issue: &PlannedIssue, milestone_name: &str) -> C
         milestones: milestone_name.to_string(),
         priority: issue.priority.as_linear_priority(),
         estimate: issue.estimate,
+        repository: issue.repository.clone(),
         blocked_by: issue.blocked_by.clone(),
         blocks: issue.blocks.clone(),
         acceptance_criteria_count: issue.acceptance_criteria.len(),
@@ -339,6 +346,7 @@ pub(crate) fn sub_issue_to_compiled(
         milestones: milestone_name.to_string(),
         priority: sub_issue.priority.as_linear_priority(),
         estimate: sub_issue.estimate,
+        repository: sub_issue.repository.clone(),
         blocked_by: sub_issue.blocked_by.clone(),
         blocks: sub_issue.blocks.clone(),
         acceptance_criteria_count: sub_issue.acceptance_criteria.len(),

@@ -1253,6 +1253,7 @@ fn recovered_run_from_manifests(
         worker_id,
         conversation: conversation_metadata_from_manifest(conversation_manifest),
         normal_retry_count: run_manifest.normal_retry_count,
+        repository_binding: run_manifest.repository_binding.clone(),
     })
 }
 
@@ -1393,7 +1394,8 @@ impl RuntimeWorkerBackend {
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
-                .with_normal_retry_count(run.normal_retry_count);
+                .with_normal_retry_count(run.normal_retry_count)
+                .with_repository_binding(run.repository_binding.clone());
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
@@ -4051,6 +4053,7 @@ fn normalized_issue_from_manifest(
         project_slug: None,
         project_name: None,
         parent_id: None,
+        repository_binding: manifest.repository_binding.clone(),
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
@@ -4065,6 +4068,7 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
         title: issue.title.clone(),
         current_state: issue.state.name.clone(),
         last_seen_tracker_refresh_at: issue.updated_at.map(timestamp_to_datetime),
+        repository_binding: issue.repository_binding.clone(),
     }
 }
 
@@ -7089,6 +7093,7 @@ Run the scheduler.
             tool_dir: None,
             openhands_conversation_store: None,
             retry_max_attempts: None,
+            repository_routing: None,
             state_root: None,
             memory_catalog_root: None,
             retain_failed: true,
@@ -7347,6 +7352,7 @@ Run the scheduler.
             project_slug: None,
             project_name: None,
             parent_id: None,
+            repository_binding: None,
             blocked_by: Vec::new(),
             sub_issues: Vec::new(),
             created_at: None,

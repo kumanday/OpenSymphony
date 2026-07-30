@@ -42,6 +42,12 @@ query ProjectPlanningState($slug: String!) {
             name
             type
           }
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
         }
       }
     }

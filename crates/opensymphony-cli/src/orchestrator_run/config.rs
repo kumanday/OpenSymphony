@@ -7,6 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::opensymphony_domain::{
+    CanonicalRepositoryId, RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting,
+    RepositoryRoutingMode, SafeRemoteFingerprint,
+};
 use crate::opensymphony_memory::DEFAULT_PRIVATE_MEMORY_CONFIG_FILE;
 use crate::opensymphony_openhands::OpenHandsConversationStorePaths;
 use crate::opensymphony_workflow::{
@@ -160,6 +164,8 @@ struct CentralRepositoryFile {
 #[serde(deny_unknown_fields)]
 struct CentralRemoteFile {
     provider: String,
+    #[serde(default)]
+    provider_id: Option<String>,
     locator: String,
     clone: String,
 }
@@ -312,6 +318,7 @@ pub struct ResolvedCentralConfig {
     pub integration_instructions: Option<ResolvedIntegrationInstructions>,
     pub repository_instruction_path: Option<PathBuf>,
     pub generation: String,
+    pub repository_routing: RepositoryRouting,
     pub retry_max_attempts: Option<u32>,
     runtime: RunConfigFile,
     pub workflow_front_matter: WorkflowFrontMatter,
@@ -446,6 +453,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) tool_dir: Option<PathBuf>,
     pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     pub(super) retry_max_attempts: Option<u32>,
+    pub(super) repository_routing: Option<RepositoryRouting>,
     pub(super) state_root: Option<PathBuf>,
     pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) retain_failed: bool,
@@ -469,6 +477,7 @@ pub(super) async fn resolve_runtime_config(
         central_repository_instruction_path,
         central_workflow_front_matter,
         retry_max_attempts,
+        central_repository_routing,
     ) = match &config_path {
         Some(path) => {
             let raw =
@@ -496,11 +505,13 @@ pub(super) async fn resolve_runtime_config(
                     central.repository_instruction_path,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
+                    Some(central.repository_routing),
                 )
             } else {
                 (
                     parse_legacy_run_config(path, &raw)?,
                     generation_hash(raw.as_bytes()),
+                    None,
                     None,
                     None,
                     None,
@@ -515,6 +526,7 @@ pub(super) async fn resolve_runtime_config(
         None => (
             RunConfigFile::default(),
             "legacy-unconfigured".to_string(),
+            None,
             None,
             None,
             None,
@@ -643,6 +655,7 @@ pub(super) async fn resolve_runtime_config(
         tool_dir,
         openhands_conversation_store,
         retry_max_attempts,
+        repository_routing: central_repository_routing,
         state_root: central_state_root,
         memory_catalog_root: central_memory_catalog_root,
         retain_failed: central_retain_failed.unwrap_or(true),
@@ -1245,6 +1258,13 @@ fn resolve_central_config(
         generation_input.extend_from_slice(instructions.content_hash.as_bytes());
     }
     let runtime = central_legacy_runtime_config(&config, config_root)?;
+    let generation = generation_hash(&generation_input);
+    let repository_routing = build_repository_routing(
+        &config,
+        mode.clone(),
+        active_repositories,
+        generation.clone(),
+    )?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     Ok(ResolvedCentralConfig {
         instance_id,
@@ -1256,7 +1276,8 @@ fn resolve_central_config(
         repository: config.routing.repository,
         integration_instructions,
         repository_instruction_path: legacy_repository_instruction_path,
-        generation: generation_hash(&generation_input),
+        generation,
+        repository_routing,
         retry_max_attempts,
         runtime,
         workflow_front_matter,
@@ -1545,6 +1566,116 @@ fn central_legacy_runtime_config(
         },
         openhands: RunOpenHandsConfigFile { tool_dir },
         memory,
+    })
+}
+
+fn build_repository_routing(
+    config: &CentralConfigFile,
+    mode: CentralRoutingMode,
+    active_repositories: BTreeSet<String>,
+    config_generation: String,
+) -> Result<RepositoryRouting, CentralConfigError> {
+    let mut inventory = BTreeMap::new();
+    let mut identities = BTreeMap::new();
+    for repository_id in active_repositories {
+        let repository = config.repositories.get(&repository_id).ok_or_else(|| {
+            CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}"),
+            }
+        })?;
+        let id = CanonicalRepositoryId::from_remote(
+            &repository.remote.provider,
+            repository.remote.provider_id.as_deref(),
+            &repository.remote.locator,
+        )
+        .map_err(|_| CentralConfigError::InvalidReference {
+            field: format!("repositories.{repository_id}.remote"),
+        })?;
+        let safe_remote_fingerprint = SafeRemoteFingerprint::from_remote(
+            &repository.remote.provider,
+            repository.remote.provider_id.as_deref(),
+            &repository.remote.locator,
+        )
+        .map_err(|_| CentralConfigError::InvalidReference {
+            field: format!("repositories.{repository_id}.remote"),
+        })?;
+        let identity = RepositoryIdentity {
+            id,
+            safe_remote_fingerprint,
+        };
+        identities.insert(repository_id.clone(), identity.clone());
+        for alias in &repository.aliases {
+            inventory.insert(
+                alias.clone(),
+                RepositoryInventoryEntry {
+                    alias: alias.clone(),
+                    identity: identity.clone(),
+                },
+            );
+        }
+    }
+
+    let active_project_ids = match mode {
+        CentralRoutingMode::LegacySingle => BTreeSet::new(),
+        CentralRoutingMode::ProjectSet => config
+            .routing
+            .active_project_set
+            .as_ref()
+            .and_then(|name| config.project_sets.get(name))
+            .map(|project_set| project_set.projects.iter().cloned().collect())
+            .unwrap_or_default(),
+    };
+    let mut active_projects = active_project_ids.clone();
+    let mut project_repositories = BTreeMap::new();
+    for project_id in &active_project_ids {
+        let project = config.linear_projects.get(project_id).ok_or_else(|| {
+            CentralConfigError::InvalidReference {
+                field: format!("linear_projects.{project_id}"),
+            }
+        })?;
+        let allowed = project
+            .repositories
+            .iter()
+            .filter_map(|repository| {
+                identities
+                    .get(repository)
+                    .map(|identity| identity.id.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let keys = [
+            Some(project_id.as_str()),
+            Some(project.provider_project_id.as_str()),
+            project.provider_project_slug.as_deref(),
+        ];
+        for key in keys.into_iter().flatten().filter(|key| !key.is_empty()) {
+            active_projects.insert(key.to_owned());
+            project_repositories.insert(key.to_owned(), allowed.clone());
+        }
+    }
+
+    let legacy_repository = config
+        .routing
+        .repository
+        .as_ref()
+        .and_then(|repository| config.repositories.get(repository))
+        .and_then(|repository| repository.aliases.first())
+        .cloned();
+
+    Ok(RepositoryRouting {
+        mode: match mode {
+            CentralRoutingMode::LegacySingle => RepositoryRoutingMode::LegacySingle,
+            CentralRoutingMode::ProjectSet => RepositoryRoutingMode::ProjectSet,
+        },
+        inventory,
+        project_repositories,
+        active_projects,
+        legacy_repository,
+        config_generation,
+        inventory_generation: generation_hash(&serde_json::to_vec(&identities).map_err(|_| {
+            CentralConfigError::InvalidReference {
+                field: "repositories".to_owned(),
+            }
+        })?),
     })
 }
 
@@ -2182,6 +2313,7 @@ repositories:
     aliases: [core]
     remote:
       provider: github
+      provider_id: repo-42
       locator: kumanday/OpenSymphony
       clone: git@github.com:kumanday/OpenSymphony.git
     target_branch: develop
@@ -2311,6 +2443,28 @@ scheduler:
             .expect("central fixture should resolve");
 
         assert_eq!(resolved.mode, CentralRoutingMode::ProjectSet);
+        assert!(
+            resolved
+                .repository_routing
+                .active_projects
+                .contains("core-project")
+        );
+        assert_eq!(
+            resolved.repository_routing.inventory["core"]
+                .identity
+                .id
+                .as_str(),
+            "github:repository:repo-42"
+        );
+        assert!(matches!(
+            resolved.repository_routing.resolve(
+                &["repo:core".to_string()],
+                Some("core-project"),
+                None,
+                false,
+            ),
+            crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_)
+        ));
         assert!(matches!(
             resolved.require_legacy_target_repo(),
             Err(CentralConfigError::UnsupportedRoutingMode {

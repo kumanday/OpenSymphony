@@ -91,6 +91,22 @@ used for Linear lookup. Migrated legacy files may also carry
 older slug-based tracker configuration and is not a repository association or
 execution default.
 
+### Repository binding
+
+In `project_set` mode, each terminal child task must carry exactly one managed
+`repo:<alias>` label. The alias resolves through the central repository
+inventory to a provider-qualified canonical repository ID and a credential-free
+remote fingerprint. A project's `repositories` list constrains the aliases
+that are valid for its tasks; it never selects a default. Parent tasks remain
+repository-neutral and must not carry a managed repository label.
+
+Missing, unknown, duplicate, parent, out-of-scope, and disallowed bindings are
+retained as distinct scheduler routing outcomes and do not create workspaces.
+The resolved binding records the central config and inventory generations
+before a worker is claimed. A binding change on a claimed task supersedes the
+old generation and fences its late worker events. In `legacy_single` mode only,
+an unlabelled task resolves to the configured repository for compatibility.
+
 ## Configuration migration
 
 Migration is explicit and staged:

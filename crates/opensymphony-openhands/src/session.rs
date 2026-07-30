@@ -4162,6 +4162,7 @@ mod tests {
             project_slug: None,
             project_name: None,
             parent_id: None,
+            repository_binding: None,
             blocked_by: vec![BlockerRef {
                 id: Some(must(IssueId::new("issue-100"))),
                 identifier: Some(must(IssueIdentifier::new("COE-100"))),

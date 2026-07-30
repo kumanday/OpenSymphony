@@ -9,12 +9,12 @@ use crate::opensymphony_domain::{
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptStatus, HealthStatus, IdentifierError, IssueExecution, IssueId,
     IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
-    OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry,
-    RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus,
-    StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker,
-    TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkspaceRecord,
+    OrchestratorSnapshot, ReleaseReason, RepositoryBindingOutcome, RepositoryRouting, RetryAttempt,
+    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals,
+    SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceRecord,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -50,6 +50,7 @@ pub struct SchedulerConfig {
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     pub routing: RoutingConfig,
+    pub repository_routing: Option<RepositoryRouting>,
 }
 
 impl SchedulerConfig {
@@ -99,6 +100,7 @@ impl SchedulerConfig {
             active_states: workflow.config.tracker.active_states.clone(),
             terminal_states: workflow.config.tracker.terminal_states.clone(),
             routing: workflow.config.routing.clone(),
+            repository_routing: None,
         })
     }
 
@@ -137,6 +139,7 @@ pub struct RecoveredRun {
     pub worker_id: WorkerId,
     pub conversation: ConversationMetadata,
     pub normal_retry_count: u32,
+    pub repository_binding: Option<crate::opensymphony_domain::RepositoryBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +214,7 @@ pub enum WorkerAbortReason {
     TrackerInactive,
     TrackerTerminal,
     Stalled,
+    BindingSuperseded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1363,6 +1367,20 @@ where
             {
                 continue;
             }
+            if self
+                .executions
+                .get(&normalized.id)
+                .is_some_and(|execution| {
+                    matches!(
+                        execution.status(),
+                        SchedulerStatus::Claimed | SchedulerStatus::Running
+                    ) && execution.issue().repository_binding != normalized.repository_binding
+                })
+            {
+                self.supersede_binding(normalized.id.clone(), normalized, observed_at)
+                    .await?;
+                continue;
+            }
             self.upsert_active_execution(normalized, observed_at, None)?;
         }
 
@@ -1534,6 +1552,38 @@ where
 
         self.insert_execution(issue_id, execution);
         Ok(true)
+    }
+
+    async fn supersede_binding(
+        &mut self,
+        issue_id: IssueId,
+        replacement: NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(mut execution) = self.remove_execution(&issue_id) else {
+            self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));
+            return Ok(());
+        };
+
+        if let Some(run) = execution.current_run().cloned()
+            && !self
+                .abort_worker(
+                    &mut execution,
+                    &run,
+                    WorkerAbortReason::BindingSuperseded,
+                    observed_at,
+                )
+                .await?
+        {
+            // Keep the old generation fenced until the harness confirms its
+            // stop. A later reconciliation retries the stop instead of
+            // allowing the replacement to share an active worker.
+            self.insert_execution(issue_id, execution);
+            return Ok(());
+        }
+
+        self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));
+        Ok(())
     }
 
     fn merging_interrupt_candidate(
@@ -1757,7 +1807,8 @@ where
                 .transpose()?,
             self.config.max_turns,
         )
-        .with_normal_retry_count(recovered_run.normal_retry_count);
+        .with_normal_retry_count(recovered_run.normal_retry_count)
+        .with_repository_binding(recovered_run.repository_binding.clone());
         let route = recovered_route(
             decide_issue_route(current_execution.issue(), &self.config)?,
             harness_kind.as_deref(),
@@ -2054,6 +2105,17 @@ where
                 continue;
             }
 
+            if normalized
+                .repository_binding
+                .as_ref()
+                .is_some_and(|binding| binding.resolved_binding().is_none())
+            {
+                // Keep typed routing failures visible to the control plane but
+                // never materialize a workspace for a blocked candidate.
+                self.insert_execution(issue_id, IssueExecution::new(normalized, observed_at));
+                continue;
+            }
+
             let state_key = normalized_state_name(&normalized.state.name);
             let issue_id = normalized.id.clone();
 
@@ -2110,6 +2172,13 @@ where
                 observed_at,
                 previous_retry,
                 self.config.max_turns,
+            )
+            .with_repository_binding(
+                normalized
+                    .repository_binding
+                    .as_ref()
+                    .and_then(RepositoryBindingOutcome::resolved_binding)
+                    .cloned(),
             );
             let route = decide_issue_route(&normalized, &self.config)?;
 
@@ -3137,6 +3206,14 @@ fn normalize_tracker_issue(
     issue: &TrackerIssue,
     config: &SchedulerConfig,
 ) -> Result<NormalizedIssue, SchedulerError> {
+    let repository_binding = config.repository_routing.as_ref().map(|routing| {
+        routing.resolve(
+            &issue.labels,
+            issue.project_id.as_deref(),
+            issue.project_slug.as_deref(),
+            !issue.sub_issues.is_empty(),
+        )
+    });
     Ok(NormalizedIssue {
         id: IssueId::new(issue.id.clone())?,
         identifier: IssueIdentifier::new(issue.identifier.clone())?,
@@ -3155,6 +3232,7 @@ fn normalize_tracker_issue(
             Some(parent_id) => Some(IssueId::new(parent_id.clone())?),
             None => None,
         },
+        repository_binding,
         blocked_by: issue
             .blocked_by
             .iter()
@@ -3203,6 +3281,7 @@ fn minimal_issue_from_state_snapshot(
         project_slug: None,
         project_name: None,
         parent_id: None,
+        repository_binding: None,
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: None,

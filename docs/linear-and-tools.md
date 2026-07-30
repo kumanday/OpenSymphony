@@ -100,6 +100,11 @@ Important normalization rules:
 - gateway task graph `root_ids` are the returned node identifiers whose Linear
   parent is absent or outside the returned node set; clients must not infer
   tracker hierarchy from fixture data or local fallbacks
+- `repository_binding` is derived from managed `repo:<alias>` labels and the
+  central repository inventory; project associations validate the binding but
+  never provide a default. Parents keep this field unresolved and repository
+  aliases are propagated through planning and conversion without storing
+  remotes or workspace paths in Linear
 
 ## 3. Agent-side Linear access
 

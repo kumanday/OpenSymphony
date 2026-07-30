@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use crate::opensymphony_domain::{
+    CanonicalRepositoryId, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
+    SafeRemoteFingerprint,
+};
 use crate::opensymphony_workspace::{
     CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
     HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
@@ -19,6 +23,7 @@ fn sample_issue(identifier: &str) -> IssueDescriptor {
         title: format!("Issue {identifier}"),
         current_state: "In Progress".to_string(),
         last_seen_tracker_refresh_at: None,
+        repository_binding: None,
     }
 }
 
@@ -574,6 +579,50 @@ async fn start_run_executes_before_run_in_workspace_and_persists_manifest() {
     assert_eq!(persisted.status, RunStatus::Prepared);
     assert_eq!(persisted.normal_retry_count, 2);
     assert_eq!(persisted.sanitized_workspace_key, "feature_42");
+}
+
+#[tokio::test]
+async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let binding = RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:42").expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("42"),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let mut issue = sample_issue("COE-548");
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+    assert_eq!(
+        ensured.issue_manifest.repository_binding,
+        Some(RepositoryBindingOutcome::Resolved(binding.clone()))
+    );
+
+    let manifest = manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("run-binding", 1).with_repository_binding(Some(binding.clone())),
+        )
+        .await
+        .expect("run manifest should be written");
+    assert_eq!(manifest.repository_binding, Some(binding));
 }
 
 #[tokio::test]

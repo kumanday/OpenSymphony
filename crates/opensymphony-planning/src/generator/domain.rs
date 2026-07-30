@@ -90,6 +90,9 @@ pub struct PlannedSubIssue {
     /// Relative path to the task file within the tasks directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_file: Option<String>,
+    /// Managed repository alias for a terminal task. Parent tasks leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// An issue represents a demoable vertical capability or deliverable unit.
@@ -122,6 +125,9 @@ pub struct PlannedIssue {
     /// Relative path to the task file within the tasks directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_file: Option<String>,
+    /// Managed repository alias for a terminal task. Parent tasks leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// A milestone represents a major delivery stage or checkpoint.

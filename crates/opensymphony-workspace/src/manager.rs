@@ -600,6 +600,7 @@ impl WorkspaceManager {
                 .unwrap_or(now),
             updated_at: now,
             last_seen_tracker_refresh_at: issue.last_seen_tracker_refresh_at,
+            repository_binding: issue.repository_binding.clone(),
         };
 
         self.write_manifest(workspace, &workspace.issue_manifest_path(), &manifest)

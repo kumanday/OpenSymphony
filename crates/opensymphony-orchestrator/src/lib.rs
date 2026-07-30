@@ -68,6 +68,7 @@ mod tests {
             project_slug: None,
             project_name: None,
             parent_id: None,
+            repository_binding: None,
             blocked_by: Vec::new(),
             sub_issues: vec![IssueRef {
                 id: must(IssueId::new("lin_261")),

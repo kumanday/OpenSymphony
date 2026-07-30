@@ -159,6 +159,7 @@ async fn debug_resumes_existing_conversation_history_and_sends_follow_up_input()
         title: "Debuggable session".to_string(),
         current_state: "In Progress".to_string(),
         last_seen_tracker_refresh_at: None,
+        repository_binding: None,
     };
     let ensured = manager
         .ensure(&issue)
@@ -328,6 +329,7 @@ async fn create_workspace(
         title: "Debuggable Codex session".to_string(),
         current_state: "In Progress".to_string(),
         last_seen_tracker_refresh_at: None,
+        repository_binding: None,
     };
     let ensured = manager
         .ensure(&issue)

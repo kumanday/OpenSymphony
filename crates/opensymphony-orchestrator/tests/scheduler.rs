@@ -5,7 +5,9 @@ use std::{
 };
 
 use crate::opensymphony_domain::{
-    HarnessInterruptCommand, HarnessInterruptReason, HarnessInterruptStatus, TrackerErrorCategory,
+    CanonicalRepositoryId, HarnessInterruptCommand, HarnessInterruptReason, HarnessInterruptStatus,
+    RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode,
+    SafeRemoteFingerprint, TrackerErrorCategory,
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
@@ -53,6 +55,7 @@ fn scheduler_config() -> SchedulerConfig {
             model_profile_from_env: false,
             dry_run: false,
         },
+        repository_routing: None,
     }
 }
 
@@ -135,6 +138,7 @@ fn normalized_issue(id: &str, identifier: &str, state: &str) -> NormalizedIssue 
         project_slug: None,
         project_name: None,
         parent_id: None,
+        repository_binding: None,
         blocked_by: Vec::new(),
         sub_issues: vec![IssueRef {
             id: IssueId::new(format!("{id}-child")).expect("child id should be valid"),
@@ -144,6 +148,51 @@ fn normalized_issue(id: &str, identifier: &str, state: &str) -> NormalizedIssue 
         }],
         created_at: Some(ts(0)),
         updated_at: Some(ts(0)),
+    }
+}
+
+fn repository_routing() -> RepositoryRouting {
+    let identity = |alias: &str| RepositoryIdentity {
+        id: CanonicalRepositoryId::new(format!("github:{alias}"))
+            .expect("repository id should be valid"),
+        safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+            "github",
+            Some(alias),
+            "https://github.com/example/repository",
+        )
+        .expect("fingerprint should be valid"),
+    };
+    let one = identity("one");
+    let two = identity("two");
+    let one_id = one.id.clone();
+    let two_id = two.id.clone();
+
+    RepositoryRouting {
+        mode: RepositoryRoutingMode::ProjectSet,
+        inventory: BTreeMap::from([
+            (
+                "one".to_string(),
+                RepositoryInventoryEntry {
+                    alias: "one".to_string(),
+                    identity: one,
+                },
+            ),
+            (
+                "two".to_string(),
+                RepositoryInventoryEntry {
+                    alias: "two".to_string(),
+                    identity: two,
+                },
+            ),
+        ]),
+        project_repositories: BTreeMap::from([(
+            "project-id".to_string(),
+            [one_id, two_id].into_iter().collect(),
+        )]),
+        active_projects: ["project-id".to_string()].into_iter().collect(),
+        legacy_repository: None,
+        config_generation: "config-test".to_string(),
+        inventory_generation: "inventory-test".to_string(),
     }
 }
 
@@ -1338,6 +1387,7 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
                 worker_id: recovered_worker_id.clone(),
                 conversation: conversation(&recovered_worker_id),
                 normal_retry_count: 0,
+                repository_binding: None,
             }),
         }],
         records: HashMap::from([("lin-492".to_string(), recovered_workspace)]),
@@ -1424,6 +1474,7 @@ async fn recovered_retry_run_restores_retry_state_before_launch() {
                 worker_id: recovered_worker_id.clone(),
                 conversation: conversation(&recovered_worker_id),
                 normal_retry_count: 1,
+                repository_binding: None,
             }),
         }],
         records: HashMap::from([("lin-494".to_string(), recovered_workspace)]),
@@ -4143,6 +4194,7 @@ async fn recovered_in_flight_run_restores_persisted_interrupt_intent() {
                 worker_id: recovered_worker_id.clone(),
                 conversation: conversation(&recovered_worker_id),
                 normal_retry_count: 0,
+                repository_binding: None,
             }),
         }],
         records: HashMap::from([("lin-493".to_string(), recovered_workspace)]),
@@ -4386,4 +4438,114 @@ async fn cancel_failed_outcome_does_not_schedule_retry() {
     assert!(execution.retry().is_none());
     // No new launches should have occurred
     assert_eq!(scheduler.worker().launches.len(), 1);
+}
+
+#[tokio::test]
+async fn repository_binding_outcome_blocks_before_workspace_creation() {
+    let mut issue = tracker_issue("lin-repo-missing", "COE-548-MISSING", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("missing binding should be a durable blocked candidate");
+
+    let issue_id = IssueId::new("lin-repo-missing").expect("issue id should be valid");
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("blocked issue should remain observable");
+    assert!(matches!(
+        execution.issue().repository_binding,
+        Some(crate::opensymphony_domain::RepositoryBindingOutcome::MissingBinding)
+    ));
+    assert!(scheduler.workspace().ensured.is_empty());
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn claimed_repository_binding_is_immutable_and_stale_events_are_ignored() {
+    let mut issue = tracker_issue("lin-repo-change", "COE-548-CHANGE", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("valid repository binding should launch");
+    let old_run = scheduler.worker().launches[0].run.clone();
+    let old_binding = old_run
+        .repository_binding
+        .clone()
+        .expect("claim should persist repository binding");
+
+    scheduler.tracker_mut().active[0].labels = vec!["repo:two".to_string()];
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("binding mutation should supersede the old generation");
+
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::BindingSuperseded
+    );
+    assert_ne!(
+        scheduler.worker().launches[1]
+            .run
+            .repository_binding
+            .as_ref()
+            .expect("replacement claim should persist binding")
+            .repository
+            .id,
+        old_binding.repository.id
+    );
+
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: old_run.worker_id,
+            observed_at: ts(3_600_200),
+            event_id: Some("late-old-generation-event".to_string()),
+            event_kind: Some("late_event".to_string()),
+            summary: Some("must be ignored".to_string()),
+            payload: None,
+        });
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("late old-generation events should be ignored");
+
+    let issue_id = IssueId::new("lin-repo-change").expect("issue id should be valid");
+    let replacement = scheduler
+        .execution(&issue_id)
+        .expect("replacement execution should remain tracked");
+    assert_eq!(
+        replacement
+            .conversation()
+            .expect("replacement conversation should exist")
+            .last_event_id,
+        None
+    );
 }
