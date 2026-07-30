@@ -1120,12 +1120,12 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
 
     let workspace_root = legacy_runtime_workspace_root(&source)?;
     ensure_legacy_runtime_quiescent(&workspace_root)?;
+    let generated = generate_central_config(&source)?;
     let _runtime_ownership = acquire_legacy_runtime_ownership(&workspace_root)?;
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
     let _strict_run_marker = claim_migration_strict_run_marker(&target_config)?;
-    let generated = generate_central_config(&source)?;
     let generation = sha256(generated.as_bytes());
     let migration_root = migration_root(&target_config);
     let backup_dir = migration_root
@@ -4168,6 +4168,44 @@ mod tests {
             generate_central_config(&source),
             Err(MigrationError::WorkspaceRootState { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn migration_claims_empty_repo_relative_workspace_after_validation() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init should run");
+        Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:example/repo.git"])
+            .current_dir(root.path())
+            .status()
+            .expect("git remote should be configured");
+        fs::write(
+            root.path().join("WORKFLOW.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nworkspace:\n  root: ./var/workspaces\n---\n\nTarget branch: develop\n",
+        )
+        .expect("legacy workflow should be written");
+        let output = root.path().join("central/config.yaml");
+
+        apply(MigrationPaths {
+            config: None,
+            repo: root.path().to_path_buf(),
+            output: Some(output.clone()),
+        })
+        .await
+        .expect("empty repo-relative workspace should be accepted");
+
+        assert!(output.is_file());
+        assert!(root.path().join("var/workspaces").is_dir());
+        assert!(
+            !root
+                .path()
+                .join("var/workspaces/.opensymphony-instance.lock")
+                .exists()
+        );
     }
 
     #[test]

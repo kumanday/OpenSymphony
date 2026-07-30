@@ -1579,6 +1579,11 @@ fn validate_openhands_env_references(
             };
             let field = format!("{}.{}", path, key);
             let normalized_key = normalize_secret_field_name(key);
+            // OpenHands local-server environment entries are literal values,
+            // not names of environment variables selected by `*_env` fields.
+            if normalized_key == "env" && path.ends_with(".local_server") {
+                continue;
+            }
             if normalized_key.ends_with("_env") && !value.is_null() {
                 let Some(value) = value.as_str() else {
                     return Err(CentralConfigError::InvalidReference { field });
@@ -2510,6 +2515,23 @@ scheduler:
             .expect_err("literal OpenHands credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_accepts_literal_local_server_environment_values() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    local_server:\n      env:\n        NODE_ENV: development\n",
+            central_fixture(root.path())
+        );
+
+        resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("literal local-server environment values should be accepted");
     }
 
     #[test]

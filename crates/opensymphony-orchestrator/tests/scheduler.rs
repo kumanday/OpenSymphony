@@ -2955,6 +2955,61 @@ async fn recovery_requeues_cancelled_merging_interrupt() {
 }
 
 #[tokio::test]
+async fn recovery_parks_cancelled_merging_interrupt_with_consumed_count() {
+    let recovered_workspace = workspace_record(
+        "COE-272-MERGING-EXHAUSTED",
+        "/tmp/recovered/COE-272-MERGING-EXHAUSTED",
+    );
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            "lin-272-merging-exhausted",
+            "COE-272-MERGING-EXHAUSTED",
+            "Merging",
+            0,
+        )],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue(
+                "lin-272-merging-exhausted",
+                "COE-272-MERGING-EXHAUSTED",
+                "Merging",
+            ),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: true,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: Some(HarnessInterruptReason::TrackerMergingSupersedesHumanReview),
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-272-merging-exhausted".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.active_states.push("Merging".to_string());
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("exhausted merging cancellation recovery should succeed");
+
+    assert!(scheduler.worker().launches.is_empty());
+    assert_eq!(scheduler.workspace().persisted_retry_exhaustions, vec![1]);
+}
+
+#[tokio::test]
 async fn pre_conversation_recovery_honors_retry_limit() {
     let recovered_workspace = workspace_record("COE-273", "/tmp/recovered/COE-273");
     let tracker = FakeTracker {

@@ -1082,7 +1082,7 @@ where
                     {
                         let normal_retry_count = record.normal_retry_count.saturating_add(1);
                         if self.retry_count_exceeds_limit(normal_retry_count) {
-                            self.persist_retry_exhaustion(&record.issue, normal_retry_count)
+                            self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                                 .await?;
                             self.insert_execution(
                                 issue_id.clone(),
@@ -1094,7 +1094,7 @@ where
                             );
                             self.mark_recovered_retry_exhausted(
                                 &issue_id,
-                                normal_retry_count,
+                                record.normal_retry_count,
                                 observed_at,
                             )?;
                         } else {
