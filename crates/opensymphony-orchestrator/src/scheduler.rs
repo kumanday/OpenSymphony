@@ -1159,6 +1159,14 @@ where
                             .expect("active recovery execution should be present");
                         self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
                     }
+                } else if record.successful_run {
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::Completed, None)?,
+                    );
                 } else if record.completed_run {
                     if self.retry_limit_reached(record.normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
@@ -1722,7 +1730,10 @@ where
             self.config.max_turns,
         )
         .with_normal_retry_count(recovered_run.normal_retry_count);
-        let route = decide_issue_route(current_execution.issue(), &self.config)?;
+        let route = recovered_route(
+            decide_issue_route(current_execution.issue(), &self.config)?,
+            harness_kind.as_deref(),
+        )?;
         execution = execution.claim(run.clone())?;
         let start_request = WorkerStartRequest {
             issue: current_execution.issue().clone(),
@@ -3015,6 +3026,35 @@ pub fn decide_issue_route(
     })
 }
 
+fn recovered_route(
+    mut route: HarnessRouteDecision,
+    persisted_harness_kind: Option<&str>,
+) -> Result<HarnessRouteDecision, SchedulerError> {
+    let persisted_harness_kind = persisted_harness_kind
+        .filter(|kind| !kind.trim().is_empty())
+        .ok_or_else(|| SchedulerError::InvalidConfiguration {
+            detail: "recovered run is missing its persisted harness kind".to_string(),
+        })?;
+    if route.harness_kind == persisted_harness_kind {
+        return Ok(route);
+    }
+    let capability = harness_capability(persisted_harness_kind)?;
+    if !capability.available || !capability.actions.start_run {
+        return Err(SchedulerError::InvalidConfiguration {
+            detail: format!(
+                "persisted recovery harness `{persisted_harness_kind}` cannot start issue execution"
+            ),
+        });
+    }
+    route.harness_kind = persisted_harness_kind.to_owned();
+    route.reason = format!(
+        "recovered persisted harness `{persisted_harness_kind}`; {}",
+        route.reason
+    );
+    route.user_override = false;
+    Ok(route)
+}
+
 fn routing_reason(routing: &RoutingConfig) -> String {
     let mut parts = Vec::new();
     parts.push(if routing.harness_from_env {
@@ -3194,7 +3234,7 @@ fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
         || matches!(
             execution.state(),
             crate::opensymphony_orchestrator::SchedulerState::Released {
-                reason: ReleaseReason::Cancelled,
+                reason: ReleaseReason::Completed | ReleaseReason::Cancelled,
                 ..
             }
         )

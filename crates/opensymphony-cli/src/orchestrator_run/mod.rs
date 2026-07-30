@@ -364,7 +364,8 @@ pub(crate) fn acquire_root_ownership(
 }
 
 fn acquire_root_ownership_serialization() -> Result<RootOwnershipSerialization, RunCommandError> {
-    let path = std::env::temp_dir().join("opensymphony-runtime-root-ownership.lock");
+    let path =
+        root_ownership_coordination_directory().join("opensymphony-runtime-root-ownership.lock");
     acquire_root_ownership_serialization_at(&path)
 }
 
@@ -481,7 +482,24 @@ fn root_marker_blocks(marker: &Path) -> bool {
 }
 
 fn root_ownership_registry_path() -> PathBuf {
-    std::env::temp_dir().join("opensymphony-runtime-root-ownership-registry")
+    root_ownership_coordination_directory().join("opensymphony-runtime-root-ownership-registry")
+}
+
+fn root_ownership_coordination_directory() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp")
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        PathBuf::from("/tmp")
+    }
 }
 
 fn claim_root_registry_marker(root: &Path) -> Result<PathBuf, RunCommandError> {
@@ -634,10 +652,11 @@ pub(crate) fn process_owner_alive(pid: i32, expected_start: Option<&str>) -> boo
             tasklist_process_is_alive(output.status.success(), &output.stdout, pid)
         }
     };
-    alive
-        && expected_start.is_none_or(|expected| {
-            process_incarnation(pid as u32).is_some_and(|actual| actual == expected)
-        })
+    alive && process_owner_incarnation_matches(expected_start, process_incarnation(pid as u32))
+}
+
+fn process_owner_incarnation_matches(expected: Option<&str>, actual: Option<String>) -> bool {
+    expected.is_none_or(|expected| actual.as_deref().is_none_or(|actual| actual == expected))
 }
 
 pub(crate) fn process_marker_fields() -> String {
@@ -1660,6 +1679,18 @@ mod tests {
         .expect("marker should be written");
 
         assert!(!root_lock_owner_alive(marker.path()));
+    }
+
+    #[test]
+    fn unavailable_process_incarnation_is_treated_as_live_unknown() {
+        assert!(process_owner_incarnation_matches(
+            Some("expected-incarnation"),
+            None
+        ));
+        assert!(!process_owner_incarnation_matches(
+            Some("expected-incarnation"),
+            Some("different-incarnation".to_string())
+        ));
     }
 
     #[test]

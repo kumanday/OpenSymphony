@@ -1366,6 +1366,10 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
         scheduler.worker().launches[0].run.worker_id,
         recovered_worker_id
     );
+    assert_eq!(
+        scheduler.worker().launches[0].route.harness_kind,
+        "codex_app_server"
+    );
 
     scheduler.tracker_mut().states.insert(
         "lin-492".to_string(),
@@ -3168,7 +3172,7 @@ async fn recovery_advances_consumed_retry_budget_before_dispatch() {
 }
 
 #[tokio::test]
-async fn recovery_retries_an_interrupted_completed_initial_run() {
+async fn recovery_releases_an_active_successful_run_as_completed() {
     let recovered_workspace = workspace_record("COE-278", "/tmp/recovered/COE-278");
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-278", "COE-278", "In Progress", 0)],
@@ -3196,24 +3200,24 @@ async fn recovery_retries_an_interrupted_completed_initial_run() {
         ..Default::default()
     };
     let worker = FakeWorker::default();
-    let mut config = scheduler_config();
-    config.max_retry_attempts = Some(1);
-    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
 
     scheduler
         .tick(ts(100))
         .await
         .expect("completed initial recovery should succeed");
 
-    assert_eq!(scheduler.worker().launches.len(), 1);
-    assert_eq!(
-        scheduler.worker().launches[0]
-            .run
-            .attempt
-            .map(|attempt| attempt.get()),
-        Some(1)
-    );
-    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
+    assert!(matches!(
+        scheduler
+            .execution(&IssueId::new("lin-278").expect("issue id should be valid"))
+            .expect("recovered execution should remain visible")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::Completed,
+            ..
+        }
+    ));
+    assert!(scheduler.worker().launches.is_empty());
 }
 
 #[tokio::test]

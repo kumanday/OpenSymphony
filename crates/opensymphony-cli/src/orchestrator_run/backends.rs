@@ -1710,6 +1710,7 @@ async fn run_codex_stdio_issue_with_mode(
         route,
         workspace_manager,
         workspace,
+        run_manifest,
         issue,
         run,
         workflow,
@@ -1786,6 +1787,7 @@ async fn try_run_codex_stdio_issue(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
     workspace_manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
@@ -1887,6 +1889,7 @@ async fn try_run_codex_stdio_issue(
     } else {
         None
     };
+    let mut resume_terminal = None;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
         Some(manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
@@ -1956,6 +1959,9 @@ async fn try_run_codex_stdio_issue(
                     format!("returned thread id `{resumed_thread_id}` instead"),
                 ));
             }
+            resume_terminal = manifest.last_turn_id.as_deref().and_then(|turn_id| {
+                codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
+            });
             let prompt_kind = if manifest.workflow_prompt_seeded {
                 IssueSessionPromptKind::Continuation
             } else {
@@ -2080,6 +2086,9 @@ async fn try_run_codex_stdio_issue(
                     "persisted Codex turn id is missing; refusing to start a new turn",
                 )
             })?;
+        if let Some(outcome) = resume_terminal {
+            read_state.pending_terminal = Some(outcome);
+        }
         let _interrupt_registration = register_codex_interrupt_channel(
             codex_interrupts,
             conversation_id.clone(),
@@ -2205,6 +2214,24 @@ async fn try_run_codex_stdio_issue(
                 with_codex_stderr(error, &stderr_tail),
             )
         })?;
+    if !recovered {
+        persist_codex_run_started(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &conversation_id,
+            prompt_kind,
+        )
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(&conversation_id),
+                "run status persistence",
+                with_codex_stderr(error, &stderr_tail),
+            )
+        })?;
+    }
     let _interrupt_registration = register_codex_interrupt_channel(
         codex_interrupts,
         conversation_id.clone(),
@@ -2851,6 +2878,44 @@ fn codex_thread_id_from_response(value: &serde_json::Value) -> Result<String, St
         .ok_or_else(|| "Codex thread response missing a non-empty thread id".to_string())
 }
 
+fn codex_terminal_outcome_from_resume_response(
+    value: &serde_json::Value,
+    expected_turn_id: &str,
+) -> Option<CodexTerminalOutcome> {
+    let result = value.get("result")?;
+    let turn = result
+        .get("thread")
+        .and_then(|thread| thread.get("turns"))
+        .or_else(|| result.get("turns"))?
+        .as_array()?
+        .iter()
+        .find(|turn| {
+            turn.get("id")
+                .or_else(|| turn.get("turnId"))
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_turn_id)
+        })?;
+    let status = turn
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)?;
+    let (outcome, status) = match status.as_str() {
+        "completed" | "succeeded" | "success" => {
+            (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+        }
+        "failed" | "error" => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+        "cancelled" | "canceled" | "interrupted" => {
+            (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+        }
+        _ => return None,
+    };
+    Some(CodexTerminalOutcome {
+        event_kind: NormalizedCodexEventKind::TurnCompleted,
+        outcome,
+        status,
+    })
+}
+
 fn codex_lifecycle_error(
     issue: &NormalizedIssue,
     thread_id: Option<&str>,
@@ -3387,6 +3452,25 @@ async fn persist_codex_turn_id(
     manifest.last_attached_at = now;
     workspace_manager
         .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn persist_codex_run_started(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    conversation_id: &str,
+    prompt_kind: IssueSessionPromptKind,
+) -> Result<(), String> {
+    run_manifest.status = RunStatus::Running;
+    run_manifest.status_detail = Some(format!(
+        "{} prompt sent to Codex conversation {conversation_id}",
+        prompt_kind.as_str()
+    ));
+    run_manifest.updated_at = chrono::Utc::now();
+    workspace_manager
+        .write_run_manifest(workspace, run_manifest)
         .await
         .map_err(|error| error.to_string())
 }
@@ -4023,6 +4107,50 @@ mod tests {
         }))
         .expect_err("empty thread id should fail launch");
         assert!(empty.contains("missing a non-empty thread id"));
+    }
+
+    #[test]
+    fn codex_resume_response_reconciles_the_persisted_terminal_turn() {
+        let completed = codex_terminal_outcome_from_resume_response(
+            &serde_json::json!({
+                "result": {
+                    "thread": {
+                        "id": "thread-7",
+                        "turns": [{"id": "turn-7", "status": "completed"}]
+                    }
+                }
+            }),
+            "turn-7",
+        )
+        .expect("completed persisted turn should be terminal");
+        assert_eq!(completed.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(completed.status, RunStatus::Succeeded);
+
+        let cancelled = codex_terminal_outcome_from_resume_response(
+            &serde_json::json!({
+                "result": {
+                    "turns": [{"turnId": "turn-8", "status": "interrupted"}]
+                }
+            }),
+            "turn-8",
+        )
+        .expect("interrupted persisted turn should be terminal");
+        assert_eq!(cancelled.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(cancelled.status, RunStatus::Cancelled);
+
+        assert!(
+            codex_terminal_outcome_from_resume_response(
+                &serde_json::json!({
+                    "result": {
+                        "thread": {
+                            "turns": [{"id": "other-turn", "status": "completed"}]
+                        }
+                    }
+                }),
+                "turn-7",
+            )
+            .is_none()
+        );
     }
 
     #[test]
