@@ -544,9 +544,18 @@ pub(super) async fn resolve_runtime_config(
         }
     })?;
     let workflow = central_workflow_front_matter
-        .map(|front_matter| WorkflowDefinition {
-            front_matter,
-            prompt_template: workflow.prompt_template.clone(),
+        .map(|front_matter| {
+            // Central config owns orchestration fields, while repository-local
+            // codex/logging/extensions remain implementation guidance. Merge
+            // those allowed fields instead of dropping them when the central
+            // front matter replaces the legacy orchestration values.
+            WorkflowDefinition {
+                front_matter: merge_repository_local_front_matter(
+                    front_matter,
+                    &workflow.front_matter,
+                ),
+                prompt_template: workflow.prompt_template.clone(),
+            }
         })
         .unwrap_or(workflow);
     let mut workflow = workflow
@@ -815,6 +824,24 @@ fn resolve_central_config(
     {
         return Err(CentralConfigError::LiteralSecret);
     }
+    for (field, value) in [
+        (
+            "openhands.transport_base_url",
+            config.openhands.transport_base_url.as_deref(),
+        ),
+        (
+            "openhands.front_matter.transport.base_url",
+            config
+                .openhands
+                .front_matter
+                .as_ref()
+                .and_then(|front_matter| front_matter.transport.base_url.as_deref()),
+        ),
+    ] {
+        if let Some(value) = value {
+            validate_openhands_transport_url(value, field)?;
+        }
+    }
     if [
         config.hooks.after_create.as_deref(),
         config.hooks.before_run.as_deref(),
@@ -1005,7 +1032,10 @@ fn resolve_central_config(
             &tracker.terminal_states,
         );
         if let Some(endpoint) = tracker.endpoint.as_deref() {
-            validate_remote_clone(endpoint)?;
+            validate_tracker_endpoint(
+                endpoint,
+                &format!("tracker_profiles.{tracker_id}.endpoint"),
+            )?;
         }
     }
     for (project_id, project) in &config.linear_projects {
@@ -1436,6 +1466,16 @@ fn central_workflow_front_matter(
     Ok(front_matter)
 }
 
+fn merge_repository_local_front_matter(
+    mut central: WorkflowFrontMatter,
+    local: &WorkflowFrontMatter,
+) -> WorkflowFrontMatter {
+    central.codex = local.codex.clone();
+    central.logging = local.logging.clone();
+    central.extensions = local.extensions.clone();
+    central
+}
+
 fn project_front_matter_identity(project: &CentralLinearProjectFile) -> (Option<String>, String) {
     match project.provider_project_slug.clone() {
         Some(slug) if slug == project.provider_project_id => (None, slug),
@@ -1570,6 +1610,49 @@ fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
         && (user != "git" || host.is_empty())
     {
         return Err(CentralConfigError::CredentialBearingRemote);
+    }
+    Ok(())
+}
+
+fn validate_tracker_endpoint(value: &str, field: &str) -> Result<(), CentralConfigError> {
+    let url = Url::parse(value).map_err(|_| CentralConfigError::InvalidReference {
+        field: field.to_owned(),
+    })?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(CentralConfigError::CredentialBearingRemote);
+    }
+    if !matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https")
+        || url.host_str().is_none()
+    {
+        return Err(CentralConfigError::InvalidReference {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_openhands_transport_url(value: &str, field: &str) -> Result<(), CentralConfigError> {
+    let url = Url::parse(value).map_err(|_| CentralConfigError::InvalidReference {
+        field: field.to_owned(),
+    })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(CentralConfigError::InvalidReference {
+            field: field.to_owned(),
+        });
+    }
+    if url.query_pairs().any(|(key, _)| {
+        matches!(
+            key.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
+            "accesstoken" | "apikey" | "authorization" | "sessionapikey" | "token"
+        )
+    }) {
+        return Err(CentralConfigError::InvalidReference {
+            field: field.to_owned(),
+        });
     }
     Ok(())
 }
@@ -2459,6 +2542,63 @@ scheduler:
                 .expect_err("tracker endpoint credentials should fail");
             assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
         }
+    }
+
+    #[test]
+    fn central_config_rejects_non_http_tracker_endpoints() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        for endpoint in ["ssh://api.example.test/graphql", "api.example.test/graphql"] {
+            let source = central_fixture(root.path()).replace(
+                "endpoint: https://api.linear.app/graphql",
+                &format!("endpoint: {endpoint}"),
+            );
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("tracker endpoints must be HTTP(S) URLs");
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field }
+                    if field == "tracker_profiles.linear.endpoint"
+            ));
+        }
+    }
+
+    #[test]
+    fn central_config_rejects_credential_bearing_openhands_transport_urls() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        for (field, suffix) in [
+            (
+                "openhands.transport_base_url",
+                "openhands:\n  transport_base_url: https://token@example.test/api\n",
+            ),
+            (
+                "openhands.front_matter.transport.base_url",
+                "openhands:\n  front_matter:\n    transport:\n      base_url: https://api.example.test/api?access_token=secret-canary\n",
+            ),
+        ] {
+            let source = format!("{}\n{suffix}", central_fixture(root.path()));
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("credential-bearing OpenHands URLs must fail closed");
+            assert!(matches!(
+                &error,
+                CentralConfigError::InvalidReference { field: actual }
+                    if actual == field
+            ));
+            assert!(!error.to_string().contains("secret-canary"));
+        }
+    }
+
+    #[test]
+    fn central_runtime_preserves_repository_local_front_matter_extensions() {
+        let local = WorkflowDefinition::parse(
+            "---\ncodex:\n  command: codex app-server\nlogging:\n  level: debug\n---\nImplementation instructions\n",
+        )
+        .expect("repository-local workflow should parse")
+        .front_matter;
+        let merged = merge_repository_local_front_matter(WorkflowFrontMatter::default(), &local);
+
+        assert_eq!(merged.codex, local.codex);
+        assert_eq!(merged.logging, local.logging);
+        assert!(merged.extensions.is_empty());
     }
 
     #[test]

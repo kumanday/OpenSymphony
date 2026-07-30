@@ -47,6 +47,7 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use self::{
     backends::{
@@ -600,7 +601,11 @@ fn claim_root_registry_marker(root: &Path) -> Result<PathBuf, RunCommandError> {
         detail: format!("failed to create {}: {source}", registry.display()),
     })?;
     let sequence = ATOMIC_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let marker = registry.join(format!("root-{}-{sequence}.active", std::process::id()));
+    let instance = Uuid::new_v4().simple().to_string();
+    let marker = registry.join(format!(
+        "root-{}-{instance}-{sequence}.active",
+        std::process::id()
+    ));
     publish_initialized_marker(
         &marker,
         &format!("{}root={}\n", process_marker_fields(), root.display()),

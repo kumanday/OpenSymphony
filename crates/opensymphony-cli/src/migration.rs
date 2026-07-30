@@ -1625,6 +1625,13 @@ fn memory_catalog_generation(root: &Path) -> Result<String, MigrationError> {
     }
     let mut entries = Vec::new();
     collect_memory_catalog_entries(root, root, &mut entries)?;
+    if entries.is_empty() {
+        // Acquiring the catalog coordination lock creates only the
+        // administrative `.opensymphony/` directory. Treat that directory as
+        // absent so an interrupted apply that started without a catalog can
+        // still be rolled back after the lock is reacquired.
+        return Ok(sha256(b"<absent>"));
+    }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest_input = Vec::new();
     for (relative, kind, contents) in entries {
@@ -1673,6 +1680,11 @@ fn collect_memory_catalog_entries(
             });
         }
         if file_type.is_dir() {
+            if entry.file_name() == ".opensymphony"
+                && memory_catalog_admin_directory_is_lock_only(&path)?
+            {
+                continue;
+            }
             entries.push((relative, b'd', Vec::new()));
             collect_memory_catalog_entries(root, &path, entries)?;
         } else if file_type.is_file() {
@@ -1684,6 +1696,30 @@ fn collect_memory_catalog_entries(
         }
     }
     Ok(())
+}
+
+fn memory_catalog_admin_directory_is_lock_only(path: &Path) -> Result<bool, MigrationError> {
+    for entry in fs::read_dir(path).map_err(|source| MigrationError::Read {
+        path: path.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MigrationError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if entry.file_name() != MEMORY_MIGRATION_LOCK
+            || !entry
+                .file_type()
+                .map_err(|source| MigrationError::Read {
+                    path: entry.path(),
+                    source,
+                })?
+                .is_file()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 // The non-Unix implementation can reject paths that cannot be represented as
@@ -4290,6 +4326,21 @@ mod tests {
         let after = memory_catalog_generation(root.path()).expect("generation should succeed");
 
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn memory_catalog_generation_ignores_lock_only_admin_directory() {
+        let root = tempfile::tempdir().expect("catalog root");
+        let absent = memory_catalog_generation(root.path()).expect("absent catalog should hash");
+        let admin = root.path().join(".opensymphony");
+        fs::create_dir_all(&admin).expect("coordination directory should exist");
+        fs::write(admin.join(MEMORY_MIGRATION_LOCK), "pid=123\n")
+            .expect("coordination lock should exist");
+
+        assert_eq!(
+            absent,
+            memory_catalog_generation(root.path()).expect("lock-only catalog should hash")
+        );
     }
 
     #[cfg(unix)]
