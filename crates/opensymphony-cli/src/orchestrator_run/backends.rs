@@ -991,6 +991,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 manifest
             }
         };
+        // Recovery increments the queued retry's predecessor count when it
+        // reconstructs the retry attempt. Keep an existing manifest aligned
+        // with the same predecessor value as a synthetic one so a launch
+        // failure followed by restart cannot replay an already-consumed
+        // attempt.
+        manifest.normal_retry_count = retry.normal_retry_count.saturating_sub(1);
         manifest.pending_retry = true;
         manifest.status = RunStatus::PreparationFailed;
         manifest.status_detail = Some("retry pending after worker stop".to_owned());
@@ -6793,6 +6799,70 @@ mod tests {
         // predecessor once when reconstructing the queued retry.
         assert_eq!(manifest.normal_retry_count, 0);
         assert_eq!(manifest.retry_due_at, Some(1_200));
+    }
+
+    #[tokio::test]
+    async fn persist_retry_pending_updates_existing_manifest_predecessor_count() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut existing_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-existing-retry", 1).with_normal_retry_count(7),
+            )
+            .await
+            .expect("existing run manifest should be written");
+        existing_manifest.status = RunStatus::PreparationFailed;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &existing_manifest)
+            .await
+            .expect("existing manifest should be persisted");
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: RetryAttempt::new(2).expect("retry attempt should be valid"),
+            normal_retry_count: 3,
+            scheduled_at: TimestampMs::new(250),
+            due_at: TimestampMs::new(1_200),
+            reason: RetryReason::Failure,
+            error: Some("launch failed again".to_owned()),
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &workflow);
+
+        backend
+            .persist_retry_pending(&workspace, &retry)
+            .await
+            .expect("pending retry should update the durable manifest");
+
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.normal_retry_count, 2);
+        assert!(manifest.pending_retry);
+        assert_eq!(manifest.status, RunStatus::PreparationFailed);
     }
 
     #[tokio::test]

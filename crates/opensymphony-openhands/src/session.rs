@@ -1401,6 +1401,14 @@ impl IssueSessionRunner {
         };
 
         let mut active_session = active_session;
+        // A trigger-pending manifest means the prompt was already accepted,
+        // but the run request was not durably acknowledged. Treat every event
+        // present before reissuing that request as historical. In particular,
+        // keep a prior `finished` state in the baseline so the stale mirror
+        // cannot complete the recovered turn before its post-trigger events
+        // arrive.
+        let pre_trigger_baseline_event_ids =
+            trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
             match self.client.run_conversation(conversation_id).await {
                 Ok(_)
@@ -1437,10 +1445,12 @@ impl IssueSessionRunner {
                 .manifest
                 .to_domain_metadata(RuntimeStreamState::Ready),
         );
-        let baseline_event_ids = recovery_baseline_event_ids(
-            active_session.stream.event_cache().items(),
-            baseline_last_event_id.as_deref(),
-        );
+        let baseline_event_ids = pre_trigger_baseline_event_ids.unwrap_or_else(|| {
+            recovery_baseline_event_ids(
+                active_session.stream.event_cache().items(),
+                baseline_last_event_id.as_deref(),
+            )
+        });
         let outcome = self
             .await_terminal_outcome(&mut active_session, &baseline_event_ids, observer)
             .await;
@@ -3753,6 +3763,10 @@ fn recovery_baseline_event_ids(
         .collect()
 }
 
+fn all_event_ids(events: &[EventEnvelope]) -> HashSet<String> {
+    events.iter().map(|event| event.id.clone()).collect()
+}
+
 fn conversation_error_detail(event: &EventEnvelope) -> String {
     let message = event
         .payload
@@ -4506,6 +4520,25 @@ mod tests {
         assert_eq!(
             recovery_baseline_event_ids(&events, Some("terminal")),
             HashSet::from(["old".to_owned()])
+        );
+    }
+
+    #[test]
+    fn trigger_pending_recovery_baselines_all_pre_trigger_events() {
+        let events = vec![
+            EventEnvelope::new("old", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new(
+                "terminal",
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                serde_json::json!({"execution_status": "finished"}),
+            ),
+        ];
+
+        assert_eq!(
+            all_event_ids(&events),
+            HashSet::from(["old".to_owned(), "terminal".to_owned()])
         );
     }
 
