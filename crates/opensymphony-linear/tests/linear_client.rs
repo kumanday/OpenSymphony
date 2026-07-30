@@ -154,6 +154,57 @@ async fn candidate_issues_normalize_fixture_payloads() {
 }
 
 #[tokio::test]
+async fn configured_project_id_resolves_to_the_linear_project_slug_for_issue_queries() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"proj-open","name":"OpenSymphony","slugId":"e7b957855cb7","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = Some("proj-open".to_string());
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    client
+        .candidate_issues()
+        .await
+        .expect("project-id candidate query should succeed");
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["variables"]["id"], "proj-open");
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("project lookup query should be present")
+            .contains("filter: { id: { eq: $id } }")
+    );
+    assert_eq!(requests[1].body["variables"]["projectSlug"], "e7b957855cb7");
+}
+
+#[tokio::test]
+async fn unresolved_configured_project_id_fails_closed() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        r#"{"data":{"projects":{"nodes":[]}}}"#,
+    )])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = Some("missing-project-id".to_string());
+    config.project_slug = "missing-project-id".to_string();
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("an unresolved provider project ID should fail");
+    assert!(
+        matches!(error, LinearError::InvalidConfiguration(message) if message.contains("missing-project-id"))
+    );
+    assert_eq!(server.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
 async fn candidate_issue_summaries_use_lightweight_dispatch_query() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
         "fixtures/candidate_issues_page.json"

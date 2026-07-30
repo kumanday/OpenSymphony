@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,7 +13,7 @@ use reqwest::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::time::sleep;
+use tokio::{sync::OnceCell, time::sleep};
 use tracing::debug;
 
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
@@ -29,12 +30,13 @@ use super::graphql::{
     IssueStatesByIdsData, IssueStatesByIdsVariables, IssueSummariesByStateData,
     IssueSummariesByStateVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
     IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
-    LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY, PROJECT_ISSUES_QUERY,
-    PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
-    PROJECT_UPDATE_CONTENT_MUTATION, ProjectBySlugData, ProjectBySlugVariables, ProjectIssuesData,
-    ProjectIssuesVariables, ProjectMilestoneCreateData, ProjectMilestoneCreateInput,
-    ProjectMilestoneCreateVariables, ProjectMilestoneUpdateData, ProjectMilestoneUpdateInput,
-    ProjectMilestoneUpdateVariables, ProjectUpdateContentData, ProjectUpdateContentVariables,
+    LinearProjectNode, LinearRelationConnection, PROJECT_BY_ID_QUERY, PROJECT_BY_SLUG_QUERY,
+    PROJECT_ISSUES_QUERY, PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
+    PROJECT_UPDATE_CONTENT_MUTATION, ProjectByIdData, ProjectByIdVariables, ProjectBySlugData,
+    ProjectBySlugVariables, ProjectIssuesData, ProjectIssuesVariables, ProjectMilestoneCreateData,
+    ProjectMilestoneCreateInput, ProjectMilestoneCreateVariables, ProjectMilestoneUpdateData,
+    ProjectMilestoneUpdateInput, ProjectMilestoneUpdateVariables, ProjectUpdateContentData,
+    ProjectUpdateContentVariables,
 };
 use super::normalize::{normalize_issue, normalize_issue_state, normalize_issue_summary};
 
@@ -67,6 +69,7 @@ pub struct LinearConfig {
     pub api_key: String,
     pub base_url: String,
     pub project_slug: String,
+    pub project_id: Option<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     pub page_size: usize,
@@ -80,6 +83,7 @@ impl LinearConfig {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             project_slug: project_slug.into(),
+            project_id: None,
             active_states: Vec::new(),
             terminal_states: Vec::new(),
             page_size: DEFAULT_PAGE_SIZE,
@@ -93,6 +97,7 @@ impl LinearConfig {
 pub struct LinearClient {
     http: Client,
     config: LinearConfig,
+    project_slug_cache: Arc<OnceCell<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +274,11 @@ impl LinearClient {
         config.api_key = normalize_required_string("LINEAR_API_KEY", &config.api_key)?;
         config.project_slug =
             normalize_required_string("tracker.project_slug", &config.project_slug)?;
+        config.project_id = config
+            .project_id
+            .as_deref()
+            .map(|value| normalize_required_string("tracker.project_id", value))
+            .transpose()?;
         config.active_states =
             normalize_required_state_names("tracker.active_states", &config.active_states)?;
         config.terminal_states =
@@ -279,7 +289,11 @@ impl LinearClient {
             .build()
             .map_err(|error| LinearError::InvalidConfiguration(error.to_string()))?;
 
-        Ok(Self { http, config })
+        Ok(Self {
+            http,
+            config,
+            project_slug_cache: Arc::new(OnceCell::new()),
+        })
     }
 
     pub async fn candidate_issues(&self) -> Result<Vec<TrackerIssue>, LinearError> {
@@ -499,12 +513,13 @@ impl LinearClient {
         &self,
         include_archived: bool,
     ) -> Result<Vec<TrackerIssue>, LinearError> {
+        let project_slug = self.project_slug_for_queries().await?;
         let mut after = None;
         let mut issues = Vec::new();
 
         loop {
             let variables = ProjectIssuesVariables {
-                project_slug: self.config.project_slug.clone(),
+                project_slug: project_slug.clone(),
                 include_archived,
                 first: self.config.page_size,
                 after: after.clone(),
@@ -546,12 +561,14 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
+        let project_slug = self.project_slug_for_queries().await?;
+
         let mut after = None;
         let mut issues = Vec::new();
 
         loop {
             let variables = IssuesByStateVariables {
-                project_slug: self.config.project_slug.clone(),
+                project_slug: project_slug.clone(),
                 state_names: state_names.clone(),
                 include_archived,
                 first: self.config.page_size,
@@ -592,12 +609,14 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
+        let project_slug = self.project_slug_for_queries().await?;
+
         let mut after = None;
         let mut issues = Vec::new();
 
         loop {
             let variables = IssueSummariesByStateVariables {
-                project_slug: self.config.project_slug.clone(),
+                project_slug: project_slug.clone(),
                 state_names: state_names.clone(),
                 include_archived: false,
                 first: self.config.page_size,
@@ -638,12 +657,14 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
+        let project_slug = self.project_slug_for_queries().await?;
+
         let mut after = None;
         let mut snapshots = Vec::new();
 
         loop {
             let variables = IssueStatesByIdsVariables {
-                project_slug: self.config.project_slug.clone(),
+                project_slug: project_slug.clone(),
                 issue_ids: issue_ids.clone(),
                 first: self.config.page_size,
                 after: after.clone(),
@@ -746,9 +767,8 @@ impl LinearClient {
     }
 
     pub async fn project_overview(&self) -> Result<Option<LinearProjectOverview>, LinearError> {
-        let variables = ProjectBySlugVariables {
-            slug: self.config.project_slug.clone(),
-        };
+        let project_slug = self.project_slug_for_queries().await?;
+        let variables = ProjectBySlugVariables { slug: project_slug };
         let response: ProjectBySlugData = self
             .execute_graphql(PROJECT_BY_SLUG_QUERY, json!(variables))
             .await?;
@@ -758,6 +778,43 @@ impl LinearClient {
             .into_iter()
             .next()
             .map(LinearProjectOverview::from))
+    }
+
+    async fn project_slug_for_queries(&self) -> Result<String, LinearError> {
+        let Some(project_id) = self.config.project_id.as_deref() else {
+            return Ok(self.config.project_slug.clone());
+        };
+        let slug = self
+            .project_slug_cache
+            .get_or_try_init(|| async {
+                let response: ProjectByIdData = self
+                    .execute_graphql(
+                        PROJECT_BY_ID_QUERY,
+                        json!(ProjectByIdVariables {
+                            id: project_id.to_owned(),
+                        }),
+                    )
+                    .await?;
+                let Some(project) = response.projects.nodes.into_iter().next() else {
+                    if self.config.project_slug != *project_id {
+                        // Migrated legacy configs explicitly carry the old slug
+                        // in project_slug. Typed central configs leave it equal
+                        // to the provider ID, so an unresolved ID fails closed.
+                        return Ok(self.config.project_slug.clone());
+                    }
+                    return Err(LinearError::InvalidConfiguration(format!(
+                        "configured tracker.project_id `{project_id}` could not be resolved to a Linear project"
+                    )));
+                };
+                if project.slug_id.trim().is_empty() {
+                    return Err(LinearError::InvalidConfiguration(format!(
+                        "configured tracker.project_id `{project_id}` resolved to a Linear project without a slugId"
+                    )));
+                }
+                Ok(project.slug_id)
+            })
+            .await?;
+        Ok(slug.clone())
     }
 
     pub async fn update_project_content(

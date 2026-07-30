@@ -4,6 +4,7 @@ mod init_repo;
 mod install_tooling;
 mod memory;
 mod memory_init_summary;
+mod migration;
 mod orchestrator_run;
 mod update_repo;
 
@@ -73,6 +74,8 @@ enum Command {
     Debug(debug_session::DebugArgs),
     #[command(about = "Capture, query, and sync project memory")]
     Memory(memory::MemoryArgs),
+    #[command(about = "Preflight, apply, and roll back central configuration migration")]
+    Migrate(migration::MigrationArgs),
     #[command(about = "Linear operations guarded by OpenSymphony state")]
     Linear(memory::LinearArgs),
     #[command(about = "Serve the local control-plane demo stream")]
@@ -148,6 +151,8 @@ pub struct DoctorArgs {
 pub struct RehydrateArgs {
     #[arg(help = "Issue identifier to rehydrate (e.g., COE-123)")]
     issue: String,
+    #[arg(long, help = "Central or repository runtime config YAML path")]
+    config: Option<PathBuf>,
     #[arg(help = "Reason for rehydration")]
     #[arg(long, default_value = "manual rehydration via CLI")]
     reason: String,
@@ -322,6 +327,7 @@ pub async fn run() -> ExitCode {
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,
         Command::Memory(args) => memory::run_command(args).await,
+        Command::Migrate(args) => migration::run(args).await,
         Command::Linear(args) => memory::run_linear_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
@@ -432,7 +438,8 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
     let config_path = match &args.config {
         Some(path) => path.clone(),
         None => {
-            let candidate = cwd.join(DEFAULT_DOCTOR_CONFIG_FILE);
+            let candidate = orchestrator_run::config::select_config_path(&cwd, None)
+                .unwrap_or_else(|| cwd.join(DEFAULT_DOCTOR_CONFIG_FILE));
             if candidate.exists() {
                 candidate
             } else {
@@ -474,19 +481,72 @@ pub async fn run_doctor_command(
 ) -> ExitCode {
     let mut checks = Vec::new();
 
-    let config = match load_config(&config_path).await {
-        Ok(config) => {
-            checks.push(CheckResult::pass(
-                "config",
-                format!("parsed {}", config_path.display()),
-            ));
-            config
-        }
+    let raw_config = match fs::read_to_string(&config_path).await {
+        Ok(raw) => raw,
         Err(error) => {
-            checks.push(CheckResult::fail("config", error));
+            checks.push(CheckResult::fail(
+                "config",
+                format!("failed to read {}: {error}", config_path.display()),
+            ));
             print_checks(&checks);
             return ExitCode::from(1);
         }
+    };
+    let central_config = if orchestrator_run::config::looks_like_central_config(&raw_config) {
+        match orchestrator_run::config::load_central_config(&config_path).await {
+            Ok(config) => Some(config),
+            Err(error) => {
+                checks.push(CheckResult::fail("config", error.to_string()));
+                print_checks(&checks);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
+    if central_config.as_ref().is_some_and(|central| {
+        project_set_doctor_mutation_blocked(&central.mode, live_openhands, rehydrate)
+    }) {
+        checks.push(CheckResult::fail(
+            "config",
+            "doctor is disabled for project_set central routing until strict routing is enabled",
+        ));
+        print_checks(&checks);
+        return ExitCode::from(1);
+    }
+    let config = match central_config.as_ref() {
+        Some(central) => {
+            checks.push(CheckResult::pass(
+                "config",
+                format!("parsed central config {}", config_path.display()),
+            ));
+            let (probe_model, probe_api_key_env, probe_llm_base_url_env) =
+                central_doctor_probe_settings(&central.workflow_front_matter);
+            DoctorConfig {
+                target_repo: central.target_repo().map(|path| path.display().to_string()),
+                openhands: OpenHandsDoctorConfig {
+                    tool_dir: central.tool_dir().map(|path| path.display().to_string()),
+                    probe_model,
+                    probe_api_key_env,
+                    probe_llm_base_url_env,
+                },
+                linear: LinearDoctorConfig { enabled: true },
+            }
+        }
+        None => match load_config(&config_path).await {
+            Ok(config) => {
+                checks.push(CheckResult::pass(
+                    "config",
+                    format!("parsed {}", config_path.display()),
+                ));
+                config
+            }
+            Err(error) => {
+                checks.push(CheckResult::fail("config", error));
+                print_checks(&checks);
+                return ExitCode::from(1);
+            }
+        },
     };
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -521,7 +581,17 @@ pub async fn run_doctor_command(
             }
         }
     };
-    let runtime = resolve_doctor_runtime(&config, config_root, &target_repo);
+    let runtime = resolve_doctor_runtime(
+        &config,
+        config_root,
+        &target_repo,
+        central_config
+            .as_ref()
+            .and_then(|central| central.repository_instruction_path.as_deref()),
+        central_config
+            .as_ref()
+            .map(|central| &central.workflow_front_matter),
+    );
 
     // For repo check, try to find the cargo workspace root from the config_root
     // This allows the doctor to work with non-Rust projects (no Cargo.toml at target_repo)
@@ -531,7 +601,7 @@ pub async fn run_doctor_command(
 
     let (runtime, rendered_probe_prompt) = match runtime {
         Ok(runtime) => {
-            checks.push(check_target_repo(&runtime.target_repo).await);
+            checks.push(check_target_repo(&runtime.target_repo, &runtime.workflow_path).await);
             checks.push(check_workflow(&runtime));
 
             let rendered_probe_prompt = match render_doctor_probe_prompt(&runtime.workflow) {
@@ -562,7 +632,13 @@ pub async fn run_doctor_command(
         Err(error) => {
             let fallback_target_repo =
                 configured_target_repo.unwrap_or_else(|| config_root.to_path_buf());
-            checks.push(check_target_repo(&fallback_target_repo).await);
+            checks.push(
+                check_target_repo(
+                    &fallback_target_repo,
+                    &fallback_target_repo.join("WORKFLOW.md"),
+                )
+                .await,
+            );
             checks.push(CheckResult::fail("workflow", error));
             print_checks(&checks);
             return ExitCode::from(1);
@@ -687,6 +763,33 @@ pub async fn run_doctor_command(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn project_set_doctor_mutation_blocked(
+    mode: &orchestrator_run::config::CentralRoutingMode,
+    _live_openhands: bool,
+    _rehydrate: bool,
+) -> bool {
+    matches!(
+        mode,
+        orchestrator_run::config::CentralRoutingMode::ProjectSet
+    )
+}
+
+fn central_doctor_probe_settings(
+    front_matter: &crate::opensymphony_workflow::WorkflowFrontMatter,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let llm = front_matter
+        .openhands
+        .conversation
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.llm.as_ref());
+    (
+        llm.and_then(|llm| llm.model.clone()),
+        llm.and_then(|llm| llm.api_key_env.clone()),
+        llm.and_then(|llm| llm.base_url_env.clone()),
+    )
 }
 
 /// Bulk rehydration for all workspaces with missing/corrupted LLM API keys
@@ -1087,15 +1190,26 @@ fn resolve_doctor_runtime(
     config: &DoctorConfig,
     config_root: &Path,
     default_target_repo: &Path,
+    central_instruction_path: Option<&Path>,
+    central_front_matter: Option<&crate::opensymphony_workflow::WorkflowFrontMatter>,
 ) -> Result<DoctorRuntimeConfig, String> {
     let target_repo = config
         .target_repo
         .as_deref()
         .map(|target_repo| resolve_path(config_root, target_repo))
         .unwrap_or_else(|| default_target_repo.to_path_buf());
-    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow_path = central_instruction_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     let workflow = WorkflowDefinition::load_from_path(&workflow_path)
         .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
+    let workflow = central_front_matter
+        .cloned()
+        .map(|front_matter| WorkflowDefinition {
+            front_matter,
+            prompt_template: workflow.prompt_template.clone(),
+        })
+        .unwrap_or(workflow);
     let workflow = resolve_doctor_workflow(&workflow, &target_repo, config.linear.enabled)
         .map_err(|error| format!("failed to resolve {}: {error}", workflow_path.display()))?;
 
@@ -1189,7 +1303,7 @@ fn check_repo_root(repo_root: &Path) -> CheckResult {
     }
 }
 
-async fn check_target_repo(target_repo: &Path) -> CheckResult {
+async fn check_target_repo(target_repo: &Path, workflow_path: &Path) -> CheckResult {
     if !target_repo.exists() {
         return CheckResult::fail(
             "target-repo",
@@ -1197,13 +1311,15 @@ async fn check_target_repo(target_repo: &Path) -> CheckResult {
         );
     }
 
-    let workflow_path = target_repo.join("WORKFLOW.md");
     if workflow_path.exists() {
         CheckResult::pass("target-repo", format!("found {}", workflow_path.display()))
     } else {
         CheckResult::fail(
             "target-repo",
-            format!("missing {}", workflow_path.display()),
+            format!(
+                "missing repository instruction file {}",
+                workflow_path.display()
+            ),
         )
     }
 }
@@ -1867,6 +1983,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             } else {
                 0
             },
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,
@@ -1910,6 +2027,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             project_name: None,
             workspace_label: Some("OSYM-401".to_owned()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,
@@ -1961,6 +2079,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             project_name: None,
             workspace_label: Some("OSYM-402".to_owned()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,
@@ -2091,7 +2210,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
-    let runtime = resolve_rehydrate_runtime(&current_dir).await?;
+    let runtime = resolve_rehydrate_runtime(&current_dir, args.config.as_deref()).await?;
     let workflow = runtime.workflow;
 
     // Setup workspace manager
@@ -2232,57 +2351,96 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     Ok(())
 }
 
-async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntimeConfig, String> {
-    let config_path = current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE);
-    let (target_repo, tool_dir) = if config_path.is_file() {
+async fn resolve_rehydrate_runtime(
+    current_dir: &Path,
+    explicit_config_path: Option<&Path>,
+) -> Result<RehydrateRuntimeConfig, String> {
+    resolve_rehydrate_runtime_with_environment(
+        current_dir,
+        explicit_config_path,
+        &ProcessEnvironment,
+    )
+    .await
+}
+
+async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
+    current_dir: &Path,
+    explicit_config_path: Option<&Path>,
+    environment: &E,
+) -> Result<RehydrateRuntimeConfig, String> {
+    let config_path =
+        orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
+            .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
+    let mut central_instruction_path = None;
+    let (target_repo, tool_dir, central_front_matter) = if config_path.is_file() {
         let raw = fs::read_to_string(&config_path)
             .await
             .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
-        let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
-            .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
-        config.target_repo = config
-            .target_repo
-            .take()
-            .map(|value| resolve_rehydrate_value(&config_path, value))
-            .transpose()?;
-        config.openhands.tool_dir = config
-            .openhands
-            .tool_dir
-            .take()
-            .map(|value| resolve_rehydrate_value(&config_path, value))
-            .transpose()?;
+        if orchestrator_run::config::looks_like_central_config(&raw) {
+            let central = orchestrator_run::config::load_central_config(&config_path)
+                .await
+                .map_err(|error| error.to_string())?;
+            central_instruction_path = central.repository_instruction_path.clone();
+            (
+                central
+                    .require_legacy_target_repo()
+                    .map_err(|error| error.to_string())?,
+                central.tool_dir(),
+                Some(central.workflow_front_matter.clone()),
+            )
+        } else {
+            let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
+                .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
+            config.target_repo = config
+                .target_repo
+                .take()
+                .map(|value| resolve_rehydrate_value(&config_path, value))
+                .transpose()?;
+            config.openhands.tool_dir = config
+                .openhands
+                .tool_dir
+                .take()
+                .map(|value| resolve_rehydrate_value(&config_path, value))
+                .transpose()?;
 
-        let config_root = config_path.parent().unwrap_or(current_dir);
-        let target_repo = config
-            .target_repo
-            .as_deref()
-            .map(|value| resolve_path(config_root, value))
-            .unwrap_or_else(|| current_dir.to_path_buf());
-        let tool_dir = config
-            .openhands
-            .tool_dir
-            .as_deref()
-            .map(|value| resolve_path(config_root, value));
-        (target_repo, tool_dir)
+            let config_root = config_path.parent().unwrap_or(current_dir);
+            let target_repo = config
+                .target_repo
+                .as_deref()
+                .map(|value| resolve_path(config_root, value))
+                .unwrap_or_else(|| current_dir.to_path_buf());
+            let tool_dir = config
+                .openhands
+                .tool_dir
+                .as_deref()
+                .map(|value| resolve_path(config_root, value));
+            (target_repo, tool_dir, None)
+        }
     } else {
-        (current_dir.to_path_buf(), None)
+        (current_dir.to_path_buf(), None, None)
     };
 
-    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     if !workflow_path.exists() {
         return Err(format!(
-            "WORKFLOW.md not found at {}",
+            "repository instruction file not found at {}",
             workflow_path.display()
         ));
     }
 
     let workflow_content = fs::read_to_string(&workflow_path)
         .await
-        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
+        .map_err(|e| format!("failed to read repository instruction file: {}", e))?;
     let workflow_def = WorkflowDefinition::parse(&workflow_content)
         .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+    let workflow_def = central_front_matter
+        .map(|front_matter| WorkflowDefinition {
+            front_matter,
+            prompt_template: workflow_def.prompt_template.clone(),
+        })
+        .unwrap_or(workflow_def);
     let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
-        workflow_def.resolve_with_process_env(&target_repo)
+        workflow_def.resolve(&target_repo, environment)
     } else {
         workflow_def.resolve(
             &target_repo,
@@ -2401,7 +2559,7 @@ fn build_rehydrate_client(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::Duration};
+    use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
     use crate::opensymphony_domain::{
         ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
@@ -2412,9 +2570,35 @@ mod tests {
 
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        command_check_name, effective_openhands_probe_base_url, executable_suffixes,
-        find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot, spawn_demo_updates,
+        central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
+        executable_suffixes, find_cargo_workspace_root, project_set_doctor_mutation_blocked,
+        resolve_doctor_runtime, resolve_doctor_workflow, resolve_rehydrate_runtime,
+        resolve_rehydrate_runtime_with_environment, sample_snapshot, spawn_demo_updates,
     };
+
+    #[test]
+    fn project_set_doctor_mutations_are_blocked_before_checkout_resolution() {
+        assert!(project_set_doctor_mutation_blocked(
+            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
+            true,
+            false,
+        ));
+        assert!(project_set_doctor_mutation_blocked(
+            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
+            false,
+            true,
+        ));
+        assert!(project_set_doctor_mutation_blocked(
+            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
+            false,
+            false,
+        ));
+        assert!(!project_set_doctor_mutation_blocked(
+            &super::orchestrator_run::config::CentralRoutingMode::LegacySingle,
+            true,
+            true,
+        ));
+    }
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
@@ -2439,6 +2623,7 @@ mod tests {
             | Command::Doctor(_)
             | Command::Install(_)
             | Command::Memory(_)
+            | Command::Migrate(_)
             | Command::Linear(_)
             | Command::Update(_)
             | Command::Rehydrate(_) => {
@@ -2525,6 +2710,63 @@ mod tests {
     }
 
     #[test]
+    fn central_doctor_probe_settings_preserve_llm_environment_selectors() {
+        let workflow = WorkflowDefinition::parse(
+            "---\nopenhands:\n  conversation:\n    agent:\n      llm:\n        model: custom/model\n        api_key_env: CUSTOM_OPENAI_KEY\n        base_url_env: CUSTOM_OPENAI_BASE_URL\n---\nprobe\n",
+        )
+        .expect("central OpenHands front matter should parse");
+
+        assert_eq!(
+            central_doctor_probe_settings(&workflow.front_matter),
+            (
+                Some("custom/model".to_owned()),
+                Some("CUSTOM_OPENAI_KEY".to_owned()),
+                Some("CUSTOM_OPENAI_BASE_URL".to_owned()),
+            )
+        );
+    }
+
+    #[test]
+    fn doctor_runtime_uses_the_central_repository_instruction_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target_repo = temp_dir.path().join("checkout");
+        let instruction_path = target_repo.join("AGENTS.md");
+        fs::create_dir_all(&target_repo).expect("target repo should exist");
+        fs::write(
+            &instruction_path,
+            "---\ntracker:\n  kind: linear\n  project_slug: legacy\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n\n# Implementation guidance\n",
+        )
+        .expect("central instruction file should exist");
+        let front_matter = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: central\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./central-workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n\n# Central prompt\n",
+        )
+        .expect("central front matter should parse")
+        .front_matter;
+        let config = super::DoctorConfig {
+            target_repo: None,
+            openhands: super::OpenHandsDoctorConfig {
+                tool_dir: None,
+                probe_model: None,
+                probe_api_key_env: None,
+                probe_llm_base_url_env: None,
+            },
+            linear: super::LinearDoctorConfig { enabled: false },
+        };
+
+        let runtime = resolve_doctor_runtime(
+            &config,
+            temp_dir.path(),
+            &target_repo,
+            Some(&instruction_path),
+            Some(&front_matter),
+        )
+        .expect("doctor runtime should use the configured instruction path");
+
+        assert_eq!(runtime.workflow_path, instruction_path);
+        assert_eq!(runtime.workflow.config.tracker.project_slug, "central");
+    }
+
+    #[test]
     fn find_cargo_workspace_root_walks_up_from_nested_paths() {
         let temp_dir = TempDir::new().expect("temp dir");
         let repo_root = temp_dir.path().join("repo");
@@ -2585,11 +2827,80 @@ openhands:
         )
         .expect("config should exist");
 
-        let runtime = super::resolve_rehydrate_runtime(&target_repo)
+        let runtime = resolve_rehydrate_runtime(&target_repo, None)
             .await
             .expect("rehydrate runtime should resolve");
 
         assert_eq!(runtime.tool_dir, Some(tool_dir));
+    }
+
+    #[tokio::test]
+    async fn resolve_rehydrate_runtime_honors_explicit_config_selection() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let current_dir = temp_dir.path().join("current");
+        let selected_repo = temp_dir.path().join("selected");
+        let selected_config = temp_dir.path().join("configs/selected.yaml");
+        fs::create_dir_all(&current_dir).expect("current directory should exist");
+        fs::create_dir_all(&selected_repo).expect("selected repo should exist");
+        fs::create_dir_all(
+            selected_config
+                .parent()
+                .expect("selected config should have a parent"),
+        )
+        .expect("config directory should exist");
+        fs::write(
+            selected_repo.join("WORKFLOW.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: selected-project\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n",
+        )
+        .expect("selected workflow should exist");
+        fs::write(
+            &selected_config,
+            format!(
+                "target_repo: {}\nopenhands:\n  tool_dir: ./tools\n",
+                selected_repo.display()
+            ),
+        )
+        .expect("selected config should exist");
+
+        let runtime = resolve_rehydrate_runtime(&current_dir, Some(&selected_config))
+            .await
+            .expect("explicit rehydrate config should resolve");
+        assert_eq!(
+            runtime.workflow.config.tracker.project_slug,
+            "selected-project"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rehydrate_runtime_uses_central_repository_instruction_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let checkout = temp_dir.path().join("checkout");
+        let central = temp_dir.path().join("central.yaml");
+        fs::create_dir_all(&checkout).expect("checkout should exist");
+        fs::write(
+            checkout.join("AGENTS.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: legacy\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n\n# Repository guidance\n",
+        )
+        .expect("repository instruction file should exist");
+        fs::write(
+            &central,
+            format!(
+                "schema_version: 1\ninstance:\n  id: central\n  state_root: {0}/state\nrouting:\n  mode: legacy_single\n  repository: repo\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\n    active_states: [Todo]\n    terminal_states: [Done]\nlinear_projects:\n  project:\n    provider_project_id: project\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\n    checkout_path: {0}/checkout\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+                temp_dir.path().display()
+            ),
+        )
+        .expect("central config should exist");
+
+        let environment = BTreeMap::from([("LINEAR_API_KEY".to_owned(), "test-key".to_owned())]);
+        let runtime = resolve_rehydrate_runtime_with_environment(
+            temp_dir.path(),
+            Some(&central),
+            &environment,
+        )
+        .await
+        .expect("rehydrate runtime should resolve the central instruction path");
+
+        assert_eq!(runtime.workflow.config.tracker.project_slug, "project");
     }
 
     #[test]

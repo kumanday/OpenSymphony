@@ -20,7 +20,7 @@ use super::{
     IssueLifecycleState, IssueManifest, PromptCaptureDescriptor, PromptCaptureManifest,
     RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceHandle,
     WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
-    models::AfterCreateBootstrapReceipt,
+    models::{AfterCreateBootstrapReceipt, redact_runtime_diagnostic},
     paths::{normalize_absolute_path, resolve_path_within_root, sanitize_workspace_key},
 };
 
@@ -210,9 +210,38 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         state: IssueLifecycleState,
     ) -> Result<CleanupOutcome, WorkspaceError> {
+        self.cleanup_with_terminal_removal(
+            workspace,
+            state,
+            self.config.cleanup.remove_terminal_workspaces,
+        )
+        .await
+    }
+
+    /// Remove a failed terminal workspace even when ordinary terminal
+    /// workspaces are retained by configuration. Retry exhaustion has its own
+    /// `retain_failed` policy at the scheduler layer.
+    pub async fn cleanup_failed_terminal_workspace(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
+        self.cleanup_with_terminal_removal(workspace, IssueLifecycleState::Terminal, true)
+            .await
+    }
+
+    async fn cleanup_with_terminal_removal(
+        &self,
+        workspace: &WorkspaceHandle,
+        state: IssueLifecycleState,
+        remove_terminal_workspaces: bool,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
         if !path_exists(workspace.workspace_path()).await? {
             return Ok(CleanupOutcome {
-                decision: self.cleanup_decision(state),
+                decision: if state == IssueLifecycleState::Terminal && remove_terminal_workspaces {
+                    CleanupDecision::Remove
+                } else {
+                    CleanupDecision::Retain
+                },
                 before_remove: None,
             });
         }
@@ -229,7 +258,11 @@ impl WorkspaceManager {
             Ok(record) => record,
             Err(failure) => Some(failure.record),
         };
-        let decision = self.cleanup_decision(state);
+        let decision = if remove_terminal_workspaces {
+            CleanupDecision::Remove
+        } else {
+            CleanupDecision::Retain
+        };
 
         if decision == CleanupDecision::Remove {
             match fs::remove_dir_all(workspace.workspace_path()).await {
@@ -386,7 +419,21 @@ impl WorkspaceManager {
         manifest: &RunManifest,
     ) -> Result<(), WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
-        self.write_manifest(workspace, &workspace.run_manifest_path(), manifest)
+        let mut sanitized = manifest.clone();
+        sanitized.status_detail = sanitized
+            .status_detail
+            .as_deref()
+            .map(redact_runtime_diagnostic);
+        sanitized.retry_error = sanitized
+            .retry_error
+            .as_deref()
+            .map(redact_runtime_diagnostic);
+        for hook in &mut sanitized.hooks {
+            hook.command = redact_runtime_diagnostic(&hook.command);
+            hook.stdout = redact_runtime_diagnostic(&hook.stdout);
+            hook.stderr = redact_runtime_diagnostic(&hook.stderr);
+        }
+        self.write_manifest(workspace, &workspace.run_manifest_path(), &sanitized)
             .await
     }
 

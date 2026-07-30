@@ -12,8 +12,8 @@ use opensymphony::opensymphony_domain::{
     ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
     ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
     ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
-    SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
-    TrackerIssueStateKind,
+    ReleaseReason as DomainReleaseReason, SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
@@ -728,6 +728,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             project_name: Some("OpenSymphony".to_owned()),
             workspace_label: Some("COE-255".to_owned()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: Some(now - chrono::Duration::seconds(80)),
             started_at: Some(now - chrono::Duration::seconds(75)),
             finished_at: None,
@@ -819,6 +820,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 project_name: Some("Alpha Project".to_owned()),
                 workspace_label: None,
                 retry_count: 0,
+                release_reason: None,
                 claimed_at: None,
                 started_at: None,
                 finished_at: None,
@@ -863,6 +865,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 project_name: Some("Beta Project".to_owned()),
                 workspace_label: Some("COE-301".to_owned()),
                 retry_count: 0,
+                release_reason: None,
                 claimed_at: Some(now - chrono::Duration::seconds(90)),
                 started_at: Some(now - chrono::Duration::seconds(80)),
                 finished_at: Some(now - chrono::Duration::seconds(10)),
@@ -958,6 +961,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 project_name: None,
                 workspace_label: Some("COE-302".to_owned()),
                 retry_count: 0,
+                release_reason: None,
                 claimed_at: Some(now - chrono::Duration::seconds(30)),
                 started_at: Some(now - chrono::Duration::seconds(25)),
                 finished_at: Some(now - chrono::Duration::seconds(5)),
@@ -1002,6 +1006,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 project_name: Some("Beta Project".to_owned()),
                 workspace_label: Some("COE-303".to_owned()),
                 retry_count: 1,
+                release_reason: None,
                 claimed_at: None,
                 started_at: None,
                 finished_at: None,
@@ -1046,6 +1051,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 project_name: Some("Alpha Project".to_owned()),
                 workspace_label: None,
                 retry_count: 0,
+                release_reason: None,
                 claimed_at: None,
                 started_at: None,
                 finished_at: None,
@@ -5548,6 +5554,170 @@ async fn gateway_run_detail_failed_without_retries() {
     assert_eq!(response.max_turns, 0);
     assert_eq!(response.runtime_seconds, 20);
 
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_exposes_retry_exhausted_lifecycle() {
+    let mut snapshot = fixture_snapshot_rich(0);
+    let issue = snapshot
+        .issues
+        .iter_mut()
+        .find(|issue| issue.identifier == "COE-302")
+        .expect("failed fixture issue should exist");
+    issue.release_reason = Some(DomainReleaseReason::RetryExhausted);
+    issue.runtime_state = IssueRuntimeState::Failed;
+    issue.tracker_state = "In Progress".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-302"))
+        .send()
+        .await
+        .expect("fetch retry-exhausted run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode retry-exhausted run detail");
+
+    assert_eq!(
+        response.lifecycle_state,
+        opensymphony::opensymphony_gateway_schema::run::RunLifecycleState::RetryExhausted
+    );
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::RetryExhausted)
+    );
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_preserves_explicit_tracker_inactive_reason() {
+    let mut snapshot = fixture_snapshot_rich(0);
+    let issue = snapshot
+        .issues
+        .iter_mut()
+        .find(|issue| issue.identifier == "COE-302")
+        .expect("failed fixture issue should exist");
+    issue.release_reason = Some(DomainReleaseReason::TrackerInactive);
+    issue.runtime_state = IssueRuntimeState::Completed;
+    issue.last_outcome = WorkerOutcome::Completed;
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-302"))
+        .send()
+        .await
+        .expect("fetch tracker-inactive run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode tracker-inactive run detail");
+
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::TrackerInactive)
+    );
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_terminal_tracker_state_overrides_stale_inactive_reason() {
+    let mut snapshot = fixture_snapshot_rich(0);
+    let issue = snapshot
+        .issues
+        .iter_mut()
+        .find(|issue| issue.identifier == "COE-302")
+        .expect("failed fixture issue should exist");
+    issue.release_reason = Some(DomainReleaseReason::TrackerInactive);
+    issue.runtime_state = IssueRuntimeState::Completed;
+    issue.tracker_state = "Done".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store.clone()).with_terminal_states(["Done".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-302"))
+        .send()
+        .await
+        .expect("fetch terminal tracker run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode terminal tracker run detail");
+
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::TrackerTerminal)
+    );
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_terminal_tracker_state_overrides_stale_exhaustion_reason() {
+    let mut snapshot = fixture_snapshot_rich(0);
+    let issue = snapshot
+        .issues
+        .iter_mut()
+        .find(|issue| issue.identifier == "COE-302")
+        .expect("failed fixture issue should exist");
+    issue.release_reason = Some(DomainReleaseReason::RetryExhausted);
+    issue.runtime_state = IssueRuntimeState::Completed;
+    issue.tracker_state = "Done".to_owned();
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store.clone()).with_terminal_states(["Done".to_owned()]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-302"))
+        .send()
+        .await
+        .expect("fetch terminal exhausted run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode terminal exhausted run detail");
+
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::TrackerTerminal)
+    );
     server_task.abort();
 }
 

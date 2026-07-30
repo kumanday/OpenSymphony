@@ -7,6 +7,361 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Keep transient runtime diagnostics useful without allowing common
+/// credential-shaped values to become durable workspace metadata.
+pub fn redact_runtime_diagnostic(input: &str) -> String {
+    const SENSITIVE_KEYS: &[&str] = &[
+        "access_token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "pat",
+        "personal_access_token",
+        "account_id",
+        "accountid",
+        "account_identifier",
+        "account_identity",
+        "chatgpt_account_id",
+        "account-id",
+        "account-identifier",
+        "account-identity",
+        "chatgpt-account-id",
+        "client_secret",
+        "credential",
+        "password",
+        "refresh_token",
+        "secret",
+        "token",
+    ];
+
+    let mut redacted = redact_standalone_bearer(&redact_authorization_headers(input))
+        .split_whitespace()
+        .map(redact_diagnostic_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    for key in SENSITIVE_KEYS {
+        redacted = redact_key_value(&redacted, key);
+    }
+    const MAX_CHARS: usize = 512;
+    let mut chars = redacted.chars();
+    let prefix = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
+fn redact_authorization_headers(input: &str) -> String {
+    let mut redacted = input.to_owned();
+    let mut search_from = 0;
+    loop {
+        let lower = redacted.to_ascii_lowercase();
+        let Some(relative_start) = lower
+            .get(search_from..)
+            .and_then(|text| text.find("authorization"))
+        else {
+            return redacted;
+        };
+        let key_start = search_from + relative_start;
+        let key_end = key_start + "authorization".len();
+        if key_start > 0
+            && redacted[..key_start]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            search_from = key_end;
+            continue;
+        }
+
+        let bytes = redacted.as_bytes();
+        let mut delimiter = key_end;
+        if bytes
+            .get(delimiter)
+            .is_some_and(|character| *character == b'"' || *character == b'\'')
+        {
+            delimiter += 1;
+        }
+        while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
+            delimiter += 1;
+        }
+        if delimiter >= bytes.len() || !matches!(bytes[delimiter], b'=' | b':') {
+            search_from = key_end;
+            continue;
+        }
+        let mut value_start = delimiter + 1;
+        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        let quoted = bytes
+            .get(value_start)
+            .copied()
+            .filter(|quote| *quote == b'"' || *quote == b'\'');
+        if let Some(quote) = quoted {
+            let content_start = value_start + 1;
+            let content_end = quoted_value_end(bytes, content_start, quote);
+            let content = &redacted[content_start..content_end];
+            let replacement = authorization_value_replacement(content);
+            if replacement != content {
+                redacted.replace_range(content_start..content_end, &replacement);
+                search_from = content_start + replacement.len();
+            } else {
+                search_from = content_end;
+            }
+            continue;
+        }
+
+        let mut value_end = value_start;
+        while value_end < bytes.len()
+            && !bytes[value_end].is_ascii_whitespace()
+            && !matches!(bytes[value_end], b',' | b';' | b'}' | b']' | b'&')
+        {
+            value_end += 1;
+        }
+        let mut token_start = value_end;
+        while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
+            token_start += 1;
+        }
+        let mut token_end = token_start;
+        while token_end < bytes.len()
+            && !bytes[token_end].is_ascii_whitespace()
+            && !matches!(bytes[token_end], b',' | b';' | b'}' | b']' | b'&')
+        {
+            token_end += 1;
+        }
+        if token_start < token_end {
+            let scheme = &redacted[value_start..value_end];
+            let replacement = format!("{scheme} [redacted]");
+            redacted.replace_range(value_start..token_end, &replacement);
+            search_from = value_start + replacement.len();
+        } else if value_start < value_end {
+            redacted.replace_range(value_start..value_end, "[redacted]");
+            search_from = value_start + "[redacted]".len();
+        } else {
+            search_from = value_end;
+        }
+    }
+}
+
+fn authorization_value_replacement(value: &str) -> String {
+    let Some((scheme, token)) = value.split_once(char::is_whitespace) else {
+        return "[redacted]".to_owned();
+    };
+    if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {
+        format!("{scheme} [redacted]")
+    } else {
+        "[redacted]".to_owned()
+    }
+}
+
+fn redact_standalone_bearer(input: &str) -> String {
+    let mut redacted = input.to_owned();
+    let mut search_from = 0;
+    loop {
+        let lower = redacted.to_ascii_lowercase();
+        let Some(relative_start) = lower
+            .get(search_from..)
+            .and_then(|text| text.find("bearer"))
+        else {
+            return redacted;
+        };
+        let scheme_start = search_from + relative_start;
+        let scheme_end = scheme_start + "bearer".len();
+        let bytes = redacted.as_bytes();
+        if (scheme_start > 0 && is_bearer_word_byte(bytes[scheme_start - 1]))
+            || bytes
+                .get(scheme_end)
+                .is_none_or(|character| !character.is_ascii_whitespace())
+        {
+            search_from = scheme_end;
+            continue;
+        }
+        let mut token_start = scheme_end;
+        while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
+            token_start += 1;
+        }
+        let mut token_end = token_start;
+        while token_end < bytes.len()
+            && !bytes[token_end].is_ascii_whitespace()
+            && !matches!(
+                bytes[token_end],
+                b',' | b';' | b'}' | b']' | b'&' | b'"' | b'\''
+            )
+        {
+            token_end += 1;
+        }
+        if token_start == token_end {
+            search_from = scheme_end;
+            continue;
+        }
+        redacted.replace_range(token_start..token_end, "[redacted]");
+        search_from = token_start + "[redacted]".len();
+    }
+}
+
+fn is_bearer_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+fn redact_diagnostic_token(token: &str) -> String {
+    if let Some(scheme_end) = token.find("://")
+        && let Some(at) = token[scheme_end + 3..].rfind('@')
+    {
+        let at = scheme_end + 3 + at;
+        let userinfo = &token[scheme_end + 3..at];
+        if !userinfo.eq_ignore_ascii_case("git") {
+            return format!("{}[redacted]{}", &token[..scheme_end + 3], &token[at..]);
+        }
+    }
+    token.to_string()
+}
+
+fn redact_key_value(input: &str, key: &str) -> String {
+    let mut redacted = input.to_string();
+    let mut search_from = 0;
+    loop {
+        let Some((_, key_end)) = find_sensitive_key(&redacted, search_from, key) else {
+            return redacted;
+        };
+        let bytes = redacted.as_bytes();
+        let mut delimiter = key_end;
+        if bytes
+            .get(delimiter)
+            .is_some_and(|character| *character == b'"' || *character == b'\'')
+        {
+            delimiter += 1;
+        }
+        while delimiter < bytes.len() && bytes[delimiter].is_ascii_whitespace() {
+            delimiter += 1;
+        }
+        if delimiter >= bytes.len() || !matches!(bytes[delimiter], b'=' | b':') {
+            search_from = key_end;
+            continue;
+        }
+        let mut value_start = delimiter + 1;
+        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        let quoted = bytes
+            .get(value_start)
+            .copied()
+            .filter(|quote| *quote == b'"' || *quote == b'\'');
+        if let Some(quote) = quoted {
+            value_start += 1;
+            let value_end = quoted_value_end(bytes, value_start, quote);
+            let suffix_start = if value_end < bytes.len() {
+                value_end + 1
+            } else {
+                value_end
+            };
+            if redacted[value_start..value_end].eq_ignore_ascii_case("[redacted]") {
+                search_from = suffix_start;
+                continue;
+            }
+            redacted.replace_range(value_start..value_end, "[redacted]");
+            search_from = value_start + "[redacted]".len();
+            continue;
+        }
+        let mut value_end = value_start;
+        while value_end < bytes.len()
+            && !bytes[value_end].is_ascii_whitespace()
+            && !matches!(bytes[value_end], b',' | b';' | b'}' | b']' | b'&')
+        {
+            value_end += 1;
+        }
+        if redacted[value_start..value_end].eq_ignore_ascii_case("[redacted]") {
+            search_from = value_end;
+            continue;
+        }
+        redacted.replace_range(value_start..value_end, "[redacted]");
+        search_from = value_start + "[redacted]".len();
+    }
+}
+
+fn find_sensitive_key(input: &str, search_from: usize, key: &str) -> Option<(usize, usize)> {
+    let key = normalize_secret_field_name(key);
+    let bytes = input.as_bytes();
+    let mut index = search_from;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_alphanumeric() && bytes[index] != b'_' && bytes[index] != b'-' {
+            index += 1;
+            continue;
+        }
+        if index > 0
+            && (bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'-')
+        {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
+        {
+            end += 1;
+        }
+        if normalize_secret_field_name(&input[index..end]) == key
+            || normalize_secret_field_name(&input[index..end]).ends_with(&format!("_{key}"))
+        {
+            return Some((index, end));
+        }
+        index = end;
+    }
+    None
+}
+
+fn normalize_secret_field_name(name: &str) -> String {
+    let characters = name.chars().collect::<Vec<_>>();
+    let mut normalized = String::with_capacity(name.len());
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '-' {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+        if character.is_ascii_uppercase() {
+            let previous_is_lower_or_digit = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
+            let previous_is_acronym_boundary = characters
+                .get(index.wrapping_sub(1))
+                .is_some_and(|previous| previous.is_ascii_uppercase())
+                && characters
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_lowercase());
+            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
+                && !normalized.ends_with('_')
+            {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+fn quoted_value_end(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == quote && !escaped {
+            return index;
+        }
+        if byte == b'\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+        index += 1;
+    }
+    index
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueDescriptor {
     pub issue_id: String,
@@ -20,6 +375,7 @@ pub struct IssueDescriptor {
 pub struct RunDescriptor {
     pub run_id: String,
     pub attempt: u32,
+    pub normal_retry_count: u32,
 }
 
 impl RunDescriptor {
@@ -27,7 +383,13 @@ impl RunDescriptor {
         Self {
             run_id: run_id.into(),
             attempt,
+            normal_retry_count: 0,
         }
+    }
+
+    pub fn with_normal_retry_count(mut self, normal_retry_count: u32) -> Self {
+        self.normal_retry_count = normal_retry_count;
+        self
     }
 }
 
@@ -354,6 +716,20 @@ pub struct RunManifest {
     pub sanitized_workspace_key: String,
     pub workspace_path: PathBuf,
     pub attempt: u32,
+    #[serde(default)]
+    pub normal_retry_count: u32,
+    #[serde(default)]
+    pub pending_retry: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_scheduled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_due_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt_reason: Option<String>,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -373,6 +749,13 @@ impl RunManifest {
             sanitized_workspace_key: workspace.workspace_key().to_string(),
             workspace_path: workspace.workspace_path().to_path_buf(),
             attempt: run.attempt,
+            normal_retry_count: run.normal_retry_count,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
             status: RunStatus::Preparing,
             created_at: now,
             updated_at: now,
@@ -661,5 +1044,143 @@ impl SessionContextArtifact {
             last_retry_reason: None,
             updated_at: Utc::now(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_runtime_diagnostic;
+
+    #[test]
+    fn runtime_diagnostics_redact_common_credentials_and_url_userinfo() {
+        let value = redact_runtime_diagnostic(
+            "request failed token=secret-canary api_key:another-canary https://user:password-canary@example.test/run",
+        );
+
+        assert!(!value.contains("secret-canary"));
+        assert!(!value.contains("another-canary"));
+        assert!(!value.contains("password-canary"));
+        assert!(value.contains("[redacted]"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_repeated_credentials() {
+        let value = redact_runtime_diagnostic(
+            "access_token=first access_token=second api_key=one api_key=two",
+        );
+
+        assert!(!value.contains("first"));
+        assert!(!value.contains("second"));
+        assert!(!value.contains("one"));
+        assert!(!value.contains("two"));
+        assert_eq!(value.matches("[redacted]").count(), 4);
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_complete_bearer_authorization_values() {
+        let value = redact_runtime_diagnostic(
+            "Authorization: Bearer first \"authorization\":\"Bearer second\" authorization=Bearer third",
+        );
+
+        assert!(!value.contains("first"));
+        assert!(!value.contains("second"));
+        assert!(!value.contains("third"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_standalone_bearer_values() {
+        let value = redact_runtime_diagnostic(
+            "hook failed Bearer oauth-token-canary and bearer second-token",
+        );
+
+        assert!(!value.contains("oauth-token-canary"));
+        assert!(!value.contains("second-token"));
+        assert!(value.contains("Bearer [redacted]"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_credentials_after_non_bearer_authorization_schemes() {
+        let value = redact_runtime_diagnostic(
+            "Authorization: Basic dXNlcjpwYXNz Authorization: token ghp_secret authorization=Digest digest-secret",
+        );
+
+        assert!(!value.contains("dXNlcjpwYXNz"));
+        assert!(!value.contains("ghp_secret"));
+        assert!(!value.contains("digest-secret"));
+        assert!(value.contains("[redacted]"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_quoted_json_credentials() {
+        let value = redact_runtime_diagnostic(
+            r#"{"access_token":"quoted-secret","api_key":"another-secret"}"#,
+        );
+
+        assert!(!value.contains("quoted-secret"));
+        assert!(!value.contains("another-secret"));
+        assert_eq!(value.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_camel_case_credentials() {
+        let value = redact_runtime_diagnostic(
+            r#"{"accessToken":"quoted-token","refreshToken":"refresh-secret","chatgptAccountId":"acct_123"}"#,
+        );
+
+        assert!(!value.contains("quoted-token"));
+        assert!(!value.contains("refresh-secret"));
+        assert!(!value.contains("acct_123"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_escaped_quoted_credentials() {
+        let value = redact_runtime_diagnostic(
+            r#"{"refresh_token":"abc\"secret-suffix","api_key":"plain-secret"}"#,
+        );
+
+        assert!(!value.contains("abc"));
+        assert!(!value.contains("secret-suffix"));
+        assert!(!value.contains("plain-secret"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_token_only_url_userinfo() {
+        let value = redact_runtime_diagnostic("hook failed https://ghp_secret@example.test/repo");
+
+        assert!(!value.contains("ghp_secret"));
+        assert!(value.contains("https://[redacted]@example.test/repo"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_url_userinfo_through_the_final_at() {
+        let value = redact_runtime_diagnostic(
+            "hook failed https://user@example.test:password-canary@example.test/repo",
+        );
+
+        assert!(!value.contains("example.test:password-canary"));
+        assert!(value.contains("https://[redacted]@example.test/repo"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_account_identities() {
+        let value = redact_runtime_diagnostic(
+            "account_id=acct_123 account_identifier:acct_456 chatgpt_account_id=acct_789 chatgpt-account-id:acct_999",
+        );
+
+        assert!(!value.contains("acct_123"));
+        assert!(!value.contains("acct_456"));
+        assert!(!value.contains("acct_789"));
+        assert!(!value.contains("acct_999"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_pat_fields() {
+        let value = redact_runtime_diagnostic(
+            r#"pat=ghp_plain "pat":"ghp_json" personal_access_token=ghp_long"#,
+        );
+
+        assert!(!value.contains("ghp_plain"));
+        assert!(!value.contains("ghp_json"));
+        assert!(!value.contains("ghp_long"));
     }
 }

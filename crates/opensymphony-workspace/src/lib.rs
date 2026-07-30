@@ -11,5 +11,6 @@ pub use models::{
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, IssueManifest,
     PromptCaptureDescriptor, PromptCaptureManifest, PromptKind, RunDescriptor, RunManifest,
     RunStatus, SessionContextArtifact, WorkspaceHandle, WorkspaceManagerConfig,
+    redact_runtime_diagnostic,
 };
 pub use paths::{resolve_path_within_root, sanitize_workspace_key, workspace_path_for_root};

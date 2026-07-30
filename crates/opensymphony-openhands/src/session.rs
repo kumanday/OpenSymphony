@@ -113,6 +113,7 @@ pub struct OpenHandsInterruptAcknowledgement {
     pub reconciled_events: usize,
     pub execution_status: Option<String>,
     pub diagnostic: Option<String>,
+    pub timed_out: bool,
 }
 
 #[async_trait]
@@ -748,6 +749,21 @@ pub struct IssueConversationManifest {
     /// Codex-only archive state. Missing values from older manifests mean active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_archive_state: Option<String>,
+    /// Codex-only active turn id used to interrupt a recovered turn safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_id: Option<String>,
+    /// Runtime run id associated with the current turn. OpenHands writes this
+    /// after prompt acceptance; Codex may persist it during turn preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run_id: Option<String>,
+    /// OpenHands-only marker for a run prepared before its prompt was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_run_id: Option<String>,
+    /// OpenHands-only marker for an accepted prompt whose run trigger has not
+    /// yet been acknowledged. Recovery reissues the idempotent trigger before
+    /// observing the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_pending_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_kind: Option<IssueSessionPromptKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -813,6 +829,10 @@ impl IssueConversationManifest {
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
             codex_archive_state: None,
+            last_turn_id: None,
+            active_run_id: None,
+            prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -1258,6 +1278,7 @@ impl IssueSessionRunner {
                     reconciled_events,
                     execution_status: stream.state_mirror().execution_status().map(str::to_owned),
                     diagnostic,
+                    timed_out: false,
                 });
             }
 
@@ -1288,6 +1309,7 @@ impl IssueSessionRunner {
                                 self.config.runtime_stream.readiness_timeout
                             ),
                         }),
+                        timed_out: true,
                     });
                 }
             };
@@ -1316,6 +1338,166 @@ impl IssueSessionRunner {
             run,
             workflow,
             &mut (),
+        )
+        .await
+    }
+
+    /// Reattach to an in-flight conversation after scheduler recovery and
+    /// observe it until the runtime reports a terminal outcome. Recovery must
+    /// not send a duplicate prompt; the existing conversation is already the
+    /// source of truth for the active turn.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_with_observer<O>(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        observer: &mut O,
+    ) -> Result<IssueSessionResult, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
+        let observed_run = observed_run_for_turn(run);
+        let raw_manifest = workspace_manager
+            .read_text_artifact(workspace, &workspace.conversation_manifest_path())
+            .await?
+            .ok_or_else(|| {
+                IssueSessionError::RehydrationFailed(
+                    "recovered run has no conversation manifest to reattach".to_string(),
+                )
+            })?;
+        let manifest =
+            serde_json::from_str::<IssueConversationManifest>(&raw_manifest).map_err(|error| {
+                IssueSessionError::RehydrationFailed(format!(
+                    "recovered conversation manifest is invalid: {error}"
+                ))
+            })?;
+        let trigger_pending = manifest
+            .trigger_pending_run_id
+            .as_deref()
+            .is_some_and(|run_id| run_id == run_manifest.run_id);
+        let baseline_last_event_id = manifest.last_event_id.clone();
+        if manifest.issue_id != issue.id
+            || manifest.identifier != issue.identifier
+            || manifest.runtime_contract_version.as_deref() != Some(RUNTIME_CONTRACT_VERSION)
+        {
+            return Err(IssueSessionError::RehydrationFailed(
+                "recovered conversation manifest is incompatible with the active issue or runtime"
+                    .to_string(),
+            ));
+        }
+        let conversation_id = parse_uuid(manifest.conversation_id.as_str())
+            .map_err(IssueSessionError::RehydrationFailed)?;
+        let recovery_client = match manifest.server_base_url.as_deref() {
+            Some(base_url) => self
+                .client
+                .with_persisted_base_url(base_url)
+                .map_err(|error| {
+                    IssueSessionError::RehydrationFailed(format!(
+                        "recovered conversation server identity is not trusted: {error}"
+                    ))
+                })?,
+            None => self.client.clone(),
+        };
+        let active_session = match self
+            .try_attach_and_resume(
+                &recovery_client,
+                workspace_manager,
+                workspace,
+                manifest,
+                conversation_id,
+            )
+            .await?
+        {
+            ReuseSession::Active(session) => *session,
+            ReuseSession::Reset(reason) => {
+                return Err(IssueSessionError::RehydrationFailed(reason));
+            }
+        };
+
+        let mut active_session = active_session;
+        // A trigger-pending manifest means the prompt was already accepted,
+        // but the run request was not durably acknowledged. Treat every event
+        // present before reissuing that request as historical. In particular,
+        // keep a prior `finished` state in the baseline so the stale mirror
+        // cannot complete the recovered turn before its post-trigger events
+        // arrive.
+        let mut pre_trigger_baseline_event_ids =
+            trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
+        if trigger_pending {
+            loop {
+                match recovery_client.run_conversation(conversation_id).await {
+                    Ok(_) => break,
+                    Err(OpenHandsError::HttpStatus {
+                        status_code: 409, ..
+                    }) => {
+                        if let Err(error) = active_session.stream.reconcile_events().await {
+                            debug!(
+                                %error,
+                                conversation_id = %active_session.manifest.conversation_id,
+                                "pre-wait reconcile failed after recovered run retry conflict, proceeding anyway"
+                            );
+                        }
+                        if let Err(error) = self
+                            .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                            .await
+                        {
+                            return Err(IssueSessionError::RehydrationFailed(format!(
+                                "previous OpenHands turn did not finish before recovered run retry: {error}"
+                            )));
+                        }
+                        pre_trigger_baseline_event_ids =
+                            Some(all_event_ids(active_session.stream.event_cache().items()));
+                    }
+                    Err(error) => {
+                        return Err(IssueSessionError::RehydrationFailed(format!(
+                            "failed to trigger recovered OpenHands run: {error}"
+                        )));
+                    }
+                }
+            }
+            active_session.manifest.trigger_pending_run_id = None;
+            active_session.manifest.updated_at = Utc::now();
+            workspace_manager
+                .write_json_artifact(
+                    workspace,
+                    &workspace.conversation_manifest_path(),
+                    &active_session.manifest,
+                )
+                .await?;
+            run_manifest.status = RunStatus::Running;
+            run_manifest.status_detail = Some(format!(
+                "recovered {} prompt trigger for conversation {}",
+                active_session.prompt_kind.as_str(),
+                active_session.manifest.conversation_id
+            ));
+            workspace_manager
+                .write_run_manifest(workspace, run_manifest)
+                .await?;
+        }
+        observer.on_launch(
+            &active_session
+                .manifest
+                .to_domain_metadata(RuntimeStreamState::Ready),
+        );
+        let baseline_event_ids = pre_trigger_baseline_event_ids.unwrap_or_else(|| {
+            recovery_baseline_event_ids(
+                active_session.stream.event_cache().items(),
+                baseline_last_event_id.as_deref(),
+            )
+        });
+        let outcome = self
+            .await_terminal_outcome(&mut active_session, &baseline_event_ids, observer)
+            .await;
+        self.finalize_active_session(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &observed_run,
+            active_session,
+            outcome,
         )
         .await
     }
@@ -1849,6 +2031,17 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        active_session.manifest.prepared_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.trigger_pending_run_id = None;
+        active_session.manifest.updated_at = Utc::now();
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &active_session.manifest,
+            )
+            .await?;
+
         if let Err(error) = self
             .client
             .send_message(
@@ -1857,6 +2050,7 @@ impl IssueSessionRunner {
             )
             .await
         {
+            active_session.manifest.prepared_run_id = None;
             let summary = format!(
                 "failed to send {} prompt event",
                 active_session.prompt_kind.as_str()
@@ -1875,6 +2069,10 @@ impl IssueSessionRunner {
                 .map(Step::EarlyResult);
         }
 
+        active_session.manifest.active_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.prepared_run_id = None;
+        active_session.manifest.trigger_pending_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.updated_at = Utc::now();
         if active_session.prompt_kind == IssueSessionPromptKind::Full {
             active_session.manifest.workflow_prompt_seeded = true;
         }
@@ -1963,6 +2161,15 @@ impl IssueSessionRunner {
                 }
             }
         }
+        active_session.manifest.trigger_pending_run_id = None;
+        active_session.manifest.updated_at = Utc::now();
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &active_session.manifest,
+            )
+            .await?;
         if (prepared_turn.waited_for_prior_turn || had_run_conflict)
             && let Err(error) = active_session.stream.reconcile_events().await
         {
@@ -2111,12 +2318,19 @@ impl IssueSessionRunner {
         // The conversation's stored LLM config in meta.json is used as-is.
         // If the API key has changed, the attach will fail naturally and
         // the caller can use explicit rehydration via the CLI.
-        self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
-            .await
+        self.try_attach_and_resume(
+            &self.client,
+            workspace_manager,
+            workspace,
+            manifest,
+            conversation_id,
+        )
+        .await
     }
 
     async fn try_attach_and_resume(
         &self,
+        client: &OpenHandsClient,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         mut manifest: IssueConversationManifest,
@@ -2127,8 +2341,7 @@ impl IssueSessionRunner {
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
-        let stream = match self
-            .client
+        let stream = match client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
         {
@@ -2148,9 +2361,8 @@ impl IssueSessionRunner {
         manifest.llm_config_fingerprint.get_or_insert_with(|| {
             LlmConfigFingerprint::from_llm_config(&stream.conversation().agent.llm)
         });
-        let transport_diagnostics = self.client.transport_diagnostics().ok();
-        manifest
-            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
+        let transport_diagnostics = client.transport_diagnostics().ok();
+        manifest.apply_transport_diagnostics(transport_diagnostics.as_ref(), client.base_url());
         manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
         manifest.last_attached_at = attached_at;
         manifest.updated_at = attached_at;
@@ -2959,6 +3171,8 @@ impl IssueSessionRunner {
         mut session: ActiveSession,
         outcome: NormalizedOutcome,
     ) -> Result<IssueSessionResult, IssueSessionError> {
+        session.manifest.prepared_run_id = None;
+        session.manifest.trigger_pending_run_id = None;
         session.manifest.apply_runtime_snapshot(&session.stream);
         workspace_manager
             .write_json_artifact(
@@ -3552,6 +3766,49 @@ fn latest_current_turn_error(
         .map(conversation_error_detail)
 }
 
+fn recovery_baseline_event_ids(
+    events: &[EventEnvelope],
+    last_event_id: Option<&str>,
+) -> HashSet<String> {
+    let terminal_state_event_id = events.iter().rev().find_map(|event| {
+        let KnownEvent::ConversationStateUpdate(payload) = KnownEvent::from_envelope(event) else {
+            return None;
+        };
+        payload
+            .execution_status
+            .as_deref()
+            .filter(|status| matches!(*status, "finished" | "error" | "stuck"))
+            .map(|_| event.id.as_str())
+    });
+    if let Some(baseline_len) = last_event_id.and_then(|last_event_id| {
+        events
+            .iter()
+            .position(|event| event.id == last_event_id)
+            .map(|index| index + 1)
+    }) {
+        return events
+            .iter()
+            .take(baseline_len)
+            .filter(|event| Some(event.id.as_str()) != terminal_state_event_id)
+            .map(|event| event.id.clone())
+            .collect();
+    }
+
+    // A missing marker can happen when an older runtime crashed before it
+    // persisted the event cursor. Keep historical errors in the baseline, but
+    // leave the newest terminal state update visible so recovery can finish
+    // instead of waiting for activity that has already happened.
+    events
+        .iter()
+        .filter(|event| Some(event.id.as_str()) != terminal_state_event_id)
+        .map(|event| event.id.clone())
+        .collect()
+}
+
+fn all_event_ids(events: &[EventEnvelope]) -> HashSet<String> {
+    events.iter().map(|event| event.id.clone()).collect()
+}
+
 fn conversation_error_detail(event: &EventEnvelope) -> String {
     let message = event
         .payload
@@ -4111,6 +4368,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recovery_client_uses_trusted_persisted_server_base_url_and_current_auth() {
+        let client = OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:8000").with_auth(
+            super::super::AuthConfig::header_api_key("x-session-api-key", "redacted"),
+        ));
+        let recovery_client = client
+            .with_persisted_base_url("http://127.0.0.1:8000/api")
+            .expect("same-origin recovery transport should remain trusted");
+
+        assert_eq!(recovery_client.base_url(), "http://127.0.0.1:8000/api");
+        let diagnostics = recovery_client
+            .transport_diagnostics()
+            .expect("recovery transport should remain valid");
+        assert_eq!(
+            diagnostics.http_auth_kind,
+            super::super::TransportAuthKind::Header
+        );
+    }
+
+    #[test]
+    fn recovery_client_rejects_changed_persisted_server_origin() {
+        let client = OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:8000").with_auth(
+            super::super::AuthConfig::header_api_key("x-session-api-key", "redacted"),
+        ));
+
+        let error = match client.with_persisted_base_url("http://attacker.example.test:9000") {
+            Ok(_) => panic!("recovery must not carry auth to a changed origin"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the configured OpenHands server")
+        );
+    }
+
     fn interrupt_command(conversation_id: Uuid) -> HarnessInterruptCommand {
         HarnessInterruptCommand {
             run_id: "COE-489".to_string(),
@@ -4210,6 +4503,10 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             codex_archive_state: None,
+            last_turn_id: None,
+            active_run_id: None,
+            prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -4239,6 +4536,87 @@ mod tests {
         assert_eq!(
             session.stream.state_mirror().terminal_status(),
             Some(TerminalExecutionStatus::Finished)
+        );
+    }
+
+    #[test]
+    fn recovery_baseline_includes_events_through_persisted_marker() {
+        let events = vec![
+            EventEnvelope::new("old-1", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new("old-2", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new("current", Utc::now(), "runtime", "current", Value::Null),
+        ];
+
+        assert_eq!(
+            recovery_baseline_event_ids(&events, Some("old-2")),
+            HashSet::from(["old-1".to_owned(), "old-2".to_owned()])
+        );
+        assert_eq!(
+            recovery_baseline_event_ids(&events, Some("missing")),
+            HashSet::from(["old-1".to_owned(), "old-2".to_owned(), "current".to_owned()])
+        );
+    }
+
+    #[test]
+    fn recovery_baseline_keeps_unmarked_terminal_state_current() {
+        let events = vec![
+            EventEnvelope::new(
+                "old-error",
+                Utc::now(),
+                "runtime",
+                "ConversationErrorEvent",
+                serde_json::json!({"message": "old failure"}),
+            ),
+            EventEnvelope::new(
+                "terminal",
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                serde_json::json!({"execution_status": "finished"}),
+            ),
+        ];
+
+        assert_eq!(
+            recovery_baseline_event_ids(&events, None),
+            HashSet::from(["old-error".to_owned()])
+        );
+    }
+
+    #[test]
+    fn recovery_baseline_keeps_persisted_terminal_state_current() {
+        let events = vec![
+            EventEnvelope::new("old", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new(
+                "terminal",
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                serde_json::json!({"execution_status": "finished"}),
+            ),
+        ];
+
+        assert_eq!(
+            recovery_baseline_event_ids(&events, Some("terminal")),
+            HashSet::from(["old".to_owned()])
+        );
+    }
+
+    #[test]
+    fn trigger_pending_recovery_baselines_all_pre_trigger_events() {
+        let events = vec![
+            EventEnvelope::new("old", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new(
+                "terminal",
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                serde_json::json!({"execution_status": "finished"}),
+            ),
+        ];
+
+        assert_eq!(
+            all_event_ids(&events),
+            HashSet::from(["old".to_owned(), "terminal".to_owned()])
         );
     }
 

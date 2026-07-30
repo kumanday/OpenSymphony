@@ -388,6 +388,41 @@ mod tests {
     }
 
     #[test]
+    fn acknowledged_interrupt_replaces_command_without_losing_stop_state() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(60),
+        ));
+        must(execution.acknowledge_interrupt(ts(61)));
+
+        let (command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-2".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(62),
+        ));
+
+        assert!(!queued);
+        assert_eq!(command.reason, HarnessInterruptReason::OperatorCancel);
+        assert_eq!(command.turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Acknowledged)
+        );
+        assert_eq!(
+            execution
+                .interrupt()
+                .map(|interrupt| interrupt.command.reason),
+            Some(HarnessInterruptReason::OperatorCancel)
+        );
+    }
+
+    #[test]
     fn interrupt_idempotency_does_not_cross_reopened_runs() {
         let issue = sample_issue();
         let workspace = sample_workspace();
@@ -481,6 +516,70 @@ mod tests {
         assert_eq!(
             timed_out.interrupt().map(|interrupt| interrupt.status),
             Some(HarnessInterruptStatus::TimedOut)
+        );
+    }
+
+    #[test]
+    fn failed_or_timed_out_interrupt_can_be_retried_for_the_same_run() {
+        for timed_out in [false, true] {
+            let mut execution = running_execution();
+            let (command, queued) = must(execution.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::SchedulerAbort,
+                HarnessInterruptExpectedNextState::Released,
+                ts(60),
+            ));
+            assert!(queued);
+            if timed_out {
+                must(execution.timeout_interrupt(ts(61), "ack timeout"));
+            } else {
+                must(execution.fail_interrupt(ts(61), "adapter refused interrupt"));
+            }
+
+            let (retry_command, retry_queued) = must(execution.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::SchedulerAbort,
+                HarnessInterruptExpectedNextState::Released,
+                ts(62),
+            ));
+            assert!(retry_queued);
+            assert_eq!(retry_command, command);
+            assert_eq!(
+                execution.interrupt().map(|interrupt| interrupt.status),
+                Some(HarnessInterruptStatus::Requested)
+            );
+        }
+    }
+
+    #[test]
+    fn failed_interrupt_retry_rebuilds_a_changed_request() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(60),
+        ));
+        must(execution.fail_interrupt(ts(61), "adapter refused interrupt"));
+
+        let (command, queued) = must(execution.request_interrupt(
+            "codex_app_server",
+            Some("turn-2".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(62),
+        ));
+
+        assert!(queued);
+        assert_eq!(command.harness_kind, "codex_app_server");
+        assert_eq!(command.turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(command.reason, HarnessInterruptReason::OperatorCancel);
+        assert_eq!(
+            command.expected_next_state,
+            HarnessInterruptExpectedNextState::Paused
         );
     }
 
@@ -860,6 +959,7 @@ mod tests {
             policy,
         ));
         assert_eq!(first_failure.attempt.get(), 1);
+        assert_eq!(first_failure.normal_retry_count, 2);
         assert_eq!(first_failure.due_at, ts(10_100));
 
         let capped_policy = RetryPolicy {

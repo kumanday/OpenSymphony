@@ -57,6 +57,7 @@ fn fixture() -> SnapshotEnvelope {
                 project_name: Some("OpenSymphony".to_owned()),
                 workspace_label: Some("COE-269".to_owned()),
                 retry_count: 1,
+                release_reason: None,
                 claimed_at: None,
                 started_at: None,
                 finished_at: None,

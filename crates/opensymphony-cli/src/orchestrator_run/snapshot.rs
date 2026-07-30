@@ -96,29 +96,40 @@ fn map_issue(
     let runtime_state = match issue.runtime.state {
         SchedulerStatus::Running | SchedulerStatus::Claimed => IssueRuntimeState::Running,
         SchedulerStatus::RetryQueued => IssueRuntimeState::RetryQueued,
-        SchedulerStatus::Released => match issue
-            .last_worker_outcome
-            .as_ref()
-            .map(|outcome| outcome.outcome)
-        {
-            Some(
-                WorkerOutcomeKind::Failed
-                | WorkerOutcomeKind::TimedOut
-                | WorkerOutcomeKind::Stalled,
-            ) => IssueRuntimeState::Failed,
-            // A released execution with no recorded run never dispatched a
-            // worker (e.g. a recovered workspace parked while its issue sits
-            // in a non-active tracker state). Key on the *current* tracker
-            // state, not the release reason: `release_issue` refreshes the
-            // issue state but leaves a stale `TrackerInactive` reason when the
-            // execution is already released, so a parked issue later moved
-            // straight to a terminal state (Backlog → Done) must still surface
-            // as a completion rather than a phantom idle row.
-            None if issue.issue.state.category != IssueStateCategory::Terminal => {
-                IssueRuntimeState::Idle
+        SchedulerStatus::Released => {
+            if issue.issue.state.category == IssueStateCategory::Terminal {
+                // Tracker terminal state is authoritative even when the last
+                // worker outcome was a failure or the release reason is stale.
+                IssueRuntimeState::Completed
+            } else {
+                match issue
+                    .last_worker_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.outcome)
+                {
+                    Some(
+                        WorkerOutcomeKind::Failed
+                        | WorkerOutcomeKind::TimedOut
+                        | WorkerOutcomeKind::Stalled,
+                    ) => IssueRuntimeState::Failed,
+                    _ if issue.runtime.release_reason
+                        == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted) =>
+                    {
+                        IssueRuntimeState::Failed
+                    }
+                    // A released execution with no recorded run never dispatched a
+                    // worker (e.g. a recovered workspace parked while its issue sits
+                    // in a non-active tracker state). Key on the *current* tracker
+                    // state, not the release reason: `release_issue` refreshes the
+                    // issue state but leaves a stale `TrackerInactive` reason when the
+                    // execution is already released, so a parked issue later moved
+                    // straight to a terminal state (Backlog → Done) must still surface
+                    // as a completion rather than a phantom idle row.
+                    None => IssueRuntimeState::Idle,
+                    _ => IssueRuntimeState::Completed,
+                }
             }
-            _ => IssueRuntimeState::Completed,
-        },
+        }
         SchedulerStatus::Unclaimed => IssueRuntimeState::Idle,
     };
     let last_outcome = map_worker_outcome(issue, runtime_state);
@@ -209,7 +220,25 @@ fn map_issue(
             .retry
             .as_ref()
             .map(|retry| retry.normal_retry_count)
+            .or(issue.retry_count_override)
+            .or_else(|| {
+                matches!(
+                    issue.runtime.release_reason,
+                    Some(
+                        crate::opensymphony_domain::ReleaseReason::RetryExhausted
+                            | crate::opensymphony_domain::ReleaseReason::Completed
+                    )
+                )
+                .then(|| {
+                    issue
+                        .last_worker_outcome
+                        .as_ref()
+                        .and_then(|outcome| outcome.attempt.map(|attempt| attempt.get()))
+                        .unwrap_or(0)
+                })
+            })
             .unwrap_or(0),
+        release_reason: issue.runtime.release_reason,
         claimed_at: issue.runtime.claimed_at.map(timestamp_to_datetime),
         started_at,
         finished_at,
@@ -476,9 +505,10 @@ mod tests {
     use crate::opensymphony_domain::{
         BlockerRef, ComponentHealthSnapshot, ConversationId, ConversationMetadata, DaemonSnapshot,
         HealthStatus, IssueId, IssueIdentifier, IssueRef, IssueSnapshot as DomainIssueSnapshot,
-        IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
+        IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, RetryAttempt,
         RuntimeStateSnapshot, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, TimestampMs,
-        WorkerAttemptSnapshot, WorkerId, WorkspaceKey, WorkspaceRecord,
+        WorkerAttemptSnapshot, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+        WorkspaceRecord,
     };
     use serde_json::json;
 
@@ -617,6 +647,7 @@ tracker:
                     next_activity_sequence: 0,
                 }),
                 retry: None,
+                retry_count_override: None,
                 last_worker_outcome: None,
                 recent_worker_outcomes: Vec::new(),
             }],
@@ -710,6 +741,7 @@ tracker:
             workspace: None,
             conversation: None,
             retry: None,
+            retry_count_override: None,
             last_worker_outcome: None,
             recent_worker_outcomes: Vec::new(),
         }
@@ -868,6 +900,56 @@ tracker:
     }
 
     #[test]
+    fn retry_exhausted_release_preserves_explicit_reason() {
+        let mut domain_issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::RetryExhausted,
+        );
+        domain_issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-532")),
+            attempt: Some(must(RetryAttempt::new(3))),
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: None,
+            error: Some("historical failure".to_owned()),
+        });
+        let issue = map_single_issue(domain_issue);
+        assert_eq!(
+            issue.release_reason,
+            Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted)
+        );
+        assert_eq!(issue.retry_count, 3);
+        assert_eq!(
+            issue.runtime_state,
+            crate::opensymphony_control::IssueRuntimeState::Failed
+        );
+    }
+
+    #[test]
+    fn completed_final_retry_preserves_attempt_count() {
+        let mut domain_issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::Completed,
+        );
+        domain_issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-532")),
+            attempt: Some(must(RetryAttempt::new(3))),
+            outcome: WorkerOutcomeKind::Succeeded,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: None,
+            error: None,
+        });
+
+        assert_eq!(map_single_issue(domain_issue).retry_count, 3);
+    }
+
+    #[test]
     fn stale_tracker_inactive_reason_with_terminal_state_still_maps_to_completed() {
         // A parked issue (released `TrackerInactive`) moved straight to Done
         // keeps its stale release reason because `release_issue` does not
@@ -881,6 +963,30 @@ tracker:
         ));
         assert_eq!(
             state,
+            crate::opensymphony_control::IssueRuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn terminal_tracker_state_overrides_a_failed_worker_outcome() {
+        let mut issue = released_issue_snapshot(
+            "Done",
+            IssueStateCategory::Terminal,
+            crate::opensymphony_domain::ReleaseReason::RetryExhausted,
+        );
+        issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-532")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: None,
+            error: Some("historical failure".to_owned()),
+        });
+
+        assert_eq!(
+            map_single_issue_runtime_state(issue),
             crate::opensymphony_control::IssueRuntimeState::Completed
         );
     }

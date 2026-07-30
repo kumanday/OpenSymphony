@@ -3,6 +3,147 @@
 This document covers target-repo bootstrap, generated files, and the runtime
 configuration that `opensymphony run` expects.
 
+## Central configuration
+
+`opensymphony run` selects configuration before it reads any repository
+checkout. Selection order is:
+
+1. `--config <path>`;
+2. `~/.opensymphony/config.yaml`;
+3. `./config.yaml` during the explicit legacy compatibility window.
+
+Central files use `schema_version: 1` and own instance roots, routing mode,
+tracker profiles, project sets, Linear projects, repository inventory,
+credential references, review profiles, scheduler, integration, workspace, and
+memory-catalog policy. Relative paths resolve from the central config file.
+Remote values may contain no credentials, repository aliases are unique, and
+strict unknown fields fail before tracker polling or workspace creation.
+Any central-only key such as `instance`, `routing`, `tracker_profiles`, or
+`repositories` selects the strict central parser, even when its discriminator
+is malformed; those files fail closed instead of falling through to legacy
+current-directory discovery. A legacy file containing only `schema_version`
+remains on the legacy parser. `compatibility.allow_repo_local_config` is currently unsupported
+and must remain `false`; setting it to `true` fails validation rather than
+silently discarding repository-local orchestration settings.
+Before tracker or workspace initialization, each run claims a process-lifetime
+`.opensymphony-instance.lock` in every configured state and workspace root.
+The lock prevents two instances from sharing runtime state; a live owner fails
+startup, while a marker whose PID is no longer alive is atomically quarantined
+and reclaimed. Legacy runs claim their configured workspace root as well.
+The `openhands.front_matter` subsection carries the complete typed OpenHands
+transport, local-server, conversation/LLM, subscription-reference, and
+WebSocket profile when a workflow is migrated. `scheduler.retry.max_attempts`
+is enforced as the maximum number of automatic retries; omitted values retain
+the legacy retry behavior.
+`workspace.retain_failed` applies only to failed or retry-exhausted outcomes.
+The explicit `legacy_single` compatibility path retains terminal workspaces as
+before, including successful, cancelled, and tracker-terminal releases. Future
+strict routing may opt into terminal cleanup only through an explicit policy.
+Queued retries do not advance the durable retry count until dispatch begins, so
+a restart during the backoff window cannot mistake a pending retry for an
+exhausted one. Recovery restores persisted non-exhausted retry counts before
+redispatch, while terminal tracker reconciliation removes stale exhaustion
+markers. Once the limit is reached, the instance state root records a
+retry-exhaustion marker before a disposable failed workspace is removed; the
+marker keeps the issue parked across a later run.
+Pending retry manifests also retain their scheduled time, due deadline,
+reason, and redacted error summary, so recovery preserves the original
+backoff instead of redispatching immediately.
+If a crash leaves a `Preparing` or `Prepared` run without a conversation
+manifest, recovery consumes that attempt as a reconciliation retry and still
+enforces `scheduler.retry.max_attempts`.
+If OpenHands has accepted a prompt but the process exits before its run trigger
+is acknowledged, the conversation manifest records a trigger-pending phase;
+recovery reissues the idempotent trigger before observing the turn.
+
+The supported routing variants are explicit:
+
+```yaml
+routing:
+  mode: legacy_single
+  repository: github:repository:example
+```
+
+`legacy_single` keeps unlabelled existing tasks on one configured repository.
+That repository must also appear in the sole selected Linear project's
+`repositories` association set; a mismatch fails before tracker polling so a
+legacy run cannot execute a project's tasks from an unrelated checkout.
+The repository inventory entry's `instructions.path` is resolved beneath its
+configured checkout and is the workflow file loaded for that legacy run;
+repository implementation guidance remains separate from central front matter.
+`project_set` validates the multi-repository model but remains disabled until
+its later release gates pass; it fails before starting the scheduler rather
+than silently falling back to the current directory. Operational recovery
+commands (`debug` and `rehydrate`), plus all doctor modes, reject the same gated
+mode before selecting an unrelated checkout for workflow or conversation-store
+discovery.
+`rehydrate` also accepts `--config <path>` when an instance is not the default
+home configuration. `memory init` refuses to treat a selected central config
+as a repository-local memory file; initialize the local memory config instead.
+
+Every run records one `sha256:` config generation in startup diagnostics and
+the initial control-plane event. Resolved credential values are never part of
+the central model or its serialized diagnostics.
+
+`linear_projects.<alias>.provider_project_id` is the provider project identity
+used for Linear lookup. Migrated legacy files may also carry
+`provider_project_slug`; that field is an explicit compatibility fallback for
+older slug-based tracker configuration and is not a repository association or
+execution default.
+
+## Configuration migration
+
+Migration is explicit and staged:
+
+```bash
+opensymphony migrate preflight --repo /path/to/repo
+opensymphony migrate apply --repo /path/to/repo --config /path/to/repo/config.yaml
+opensymphony migrate rollback --config /path/to/repo/config.yaml
+```
+
+`preflight` is read-only and reports recognized workflow fields, clone-hook
+risks, and secret/remote-risk booleans without printing their values. `apply`
+backs up the legacy config and workflow, writes central config and a reduced
+workflow body through same-directory staging, preserves supported repository-local
+`codex`/`logging` namespaces, and records an activation marker specific to the
+central config destination. A marker is written after validation and staging but
+before replacement so an interrupted apply remains recoverable. Relative legacy
+workspace roots are resolved against the target repository, and migration
+requires an exact `Target branch:` line.
+Applying again with a separate `--output` detects the active destination
+generation before creating a backup or rewriting the source. `rollback`
+restores the backup and refuses to run while the instance's strict-run marker
+is active; it restores the original file permissions as well as file contents.
+Repeating a complete `apply` is a no-op; a partially published activation
+promotes its staged workflow or restores the backup before retrying.
+When preserving a legacy `.opensymphony/memory` tree, preflight inspects the
+legacy inputs without requiring memory quiescence and does not copy or write
+files. Apply, direct CLI memory writers,
+automatic capture, archive, and the local memory server claim the same atomic
+coordination lock; the server holds it for its lifetime while publishing an
+activity marker. Owner PIDs allow stale lock and marker recovery after an
+unclean exit; apply removes stale markers only after it owns the lock. Rollback
+also fingerprints the migrated catalog and refuses to restore the legacy
+generation after post-migration memory has changed, preserving that evidence.
+Central-config runs publish a destination-hashed
+`.opensymphony/migration/strict-run-<destination>.active` marker for their full
+process lifetime; rollback claims the same marker before restoring the legacy
+generation, so startup and rollback cannot interleave, and normal shutdown
+removes it. Stale markers are reclaimed only when their owner PID is no longer
+live. Recovery treats a terminal successful run as
+successful even when its retry count reached the configured limit, while a
+pending retry is parked if a lowered limit would make it exceed the current
+budget. Failed interrupt requests keep the execution owned until a later
+reconciliation observes a stop acknowledgement, and retained failed
+workspaces are not force-removed during terminal recovery. Durable run
+diagnostics are redacted before `run.json` is written. A file containing the
+central-only `memory.catalog_root` shape is classified as central even if its
+required routing fields are malformed, so it fails closed instead of falling
+back to legacy parsing.
+When the migrated implementation prompt itself begins with `---`, migration
+emits an empty front-matter boundary so the prompt remains implementation text
+on the next load.
+
 ## Bootstrap
 
 Use `opensymphony init` from the target repository root:
@@ -158,9 +299,12 @@ Important fields:
 
 | Field | Description | Env Var | Example |
 |-------|-------------|---------|---------|
+| `tracker.project_id` | Linear `Project.id` used to resolve the provider project before issue polling | - | `2b7c...` |
 | `tracker.project_slug` | Linear `Project.slugId` from the project URL | - | `my-project-5250e49b61f4` |
 | `WORKFLOW.md` `Target branch:` | Local branch name agents use as `origin/<target-branch>` for syncs and PR bases | - | `develop`, `main`, `release/next` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
+| `routing.*_env` | Optional environment-variable selectors for harness, model, and model profile | `OPENSYMPHONY_*` | `MY_HARNESS` |
+| `memory.token_env` | Name of the environment variable used by the memory service | `OPENSYMPHONY_MEMORY_TOKEN` | `MEMORY_TOKEN` |
 | `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
 | `openhands.conversation.agent.llm.credential_mode` | LLM credential adapter | - | `api_key` or `openai_subscription` |
 

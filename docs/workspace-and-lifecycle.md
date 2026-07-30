@@ -242,6 +242,12 @@ Suggested fields:
 - `status`
 - `status_detail`
 - `hooks`
+- `normal_retry_count`
+- `pending_retry`
+- `retry_scheduled_at`
+- `retry_due_at`
+- `retry_reason`
+- `retry_error`
 - `created_at`
 - `updated_at`
 
@@ -253,7 +259,17 @@ Use cases:
 
 Current repository note:
 
-- the run manifest is currently explanatory recovery evidence for operators and future adapters; the generic scheduler core already reuses workspace ownership from recovery records, while persisted retry-queue reconstruction remains a later follow-on
+- the run manifest is durable recovery state, not only explanatory evidence: a
+  `pending_retry` record is reconstructed before dispatch, including its retry
+  count, schedule, reason, and diagnostic; a completed `succeeded`, `failed`,
+  or `cancelled` initial run is reconciled as the next retry when the tracker
+  still has the issue active
+- retry exhaustion is also persisted under the configured retry-state root so
+  a restart can keep an exhausted issue parked without granting another initial
+  attempt; cleanup is deferred until that exhaustion marker is durable
+- if worker launch fails before `start_run` can create `run.json`, the runtime
+  backend writes a non-in-flight preparation-failure manifest carrying the
+  pending retry, so the next startup follows the same recovery path
 
 ## 8. Conversation metadata manifest
 

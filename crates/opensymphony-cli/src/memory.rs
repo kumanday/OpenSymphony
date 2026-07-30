@@ -1,17 +1,27 @@
 use std::{
     collections::BTreeSet,
-    env, fs,
+    env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
+
+#[cfg(test)]
+use std::io::Write;
 
 use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard, watch},
+    task::JoinHandle,
+};
 
 use crate::{
     opensymphony_code_intel::{
@@ -45,15 +55,47 @@ use crate::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
         OpenHandsConversationStorePaths,
     },
-    opensymphony_workflow::WorkflowDefinition,
+    opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
         CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
         workspace_path_for_root,
     },
 };
 
+use super::orchestrator_run::config::{
+    CentralRoutingMode, looks_like_central_config, select_config_path, validate_central_config_text,
+};
+
 const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
+pub(crate) const MEMORY_ACTIVITY_MARKER: &str = ".opensymphony-memory.active";
+pub(crate) const MEMORY_MIGRATION_LOCK: &str = "memory.migration.lock";
+static MEMORY_STALE_LOCK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryActivityStatus {
+    Absent,
+    Live,
+    Stale,
+}
+
+pub(crate) struct MemoryCoordinationLock {
+    path: PathBuf,
+}
+
+impl Drop for MemoryCoordinationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+type MemoryWriterGate = Arc<Mutex<Option<MemoryCoordinationLock>>>;
+
+#[allow(dead_code)]
+enum MemoryWriterGuard {
+    File(MemoryCoordinationLock),
+    Shared(OwnedMutexGuard<Option<MemoryCoordinationLock>>),
+}
 const AST_MCP_TOOL_NAMES: &[&str] = &[
     "code.ast.status",
     "code.ast.outline",
@@ -451,12 +493,16 @@ impl AutoMemoryReport {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn auto_capture_terminal(
     repo_root: &Path,
     workflow_path: &Path,
+    resolved_workflow: Option<&ResolvedWorkflow>,
     identifiers: &[String],
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     auto_archive: bool,
+    memory_config: Option<&MemoryConfig>,
+    writer_gate: Option<MemoryWriterGate>,
 ) -> Result<AutoMemoryReport, MemoryError> {
     let mut identifiers = identifiers
         .iter()
@@ -468,8 +514,15 @@ pub(crate) async fn auto_capture_terminal(
         return Ok(AutoMemoryReport::default());
     }
 
-    let config = MemoryConfig::load(repo_root, None)?;
-    let client = linear_client_from_workflow(repo_root, Some(workflow_path))?;
+    let config = memory_config
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| load_memory_config(repo_root, None))?;
+    let _coordination_lock = acquire_memory_writer_guard(&config, writer_gate).await?;
+    let client = match resolved_workflow {
+        Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
+        None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
+    };
     let source = load_linear_source_from_client(&client, &identifiers).await?;
     let selection = IssueSelection {
         identifiers,
@@ -500,7 +553,7 @@ pub(crate) async fn auto_capture_terminal(
     } else {
         let capture_report = write_capture_plan(&config, &capture_plan, false)?;
         warnings.extend(capture_report.warnings);
-        match MemoryConfig::load(repo_root, None) {
+        match reload_memory_config(&config) {
             Ok(config) => config,
             Err(error) => {
                 capture_completed = false;
@@ -557,7 +610,7 @@ pub(crate) async fn auto_capture_terminal(
         match plan_archive(&evolved_config, &issue_keys, false, None, true, false) {
             Ok(archive_plan) => {
                 warnings.extend(archive_plan.warnings.clone());
-                match archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await {
+                match archive_in_linear_with_client(&client, &archive_plan).await {
                     Ok(archive_report) => {
                         archive_completed =
                             archive_plan.warnings.is_empty() && archive_report.failures.is_empty();
@@ -575,6 +628,7 @@ pub(crate) async fn auto_capture_terminal(
                                 Some(workflow_path),
                                 conversation_store,
                                 &archive_report.archived,
+                                resolved_workflow,
                             )
                             .await
                             {
@@ -649,6 +703,13 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         config: config_path,
         command,
     } = args;
+    let selected_central_config = selected_central_config_path(&repo_root, config_path.as_deref())?;
+    if memory_command_writes(&command) {
+        reject_project_set_memory_write(
+            selected_central_config.as_deref(),
+            command_name(&command),
+        )?;
+    }
     if let Some(endpoint) = env::var("OPENSYMPHONY_MEMORY_ENDPOINT")
         .ok()
         .and_then(|value| non_empty(&value))
@@ -657,68 +718,142 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         return run_remote_memory_tool(&endpoint, tool_name, arguments).await;
     }
     match command {
-        MemoryCommand::Init(args) => run_init(&repo_root, config_path.as_deref(), args),
+        MemoryCommand::Init(args) => run_init(
+            &repo_root,
+            config_path.as_deref(),
+            selected_central_config.as_deref(),
+            args,
+        ),
         MemoryCommand::Capture(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
-            run_capture(&repo_root, &config, args).await
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = (!args.dry_run)
+                .then(|| acquire_memory_writer_lock(&config))
+                .transpose()?;
+            run_capture(
+                &repo_root,
+                &config,
+                selected_central_config.as_deref(),
+                args,
+            )
+            .await
         }
         MemoryCommand::Import(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = (!args.dry_run)
+                .then(|| acquire_memory_writer_lock(&config))
+                .transpose()?;
             run_import(&config, args)
         }
         MemoryCommand::SyncDocs(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = (!args.dry_run)
+                .then(|| acquire_memory_writer_lock(&config))
+                .transpose()?;
             run_sync_docs(&config, args)
         }
         MemoryCommand::Status(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_status(&config, args)
         }
         MemoryCommand::Show(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_show(&config, args, ShowMode::Full)
         }
         MemoryCommand::Brief(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_show(&config, args, ShowMode::Brief)
         }
         MemoryCommand::Search(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_search(&config, args)
         }
         MemoryCommand::Related(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_related(&config, args)
         }
         MemoryCommand::Docs(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_docs(&config, args)
         }
         MemoryCommand::Context(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
-            run_context(&repo_root, &config, args).await
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            run_context(
+                &repo_root,
+                &config,
+                selected_central_config.as_deref(),
+                args,
+            )
+            .await
         }
         MemoryCommand::Serve(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
-            run_serve(config, args).await
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            run_serve(config, args, selected_central_config).await
         }
         MemoryCommand::Lint(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
             run_lint(&config, args)
         }
         MemoryCommand::Reindex(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_reindex(&config, args)
         }
         MemoryCommand::ExportOkf(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_export_okf(&config, args)
         }
         MemoryCommand::ImportOkf(args) => {
-            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            let config = load_memory_config(&repo_root, config_path.as_deref())?;
+            let _coordination_lock = acquire_memory_writer_lock(&config)?;
             run_import_okf(&config, args)
         }
     }
+}
+
+fn memory_command_writes(command: &MemoryCommand) -> bool {
+    matches!(
+        command,
+        MemoryCommand::Capture(_)
+            | MemoryCommand::Import(_)
+            | MemoryCommand::SyncDocs(_)
+            | MemoryCommand::Reindex(_)
+            | MemoryCommand::ExportOkf(_)
+            | MemoryCommand::ImportOkf(_)
+    )
+}
+
+fn command_name(command: &MemoryCommand) -> &'static str {
+    match command {
+        MemoryCommand::Capture(_) => "memory capture",
+        MemoryCommand::Import(_) => "memory import",
+        MemoryCommand::SyncDocs(_) => "memory sync-docs",
+        MemoryCommand::Reindex(_) => "memory reindex",
+        MemoryCommand::ExportOkf(_) => "memory export-okf",
+        MemoryCommand::ImportOkf(_) => "memory import-okf",
+        _ => "memory operation",
+    }
+}
+
+fn reject_project_set_memory_write(
+    central_config_path: Option<&Path>,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    let Some(central_config_path) = central_config_path else {
+        return Ok(());
+    };
+    let raw = fs::read_to_string(central_config_path).map_err(|source| MemoryError::ReadFile {
+        path: central_config_path.to_path_buf(),
+        source,
+    })?;
+    let central = validate_central_config_text(central_config_path, &raw)
+        .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    if central.mode == CentralRoutingMode::ProjectSet {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory write operation `{operation}` does not support project_set central routing until strict routing is enabled"
+        )));
+    }
+    Ok(())
 }
 
 async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
@@ -727,11 +862,105 @@ async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
     }
 }
 
+fn load_memory_config(
+    repo_root: &Path,
+    config_path: Option<&Path>,
+) -> Result<MemoryConfig, MemoryError> {
+    if let Some(central_path) = selected_central_config_path(repo_root, config_path)? {
+        let memory_repo_root = central_memory_repo_root(repo_root, &central_path)?;
+        let mut config = MemoryConfig::load(memory_repo_root, None)?;
+        apply_central_memory_root(&mut config, &central_path)?;
+        return Ok(config);
+    }
+    let mut config = MemoryConfig::load(repo_root, config_path)?;
+    if config_path.is_some() {
+        return Ok(config);
+    }
+    let Some(central_path) = select_config_path(repo_root, None) else {
+        return Ok(config);
+    };
+    let raw = fs::read_to_string(&central_path).map_err(|source| MemoryError::ReadFile {
+        path: central_path.clone(),
+        source,
+    })?;
+    if !looks_like_central_config(&raw) {
+        return Ok(config);
+    }
+    apply_central_memory_root(&mut config, &central_path)?;
+    Ok(config)
+}
+
+fn selected_central_config_path(
+    repo_root: &Path,
+    explicit_path: Option<&Path>,
+) -> Result<Option<PathBuf>, MemoryError> {
+    let Some(config_path) = select_config_path(repo_root, explicit_path) else {
+        return Ok(None);
+    };
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+        path: config_path.clone(),
+        source,
+    })?;
+    Ok(looks_like_central_config(&raw).then_some(config_path))
+}
+
+fn central_memory_repo_root(repo_root: &Path, central_path: &Path) -> Result<PathBuf, MemoryError> {
+    let raw = fs::read_to_string(central_path).map_err(|source| MemoryError::ReadFile {
+        path: central_path.to_path_buf(),
+        source,
+    })?;
+    let central = validate_central_config_text(central_path, &raw)
+        .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    Ok(central
+        .target_repo()
+        .unwrap_or_else(|| repo_root.to_path_buf()))
+}
+
+fn apply_central_memory_root(
+    config: &mut MemoryConfig,
+    central_path: &Path,
+) -> Result<(), MemoryError> {
+    let raw = fs::read_to_string(central_path).map_err(|source| MemoryError::ReadFile {
+        path: central_path.to_path_buf(),
+        source,
+    })?;
+    let central = validate_central_config_text(central_path, &raw)
+        .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    if let Some(memory_root) = central.memory_catalog_root {
+        config.memory_root = memory_root.clone();
+        config.index_path = memory_root.join("memory.duckdb");
+    }
+    config.containment_root = Some(central.state_root);
+    Ok(())
+}
+
+fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryError> {
+    let mut evolved = if config.config_path.is_file() {
+        MemoryConfig::load(&config.repo_root, Some(&config.config_path))?
+    } else {
+        MemoryConfig::load(&config.repo_root, None)?
+    };
+    evolved.memory_root = config.memory_root.clone();
+    evolved.index_path = config.index_path.clone();
+    evolved.containment_root = config.containment_root.clone();
+    Ok(evolved)
+}
+
 fn run_init(
     repo_root: &Path,
     config_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     args: InitArgs,
 ) -> Result<(), MemoryError> {
+    if central_config_path.is_some() {
+        return Err(MemoryError::InvalidInput(
+            "memory init cannot target a central instance config; initialize a repository-local memory config instead"
+                .to_string(),
+        ));
+    }
     let plan = plan_memory_init(repo_root, config_path, args.force)?;
     println!("# Memory Init Plan\n");
     println!("Config: {}", plan.config_path.display());
@@ -743,6 +972,11 @@ fn run_init(
         return Ok(());
     }
 
+    let _coordination_lock =
+        acquire_memory_coordination_lock(repo_root).map_err(|source| MemoryError::WriteFile {
+            path: memory_migration_lock_path(repo_root),
+            source,
+        })?;
     write_memory_init_plan(&plan)?;
     println!("Wrote memory configuration: {}", plan.config_path.display());
     if plan.gitignore_before.as_deref() == Some(plan.gitignore_after.as_str()) {
@@ -756,6 +990,7 @@ fn run_init(
 async fn run_capture(
     repo_root: &Path,
     config: &MemoryConfig,
+    central_config_path: Option<&Path>,
     args: CaptureArgs,
 ) -> Result<(), MemoryError> {
     let identifiers = collect_issue_ids(
@@ -773,7 +1008,7 @@ async fn run_capture(
         identifiers: identifiers.clone(),
         ..IssueSelection::default()
     };
-    let source = load_linear_source(repo_root, None, &identifiers).await?;
+    let source = load_linear_source(repo_root, None, central_config_path, &identifiers).await?;
     let write = !args.dry_run;
     let plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
     print_or_write_capture_plan(config, &plan, args.force)?;
@@ -974,18 +1209,23 @@ fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
 async fn run_context(
     repo_root: &Path,
     config: &MemoryConfig,
+    central_config_path: Option<&Path>,
     args: ContextArgs,
 ) -> Result<(), MemoryError> {
+    if central_config_path.is_some() {
+        let _ = load_central_resolved_workflow(repo_root, central_config_path)?;
+    }
     let mut warnings = Vec::new();
-    let source = match load_linear_context_source(repo_root, None, &args.issue).await {
-        Ok(source) => source,
-        Err(error) => {
-            warnings.push(format!(
+    let source =
+        match load_linear_context_source(repo_root, None, central_config_path, &args.issue).await {
+            Ok(source) => source,
+            Err(error) => {
+                warnings.push(format!(
                 "live Linear context lookup failed; continuing with indexed memory only: {error}"
             ));
-            SourceFile::default()
-        }
-    };
+                SourceFile::default()
+            }
+        };
     let options = MemoryContextOptions {
         issue: args.issue,
         explicit_includes: args.include,
@@ -1407,6 +1647,10 @@ struct MemoryServerState {
     config: MemoryConfig,
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
+    resolved_workflow: Option<ResolvedWorkflow>,
+    config_generation: Option<String>,
+    writer_gate: MemoryWriterGate,
 }
 
 #[derive(Clone, Default)]
@@ -1430,7 +1674,11 @@ struct MemoryMcpRequest {
     params: Value,
 }
 
-async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryError> {
+async fn run_serve(
+    config: MemoryConfig,
+    args: ServeArgs,
+    central_config_path: Option<PathBuf>,
+) -> Result<(), MemoryError> {
     let handle = start_memory_server_with_auth(
         config,
         args.addr,
@@ -1438,6 +1686,9 @@ async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryEr
             read_token: args.token,
             admin_token: args.admin_token,
         },
+        None,
+        central_config_path,
+        None,
         None,
     )
     .await?;
@@ -1450,7 +1701,15 @@ async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryEr
 
 pub(crate) struct MemoryServerHandle {
     endpoint: String,
-    task: JoinHandle<Result<(), String>>,
+    task: Option<JoinHandle<Result<(), String>>>,
+    shutdown: watch::Sender<bool>,
+    writer_gate: MemoryWriterGate,
+}
+
+impl Drop for MemoryServerHandle {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl MemoryServerHandle {
@@ -1458,16 +1717,24 @@ impl MemoryServerHandle {
         &self.endpoint
     }
 
+    pub(crate) fn writer_gate(&self) -> Option<MemoryWriterGate> {
+        (!self.is_finished()).then(|| Arc::clone(&self.writer_gate))
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
-        self.task.is_finished()
+        self.task.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
     pub(crate) fn abort(&self) {
-        self.task.abort();
+        let _ = self.shutdown.send(true);
     }
 
-    pub(crate) async fn wait(self) -> Result<(), MemoryError> {
-        match self.task.await {
+    pub(crate) async fn wait(mut self) -> Result<(), MemoryError> {
+        let task = self
+            .task
+            .take()
+            .expect("memory server task should only be awaited once");
+        match task.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(MemoryError::InvalidInput(error)),
             Err(error) if error.is_cancelled() => Ok(()),
@@ -1478,6 +1745,7 @@ impl MemoryServerHandle {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn start_memory_server_with_workspace_root(
     config: MemoryConfig,
     addr: SocketAddr,
@@ -1492,6 +1760,53 @@ pub(crate) async fn start_memory_server_with_workspace_root(
             admin_token: None,
         },
         workspace_root,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(dead_code)]
+pub(crate) async fn start_memory_server_with_central_config(
+    config: MemoryConfig,
+    addr: SocketAddr,
+    token: Option<String>,
+    workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
+) -> Result<MemoryServerHandle, MemoryError> {
+    start_memory_server_with_resolved_config(
+        config,
+        addr,
+        token,
+        workspace_root,
+        central_config_path,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn start_memory_server_with_resolved_config(
+    config: MemoryConfig,
+    addr: SocketAddr,
+    token: Option<String>,
+    workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
+    resolved_workflow: Option<ResolvedWorkflow>,
+    config_generation: Option<String>,
+) -> Result<MemoryServerHandle, MemoryError> {
+    start_memory_server_with_auth(
+        config,
+        addr,
+        MemoryServerAuth {
+            read_token: token,
+            admin_token: None,
+        },
+        workspace_root,
+        central_config_path,
+        resolved_workflow,
+        config_generation,
     )
     .await
 }
@@ -1501,37 +1816,259 @@ async fn start_memory_server_with_auth(
     addr: SocketAddr,
     auth: MemoryServerAuth,
     workspace_root: Option<PathBuf>,
+    central_config_path: Option<PathBuf>,
+    resolved_workflow: Option<ResolvedWorkflow>,
+    config_generation: Option<String>,
 ) -> Result<MemoryServerHandle, MemoryError> {
+    let activity_marker = memory_activity_marker_path(&config.memory_root);
+    let coordination_root = memory_coordination_root(&config);
+    let coordination_lock =
+        acquire_memory_coordination_lock(&coordination_root).map_err(|source| {
+            MemoryError::InvalidInput(format!(
+                "memory migration or server activity is already active at {}; {source}",
+                memory_migration_lock_path(&coordination_root).display()
+            ))
+        })?;
+    fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
+        path: config.memory_root.clone(),
+        source,
+    })?;
+    match memory_activity_status(&config.memory_root).map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "failed to inspect memory server activity marker {}: {source}",
+            activity_marker.display()
+        ))
+    })? {
+        MemoryActivityStatus::Absent => {}
+        MemoryActivityStatus::Stale => {
+            fs::remove_file(&activity_marker).map_err(|source| {
+                MemoryError::InvalidInput(format!(
+                    "failed to remove stale memory activity marker {}: {source}",
+                    activity_marker.display()
+                ))
+            })?;
+        }
+        MemoryActivityStatus::Live => {
+            return Err(MemoryError::InvalidInput(format!(
+                "memory server is already active at {}",
+                activity_marker.display()
+            )));
+        }
+    }
+    super::orchestrator_run::publish_initialized_marker(
+        &activity_marker,
+        &super::orchestrator_run::process_marker_fields(),
+    )
+    .map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "memory server is already active or cannot claim {}; {source}",
+            activity_marker.display()
+        ))
+    })?;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
+        let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to bind memory server {addr}: {error}"))
     })?;
     let local_addr = listener.local_addr().map_err(|error| {
+        let _ = fs::remove_file(&activity_marker);
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
+    let writer_gate = Arc::new(Mutex::new(Some(coordination_lock)));
     let state = MemoryServerState {
         config,
         auth,
         workspace_root,
+        central_config_path,
+        resolved_workflow,
+        config_generation,
+        writer_gate: Arc::clone(&writer_gate),
     };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
         .route("/mcp", axum::routing::post(memory_server_mcp))
         .with_state(state);
+    let (shutdown, mut shutdown_rx) = watch::channel(false);
+    let writer_gate_for_task = Arc::clone(&writer_gate);
     let task = tokio::spawn(async move {
-        axum::serve(listener, app)
+        let result = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.changed().await;
+            })
             .await
-            .map_err(|error| format!("memory server failed: {error}"))
+            .map_err(|error| format!("memory server failed: {error}"));
+        let _ = fs::remove_file(&activity_marker);
+        let mut lock = writer_gate_for_task.lock().await;
+        lock.take();
+        result
     });
     Ok(MemoryServerHandle {
         endpoint: format!("http://{local_addr}/mcp"),
-        task,
+        task: Some(task),
+        shutdown,
+        writer_gate,
     })
+}
+
+pub(crate) fn memory_activity_marker_path(memory_root: &Path) -> PathBuf {
+    memory_root.join(MEMORY_ACTIVITY_MARKER)
+}
+
+pub(crate) fn memory_migration_lock_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".opensymphony").join(MEMORY_MIGRATION_LOCK)
+}
+
+pub(crate) fn acquire_memory_coordination_lock(
+    repo_root: &Path,
+) -> io::Result<MemoryCoordinationLock> {
+    let path = memory_migration_lock_path(repo_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    loop {
+        match super::orchestrator_run::publish_initialized_marker(
+            &path,
+            &super::orchestrator_run::process_marker_fields(),
+        ) {
+            Ok(_) => {
+                return Ok(MemoryCoordinationLock {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if memory_lock_owner_is_stale(&path) {
+                    let quarantine = stale_memory_lock_path(&path);
+                    match fs::rename(&path, &quarantine) {
+                        Ok(()) => {
+                            fs::remove_file(&quarantine)?;
+                            continue;
+                        }
+                        Err(rename_error) if rename_error.kind() == io::ErrorKind::NotFound => {
+                            continue;
+                        }
+                        Err(rename_error) => return Err(rename_error),
+                    }
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn memory_coordination_root(config: &MemoryConfig) -> PathBuf {
+    let local_default = config.repo_root.join(".opensymphony/memory");
+    if config.memory_root == local_default {
+        config.repo_root.clone()
+    } else {
+        config.memory_root.clone()
+    }
+}
+
+#[cfg(test)]
+fn initialize_memory_coordination_lock(
+    mut file: fs::File,
+    path: &Path,
+) -> io::Result<MemoryCoordinationLock> {
+    if let Err(error) = file.write_all(super::orchestrator_run::process_marker_fields().as_bytes())
+    {
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(MemoryCoordinationLock {
+        path: path.to_path_buf(),
+    })
+}
+
+fn acquire_memory_writer_lock(
+    config: &MemoryConfig,
+) -> Result<MemoryCoordinationLock, MemoryError> {
+    let coordination_root = memory_coordination_root(config);
+    acquire_memory_coordination_lock(&coordination_root).map_err(|source| MemoryError::WriteFile {
+        path: memory_migration_lock_path(&coordination_root),
+        source,
+    })
+}
+
+async fn acquire_memory_writer_guard(
+    config: &MemoryConfig,
+    writer_gate: Option<MemoryWriterGate>,
+) -> Result<MemoryWriterGuard, MemoryError> {
+    if let Some(writer_gate) = writer_gate {
+        let guard = writer_gate.lock_owned().await;
+        if guard.is_some() {
+            return Ok(MemoryWriterGuard::Shared(guard));
+        }
+        drop(guard);
+    }
+    Ok(MemoryWriterGuard::File(acquire_memory_writer_lock(config)?))
+}
+
+fn stale_memory_lock_path(path: &Path) -> PathBuf {
+    let sequence = MEMORY_STALE_LOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let incarnation = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(MEMORY_MIGRATION_LOCK);
+    path.with_file_name(format!(
+        ".{name}.stale-{}-{incarnation}-{sequence}",
+        process::id()
+    ))
+}
+
+pub(crate) fn memory_lock_is_stale(repo_root: &Path) -> bool {
+    let path = memory_migration_lock_path(repo_root);
+    path.exists() && memory_lock_owner_is_stale(&path)
+}
+
+pub(crate) fn memory_activity_status(memory_root: &Path) -> io::Result<MemoryActivityStatus> {
+    let path = memory_activity_marker_path(memory_root);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(MemoryActivityStatus::Absent);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(if memory_marker_owner_alive(&raw) {
+        MemoryActivityStatus::Live
+    } else {
+        MemoryActivityStatus::Stale
+    })
+}
+
+fn memory_lock_owner_is_stale(path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    !memory_marker_owner_alive(&raw)
+}
+
+fn memory_marker_owner_alive(raw: &str) -> bool {
+    let Some(pid) = raw.lines().find_map(|line| {
+        line.strip_prefix("pid=")
+            .and_then(|value| value.parse::<u32>().ok())
+    }) else {
+        return true;
+    };
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    super::orchestrator_run::process_owner_alive(
+        pid,
+        raw.lines()
+            .find_map(|line| line.strip_prefix("start=").map(str::trim)),
+    )
 }
 
 async fn memory_server_health(
     axum::extract::State(state): axum::extract::State<MemoryServerState>,
 ) -> axum::Json<Value> {
-    axum::Json(memory_server_health_payload(&state.auth))
+    let mut payload = memory_server_health_payload(&state.auth);
+    if let Some(generation) = state.config_generation.as_deref() {
+        payload["configGeneration"] = json!(generation);
+    }
+    axum::Json(payload)
 }
 
 fn memory_server_health_payload(auth: &MemoryServerAuth) -> Value {
@@ -1557,6 +2094,17 @@ async fn memory_server_mcp(
         return response;
     }
     let id = request.id.clone();
+    let writer_request = request.method == "tools/call"
+        && request
+            .params
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(is_memory_writer_tool);
+    let _writer_guard = if writer_request {
+        Some(state.writer_gate.clone().lock_owned().await)
+    } else {
+        None
+    };
     let result = match request.method.as_str() {
         "initialize" => Ok(json!({
             "protocolVersion": "2025-06-18",
@@ -1572,6 +2120,8 @@ async fn memory_server_mcp(
                 &state.config,
                 request.params,
                 state.workspace_root.as_deref(),
+                state.central_config_path.as_deref(),
+                state.resolved_workflow.as_ref(),
             ),
         )
         .await
@@ -1684,6 +2234,18 @@ fn is_admin_memory_tool(name: &str) -> bool {
     )
 }
 
+fn is_memory_writer_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "memory.capture"
+            | "memory.sync_docs"
+            | "memory.reindex"
+            | "memory.export_okf"
+            | "memory.import_okf"
+            | "memory.ingest_code_intel"
+    )
+}
+
 fn required_access_for_tool(name: &str, auth: &MemoryServerAuth) -> MemoryServerAccess {
     if is_admin_memory_tool(name)
         || (name == "code.ast.query" && non_empty_str(auth.admin_token.as_deref()).is_some())
@@ -1784,19 +2346,27 @@ fn origin_is_localhost(origin: &str) -> bool {
 
 #[cfg(test)]
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
-    call_memory_tool_with_workspace(config, params, None).await
+    call_memory_tool_with_workspace(config, params, None, None, None).await
 }
 
 async fn call_memory_tool_with_workspace(
     config: &MemoryConfig,
     params: Value,
     workspace_root: Option<&Path>,
+    central_config_path: Option<&Path>,
+    resolved_workflow: Option<&ResolvedWorkflow>,
 ) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| MemoryError::InvalidInput("tools/call requires params.name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if central_config_path.is_some() && resolved_workflow.is_none() && name == "memory.context" {
+        let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
+    }
+    if is_memory_writer_tool(name) {
+        reject_project_set_memory_write(central_config_path, name)?;
+    }
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
         return Err(MemoryError::InvalidInput(
             "AST code-intelligence tools are disabled".to_string(),
@@ -1921,7 +2491,10 @@ async fn call_memory_tool_with_workspace(
         "code.ast.diagnostics" => {
             call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
         }
-        "memory.capture" => call_memory_capture_tool(config, &arguments).await,
+        "memory.capture" => {
+            call_memory_capture_tool(config, &arguments, central_config_path, resolved_workflow)
+                .await
+        }
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
         "memory.reindex" => call_memory_reindex_tool(config, &arguments),
@@ -2686,7 +3259,12 @@ fn truncate_capture(text: &str, max_bytes: usize) -> (String, bool) {
 async fn call_memory_capture_tool(
     config: &MemoryConfig,
     arguments: &Value,
+    central_config_path: Option<&Path>,
+    resolved_workflow: Option<&ResolvedWorkflow>,
 ) -> Result<Value, MemoryError> {
+    if central_config_path.is_some() && resolved_workflow.is_none() {
+        let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
+    }
     let identifiers = issue_ids_from_mcp(config, arguments)?;
     if identifiers.is_empty() {
         return Err(MemoryError::InvalidInput(
@@ -2697,8 +3275,11 @@ async fn call_memory_capture_tool(
         .or_else(|| optional_string_arg(arguments, "source_file"))
     {
         load_source_file(&repo_existing_path(config, &source_file)?)?
+    } else if let Some(workflow) = resolved_workflow {
+        let client = linear_client_from_resolved_workflow(workflow)?;
+        load_linear_source_from_client(&client, &identifiers).await?
     } else {
-        load_linear_source(&config.repo_root, None, &identifiers).await?
+        load_linear_source(&config.repo_root, None, central_config_path, &identifiers).await?
     };
     let selection = IssueSelection {
         identifiers,
@@ -3945,7 +4526,8 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         path: PathBuf::from("."),
         source,
     })?;
-    let config = MemoryConfig::load(&repo_root, args.config.as_deref())?;
+    let selected_central_config = selected_central_config_path(&repo_root, args.config.as_deref())?;
+    let config = load_memory_config(&repo_root, args.config.as_deref())?;
     let identifiers = collect_issue_ids(
         None,
         args.issues.as_deref(),
@@ -3969,6 +4551,9 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         ));
     }
     let write = !args.dry_run;
+    let _coordination_lock = write
+        .then(|| acquire_memory_writer_lock(&config))
+        .transpose()?;
 
     if !args.from_memory {
         if identifiers.is_empty() {
@@ -3992,7 +4577,13 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         println!("Dry run only. Re-run without `--dry-run` to archive eligible Linear issues.");
         return Ok(());
     }
-    let report = archive_in_linear(&repo_root, args.workflow.as_deref(), &plan).await?;
+    let report = archive_in_linear(
+        &repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        &plan,
+    )
+    .await?;
     if !report.archived.is_empty() {
         mark_archived(&config, &report.archived)?;
     }
@@ -4000,6 +4591,7 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         &repo_root,
         args.workflow.as_deref(),
         &report.archived,
+        selected_central_config.as_deref(),
     )
     .await?;
     println!("Archived {} Linear issue(s).", report.archived.len());
@@ -4034,11 +4626,18 @@ async fn run_archive_with_live_capture(
     identifiers: Vec<String>,
     write: bool,
 ) -> Result<(), MemoryError> {
+    let selected_central_config = selected_central_config_path(repo_root, args.config.as_deref())?;
     let selection = IssueSelection {
         identifiers: identifiers.clone(),
         ..IssueSelection::default()
     };
-    let source = load_linear_source(repo_root, args.workflow.as_deref(), &identifiers).await?;
+    let source = load_linear_source(
+        repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        &identifiers,
+    )
+    .await?;
     let capture_plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
 
     if !write {
@@ -4065,8 +4664,21 @@ async fn run_archive_with_live_capture(
         println!("\n{}", render_archive_plan(config, &archive_plan));
     }
 
-    let report = archive_in_linear(repo_root, args.workflow.as_deref(), &archive_plan).await?;
-    finish_archive_write(repo_root, args.workflow.as_deref(), config, report).await
+    let report = archive_in_linear(
+        repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        &archive_plan,
+    )
+    .await?;
+    finish_archive_write(
+        repo_root,
+        args.workflow.as_deref(),
+        selected_central_config.as_deref(),
+        config,
+        report,
+    )
+    .await
 }
 
 fn archive_plan_after_capture(
@@ -4135,15 +4747,20 @@ fn archive_plan_after_capture(
 async fn finish_archive_write(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     config: &MemoryConfig,
     report: LinearArchiveReport,
 ) -> Result<(), MemoryError> {
     if !report.archived.is_empty() {
         mark_archived(config, &report.archived)?;
     }
-    let conversation_report =
-        archive_openhands_conversations_from_config(repo_root, workflow_path, &report.archived)
-            .await?;
+    let conversation_report = archive_openhands_conversations_from_config(
+        repo_root,
+        workflow_path,
+        &report.archived,
+        central_config_path,
+    )
+    .await?;
     println!("Archived {} Linear issue(s).", report.archived.len());
     for issue_key in &report.archived {
         println!("- {issue_key}");
@@ -4206,9 +4823,16 @@ async fn archive_openhands_conversations_from_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
     issue_keys: &[String],
+    central_config_path: Option<&Path>,
 ) -> Result<ConversationArchiveReport, MemoryError> {
-    let store = conversation_store_from_run_config(repo_root, workflow_path)?;
-    let context = conversation_archive_context(repo_root, workflow_path, store.as_ref())?;
+    let store = conversation_store_from_run_config(repo_root, workflow_path, central_config_path)?;
+    let context = conversation_archive_context(
+        repo_root,
+        workflow_path,
+        central_config_path,
+        None,
+        store.as_ref(),
+    )?;
     archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
 }
 
@@ -4217,20 +4841,32 @@ async fn archive_openhands_conversations_for_issues(
     workflow_path: Option<&Path>,
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     issue_keys: &[String],
+    resolved_workflow: Option<&ResolvedWorkflow>,
 ) -> Result<ConversationArchiveReport, MemoryError> {
-    let context = conversation_archive_context(repo_root, workflow_path, conversation_store)?;
+    let context = conversation_archive_context(
+        repo_root,
+        workflow_path,
+        None,
+        resolved_workflow,
+        conversation_store,
+    )?;
     archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
 }
 
 fn conversation_archive_context<'a>(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
+    resolved_workflow: Option<&ResolvedWorkflow>,
     conversation_store: Option<&'a OpenHandsConversationStorePaths>,
 ) -> Result<Option<ConversationArchiveContext<'a>>, MemoryError> {
     let Some(conversation_store) = conversation_store else {
         return Ok(None);
     };
-    let workflow = load_resolved_workflow(repo_root, workflow_path)?;
+    let workflow = match resolved_workflow {
+        Some(workflow) => workflow.clone(),
+        None => load_resolved_workflow_with_config(repo_root, workflow_path, central_config_path)?,
+    };
     let manager = WorkspaceManager::new(WorkspaceManagerConfig {
         root: workflow.config.workspace.root.clone(),
         hooks: HookConfig::default(),
@@ -4422,39 +5058,73 @@ fn print_conversation_archive_report(report: &ConversationArchiveReport) {
 fn conversation_store_from_run_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
 ) -> Result<Option<OpenHandsConversationStorePaths>, MemoryError> {
-    let config_path = repo_root.join("config.yaml");
+    let config_path = central_config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| repo_root.join("config.yaml"));
     if !config_path.is_file() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
-        path: config_path.clone(),
-        source,
-    })?;
-    let config =
-        serde_yaml::from_str::<ConversationArchiveRuntimeConfig>(&raw).map_err(|source| {
-            MemoryError::ParseYaml {
-                path: config_path.clone(),
-                source,
-            }
+    let central = if central_config_path.is_some() {
+        let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+            path: config_path.clone(),
+            source,
         })?;
+        Some(
+            validate_central_config_text(&config_path, &raw).map_err(|error| {
+                MemoryError::InvalidInput(format!("invalid central config: {error}"))
+            })?,
+        )
+    } else {
+        None
+    };
+    let config = if central.is_none() {
+        let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+            path: config_path.clone(),
+            source,
+        })?;
+        Some(
+            serde_yaml::from_str::<ConversationArchiveRuntimeConfig>(&raw).map_err(|source| {
+                MemoryError::ParseYaml {
+                    path: config_path.clone(),
+                    source,
+                }
+            })?,
+        )
+    } else {
+        None
+    };
     let config_root = config_path.parent().unwrap_or(repo_root);
-    let target_repo = match workflow_path.and_then(Path::parent) {
-        Some(workflow_root) => workflow_root.to_path_buf(),
-        None => config
+    let target_repo = if let Some(workflow_root) = workflow_path.and_then(Path::parent) {
+        workflow_root.to_path_buf()
+    } else if let Some(central) = central.as_ref() {
+        central
+            .target_repo()
+            .unwrap_or_else(|| repo_root.to_path_buf())
+    } else if let Some(config) = config.as_ref() {
+        config
             .target_repo
             .as_deref()
             .map(|value| expand_config_path(&config_path, config_root, value))
             .transpose()?
-            .unwrap_or_else(|| repo_root.to_path_buf()),
+            .unwrap_or_else(|| repo_root.to_path_buf())
+    } else {
+        repo_root.to_path_buf()
     };
-    let Some(tool_dir) = config
-        .openhands
-        .tool_dir
-        .as_deref()
-        .map(|value| expand_config_path(&config_path, config_root, value))
-        .transpose()?
-    else {
+    let tool_dir = if let Some(central) = central.as_ref() {
+        central.tool_dir()
+    } else if let Some(config) = config.as_ref() {
+        config
+            .openhands
+            .tool_dir
+            .as_deref()
+            .map(|value| expand_config_path(&config_path, config_root, value))
+            .transpose()?
+    } else {
+        None
+    };
+    let Some(tool_dir) = tool_dir else {
         return Ok(None);
     };
     OpenHandsConversationStorePaths::for_tool_dir(tool_dir, target_repo)
@@ -4476,10 +5146,14 @@ fn expand_config_path(
     Ok(super::resolve_path(config_root, &expanded))
 }
 
-fn load_resolved_workflow(
+fn load_resolved_workflow_with_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
-) -> Result<crate::opensymphony_workflow::ResolvedWorkflow, MemoryError> {
+    central_config_path: Option<&Path>,
+) -> Result<ResolvedWorkflow, MemoryError> {
+    if let Some(workflow) = load_central_resolved_workflow(repo_root, central_config_path)? {
+        return Ok(workflow);
+    }
     let workflow_path = workflow_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
@@ -4691,11 +5365,19 @@ struct LinearArchiveReport {
 async fn archive_in_linear(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     plan: &ArchivePlan,
 ) -> Result<LinearArchiveReport, MemoryError> {
-    let client = linear_client_from_workflow(repo_root, workflow_path)?;
-    let mut report = LinearArchiveReport::default();
+    let client =
+        linear_client_from_workflow_with_config(repo_root, workflow_path, central_config_path)?;
+    archive_in_linear_with_client(&client, plan).await
+}
 
+async fn archive_in_linear_with_client(
+    client: &LinearClient,
+    plan: &ArchivePlan,
+) -> Result<LinearArchiveReport, MemoryError> {
+    let mut report = LinearArchiveReport::default();
     for issue in plan.issues.iter().filter(|issue| issue.eligible) {
         match client.archive_issue(&issue.issue_key).await {
             Ok(()) => report.archived.push(issue.issue_key.clone()),
@@ -4711,30 +5393,79 @@ fn linear_client_from_workflow(
     repo_root: &Path,
     workflow_path: Option<&Path>,
 ) -> Result<LinearClient, MemoryError> {
+    linear_client_from_workflow_with_config(repo_root, workflow_path, None)
+}
+
+fn linear_client_from_workflow_with_config(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
+) -> Result<LinearClient, MemoryError> {
+    if let Some(resolved) = load_central_resolved_workflow(repo_root, central_config_path)? {
+        return linear_client_from_resolved_workflow(&resolved);
+    }
     let workflow_path = workflow_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
-    if !workflow_path.exists() {
-        return Err(MemoryError::InvalidInput(format!(
-            "{} not found",
-            workflow_path.display()
-        )));
+    let workflow_result = match WorkflowDefinition::load_from_path(&workflow_path) {
+        Ok(workflow) => {
+            let workflow_root = workflow_path.parent().unwrap_or(repo_root);
+            workflow
+                .resolve_with_process_env(workflow_root)
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    match workflow_result {
+        Ok(resolved) => linear_client_from_resolved_workflow(&resolved),
+        Err(workflow_error) => Err(MemoryError::InvalidInput(format!(
+            "failed to resolve workflow: {workflow_error}"
+        ))),
     }
-    let workflow = WorkflowDefinition::load_from_path(&workflow_path)
-        .map_err(|error| MemoryError::InvalidInput(format!("failed to load workflow: {error}")))?;
-    let workflow_root = workflow_path.parent().unwrap_or(repo_root);
-    let resolved = workflow
-        .resolve_with_process_env(workflow_root)
+}
+
+fn load_central_resolved_workflow(
+    repo_root: &Path,
+    explicit_path: Option<&Path>,
+) -> Result<Option<ResolvedWorkflow>, MemoryError> {
+    let Some(config_path) = selected_central_config_path(repo_root, explicit_path)? else {
+        return Ok(None);
+    };
+    let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+        path: config_path.clone(),
+        source,
+    })?;
+    let central = validate_central_config_text(&config_path, &raw)
+        .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
+    if central.mode == CentralRoutingMode::ProjectSet {
+        return Err(MemoryError::InvalidInput(
+            "memory commands do not support project_set central routing until strict routing is enabled"
+                .to_string(),
+        ));
+    }
+    let workflow = WorkflowDefinition {
+        front_matter: central.workflow_front_matter,
+        prompt_template: String::new(),
+    };
+    workflow
+        .resolve_with_process_env(config_path.parent().unwrap_or(repo_root))
+        .map(Some)
         .map_err(|error| {
-            MemoryError::InvalidInput(format!("failed to resolve workflow: {error}"))
-        })?;
+            MemoryError::InvalidInput(format!("failed to resolve central config tracker: {error}"))
+        })
+}
+
+fn linear_client_from_resolved_workflow(
+    resolved: &ResolvedWorkflow,
+) -> Result<LinearClient, MemoryError> {
     let mut linear_config = LinearConfig::new(
-        resolved.config.tracker.api_key,
-        resolved.config.tracker.project_slug,
+        resolved.config.tracker.api_key.clone(),
+        resolved.config.tracker.project_slug.clone(),
     );
-    linear_config.base_url = resolved.config.tracker.endpoint;
-    linear_config.active_states = resolved.config.tracker.active_states;
-    linear_config.terminal_states = resolved.config.tracker.terminal_states;
+    linear_config.base_url = resolved.config.tracker.endpoint.clone();
+    linear_config.project_id = resolved.config.tracker.project_id.clone();
+    linear_config.active_states = resolved.config.tracker.active_states.clone();
+    linear_config.terminal_states = resolved.config.tracker.terminal_states.clone();
     LinearClient::new(linear_config)
         .map_err(|error| MemoryError::Linear(format!("invalid Linear config: {error}")))
 }
@@ -4742,18 +5473,22 @@ fn linear_client_from_workflow(
 async fn load_linear_source(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     identifiers: &[String],
 ) -> Result<SourceFile, MemoryError> {
-    let client = linear_client_from_workflow(repo_root, workflow_path)?;
+    let client =
+        linear_client_from_workflow_with_config(repo_root, workflow_path, central_config_path)?;
     load_linear_source_from_client(&client, identifiers).await
 }
 
 async fn load_linear_context_source(
     repo_root: &Path,
     workflow_path: Option<&Path>,
+    central_config_path: Option<&Path>,
     issue_key: &str,
 ) -> Result<SourceFile, MemoryError> {
-    let client = linear_client_from_workflow(repo_root, workflow_path)?;
+    let client =
+        linear_client_from_workflow_with_config(repo_root, workflow_path, central_config_path)?;
     let normalized_issue = issue_key.trim();
     if normalized_issue.is_empty() {
         return Err(MemoryError::InvalidInput(
@@ -5007,12 +5742,13 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, RUST_QUERY_PACK_VERSION, authorize_memory_request,
-        call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
-        context_source_from_mcp, memory_server_health_payload, memory_tool_descriptors,
-        origin_is_localhost, parse_remote_memory_response, remote_memory_tool_token,
-        replace_or_append_managed_section, required_access_for_request, resolve_code_graph_overlay,
-        resolve_code_intel_repo, trim_auto_memory_status_log,
+        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
+        authorize_memory_request, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
+        call_memory_tool, context_source_from_mcp, load_memory_config, memory_server_health,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
+        trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -5074,6 +5810,109 @@ mod tests {
         assert!(names.contains(&"code.ast.query".to_string()));
         assert!(names.contains(&"code.ast.context".to_string()));
         assert!(names.contains(&"code.ast.diagnostics".to_string()));
+    }
+
+    #[test]
+    fn memory_init_rejects_a_selected_central_config() {
+        let repo = TempDir::new().expect("repo should exist");
+        let central = repo.path().join("central.yaml");
+        let error = run_init(
+            repo.path(),
+            Some(&central),
+            Some(&central),
+            super::InitArgs {
+                dry_run: true,
+                force: false,
+            },
+        )
+        .expect_err("central config must not be overwritten by memory init");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot target a central instance config")
+        );
+    }
+
+    #[test]
+    fn central_memory_load_uses_typed_checkout_for_repository_policy() {
+        let root = TempDir::new().expect("central config root should exist");
+        let checkout = root.path().join("checkout");
+        let central = root.path().join("central.yaml");
+        std::fs::create_dir_all(checkout.join(".opensymphony/memory"))
+            .expect("checkout memory config directory should exist");
+        std::fs::write(
+            checkout.join(".opensymphony/memory/memory.yaml"),
+            "docs:\n  public_root: repository-docs\nareas:\n  ops:\n    docs_target: repository-ops.md\nredaction:\n  deny_patterns: [checkout-secret]\n",
+        )
+        .expect("checkout memory config should be written");
+        std::fs::write(
+            &central,
+            format!(
+                "schema_version: 1\ninstance:\n  id: typed-checkout\n  state_root: {0}/state\nrouting:\n  mode: legacy_single\n  repository: repo\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\n    active_states: [Todo]\n    terminal_states: [Done]\nlinear_projects:\n  project:\n    provider_project_id: project-id\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: github.com/example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\n    checkout_path: {0}/checkout\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+                root.path().display()
+            ),
+        )
+        .expect("central config should be written");
+
+        let config = load_memory_config(root.path(), Some(&central))
+            .expect("central memory config should load");
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        assert_eq!(config.repo_root, canonical_root.join("checkout"));
+        assert_eq!(config.memory_root, canonical_root.join("state/memory"));
+        assert_eq!(
+            config.docs.public_root,
+            canonical_root.join("checkout/repository-docs")
+        );
+        assert_eq!(
+            config
+                .areas
+                .get("ops")
+                .expect("checkout area should load")
+                .docs_target,
+            canonical_root.join("checkout/repository-ops.md")
+        );
+        assert_eq!(config.redaction.deny_patterns, vec!["checkout-secret"]);
+    }
+
+    #[tokio::test]
+    async fn project_set_memory_commands_are_rejected_before_tracker_access() {
+        let repo = TempDir::new().expect("repo should exist");
+        let central = repo.path().join("central.yaml");
+        std::fs::write(
+            &central,
+            format!(
+                "schema_version: 1\ninstance:\n  id: project-set\n  state_root: {0}/state\nrouting:\n  mode: project_set\n  active_project_set: suite\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\nproject_sets:\n  suite:\n    tracker_profile: linear\n    projects: [project]\nlinear_projects:\n  project:\n    provider_project_id: project-id\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: github.com/example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+                repo.path().display()
+            ),
+        )
+        .expect("central config should be written");
+
+        let error = super::load_central_resolved_workflow(repo.path(), Some(&central))
+            .expect_err("project_set memory commands must be gated");
+        assert!(error.to_string().contains("do not support project_set"));
+        let error = super::reject_project_set_memory_write(Some(&central), "memory sync-docs")
+            .expect_err("project_set memory writes must be rejected");
+        assert!(error.to_string().contains("memory sync-docs"));
+
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config should load");
+        let error = super::run_context(
+            repo.path(),
+            &config,
+            Some(&central),
+            super::ContextArgs {
+                scope: super::ScopeArgs::default(),
+                issue: "COE-547".to_string(),
+                milestone: None,
+                area: None,
+                include: Vec::new(),
+                paths: Vec::new(),
+                include_code_intel: false,
+                limit: 20,
+            },
+        )
+        .await
+        .expect_err("CLI context must reject project_set memory commands");
+        assert!(error.to_string().contains("do not support project_set"));
     }
 
     #[test]
@@ -5541,6 +6380,7 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("repo id")
             .to_string();
+        let activity_marker = super::memory_activity_marker_path(&config.memory_root);
         let handle = super::start_memory_server_with_workspace_root(
             config,
             "127.0.0.1:0".parse().expect("address"),
@@ -5549,6 +6389,7 @@ mod tests {
         )
         .await
         .expect("start memory server");
+        assert!(activity_marker.is_file());
         let client = reqwest::Client::new();
         let list = client
             .post(handle.endpoint())
@@ -5603,6 +6444,199 @@ mod tests {
             .expect("AST response");
         assert!(ast["result"]["markdown"].as_str().is_some());
         handle.abort();
+        handle
+            .wait()
+            .await
+            .expect("memory server should shut down gracefully");
+        assert!(!activity_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn memory_server_refuses_to_start_during_migration() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let lock_path = super::memory_migration_lock_path(&config.repo_root);
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent"))
+            .expect("lock parent should exist");
+        std::fs::write(&lock_path, "active\n").expect("migration lock should exist");
+
+        let result = super::start_memory_server_with_workspace_root(
+            config,
+            "127.0.0.1:0".parse().expect("address"),
+            None,
+            None,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(handle) => {
+                handle.abort();
+                panic!("memory server must honor migration lock");
+            }
+        };
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("migration"))
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_server_reclaims_stale_activity_marker() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let marker_path = super::memory_activity_marker_path(&config.memory_root);
+        std::fs::create_dir_all(&config.memory_root).expect("memory root");
+        std::fs::write(&marker_path, "pid=2000000000\n").expect("stale marker");
+
+        let handle = super::start_memory_server_with_workspace_root(
+            config,
+            "127.0.0.1:0".parse().expect("address"),
+            None,
+            None,
+        )
+        .await
+        .expect("stale marker should be reclaimed");
+        assert!(marker_path.is_file());
+        handle.abort();
+        handle
+            .wait()
+            .await
+            .expect("memory server should shut down gracefully");
+        assert!(!marker_path.exists());
+    }
+
+    #[test]
+    fn memory_markers_reject_reused_pid_incarnation() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        std::fs::create_dir_all(&config.memory_root).expect("memory root");
+        let marker_path = super::memory_activity_marker_path(&config.memory_root);
+        std::fs::write(
+            &marker_path,
+            format!(
+                "pid={}\nstart=not-the-current-process\n",
+                std::process::id()
+            ),
+        )
+        .expect("activity marker");
+        assert_eq!(
+            super::memory_activity_status(&config.memory_root).expect("activity status"),
+            super::MemoryActivityStatus::Stale
+        );
+
+        let lock_path = super::memory_migration_lock_path(repo.path());
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("lock parent");
+        std::fs::write(
+            &lock_path,
+            format!(
+                "pid={}\nstart=not-the-current-process\n",
+                std::process::id()
+            ),
+        )
+        .expect("coordination marker");
+        assert!(super::memory_lock_owner_is_stale(&lock_path));
+    }
+
+    #[test]
+    fn stale_memory_lock_quarantine_names_are_unique() {
+        let repo = TempDir::new().expect("repo");
+        let path = super::memory_migration_lock_path(repo.path());
+        let first = super::stale_memory_lock_path(&path);
+        let second = super::stale_memory_lock_path(&path);
+
+        assert_ne!(first, second);
+        assert!(
+            first
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(&std::process::id().to_string()))
+        );
+    }
+
+    #[test]
+    fn failed_memory_lock_owner_initialization_removes_partial_lock() {
+        let repo = TempDir::new().expect("repo");
+        let path = super::memory_migration_lock_path(repo.path());
+        std::fs::create_dir_all(path.parent().expect("lock parent")).expect("lock parent");
+        std::fs::File::create(&path).expect("lock file");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("read-only lock file");
+
+        assert!(super::initialize_memory_coordination_lock(file, &path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn central_memory_reload_uses_defaults_when_local_config_is_absent() {
+        let repo = TempDir::new().expect("repo");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.memory_root = repo.path().join("central-catalog");
+        config.index_path = config.memory_root.join("memory.duckdb");
+        assert!(!config.config_path.is_file());
+
+        let evolved = super::reload_memory_config(&config).expect("reload should use defaults");
+
+        assert_eq!(evolved.memory_root, config.memory_root);
+        assert_eq!(evolved.index_path, config.index_path);
+    }
+
+    #[test]
+    fn central_memory_writers_share_a_catalog_coordination_lock() {
+        let first_repo = TempDir::new().expect("first repo");
+        let second_repo = TempDir::new().expect("second repo");
+        let catalog = first_repo.path().join("central-catalog");
+        let mut first = MemoryConfig::load(first_repo.path(), None).expect("first config");
+        let mut second = MemoryConfig::load(second_repo.path(), None).expect("second config");
+        first.memory_root = catalog.clone();
+        second.memory_root = catalog.clone();
+
+        let lock = acquire_memory_writer_lock(&first).expect("first catalog lock");
+        assert!(matches!(
+            acquire_memory_writer_lock(&second),
+            Err(MemoryError::WriteFile { .. })
+        ));
+        drop(lock);
+        acquire_memory_writer_lock(&second)
+            .expect("catalog lock should be released after the first writer exits");
+    }
+
+    #[tokio::test]
+    async fn memory_server_writer_gate_keeps_filesystem_lock_until_guards_drain() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let coordination_lock = super::acquire_memory_coordination_lock(&config.repo_root)
+            .expect("coordination lock should be acquired");
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(Some(coordination_lock)));
+        let writer_guard = gate.clone().lock_owned().await;
+        let releasing_gate = gate.clone();
+        let release_task = tokio::spawn(async move {
+            let mut lock = releasing_gate.lock().await;
+            lock.take();
+        });
+
+        assert!(
+            super::acquire_memory_coordination_lock(&config.repo_root).is_err(),
+            "the filesystem lock must remain held while a writer guard is active"
+        );
+        drop(writer_guard);
+        release_task
+            .await
+            .expect("the server shutdown lock release should complete");
+        super::acquire_memory_coordination_lock(&config.repo_root)
+            .expect("the filesystem lock should release after guards drain");
+    }
+
+    #[tokio::test]
+    async fn memory_writer_gate_falls_back_after_server_consumes_lock() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let guard = super::acquire_memory_writer_guard(&config, Some(gate))
+            .await
+            .expect("writer should fall back to the filesystem lock");
+        assert!(matches!(guard, super::MemoryWriterGuard::File(_)));
     }
 
     #[test]
@@ -7944,6 +8978,24 @@ Public memory concept.
         let configured_payload = memory_server_health_payload(&configured_admin);
         assert_eq!(configured_payload["mode"], "read_write");
         assert_eq!(configured_payload["adminTools"], true);
+    }
+
+    #[tokio::test]
+    async fn memory_server_health_reports_pinned_config_generation() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let state = MemoryServerState {
+            config,
+            auth: MemoryServerAuth::default(),
+            workspace_root: None,
+            central_config_path: None,
+            resolved_workflow: None,
+            config_generation: Some("sha256:pinned-generation".to_string()),
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        let axum::Json(payload) = memory_server_health(axum::extract::State(state)).await;
+        assert_eq!(payload["configGeneration"], "sha256:pinned-generation");
     }
 
     #[test]

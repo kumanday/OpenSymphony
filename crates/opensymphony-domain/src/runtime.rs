@@ -775,7 +775,7 @@ impl RetryEntry {
             issue_id: issue.id.clone(),
             identifier: issue.identifier.clone(),
             attempt,
-            normal_retry_count,
+            normal_retry_count: normal_retry_count.saturating_add(1),
             scheduled_at,
             due_at: scheduled_at.saturating_add(policy.failure_delay(attempt)),
             reason,
@@ -947,6 +947,7 @@ pub enum WorkerOutcomeKind {
 pub enum HarnessInterruptReason {
     OperatorCancel,
     TrackerMergingSupersedesHumanReview,
+    SchedulerAbort,
 }
 
 impl HarnessInterruptReason {
@@ -954,6 +955,7 @@ impl HarnessInterruptReason {
         match self {
             Self::OperatorCancel => "operator_cancel",
             Self::TrackerMergingSupersedesHumanReview => "tracker_merging_supersedes_human_review",
+            Self::SchedulerAbort => "scheduler_abort",
         }
     }
 }
@@ -1014,6 +1016,10 @@ impl HarnessInterruptState {
             updated_at: None,
             detail: None,
         }
+    }
+
+    pub fn replace_command(&mut self, command: HarnessInterruptCommand) {
+        self.command = command;
     }
 
     pub fn acknowledge(&mut self, observed_at: TimestampMs) {

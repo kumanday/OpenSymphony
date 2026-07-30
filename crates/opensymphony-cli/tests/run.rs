@@ -167,7 +167,8 @@ async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_me
         bind_addr,
     );
     write_memory_config(project.path());
-    seed_recovered_human_review_workspace(project.path(), conversation_id).await;
+    seed_recovered_human_review_workspace(project.path(), conversation_id, openhands.base_url())
+        .await;
     seed_fake_openhands_conversation(&openhands, conversation_id, project.path()).await;
 
     let mut child = spawn_run_child(project.path(), &[]);
@@ -447,6 +448,7 @@ fn write_codex_merging_supersede_project_files(
 async fn seed_recovered_human_review_workspace(
     project_root: &std::path::Path,
     conversation_id: uuid::Uuid,
+    server_base_url: &str,
 ) {
     let workspace_manager = WorkspaceManager::new(WorkspaceManagerConfig {
         root: project_root.join("var/workspaces"),
@@ -488,7 +490,7 @@ async fn seed_recovered_human_review_workspace(
         conversation_id: ConversationId::new(conversation_id.to_string())
             .expect("conversation id should be valid"),
         reuse_policy: "per_issue".to_string(),
-        server_base_url: Some("http://127.0.0.1".to_string()),
+        server_base_url: Some(server_base_url.to_string()),
         transport_target: Some("openhands_agent_server".to_string()),
         http_auth_mode: Some("none".to_string()),
         websocket_auth_mode: Some("none".to_string()),
@@ -504,6 +506,10 @@ async fn seed_recovered_human_review_workspace(
         reset_reason: None,
         runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_string()),
         codex_archive_state: None,
+        last_turn_id: None,
+        active_run_id: None,
+        prepared_run_id: None,
+        trigger_pending_run_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,

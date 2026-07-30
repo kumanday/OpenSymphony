@@ -106,6 +106,12 @@ fn resolve_tracker<E: Environment>(
         kind,
         endpoint,
         api_key,
+        project_id: tracker
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
         project_slug,
         active_states: resolve_state_list(
             tracker.active_states.as_deref(),

@@ -91,6 +91,7 @@ impl MemoryConfig {
             },
             config_path: resolved_config_path,
             repo_root,
+            containment_root: None,
             memory_root,
             visibility,
             index_path,

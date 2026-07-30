@@ -984,6 +984,34 @@ impl OpenHandsClient {
         self.transport.base_url()
     }
 
+    /// Clone this client while targeting a persisted runtime server. Auth
+    /// configuration is retained, but the endpoint comes from the durable
+    /// conversation manifest used during recovery.
+    pub fn with_base_url(&self, base_url: impl Into<String>) -> Self {
+        Self {
+            http: self.http.clone(),
+            transport: TransportConfig::new(base_url).with_auth(self.transport.auth.clone()),
+        }
+    }
+
+    /// Reuse a persisted runtime endpoint only when it still identifies the
+    /// configured OpenHands server.  Conversation manifests live in an agent-
+    /// writable workspace, so a changed origin must never receive the current
+    /// session authentication.
+    pub fn with_persisted_base_url(&self, base_url: &str) -> Result<Self, OpenHandsError> {
+        let configured = self.transport.parsed_base_url()?;
+        let persisted = TransportConfig::new(base_url).parsed_base_url()?;
+        let same_origin = configured.scheme() == persisted.scheme()
+            && configured.host() == persisted.host()
+            && configured.port_or_known_default() == persisted.port_or_known_default();
+        if !same_origin {
+            return Err(OpenHandsError::invalid_configuration(
+                "persisted runtime server does not match the configured OpenHands server",
+            ));
+        }
+        Ok(self.with_base_url(base_url.to_owned()))
+    }
+
     pub fn transport_diagnostics(&self) -> Result<TransportDiagnostics, OpenHandsError> {
         self.transport.diagnostics()
     }

@@ -480,6 +480,11 @@ memory:
   auto_archive: false
 ```
 
+With a central instance config, automatic capture uses the configured catalog
+even when the selected checkout has no repository-local memory YAML. After a
+capsule write, the reload falls back to the normal default policy lookup rather
+than treating the absent local file as an explicit required path.
+
 Manual commands remain available for setup, backfill, inspection, and guarded
 archive operations:
 
@@ -517,10 +522,33 @@ Memory capture does not archive Linear issues.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema
-migrations. Run capture, import, OKF import/export, docs sync, or reindex-style
-admin operations serially if a local DuckDB writer is active. Prefer the CLI or
-MCP admin surface for maintenance; direct file or DuckDB access is an offline
-recovery and diagnostics fallback only.
+migrations. Capture, import, OKF import/export, docs sync, reindex, archive,
+automatic terminal capture, and code-intelligence persistence acquire the
+instance coordination lock before writing. The local MCP server holds that
+same lock for its lifetime, so migration and direct writers cannot copy or
+index a torn catalog. Prefer the CLI or MCP admin surface for maintenance;
+direct file or DuckDB access is an offline recovery and diagnostics fallback
+only.
+
+Each `opensymphony run` claims the configured state and workspace roots before
+constructing tracker, memory, or workspace services. A second live process
+using either root fails without polling Linear or creating a workspace. The
+ownership marker records the process ID and, when available, a process-start
+incarnation; stale markers are atomically quarantined before the root is
+reclaimed, and a reused PID does not keep an old marker live when its
+incarnation differs. The marker is released when the run shuts down, including
+legacy single-repository runs.
+
+When a worker outcome schedules a retry, the run manifest records the retry's
+scheduled time, due deadline, reason, and redacted error summary. Restart
+recovery restores those values and waits for the original deadline. Failed
+stall-stop requests remain attached to the running execution until a later
+stop attempt is acknowledged, so a remote worker cannot be forgotten after a
+transient interrupt failure.
+An interrupted `Preparing` or `Prepared` run with no conversation manifest is
+recovered as a retry using its persisted retry count; once the configured
+retry limit is reached it is parked as exhausted instead of being dispatched
+as a fresh attempt.
 
 For worker or tool access, `opensymphony run` starts the read-only memory server
 when memory is initialized and `memory.serve` is not disabled. The supervised
@@ -599,7 +627,7 @@ Use it for:
 Examples:
 
 ```bash
-opensymphony rehydrate COE-123 --reason "API key rotation"
+opensymphony rehydrate COE-123 --config ~/.opensymphony/config.yaml --reason "API key rotation"
 opensymphony doctor --config ./config.yaml --rehydrate
 ```
 
@@ -614,6 +642,77 @@ opensymphony doctor --config ./config.yaml --rehydrate
 - do not store provider secrets in checked-in files
 
 ## 9. Migration note
+
+Central configuration migration is an explicit operator action. Use
+`opensymphony migrate preflight --repo <path>` to inspect legacy
+`config.yaml`/`WORKFLOW.md` without changing files, then use `migrate apply`
+with the same paths to create a staged central config. The generated config
+uses `legacy_single`, so migration does not activate strict multi-repository
+routing. It records a config generation and an activation marker, preserves
+the workflow body as repository implementation guidance, and keeps a backup
+under `.opensymphony/migration/backups/`. Reports contain only paths, hashes,
+field names, and boolean risk indicators; literal secret values and
+credential-bearing remote values are never printed or serialized.
+
+If apply is interrupted after staging or replacement, run
+`opensymphony migrate rollback --config <central-config>` once the strict-run
+marker is absent. Rollback restores the backed-up runnable generation and
+leaves the backup evidence in place. Migration rejects repository-creation
+hooks, query/fragment-bearing remotes, literal credentials embedded in hook
+commands, and ambiguous credential expressions before activation; hook
+credentials must use environment indirection. Existing repository-local
+memory entries are copied into
+the central catalog; identical repeat applies are idempotent, while divergent
+entries fail as a recoverable conflict instead of silently keeping stale data.
+The memory server marks its catalog as active while running, so read-only
+preflight can inspect a live legacy writer without copying or writing anything.
+Apply and
+the server claim the same atomic `.opensymphony/memory.migration.lock` before
+reading or copying the catalog; the server holds it for its lifetime. The lock
+and activity marker record an owner PID and process incarnation, so stale
+ownership from an unclean exit can be reclaimed while a live owner still
+blocks migration/startup.
+Stale lock recovery atomically renames the old lock to a unique quarantine file
+before removing it; it never removes a newly-created owner lock at the shared
+path. A project-set central config is also rejected by every doctor mode until
+strict routing is enabled, avoiding a probe against an unrelated legacy
+checkout.
+After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
+policy so operational recovery continues to use the migrated OpenHands and
+tracker settings.
+For `legacy_single`, the same central policy resolves the selected repository's
+`instructions.path` beneath its checkout instead of silently reverting to the
+checkout root `WORKFLOW.md`.
+
+Rollback refuses to proceed when the central catalog fingerprint differs from
+the activation marker. This deliberate safety stop keeps captures made after
+migration visible instead of restoring a legacy config that would hide them;
+remove or reconcile the divergent catalog only through an explicit recovery
+operation.
+
+Central-config `opensymphony run` holds a destination-hashed
+`.opensymphony/migration/strict-run-<destination>.active` marker until the
+process exits. Rollback claims that same marker for its full restore, so it
+cannot replace the active generation underneath a running instance, and stale
+markers are reclaimed only after owner liveness is disproved. Graceful run
+shutdown awaits the memory-server task before returning, ensuring its activity
+marker and coordination lock are released.
+Lock ownership treats permission-denied Unix PIDs as live, compares the
+recorded process incarnation when available, and uses native process creation
+times alongside `tasklist` for stale-lock recovery on Windows. Restart recovery
+preserves successful
+terminal workspaces according to the configured retention policy, rejects
+pending retries that exceed a newly lowered retry limit, and redacts
+credential-shaped diagnostics before persisting them in `run.json`. If a
+terminal or nonterminal tracker transition cannot stop the remote harness,
+the scheduler retains the execution and retries the interrupt on the next
+reconciliation; terminal recovery also honors `workspace.retain_failed`.
+Malformed central-only memory configuration is detected before legacy fallback
+so it fails validation rather than polling or creating a workspace.
+
+Activation markers are namespaced by the absolute central-config destination,
+so separate instances cannot overwrite or consume one another's rollback
+record.
 
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the

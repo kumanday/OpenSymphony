@@ -76,6 +76,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             project_name: None,
             workspace_label: Some("workspace-0".to_owned()),
             retry_count: 0,
+            release_reason: None,
             claimed_at: None,
             started_at: None,
             finished_at: None,

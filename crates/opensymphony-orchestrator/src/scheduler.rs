@@ -9,15 +9,17 @@ use crate::opensymphony_domain::{
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptStatus, HealthStatus, IdentifierError, IssueExecution, IssueId,
     IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
-    OrchestratorSnapshot, ReleaseReason, RetryCalculationError, RetryEntry, RetryPolicy,
-    RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
-    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef,
-    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
-    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry,
+    RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus,
+    StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
+    WorkspaceRecord,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     select,
@@ -43,6 +45,7 @@ pub struct SchedulerConfig {
     pub max_turns: u32,
     pub max_concurrent_agents_by_state: BTreeMap<String, u32>,
     pub retry_policy: RetryPolicy,
+    pub max_retry_attempts: Option<u32>,
     pub stall_timeout_ms: Option<u64>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -91,6 +94,7 @@ impl SchedulerConfig {
                 max_backoff_ms: DurationMs::new(workflow.config.agent.max_retry_backoff_ms),
                 ..RetryPolicy::default()
             },
+            max_retry_attempts: None,
             stall_timeout_ms: workflow.config.agent.stall_timeout_ms,
             active_states: workflow.config.tracker.active_states.clone(),
             terminal_states: workflow.config.tracker.terminal_states.clone(),
@@ -107,15 +111,32 @@ impl SchedulerConfig {
 pub struct RecoveryRecord {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
+    pub successful_run: bool,
+    pub cancelled_run: bool,
+    pub completed_run: bool,
     pub had_in_flight_run: bool,
+    pub pending_retry: bool,
+    pub normal_retry_count: u32,
+    pub retry_scheduled_at: Option<TimestampMs>,
+    pub retry_due_at: Option<TimestampMs>,
+    pub retry_reason: Option<RetryReason>,
+    pub retry_error: Option<String>,
     pub harness_kind: Option<String>,
+    pub interrupt_reason: Option<HarnessInterruptReason>,
     pub recovered_run: Option<RecoveredRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryExhaustionRecord {
+    pub issue: NormalizedIssue,
+    pub normal_retry_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredRun {
     pub worker_id: WorkerId,
     pub conversation: ConversationMetadata,
+    pub normal_retry_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +217,7 @@ pub enum WorkerAbortReason {
 pub struct WorkerInterruptAcknowledgement {
     pub accepted: bool,
     pub detail: Option<String>,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,11 +288,64 @@ pub trait WorkspaceBackend {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
+    async fn recover_retry_exhaustion(
+        &mut self,
+    ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     async fn cleanup_workspace(
         &mut self,
         workspace: &WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error>;
+
+    async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace(workspace, true).await
+    }
+
+    async fn persist_retry_count(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        _normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_retry_exhaustion(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn clear_retry_exhaustion(&mut self, _identifier: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_retry_pending(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        _retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_interrupt_reason(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+        _reason: HarnessInterruptReason,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn retain_failed_workspaces(&self) -> bool {
+        false
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -281,6 +356,13 @@ pub trait WorkerBackend {
         &mut self,
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error>;
+
+    async fn recover_worker(
+        &mut self,
+        request: WorkerStartRequest,
+    ) -> Result<WorkerLaunch, Self::Error> {
+        self.start_worker(request).await
+    }
 
     async fn start_workers(
         &mut self,
@@ -311,6 +393,7 @@ pub trait WorkerBackend {
                 "harness `{}` does not expose a scheduler-side interrupt channel",
                 command.harness_kind
             )),
+            timed_out: false,
         })
     }
 }
@@ -341,7 +424,10 @@ pub struct Scheduler<T, W, M> {
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
+    pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
+    pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
+    pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     recovered: bool,
     next_worker_ordinal: u64,
     last_poll_at: Option<TimestampMs>,
@@ -373,7 +459,10 @@ where
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
+            pending_retry_persistence: BTreeMap::new(),
+            pending_retry_exhaustion_persistence: BTreeMap::new(),
             pending_recovery: None,
+            pending_retry_exhaustion: None,
             recovered: false,
             next_worker_ordinal: 0,
             last_poll_at: None,
@@ -475,14 +564,7 @@ where
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<OrchestratorSnapshot, SchedulerError> {
-        if self.pending_recovery.is_none() {
-            self.pending_recovery =
-                Some(self.workspace.recover_workspaces().await.map_err(|error| {
-                    SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    }
-                })?);
-        }
+        self.load_recovery_state().await?;
 
         if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
             self.record_full_detail_refresh(observed_at);
@@ -501,14 +583,9 @@ where
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<OrchestratorSnapshot, SchedulerError> {
-        if self.pending_recovery.is_none() {
-            self.pending_recovery =
-                Some(self.workspace.recover_workspaces().await.map_err(|error| {
-                    SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    }
-                })?);
-        }
+        self.load_recovery_state().await?;
+        self.flush_pending_retry_persistence().await?;
+        self.flush_pending_retry_exhaustion_persistence().await?;
 
         let updates = self
             .worker
@@ -603,6 +680,8 @@ where
             HarnessInterruptExpectedNextState::Paused,
             observed_at,
         )?;
+
+        self.persist_interrupt_intent(&execution).await?;
 
         if queued {
             execution.observe_runtime_event(
@@ -915,30 +994,303 @@ where
             return Ok(());
         };
 
+        for record in self.pending_retry_exhaustion.take().unwrap_or_default() {
+            if let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) {
+                let normalized = normalize_tracker_issue(active_issue, &self.config)?;
+                let execution = IssueExecution::new(normalized.clone(), observed_at).release(
+                    observed_at,
+                    ReleaseReason::RetryExhausted,
+                    None,
+                )?;
+                let mut execution = execution;
+                execution.set_retry_count_override(record.normal_retry_count);
+                self.insert_execution(normalized.id.clone(), execution);
+                continue;
+            }
+            if tracker_snapshot.contains_terminal(record.issue.id.as_str()) {
+                self.workspace
+                    .clear_retry_exhaustion(record.issue.identifier.as_str())
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+                continue;
+            }
+            let mut issue = record.issue.clone();
+            if let Some(snapshot) = tracker_snapshot.state_by_id.get(record.issue.id.as_str()) {
+                issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
+            }
+            let execution = IssueExecution::new(issue.clone(), observed_at).release(
+                observed_at,
+                ReleaseReason::RetryExhausted,
+                None,
+            )?;
+            let mut execution = execution;
+            execution.set_retry_count_override(record.normal_retry_count);
+            self.insert_execution(issue.id.clone(), execution);
+        }
+
         let mut retry_records = Vec::new();
         for record in records {
+            if let Some(recovered_run) = record.recovered_run.as_ref() {
+                self.reserve_recovered_worker_id(&recovered_run.worker_id);
+            }
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
-                self.upsert_active_execution(normalized, observed_at, Some(record.workspace))?;
-                self.restore_recovered_run(
-                    &issue_id,
-                    record.recovered_run,
-                    recovered_harness_kind,
+                self.upsert_active_execution(
+                    normalized.clone(),
                     observed_at,
+                    Some(record.workspace),
                 )?;
+                if record.had_in_flight_run {
+                    if record.recovered_run.is_some() {
+                        self.restore_recovered_run(
+                            &issue_id,
+                            record.recovered_run,
+                            recovered_harness_kind,
+                            record.interrupt_reason,
+                            observed_at,
+                        )
+                        .await?;
+                        if record.interrupt_reason.is_some() {
+                            self.retry_recovered_interrupt(&issue_id, observed_at)
+                                .await?;
+                        }
+                    } else if self.retry_limit_reached(record.normal_retry_count) {
+                        self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                            .await?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
+                    } else {
+                        let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                        let retry = RetryEntry {
+                            issue_id: normalized.id.clone(),
+                            identifier: normalized.identifier.clone(),
+                            attempt: RetryAttempt::new(normal_retry_count)?,
+                            normal_retry_count,
+                            scheduled_at: observed_at,
+                            due_at: observed_at,
+                            reason: RetryReason::Reconciliation,
+                            error: None,
+                        };
+                        let execution = self
+                            .remove_execution(&issue_id)
+                            .expect("active recovery execution should be present");
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
+                } else if record.cancelled_run && !record.pending_retry {
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    if record.interrupt_reason
+                        == Some(HarnessInterruptReason::TrackerMergingSupersedesHumanReview)
+                        && normalized_state_name(&normalized.state.name) == MERGING_STATE
+                    {
+                        let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                        if self.retry_count_exceeds_limit(normal_retry_count) {
+                            self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                                .await?;
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.release(
+                                    observed_at,
+                                    ReleaseReason::RetryExhausted,
+                                    None,
+                                )?,
+                            );
+                            self.mark_recovered_retry_exhausted(
+                                &issue_id,
+                                record.normal_retry_count,
+                                observed_at,
+                            )?;
+                        } else {
+                            let retry = RetryEntry {
+                                issue_id: normalized.id.clone(),
+                                identifier: normalized.identifier.clone(),
+                                attempt: RetryAttempt::new(normal_retry_count)?,
+                                normal_retry_count,
+                                scheduled_at: observed_at,
+                                due_at: observed_at,
+                                reason: RetryReason::Continuation,
+                                error: None,
+                            };
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.restore_retry(retry)?,
+                            );
+                        }
+                    } else {
+                        self.insert_execution(
+                            issue_id.clone(),
+                            execution.release(observed_at, ReleaseReason::Cancelled, None)?,
+                        );
+                    }
+                } else if record.pending_retry {
+                    let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                    // A retry whose count equals the configured maximum is
+                    // still the final permitted dispatch; only a pending
+                    // retry beyond that count must be parked here.
+                    if self.retry_count_exceeds_limit(normal_retry_count) {
+                        // The durable pending marker's count is the next
+                        // undispatched attempt. Parking it must not turn
+                        // that attempt into an already-consumed retry.
+                        self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                            .await?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
+                    } else {
+                        let retry = RetryEntry {
+                            issue_id: normalized.id.clone(),
+                            identifier: normalized.identifier.clone(),
+                            attempt: RetryAttempt::new(normal_retry_count)?,
+                            normal_retry_count,
+                            scheduled_at: record.retry_scheduled_at.unwrap_or(observed_at),
+                            due_at: record.retry_due_at.unwrap_or(observed_at),
+                            reason: record.retry_reason.unwrap_or(RetryReason::Reconciliation),
+                            error: record.retry_error.clone(),
+                        };
+                        let execution = self
+                            .remove_execution(&issue_id)
+                            .expect("active recovery execution should be present");
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
+                } else if record.successful_run {
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    let already_exhausted = retry_exhausted_release(&execution);
+                    if self.retry_limit_reached(record.normal_retry_count) {
+                        let mut execution = if already_exhausted {
+                            execution
+                        } else {
+                            self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                                .await?;
+                            execution.release(observed_at, ReleaseReason::RetryExhausted, None)?
+                        };
+                        execution.set_retry_count_override(record.normal_retry_count);
+                        self.insert_execution(issue_id.clone(), execution);
+                    } else {
+                        let previous_attempt = (record.normal_retry_count > 0)
+                            .then(|| RetryAttempt::new(record.normal_retry_count))
+                            .transpose()?;
+                        let retry = RetryEntry::continuation(
+                            &normalized,
+                            previous_attempt,
+                            record.normal_retry_count,
+                            observed_at,
+                            self.config.retry_policy,
+                        )?;
+                        let execution = if already_exhausted {
+                            execution.reopen(observed_at)?
+                        } else {
+                            execution
+                        };
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
+                } else if record.completed_run {
+                    if self.retry_limit_reached(record.normal_retry_count) {
+                        self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                            .await?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
+                    } else {
+                        let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                        let retry = RetryEntry {
+                            issue_id: normalized.id.clone(),
+                            identifier: normalized.identifier.clone(),
+                            attempt: RetryAttempt::new(normal_retry_count)?,
+                            normal_retry_count,
+                            scheduled_at: observed_at,
+                            due_at: observed_at,
+                            reason: RetryReason::Reconciliation,
+                            error: None,
+                        };
+                        let execution = self
+                            .remove_execution(&issue_id)
+                            .expect("active recovery execution should be present");
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
+                } else if self.retry_limit_reached(record.normal_retry_count) {
+                    self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                        .await?;
+                    self.mark_recovered_retry_exhausted(
+                        &issue_id,
+                        record.normal_retry_count,
+                        observed_at,
+                    )?;
+                } else if record.normal_retry_count > 0 {
+                    let normal_retry_count = record.normal_retry_count.saturating_add(1);
+                    if self.retry_count_exceeds_limit(normal_retry_count) {
+                        self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                            .await?;
+                        self.mark_recovered_retry_exhausted(
+                            &issue_id,
+                            record.normal_retry_count,
+                            observed_at,
+                        )?;
+                        continue;
+                    }
+                    let retry = RetryEntry {
+                        issue_id: normalized.id.clone(),
+                        identifier: normalized.identifier.clone(),
+                        attempt: RetryAttempt::new(normal_retry_count)?,
+                        normal_retry_count,
+                        scheduled_at: observed_at,
+                        due_at: observed_at,
+                        reason: RetryReason::Reconciliation,
+                        error: None,
+                    };
+                    let execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                }
                 continue;
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
-                if let Err(error) = self
-                    .workspace
-                    .cleanup_workspace(&record.workspace, true)
-                    .await
+                let retain_failed = !record.successful_run
+                    && !record.cancelled_run
+                    && self.retry_limit_reached(record.normal_retry_count)
+                    && self.workspace.retain_failed_workspaces();
+                let cleanup_result = if retain_failed {
+                    Ok(())
+                } else if !record.successful_run
+                    && !record.cancelled_run
+                    && self.retry_limit_reached(record.normal_retry_count)
                 {
-                    tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
-                    retry_records.push(record);
+                    self.workspace
+                        .cleanup_failed_workspace(&record.workspace)
+                        .await
+                } else {
+                    self.workspace
+                        .cleanup_workspace(&record.workspace, true)
+                        .await
+                };
+                match cleanup_result {
+                    Ok(()) => {
+                        self.workspace
+                            .clear_retry_exhaustion(record.issue.identifier.as_str())
+                            .await
+                            .map_err(|error| SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            })?;
+                    }
+                    Err(error) => {
+                        tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
+                        retry_records.push(record);
+                    }
                 }
                 continue;
             }
@@ -950,7 +1302,20 @@ where
 
             let mut execution = IssueExecution::new(issue.clone(), observed_at);
             execution.attach_workspace(record.workspace)?;
-            let execution = execution.release(observed_at, ReleaseReason::TrackerInactive, None)?;
+            let reason =
+                if !record.cancelled_run && self.retry_limit_reached(record.normal_retry_count) {
+                    ReleaseReason::RetryExhausted
+                } else {
+                    ReleaseReason::TrackerInactive
+                };
+            if reason == ReleaseReason::RetryExhausted {
+                self.persist_retry_exhaustion(&issue, record.normal_retry_count)
+                    .await?;
+            }
+            let mut execution = execution.release(observed_at, reason, None)?;
+            if reason == ReleaseReason::RetryExhausted {
+                execution.set_retry_count_override(record.normal_retry_count);
+            }
             self.executions.entry(issue.id.clone()).or_insert(execution);
         }
 
@@ -969,6 +1334,29 @@ where
     ) -> Result<(), SchedulerError> {
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+            let retry_cleanup_workspace = self
+                .executions
+                .get(&normalized.id)
+                .filter(|execution| retry_exhausted_release(execution))
+                .and_then(|execution| execution.workspace().cloned());
+            if let Some(workspace) = retry_cleanup_workspace
+                && !self.workspace.retain_failed_workspaces()
+            {
+                match self.workspace.cleanup_failed_workspace(&workspace).await {
+                    Ok(()) => {
+                        if let Some(execution) = self.executions.get_mut(&normalized.id) {
+                            execution.clear_workspace();
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            issue = %normalized.id,
+                            %error,
+                            "retry-exhausted workspace cleanup failed; will retry on the next reconciliation"
+                        );
+                    }
+                }
+            }
             if self
                 .interrupt_human_review_polling_for_merging(&normalized, observed_at)
                 .await?
@@ -1028,6 +1416,18 @@ where
                 } else {
                     minimal_issue_from_state_snapshot(snapshot, &self.config)?
                 };
+
+                if category == IssueStateCategory::NonActive
+                    && self
+                        .executions
+                        .get(&issue_id)
+                        .is_some_and(retry_exhausted_release)
+                {
+                    self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
+                        .await;
+                    self.refresh_execution_issue(&issue_id, normalized)?;
+                    continue;
+                }
 
                 let (reason, cleanup, abort_reason) = match category {
                     IssueStateCategory::Terminal => (
@@ -1101,15 +1501,29 @@ where
             return Ok(false);
         };
 
-        let command = Self::prepare_merging_interrupt(
-            &mut execution,
-            issue,
-            &run,
-            harness_kind,
-            observed_at,
-        )?;
+        let command =
+            Self::prepare_merging_interrupt(&mut execution, issue, harness_kind, observed_at)?;
         if let Some(command) = command {
+            self.persist_interrupt_intent(&execution).await?;
             let result = self.worker.interrupt_worker(command).await;
+            execution.observe_runtime_event(
+                observed_at,
+                Some(format!(
+                    "tracker-merging-supersedes-human-review-{}",
+                    observed_at.as_u64()
+                )),
+                Some("scheduler.interrupt_requested".to_string()),
+                Some(
+                    "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
+                        .to_string(),
+                ),
+                Some(serde_json::json!({
+                    "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                    "from_state": HUMAN_REVIEW_STATE,
+                    "to_state": issue.state.name,
+                    "worker_id": run.worker_id.as_str(),
+                })),
+            )?;
             Self::apply_interrupt_result(
                 &mut execution,
                 HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
@@ -1127,7 +1541,17 @@ where
         issue: &NormalizedIssue,
     ) -> Option<(IssueId, IssueExecution, RunAttempt, String)> {
         let existing = self.executions.get(&issue.id)?;
-        if !is_human_review_to_merging(existing.issue(), issue)
+        let retrying_failed_merging_interrupt = existing.interrupt().is_some_and(|interrupt| {
+            interrupt.command.reason == HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+                && matches!(
+                    interrupt.status,
+                    HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut
+                )
+                && normalized_state_name(&existing.issue().state.name) == MERGING_STATE
+                && normalized_state_name(&issue.state.name) == MERGING_STATE
+        });
+        if (!is_human_review_to_merging(existing.issue(), issue)
+            && !retrying_failed_merging_interrupt)
             || !matches!(
                 existing.status(),
                 SchedulerStatus::Claimed | SchedulerStatus::Running
@@ -1196,7 +1620,6 @@ where
     fn prepare_merging_interrupt(
         execution: &mut IssueExecution,
         issue: &NormalizedIssue,
-        run: &RunAttempt,
         harness_kind: String,
         observed_at: TimestampMs,
     ) -> Result<Option<HarnessInterruptCommand>, SchedulerError> {
@@ -1213,25 +1636,28 @@ where
             return Ok(None);
         }
 
-        execution.observe_runtime_event(
-            observed_at,
-            Some(format!(
-                "tracker-merging-supersedes-human-review-{}",
-                observed_at.as_u64()
-            )),
-            Some("scheduler.interrupt_requested".to_string()),
-            Some(
-                "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
-                    .to_string(),
-            ),
-            Some(serde_json::json!({
-                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
-                "from_state": HUMAN_REVIEW_STATE,
-                "to_state": issue.state.name,
-                "worker_id": run.worker_id.as_str(),
-            })),
-        )?;
         Ok(Some(command))
+    }
+
+    async fn persist_interrupt_intent(
+        &mut self,
+        execution: &IssueExecution,
+    ) -> Result<(), SchedulerError> {
+        let Some(workspace) = execution.workspace().cloned() else {
+            return Ok(());
+        };
+        let Some(reason) = execution
+            .interrupt()
+            .map(|interrupt| interrupt.command.reason)
+        else {
+            return Ok(());
+        };
+        self.workspace
+            .persist_interrupt_reason(&workspace, reason)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })
     }
 
     fn apply_interrupt_result(
@@ -1241,6 +1667,14 @@ where
         result: Result<WorkerInterruptAcknowledgement, M::Error>,
     ) -> Result<(), SchedulerError> {
         match result {
+            Ok(acknowledgement) if acknowledgement.timed_out => {
+                execution.timeout_interrupt(
+                    observed_at,
+                    acknowledgement.detail.unwrap_or_else(|| {
+                        "worker interrupt acknowledgement timed out".to_string()
+                    }),
+                )?;
+            }
             Ok(acknowledgement) if acknowledgement.accepted => {
                 execution.acknowledge_interrupt(observed_at)?;
                 if let Some(detail) = acknowledgement.detail {
@@ -1274,48 +1708,205 @@ where
         Ok(())
     }
 
-    fn restore_recovered_run(
+    async fn restore_recovered_run(
         &mut self,
         issue_id: &IssueId,
         recovered_run: Option<RecoveredRun>,
         harness_kind: Option<String>,
+        interrupt_reason: Option<HarnessInterruptReason>,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
         let Some(recovered_run) = recovered_run else {
             return Ok(());
         };
-        let Some(execution) = self.executions.get(issue_id).cloned() else {
+        let Some(current_execution) = self.executions.get(issue_id).cloned() else {
             return Ok(());
         };
-        if execution.status() != SchedulerStatus::Unclaimed {
+        if current_execution.status() != SchedulerStatus::Unclaimed {
             return Ok(());
         }
-        let Some(workspace) = execution.workspace().cloned() else {
+        let Some(workspace) = current_execution.workspace().cloned() else {
             return Ok(());
         };
+        let retry = if recovered_run.normal_retry_count > 0 {
+            Some(RetryEntry {
+                issue_id: current_execution.issue().id.clone(),
+                identifier: current_execution.issue().identifier.clone(),
+                attempt: RetryAttempt::new(recovered_run.normal_retry_count)?,
+                normal_retry_count: recovered_run.normal_retry_count,
+                scheduled_at: observed_at,
+                due_at: observed_at,
+                reason: RetryReason::Reconciliation,
+                error: None,
+            })
+        } else {
+            None
+        };
+        let mut execution = current_execution.clone();
+        if let Some(retry) = retry {
+            execution = execution.restore_retry(retry)?;
+        }
         let run = RunAttempt::new(
             recovered_run.worker_id.clone(),
-            execution.issue().id.clone(),
-            execution.issue().identifier.clone(),
+            current_execution.issue().id.clone(),
+            current_execution.issue().identifier.clone(),
             workspace.path.clone(),
             observed_at,
-            None,
+            (recovered_run.normal_retry_count > 0)
+                .then(|| RetryAttempt::new(recovered_run.normal_retry_count))
+                .transpose()?,
             self.config.max_turns,
-        );
-        let mut execution = execution.claim(run.clone())?;
+        )
+        .with_normal_retry_count(recovered_run.normal_retry_count);
+        let route = recovered_route(
+            decide_issue_route(current_execution.issue(), &self.config)?,
+            harness_kind.as_deref(),
+        )?;
+        execution = execution.claim(run.clone())?;
+        let start_request = WorkerStartRequest {
+            issue: current_execution.issue().clone(),
+            workspace: workspace.clone(),
+            run: run.clone(),
+            route: route.clone(),
+        };
+        self.remove_execution(issue_id);
+        let launch = match self.worker.recover_worker(start_request).await {
+            Ok(launch) => launch,
+            Err(error) => {
+                let detail = error.to_string();
+                warn!(
+                    issue_id = %issue_id,
+                    error = %detail,
+                    "failed to reattach recovered scheduler worker"
+                );
+                let outcome = WorkerOutcomeRecord::from_run(
+                    &run,
+                    WorkerOutcomeKind::Failed,
+                    observed_at,
+                    Some("failed to reattach recovered worker".to_string()),
+                    Some(detail),
+                );
+                let execution = self
+                    .resolve_finished_execution(execution, outcome, observed_at)
+                    .await?;
+                self.insert_execution(issue_id.clone(), execution);
+                self.persist_retry_if_queued(issue_id).await?;
+                return Ok(());
+            }
+        };
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
-            Some(recovered_run.conversation),
+            Some(launch.conversation),
         )?;
         execution.record_turn_started(observed_at)?;
+        if let Some(reason) = interrupt_reason {
+            let expected_next_state = match reason {
+                HarnessInterruptReason::OperatorCancel => HarnessInterruptExpectedNextState::Paused,
+                HarnessInterruptReason::TrackerMergingSupersedesHumanReview => {
+                    HarnessInterruptExpectedNextState::CloseoutPending
+                }
+                HarnessInterruptReason::SchedulerAbort => {
+                    HarnessInterruptExpectedNextState::Released
+                }
+            };
+            execution.restore_interrupt_intent(
+                harness_kind
+                    .clone()
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                reason,
+                expected_next_state,
+                observed_at,
+            )?;
+        }
         self.worker_metadata.insert(
             run.worker_id.clone(),
             WorkerMetadata::new(
                 issue_id.clone(),
-                harness_kind.filter(|kind| !kind.trim().is_empty()),
+                harness_kind
+                    .filter(|kind| !kind.trim().is_empty())
+                    .or(Some(route.harness_kind)),
             ),
         );
+        self.insert_execution(issue_id.clone(), execution);
+        Ok(())
+    }
+
+    async fn retry_recovered_interrupt(
+        &mut self,
+        issue_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(mut execution) = self.remove_execution(issue_id) else {
+            return Ok(());
+        };
+        let Some(interrupt) = execution.interrupt().cloned() else {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        };
+        if !matches!(
+            interrupt.status,
+            HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut
+        ) {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        }
+
+        let request = execution.request_interrupt(
+            interrupt.command.harness_kind,
+            interrupt.command.turn_id,
+            interrupt.command.reason,
+            interrupt.command.expected_next_state,
+            observed_at,
+        );
+        let (command, queued) = match request {
+            Ok(request) => request,
+            Err(error) => {
+                self.insert_execution(issue_id.clone(), execution);
+                return Err(error.into());
+            }
+        };
+        if queued {
+            let reason = command.reason;
+            let result = self.worker.interrupt_worker(command).await;
+            if let Err(error) =
+                Self::apply_interrupt_result(&mut execution, reason, observed_at, result)
+            {
+                self.insert_execution(issue_id.clone(), execution);
+                return Err(error);
+            }
+        }
+        self.insert_execution(issue_id.clone(), execution);
+        Ok(())
+    }
+
+    fn retry_limit_reached(&self, normal_retry_count: u32) -> bool {
+        self.config
+            .max_retry_attempts
+            .is_some_and(|max_attempts| normal_retry_count >= max_attempts)
+    }
+
+    fn retry_count_exceeds_limit(&self, normal_retry_count: u32) -> bool {
+        self.config
+            .max_retry_attempts
+            .is_some_and(|max_attempts| normal_retry_count > max_attempts)
+    }
+
+    fn mark_recovered_retry_exhausted(
+        &mut self,
+        issue_id: &IssueId,
+        normal_retry_count: u32,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(execution) = self.remove_execution(issue_id) else {
+            return Ok(());
+        };
+        if retry_exhausted_release(&execution) {
+            self.insert_execution(issue_id.clone(), execution);
+            return Ok(());
+        }
+        let mut execution = execution.release(observed_at, ReleaseReason::RetryExhausted, None)?;
+        execution.set_retry_count_override(normal_retry_count);
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
     }
@@ -1464,6 +2055,7 @@ where
             }
 
             let state_key = normalized_state_name(&normalized.state.name);
+            let issue_id = normalized.id.clone();
 
             if let Some(limit) =
                 state_limit_for(&self.config.max_concurrent_agents_by_state, &state_key)
@@ -1486,7 +2078,24 @@ where
                     detail: error.to_string(),
                 })?;
 
-            let issue_id = normalized.id.clone();
+            if let Some(normal_retry_count) = self
+                .executions
+                .get(&issue_id)
+                .and_then(IssueExecution::retry)
+                .map(|retry| retry.normal_retry_count)
+            {
+                // Keep the durable pending-retry marker intact until the
+                // worker's start_run preparation writes the replacement run
+                // manifest. A crash before start_workers must recover the
+                // queued retry rather than an advanced, unqueued count.
+                self.workspace
+                    .persist_retry_count(&workspace, normal_retry_count)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+            }
+
             let worker_id = self.next_worker_id()?;
             let previous_retry = self
                 .executions
@@ -1572,7 +2181,8 @@ where
                 }
             }
 
-            self.insert_execution(issue_id, execution);
+            self.insert_execution(issue_id.clone(), execution);
+            self.persist_retry_if_queued(&issue_id).await?;
         }
 
         Ok(())
@@ -1582,6 +2192,7 @@ where
         &mut self,
         updates: Vec<WorkerUpdate>,
     ) -> Result<(), SchedulerError> {
+        let mut first_error = None;
         for update in updates {
             match update {
                 WorkerUpdate::RuntimeEvent {
@@ -1618,10 +2229,26 @@ where
                         continue;
                     };
                     let finished_at = outcome.finished_at;
-                    let execution = self
+                    let original_execution = execution.clone();
+                    let execution = match self
                         .resolve_finished_execution(execution, outcome, finished_at)
-                        .await?;
-                    self.insert_execution(issue_id, execution);
+                        .await
+                    {
+                        Ok(execution) => execution,
+                        Err(error) => {
+                            self.insert_execution(issue_id.clone(), original_execution);
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                            continue;
+                        }
+                    };
+                    self.insert_execution(issue_id.clone(), execution);
+                    if let Err(error) = self.persist_retry_if_queued(&issue_id).await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
                 }
                 WorkerUpdate::ConversationMetadataUpdate {
                     worker_id,
@@ -1664,7 +2291,7 @@ where
             }
         }
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn handle_stalls(&mut self, observed_at: TimestampMs) -> Result<(), SchedulerError> {
@@ -1694,11 +2321,28 @@ where
                 continue;
             };
 
-            self.abort_worker(&run.worker_id, WorkerAbortReason::Stalled)
+            let remote_stopped = self
+                .abort_worker(
+                    &mut execution,
+                    &run,
+                    WorkerAbortReason::Stalled,
+                    observed_at,
+                )
                 .await?;
+            if !remote_stopped {
+                // The local worker and execution remain owned by the scheduler;
+                // keep the run in Running so the next stall pass retries the
+                // same stop request instead of releasing a still-live remote run.
+                self.insert_execution(issue_id, execution);
+                continue;
+            }
             let outcome = WorkerOutcomeRecord::from_run(
                 &run,
-                WorkerOutcomeKind::Stalled,
+                if remote_stopped {
+                    WorkerOutcomeKind::Stalled
+                } else {
+                    WorkerOutcomeKind::Detached
+                },
                 observed_at,
                 Some("worker exceeded the configured stall timeout".to_string()),
                 Some("scheduler stall timeout reached".to_string()),
@@ -1706,7 +2350,8 @@ where
             execution = self
                 .resolve_finished_execution(execution, outcome, observed_at)
                 .await?;
-            self.insert_execution(issue_id, execution);
+            self.insert_execution(issue_id.clone(), execution);
+            self.persist_retry_if_queued(&issue_id).await?;
         }
 
         Ok(())
@@ -1727,7 +2372,15 @@ where
         // Do not reopen executions that were released due to terminal worker outcomes.
         // These represent either runs that could not be safely stopped or explicit
         // operator cancels, so reopening would duplicate or restart unwanted work.
-        let was_terminal_outcome = terminal_worker_outcome_prevents_reopen(&execution);
+        let retry_exhausted_can_reopen = retry_exhausted_release(&execution)
+            && execution
+                .retry_count_override()
+                .is_some_and(|count| !self.retry_limit_reached(count));
+        let retry_exhausted_marker_only_reopen =
+            retry_exhausted_can_reopen && recovered_workspace.is_none();
+        let retry_count_override = execution.retry_count_override();
+        let was_terminal_outcome =
+            terminal_worker_outcome_prevents_reopen(&execution) && !retry_exhausted_can_reopen;
         let mut execution =
             if execution.status() == SchedulerStatus::Released && !was_terminal_outcome {
                 execution.reopen(observed_at)?
@@ -1738,6 +2391,22 @@ where
         execution.refresh_issue(issue.clone())?;
         if let Some(workspace) = recovered_workspace {
             execution.attach_workspace(workspace)?;
+        }
+        if retry_exhausted_marker_only_reopen {
+            let normal_retry_count = retry_count_override
+                .expect("retry-exhausted recovery should record its consumed retry count")
+                .saturating_add(1);
+            let retry = RetryEntry {
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                attempt: RetryAttempt::new(normal_retry_count)?,
+                normal_retry_count,
+                scheduled_at: observed_at,
+                due_at: observed_at,
+                reason: RetryReason::Reconciliation,
+                error: None,
+            };
+            execution = execution.restore_retry(retry)?;
         }
         self.insert_execution(issue_id, execution);
         Ok(())
@@ -1757,23 +2426,94 @@ where
         };
 
         execution.refresh_issue(issue)?;
+        let abort_requested = abort_reason.is_some();
+        let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()
             && let Some(abort_reason) = abort_reason
         {
-            self.abort_worker(&run.worker_id, abort_reason).await?;
+            remote_stopped = match self
+                .abort_worker(&mut execution, &run, abort_reason, observed_at)
+                .await
+            {
+                Ok(remote_stopped) => remote_stopped,
+                Err(error) => {
+                    self.insert_execution(issue_id, execution);
+                    return Err(error);
+                }
+            };
         }
-        if execution.status() != SchedulerStatus::Released {
-            execution = execution.release(observed_at, reason, None)?;
-        }
-        if cleanup_terminal
-            && let Some(workspace) = execution.workspace().cloned()
-            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
-        {
-            tracing::warn!(
+        if abort_requested && !remote_stopped {
+            warn!(
                 issue = %issue_id,
-                %error,
-                "retaining released execution while terminal workspace cleanup retries"
+                "retaining execution because the harness did not acknowledge its stop request"
             );
+            self.insert_execution(issue_id, execution);
+            return Ok(());
+        }
+        let was_retry_exhausted = retry_exhausted_release(&execution);
+        let retain_failed = was_retry_exhausted && self.workspace.retain_failed_workspaces();
+        if execution.status() == SchedulerStatus::Released
+            && reason == ReleaseReason::TrackerTerminal
+            && !was_retry_exhausted
+        {
+            execution = execution.replace_release_reason(observed_at, reason)?;
+        } else if execution.status() != SchedulerStatus::Released {
+            execution = execution.release(
+                observed_at,
+                if was_retry_exhausted {
+                    ReleaseReason::RetryExhausted
+                } else {
+                    reason
+                },
+                None,
+            )?;
+        }
+        // A retry-exhausted release can be reconciled after the tracker moves
+        // to a terminal state. Preserve its failed-cleanup policy even though
+        // the externally visible release reason becomes TrackerTerminal.
+        let cleanup_reason = if was_retry_exhausted {
+            ReleaseReason::RetryExhausted
+        } else {
+            reason
+        };
+        let mut retry_cleanup_succeeded = retain_failed;
+        if cleanup_terminal
+            && remote_stopped
+            && !retain_failed
+            && let Some(workspace) = execution.workspace().cloned()
+        {
+            match if cleanup_reason == ReleaseReason::RetryExhausted {
+                self.workspace.cleanup_failed_workspace(&workspace).await
+            } else {
+                self.workspace.cleanup_workspace(&workspace, true).await
+            } {
+                Ok(()) => {
+                    retry_cleanup_succeeded = true;
+                    execution.clear_workspace();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        issue = %issue_id,
+                        %error,
+                        "retaining released execution while terminal workspace cleanup retries"
+                    );
+                }
+            }
+        } else if was_retry_exhausted && (!cleanup_terminal || execution.workspace().is_none()) {
+            retry_cleanup_succeeded = true;
+        }
+        if was_retry_exhausted && retry_cleanup_succeeded {
+            if let Err(error) = self
+                .workspace
+                .clear_retry_exhaustion(execution.issue().identifier.as_str())
+                .await
+            {
+                self.insert_execution(issue_id, execution);
+                return Err(SchedulerError::Workspace {
+                    detail: error.to_string(),
+                });
+            }
+            execution = execution.replace_release_reason(observed_at, reason)?;
         }
         self.insert_execution(issue_id, execution);
         Ok(())
@@ -1781,16 +2521,73 @@ where
 
     async fn abort_worker(
         &mut self,
-        worker_id: &WorkerId,
+        execution: &mut IssueExecution,
+        run: &RunAttempt,
         reason: WorkerAbortReason,
-    ) -> Result<(), SchedulerError> {
-        self.worker_metadata.remove(worker_id);
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let harness_kind = self
+            .worker_metadata
+            .get(&run.worker_id)
+            .and_then(|metadata| metadata.harness_kind.clone())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let mut remote_stopped = execution.conversation().is_none();
+        if execution.conversation().is_some() {
+            let (command, queued) = execution.request_interrupt(
+                harness_kind,
+                None,
+                HarnessInterruptReason::SchedulerAbort,
+                HarnessInterruptExpectedNextState::Released,
+                observed_at,
+            )?;
+            self.persist_interrupt_intent(execution).await?;
+            if queued {
+                match self.worker.interrupt_worker(command).await {
+                    Ok(acknowledgement) if acknowledgement.timed_out => {
+                        execution.timeout_interrupt(
+                            observed_at,
+                            acknowledgement.detail.unwrap_or_else(|| {
+                                "worker interrupt acknowledgement timed out".to_string()
+                            }),
+                        )?;
+                    }
+                    Ok(acknowledgement) if acknowledgement.accepted => {
+                        execution.acknowledge_interrupt(observed_at)?;
+                        remote_stopped = true;
+                    }
+                    Ok(acknowledgement) => {
+                        execution.fail_interrupt(
+                            observed_at,
+                            acknowledgement.detail.unwrap_or_else(|| {
+                                "worker interrupt request was not accepted".to_string()
+                            }),
+                        )?;
+                    }
+                    Err(error) => {
+                        execution.fail_interrupt(observed_at, error.to_string())?;
+                    }
+                }
+            } else {
+                remote_stopped = execution.interrupt().is_some_and(|interrupt| {
+                    interrupt.status == HarnessInterruptStatus::Acknowledged
+                });
+            }
+        }
+        if !remote_stopped {
+            // Keep the local worker metadata/task until the harness confirms
+            // that it stopped. The next reconciliation can retry the same
+            // interrupt instead of leaving a remote run alive after its local
+            // task was discarded.
+            return Ok(false);
+        }
+        self.worker_metadata.remove(&run.worker_id);
         self.worker
-            .abort_worker(worker_id, reason)
+            .abort_worker(&run.worker_id, reason)
             .await
             .map_err(|error| SchedulerError::Worker {
                 detail: error.to_string(),
-            })
+            })?;
+        Ok(remote_stopped)
     }
 
     async fn resolve_finished_execution(
@@ -1806,9 +2603,9 @@ where
         }
 
         // Detached and CancelFailed are terminal outcomes: release the execution instead of
-        // queuing a retry. Acknowledged operator cancels are also terminal from the
-        // scheduler's perspective for completed or cancelled outcomes because retrying
-        // would restart work the operator explicitly stopped.
+        // queuing a retry. Operator cancels are also terminal from the scheduler's perspective
+        // for completed or cancelled outcomes, even when the worker outcome races a failed or
+        // timed-out acknowledgement, because retrying would restart work the operator stopped.
         if matches!(
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
@@ -1850,7 +2647,27 @@ where
             }
         }
 
+        let retry_count = execution
+            .current_run()
+            .map(|run| run.normal_retry_count)
+            .unwrap_or_default();
+        if self
+            .config
+            .max_retry_attempts
+            .is_some_and(|max_attempts| retry_count >= max_attempts)
+        {
+            // The tracker refresh above is the only authority that can prove
+            // the issue is no longer active. If it still appears active (or
+            // the refresh failed), park the exhausted run rather than making
+            // a successful worker turn look like a completed Linear task.
+            let reason = ReleaseReason::RetryExhausted;
+            return self
+                .release_finished_execution(execution, observed_at, reason, Some(outcome))
+                .await;
+        }
+
         self.queue_retry_for_outcome(execution, outcome, observed_at)
+            .await
     }
 
     async fn refresh_finished_issue_state(
@@ -1885,23 +2702,97 @@ where
         reason: ReleaseReason,
         outcome: Option<WorkerOutcomeRecord>,
     ) -> Result<IssueExecution, SchedulerError> {
-        let cleanup_terminal = matches!(reason, ReleaseReason::TrackerTerminal);
-        let execution = execution.release(observed_at, reason, outcome)?;
+        let cleanup_terminal = matches!(
+            reason,
+            ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
+        );
+        if reason == ReleaseReason::RetryExhausted {
+            let normal_retry_count = execution
+                .current_run()
+                .map(|run| run.normal_retry_count)
+                .unwrap_or_default();
+            let persisted = self
+                .persist_retry_exhaustion(execution.issue(), normal_retry_count)
+                .await?;
+            // A retry-exhausted execution may have been reopened after the
+            // configured limit increased. Keep the durable override aligned
+            // with the retry that just exhausted the new budget so the next
+            // reconciliation cannot reopen it repeatedly.
+            let mut execution = execution.release(observed_at, reason, outcome)?;
+            execution.set_retry_count_override(normal_retry_count);
+            let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
+            if cleanup_terminal
+                && !retain_failed
+                && let Some(workspace) = execution.workspace().cloned()
+            {
+                let cleanup = self.workspace.cleanup_failed_workspace(&workspace).await;
+                match cleanup {
+                    Ok(()) => execution.clear_workspace(),
+                    Err(error) => {
+                        tracing::warn!(
+                            issue = %execution.issue().id,
+                            %error,
+                            "retaining released execution while terminal workspace cleanup retries"
+                        );
+                    }
+                }
+            }
+            return Ok(execution);
+        }
+        let mut execution = execution.release(observed_at, reason, outcome)?;
+        let retain_failed =
+            reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
         if cleanup_terminal
+            && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
-            && let Err(error) = self.workspace.cleanup_workspace(&workspace, true).await
         {
-            tracing::warn!(
-                issue = %execution.issue().id,
-                %error,
-                "retaining released execution while terminal workspace cleanup retries"
-            );
+            let cleanup = if reason == ReleaseReason::RetryExhausted {
+                self.workspace.cleanup_failed_workspace(&workspace).await
+            } else {
+                self.workspace.cleanup_workspace(&workspace, true).await
+            };
+            match cleanup {
+                Ok(()) => execution.clear_workspace(),
+                Err(error) => {
+                    tracing::warn!(
+                        issue = %execution.issue().id,
+                        %error,
+                        "retaining released execution while terminal workspace cleanup retries"
+                    );
+                }
+            }
         }
         Ok(execution)
     }
 
-    fn queue_retry_for_outcome(
-        &self,
+    async fn persist_retry_exhaustion(
+        &mut self,
+        issue: &NormalizedIssue,
+        normal_retry_count: u32,
+    ) -> Result<bool, SchedulerError> {
+        let record = RetryExhaustionRecord {
+            issue: issue.clone(),
+            normal_retry_count,
+        };
+        if let Err(error) = self
+            .workspace
+            .persist_retry_exhaustion(issue, normal_retry_count)
+            .await
+        {
+            warn!(
+                issue_id = %issue.id,
+                %error,
+                "deferring retry exhaustion persistence"
+            );
+            self.pending_retry_exhaustion_persistence
+                .insert(issue.id.clone(), record);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    async fn queue_retry_for_outcome(
+        &mut self,
         execution: IssueExecution,
         outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
@@ -1935,10 +2826,136 @@ where
         Ok(execution.queue_retry(retry, outcome)?)
     }
 
+    async fn flush_pending_retry_persistence(&mut self) -> Result<(), SchedulerError> {
+        let pending = std::mem::take(&mut self.pending_retry_persistence);
+        let mut first_error = None;
+        for (issue_id, retry) in pending {
+            let workspace = self
+                .executions
+                .get(&issue_id)
+                .and_then(|execution| execution.workspace().cloned());
+            let Some(workspace) = workspace else {
+                continue;
+            };
+            if let Err(error) = self
+                .workspace
+                .persist_retry_pending(&workspace, &retry)
+                .await
+            {
+                self.pending_retry_persistence.insert(issue_id, retry);
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
+            }
+        }
+        first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
+    }
+
+    async fn persist_retry_if_queued(&mut self, issue_id: &IssueId) -> Result<(), SchedulerError> {
+        let Some((retry, workspace)) = self.executions.get(issue_id).and_then(|execution| {
+            execution
+                .retry()
+                .cloned()
+                .zip(execution.workspace().cloned())
+        }) else {
+            return Ok(());
+        };
+        if let Err(error) = self
+            .workspace
+            .persist_retry_pending(&workspace, &retry)
+            .await
+        {
+            self.pending_retry_persistence
+                .insert(issue_id.clone(), retry);
+            return Err(SchedulerError::Workspace {
+                detail: error.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn load_recovery_state(&mut self) -> Result<(), SchedulerError> {
+        if self.pending_recovery.is_some() {
+            return Ok(());
+        }
+
+        let recoveries = self.workspace.recover_workspaces().await.map_err(|error| {
+            SchedulerError::Workspace {
+                detail: error.to_string(),
+            }
+        })?;
+        let retry_exhaustion =
+            self.workspace
+                .recover_retry_exhaustion()
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+        self.pending_recovery = Some(recoveries);
+        self.pending_retry_exhaustion = Some(retry_exhaustion);
+        Ok(())
+    }
+
+    async fn flush_pending_retry_exhaustion_persistence(&mut self) -> Result<(), SchedulerError> {
+        let pending = std::mem::take(&mut self.pending_retry_exhaustion_persistence);
+        let mut first_error = None;
+        for (issue_id, record) in pending {
+            if let Err(error) = self
+                .workspace
+                .persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                .await
+            {
+                self.pending_retry_exhaustion_persistence
+                    .insert(issue_id, record);
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
+                continue;
+            }
+            self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
+                .await;
+        }
+        first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
+    }
+
+    async fn cleanup_retry_exhausted_workspace_if_ready(&mut self, issue_id: &IssueId) {
+        if self.workspace.retain_failed_workspaces() {
+            return;
+        }
+        let Some(workspace) = self
+            .executions
+            .get(issue_id)
+            .filter(|execution| retry_exhausted_release(execution))
+            .and_then(|execution| execution.workspace().cloned())
+        else {
+            return;
+        };
+        match self.workspace.cleanup_failed_workspace(&workspace).await {
+            Ok(()) => {
+                if let Some(execution) = self.executions.get_mut(issue_id) {
+                    execution.clear_workspace();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    issue = %issue_id,
+                    %error,
+                    "retry-exhausted workspace cleanup failed after durable marker persistence"
+                );
+            }
+        }
+    }
+
     fn next_worker_id(&mut self) -> Result<WorkerId, SchedulerError> {
         self.next_worker_ordinal = self.next_worker_ordinal.saturating_add(1);
         WorkerId::new(format!("scheduler-worker-{}", self.next_worker_ordinal))
             .map_err(SchedulerError::Identifier)
+    }
+
+    fn reserve_recovered_worker_id(&mut self, worker_id: &WorkerId) {
+        if let Some(ordinal) = recovered_worker_ordinal(worker_id) {
+            self.next_worker_ordinal = self.next_worker_ordinal.max(ordinal);
+        }
     }
 
     fn remove_execution(&mut self, issue_id: &IssueId) -> Option<IssueExecution> {
@@ -2048,6 +3065,35 @@ pub fn decide_issue_route(
     })
 }
 
+fn recovered_route(
+    mut route: HarnessRouteDecision,
+    persisted_harness_kind: Option<&str>,
+) -> Result<HarnessRouteDecision, SchedulerError> {
+    let persisted_harness_kind = persisted_harness_kind
+        .filter(|kind| !kind.trim().is_empty())
+        .ok_or_else(|| SchedulerError::InvalidConfiguration {
+            detail: "recovered run is missing its persisted harness kind".to_string(),
+        })?;
+    if route.harness_kind == persisted_harness_kind {
+        return Ok(route);
+    }
+    let capability = harness_capability(persisted_harness_kind)?;
+    if !capability.available || !capability.actions.start_run {
+        return Err(SchedulerError::InvalidConfiguration {
+            detail: format!(
+                "persisted recovery harness `{persisted_harness_kind}` cannot start issue execution"
+            ),
+        });
+    }
+    route.harness_kind = persisted_harness_kind.to_owned();
+    route.reason = format!(
+        "recovered persisted harness `{persisted_harness_kind}`; {}",
+        route.reason
+    );
+    route.user_override = false;
+    Ok(route)
+}
+
 fn routing_reason(routing: &RoutingConfig) -> String {
     let mut parts = Vec::new();
     parts.push(if routing.harness_from_env {
@@ -2070,6 +3116,13 @@ fn routing_reason(routing: &RoutingConfig) -> String {
         });
     }
     parts.join("; ")
+}
+
+fn recovered_worker_ordinal(worker_id: &WorkerId) -> Option<u64> {
+    worker_id
+        .as_str()
+        .strip_prefix("scheduler-worker-")
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
@@ -2211,21 +3264,45 @@ fn acknowledged_operator_cancel_terminal(
         outcome.outcome,
         WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Cancelled
     ) && execution.interrupt().is_some_and(|interrupt| {
-        interrupt.status == HarnessInterruptStatus::Acknowledged
-            && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
+        matches!(
+            interrupt.status,
+            HarnessInterruptStatus::Requested
+                | HarnessInterruptStatus::Acknowledged
+                | HarnessInterruptStatus::Failed
+                | HarnessInterruptStatus::TimedOut
+        ) && interrupt.command.reason == HarnessInterruptReason::OperatorCancel
             && interrupt.command.expected_next_state == HarnessInterruptExpectedNextState::Paused
     })
 }
 
 fn terminal_worker_outcome_prevents_reopen(execution: &IssueExecution) -> bool {
-    matches!(
-        execution
+    retry_exhausted_release(execution)
+        || matches!(
+            execution.state(),
+            crate::opensymphony_orchestrator::SchedulerState::Released {
+                reason: ReleaseReason::Completed | ReleaseReason::Cancelled,
+                ..
+            }
+        )
+        || matches!(
+            execution
+                .last_worker_outcome()
+                .map(|outcome| outcome.outcome),
+            Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
+        )
+        || execution
             .last_worker_outcome()
-            .map(|outcome| outcome.outcome),
-        Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
-    ) || execution
-        .last_worker_outcome()
-        .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
+            .is_some_and(|outcome| acknowledged_operator_cancel_terminal(execution, outcome))
+}
+
+fn retry_exhausted_release(execution: &IssueExecution) -> bool {
+    matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    )
 }
 
 fn tracker_merging_interrupt_cancelled(
@@ -2449,4 +3526,18 @@ fn current_epoch_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovered_scheduler_worker_ids_expose_their_allocator_ordinal() {
+        let recovered = WorkerId::new("scheduler-worker-7").expect("worker id should be valid");
+        let custom = WorkerId::new("worker-from-legacy").expect("worker id should be valid");
+
+        assert_eq!(recovered_worker_ordinal(&recovered), Some(7));
+        assert_eq!(recovered_worker_ordinal(&custom), None);
+    }
 }

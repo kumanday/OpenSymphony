@@ -290,7 +290,8 @@ pub fn export_okf_bundle(
     visibility: MemoryVisibility,
     output: Option<&Path>,
 ) -> Result<OkfExportReport, MemoryError> {
-    ensure_repo_contained(&config.repo_root, &config.memory_root)?;
+    let containment_root = config.containment_root.as_deref().unwrap_or(&config.repo_root);
+    ensure_okf_contained(containment_root, &config.memory_root)?;
     let source_root = canonicalize_existing_path(&config.memory_root)?;
     if !source_root.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
@@ -301,8 +302,8 @@ pub fn export_okf_bundle(
     let output_path = output
         .map(|path| resolve_path(&config.repo_root, path))
         .unwrap_or_else(|| config.repo_root.join(format!("okf-export-{visibility}")));
-    ensure_repo_contained(&config.repo_root, &output_path)?;
-    ensure_export_output_has_no_symlink_components(config, &output_path)?;
+    ensure_okf_contained(&config.repo_root, &output_path)?;
+    ensure_export_output_has_no_symlink_components(config, &config.repo_root, &output_path)?;
     let output_path = canonicalize_existing_prefix(&output_path)?;
     ensure_output_target_not_symlink(&output_path)?;
     if paths_overlap(&output_path, &source_root) {
@@ -397,9 +398,13 @@ pub fn import_okf_bundle(
     source: &Path,
     force: bool,
 ) -> Result<OkfImportReport, MemoryError> {
+    let containment_root = config.containment_root.as_deref().unwrap_or(&config.repo_root);
+    // The bundle is an input from the repository-facing CLI path. Central
+    // state-root containment applies to the destination catalog, not to this
+    // source path, which must remain a repo-contained bundle.
     let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
-    ensure_repo_contained(&config.repo_root, &source_path)?;
-    ensure_repo_contained(&config.repo_root, &config.memory_root)?;
+    ensure_okf_contained(&config.repo_root, &source_path)?;
+    ensure_okf_contained(containment_root, &config.memory_root)?;
     create_dir_all(&config.memory_root)?;
     let target_root = canonicalize_existing_path(&config.memory_root)?;
     if !source_path.is_dir() {
@@ -647,14 +652,19 @@ fn ensure_output_target_not_symlink(path: &Path) -> Result<(), MemoryError> {
 
 fn ensure_export_output_has_no_symlink_components(
     config: &MemoryConfig,
+    containment_root: &Path,
     path: &Path,
 ) -> Result<(), MemoryError> {
-    let repo_root = canonicalize_existing_path(&config.repo_root)?;
+    let repo_root = canonicalize_existing_prefix(containment_root)?;
     let output_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        repo_root.join(path)
+        containment_root.join(path)
     };
+    let output_path = output_path
+        .strip_prefix(containment_root)
+        .map(|relative| repo_root.join(relative))
+        .unwrap_or(output_path);
     let relative = output_path
         .strip_prefix(&repo_root)
         .map_err(|_| MemoryError::PathOutsideRepo {
@@ -699,6 +709,19 @@ fn ensure_export_output_has_no_symlink_components(
         }
     }
     Ok(())
+}
+
+fn ensure_okf_contained(root: &Path, path: &Path) -> Result<(), MemoryError> {
+    let root = canonicalize_existing_prefix(root)?;
+    let resolved = canonicalize_existing_prefix(path)?;
+    if resolved.starts_with(&root) {
+        Ok(())
+    } else {
+        Err(MemoryError::PathOutsideRepo {
+            path: resolved,
+            repo_root: root,
+        })
+    }
 }
 
 fn create_staging_dir(parent: &Path, output_path: &Path) -> Result<PathBuf, MemoryError> {

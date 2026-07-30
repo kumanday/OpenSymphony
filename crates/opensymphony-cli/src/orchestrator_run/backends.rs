@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    env,
+    env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
@@ -16,9 +16,10 @@ use crate::opensymphony_codex::{
     turn_status,
 };
 use crate::opensymphony_domain::{
-    ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
-    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+    ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
+    IssueState, IssueStateCategory, NormalizedIssue, RetryEntry, RetryReason, RuntimeStreamState,
+    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -30,8 +31,8 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveredRun, RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
+    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, TrackerBackend, WorkerAbortReason,
+    WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
@@ -74,6 +75,8 @@ pub(super) enum CliWorkspaceError {
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
     #[error("Codex lifecycle recovery failed: {0}")]
     CodexLifecycle(String),
+    #[error("retry state persistence failed: {0}")]
+    RetryState(String),
 }
 
 #[derive(Debug, Error)]
@@ -135,6 +138,8 @@ pub(super) struct RuntimeWorkspaceBackend {
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
     codex_bin: String,
+    retain_failed: bool,
+    retry_state_root: PathBuf,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -266,6 +271,7 @@ pub(super) fn build_linear_client(
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
+    config.project_id = tracker.project_id.clone();
     config.active_states = tracker.active_states.clone();
     config.terminal_states = tracker.terminal_states.clone();
     LinearClient::new(config)
@@ -489,8 +495,22 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
+#[cfg(test)]
 pub(super) fn build_workspace_manager_config(
     workflow: &ResolvedWorkflow,
+) -> WorkspaceManagerConfig {
+    let mut config = build_workspace_manager_config_with_retention(workflow, true, true);
+    // Unit tests exercise backend behavior without the scheduler's
+    // outcome-aware cleanup decision, so keep their fixtures available for
+    // manifest assertions.
+    config.cleanup.remove_terminal_workspaces = false;
+    config
+}
+
+pub(super) fn build_workspace_manager_config_with_retention(
+    workflow: &ResolvedWorkflow,
+    _retain_failed: bool,
+    preserve_terminal_workspaces: bool,
 ) -> WorkspaceManagerConfig {
     let hooks = &workflow.config.hooks;
     WorkspaceManagerConfig {
@@ -503,7 +523,7 @@ pub(super) fn build_workspace_manager_config(
             timeout: Duration::from_millis(hooks.timeout_ms),
         },
         cleanup: CleanupConfig {
-            remove_terminal_workspaces: false,
+            remove_terminal_workspaces: !preserve_terminal_workspaces,
         },
     }
 }
@@ -612,7 +632,27 @@ impl TrackerBackend for RuntimeTrackerBackend {
 }
 
 impl RuntimeWorkspaceBackend {
+    #[cfg(test)]
     pub(super) fn new(manager: Arc<WorkspaceManager>, workflow: &ResolvedWorkflow) -> Self {
+        Self::new_with_retention(manager, workflow, true)
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_retention(
+        manager: Arc<WorkspaceManager>,
+        workflow: &ResolvedWorkflow,
+        retain_failed: bool,
+    ) -> Self {
+        let retry_state_root = manager.config().root.join(".opensymphony-retry-state");
+        Self::new_with_retention_and_state_root(manager, workflow, retain_failed, retry_state_root)
+    }
+
+    pub(super) fn new_with_retention_and_state_root(
+        manager: Arc<WorkspaceManager>,
+        workflow: &ResolvedWorkflow,
+        retain_failed: bool,
+        retry_state_root: PathBuf,
+    ) -> Self {
         Self {
             manager,
             active_states: workflow
@@ -631,82 +671,20 @@ impl RuntimeWorkspaceBackend {
                 .collect(),
             terminal_cleanup_paths: HashSet::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            retain_failed,
+            retry_state_root,
         }
     }
 }
 
-impl WorkspaceBackend for RuntimeWorkspaceBackend {
-    type Error = CliWorkspaceError;
-
-    async fn ensure_workspace(
-        &mut self,
-        issue: &NormalizedIssue,
-        _observed_at: TimestampMs,
-    ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
-        let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
-        self.terminal_cleanup_paths
-            .remove(ensured.handle.workspace_path());
-        Ok(crate::opensymphony_domain::WorkspaceRecord {
-            path: ensured.handle.workspace_path().to_path_buf(),
-            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())?,
-            created_now: ensured.created,
-            created_at: Some(datetime_to_timestamp_ms(ensured.issue_manifest.created_at)),
-            updated_at: Some(datetime_to_timestamp_ms(ensured.issue_manifest.updated_at)),
-            last_seen_tracker_refresh_at: ensured
-                .issue_manifest
-                .last_seen_tracker_refresh_at
-                .map(datetime_to_timestamp_ms),
-        })
-    }
-
-    async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
-        let mut recoveries = Vec::new();
-        for (handle, manifest) in self.manager.list_all_workspaces().await? {
-            let run_manifest = self.manager.load_run_manifest(&handle).await?;
-            let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
-                matches!(
-                    run.status,
-                    RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
-                )
-            });
-            let conversation_manifest =
-                recovered_conversation_manifest(&self.manager, &handle).await?;
-            let harness_kind = conversation_manifest
-                .as_ref()
-                .map(recovered_harness_kind_from_manifest);
-            let recovered_run =
-                recovered_run_from_manifests(run_manifest.as_ref(), conversation_manifest.as_ref());
-
-            recoveries.push(RecoveryRecord {
-                issue: normalized_issue_from_manifest(
-                    &manifest,
-                    &self.active_states,
-                    &self.terminal_states,
-                )?,
-                workspace: crate::opensymphony_domain::WorkspaceRecord {
-                    path: handle.workspace_path().to_path_buf(),
-                    workspace_key: WorkspaceKey::new(handle.workspace_key().to_string())?,
-                    created_now: false,
-                    created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
-                    updated_at: Some(datetime_to_timestamp_ms(manifest.updated_at)),
-                    last_seen_tracker_refresh_at: manifest
-                        .last_seen_tracker_refresh_at
-                        .map(datetime_to_timestamp_ms),
-                },
-                had_in_flight_run,
-                harness_kind,
-                recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
-            });
-        }
-        Ok(recoveries)
-    }
-
-    async fn cleanup_workspace(
+impl RuntimeWorkspaceBackend {
+    async fn cleanup_workspace_with_policy(
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
-    ) -> Result<(), Self::Error> {
-        if terminal && !self.terminal_cleanup_paths.contains(&workspace.path) {
+        force_remove: bool,
+    ) -> Result<(), CliWorkspaceError> {
+        if terminal && (force_remove || !self.terminal_cleanup_paths.contains(&workspace.path)) {
             let Some(handle) = self
                 .manager
                 .list_all_workspaces()
@@ -754,12 +732,424 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     }
                 }
             }
-            self.manager
-                .cleanup(&handle, IssueLifecycleState::Terminal)
-                .await?;
+            if force_remove {
+                self.manager
+                    .cleanup_failed_terminal_workspace(&handle)
+                    .await?;
+            } else {
+                self.manager
+                    .cleanup(&handle, IssueLifecycleState::Terminal)
+                    .await?;
+            }
             self.terminal_cleanup_paths.insert(workspace.path.clone());
         }
         Ok(())
+    }
+}
+
+impl WorkspaceBackend for RuntimeWorkspaceBackend {
+    type Error = CliWorkspaceError;
+
+    async fn ensure_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        _observed_at: TimestampMs,
+    ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
+        let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
+        self.terminal_cleanup_paths
+            .remove(ensured.handle.workspace_path());
+        Ok(crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())?,
+            created_now: ensured.created,
+            created_at: Some(datetime_to_timestamp_ms(ensured.issue_manifest.created_at)),
+            updated_at: Some(datetime_to_timestamp_ms(ensured.issue_manifest.updated_at)),
+            last_seen_tracker_refresh_at: ensured
+                .issue_manifest
+                .last_seen_tracker_refresh_at
+                .map(datetime_to_timestamp_ms),
+        })
+    }
+
+    async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
+        let mut recoveries = Vec::new();
+        for (handle, manifest) in self.manager.list_all_workspaces().await? {
+            let run_manifest = self.manager.load_run_manifest(&handle).await?;
+            let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
+                matches!(
+                    run.status,
+                    RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
+                )
+            });
+            let conversation_manifest =
+                recovered_conversation_manifest(&self.manager, &handle).await?;
+            let harness_kind = conversation_manifest
+                .as_ref()
+                .map(recovered_harness_kind_from_manifest);
+            let recovered_run = run_manifest
+                .as_ref()
+                .filter(|run| recoverable_run_manifest(run, conversation_manifest.as_ref()))
+                .and_then(|_| {
+                    recovered_run_from_manifests(
+                        run_manifest.as_ref(),
+                        conversation_manifest.as_ref(),
+                    )
+                });
+
+            recoveries.push(RecoveryRecord {
+                issue: normalized_issue_from_manifest(
+                    &manifest,
+                    &self.active_states,
+                    &self.terminal_states,
+                )?,
+                workspace: crate::opensymphony_domain::WorkspaceRecord {
+                    path: handle.workspace_path().to_path_buf(),
+                    workspace_key: WorkspaceKey::new(handle.workspace_key().to_string())?,
+                    created_now: false,
+                    created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
+                    updated_at: Some(datetime_to_timestamp_ms(manifest.updated_at)),
+                    last_seen_tracker_refresh_at: manifest
+                        .last_seen_tracker_refresh_at
+                        .map(datetime_to_timestamp_ms),
+                },
+                successful_run: run_manifest
+                    .as_ref()
+                    .is_some_and(|run| run.status == RunStatus::Succeeded),
+                cancelled_run: run_manifest
+                    .as_ref()
+                    .is_some_and(|run| run.status == RunStatus::Cancelled),
+                completed_run: run_manifest.as_ref().is_some_and(|run| {
+                    matches!(
+                        run.status,
+                        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+                    )
+                }),
+                had_in_flight_run,
+                pending_retry: run_manifest.as_ref().is_some_and(|run| run.pending_retry),
+                normal_retry_count: run_manifest
+                    .as_ref()
+                    .map(|run| run.normal_retry_count)
+                    .unwrap_or_default(),
+                retry_scheduled_at: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_scheduled_at.map(TimestampMs::new)),
+                retry_due_at: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_due_at.map(TimestampMs::new)),
+                retry_reason: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_reason.as_deref())
+                    .and_then(retry_reason_from_manifest),
+                retry_error: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.retry_error.clone()),
+                harness_kind,
+                interrupt_reason: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.interrupt_reason.as_deref())
+                    .and_then(interrupt_reason_from_manifest),
+                recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
+            });
+        }
+        Ok(recoveries)
+    }
+
+    async fn recover_retry_exhaustion(
+        &mut self,
+    ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
+        let directory = self.retry_state_root.join("retry-exhaustion");
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(CliWorkspaceError::RetryState(format!(
+                    "failed to list {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        let mut records = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path).await.map_err(|error| {
+                CliWorkspaceError::RetryState(format!("failed to read {}: {error}", path.display()))
+            })?;
+            let record = serde_json::from_str::<RetryExhaustionRecord>(&raw).map_err(|error| {
+                CliWorkspaceError::RetryState(format!(
+                    "failed to parse {}: {error}",
+                    path.display()
+                ))
+            })?;
+            records.push(record);
+        }
+        records.sort_by(|left, right| left.issue.identifier.cmp(&right.issue.identifier));
+        Ok(records)
+    }
+
+    async fn cleanup_workspace(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        terminal: bool,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(workspace, terminal, false)
+            .await
+    }
+
+    async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(workspace, true, true)
+            .await
+    }
+
+    async fn persist_retry_count(
+        &mut self,
+        _workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        // The queued retry marker must survive until start_run writes the
+        // replacement manifest. Clearing it here creates a crash window
+        // between scheduler preparation and worker launch.
+        Ok(())
+    }
+
+    async fn persist_interrupt_reason(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        reason: HarnessInterruptReason,
+    ) -> Result<(), Self::Error> {
+        let Some((handle, _)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
+            }));
+        };
+        let Some(mut manifest) = self.manager.load_run_manifest(&handle).await? else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "run manifest is missing"),
+            }));
+        };
+        manifest.interrupt_reason = Some(reason.as_str().to_owned());
+        manifest.updated_at = chrono::Utc::now();
+        self.manager.write_run_manifest(&handle, &manifest).await?;
+        Ok(())
+    }
+
+    async fn persist_retry_pending(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        let Some((handle, _)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Err(CliWorkspaceError::Workspace(WorkspaceError::ReadManifest {
+                path: workspace.path.join(".opensymphony/run.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "workspace is not managed"),
+            }));
+        };
+        let mut manifest = match self.manager.load_run_manifest(&handle).await? {
+            Some(manifest) => manifest,
+            None => {
+                let run = RunDescriptor::new(
+                    format!("retry-pending-{}", handle.workspace_key()),
+                    retry.attempt.get(),
+                )
+                // Recovery increments a pending manifest's count when it
+                // reconstructs the queued retry. Store the predecessor here
+                // so a launch failure before run.json gets exactly one
+                // retry attempt after restart.
+                .with_normal_retry_count(retry.normal_retry_count.saturating_sub(1));
+                let mut manifest = RunManifest::new(&handle, &run);
+                // The failed launch never produced an executable run manifest.
+                // Create a non-in-flight marker so recovery sees the durable
+                // pending retry instead of repeatedly treating the workspace as
+                // an initial dispatch.
+                manifest.status = RunStatus::PreparationFailed;
+                manifest.status_detail =
+                    Some("worker launch failed before a run manifest was created".to_string());
+                manifest
+            }
+        };
+        // Recovery increments the queued retry's predecessor count when it
+        // reconstructs the retry attempt. Keep an existing manifest aligned
+        // with the same predecessor value as a synthetic one so a launch
+        // failure followed by restart cannot replay an already-consumed
+        // attempt.
+        manifest.normal_retry_count = retry.normal_retry_count.saturating_sub(1);
+        manifest.pending_retry = true;
+        manifest.status = RunStatus::PreparationFailed;
+        manifest.status_detail = Some("retry pending after worker stop".to_owned());
+        manifest.retry_scheduled_at = Some(retry.scheduled_at.as_u64());
+        manifest.retry_due_at = Some(retry.due_at.as_u64());
+        manifest.retry_reason = Some(retry_reason_for_manifest(retry.reason));
+        manifest.retry_error = retry.error.clone();
+        manifest.updated_at = chrono::Utc::now();
+        self.manager.write_run_manifest(&handle, &manifest).await?;
+        Ok(())
+    }
+
+    async fn persist_retry_exhaustion(
+        &mut self,
+        issue: &NormalizedIssue,
+        normal_retry_count: u32,
+    ) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue.identifier.as_str())?;
+        let directory = self.retry_state_root.join("retry-exhaustion");
+        fs::create_dir_all(&directory).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to create {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = directory.join(format!("{key}.json"));
+        let temporary = directory.join(format!(".{key}.json.tmp"));
+        let contents = serde_json::to_vec_pretty(&RetryExhaustionRecord {
+            issue: issue.clone(),
+            normal_retry_count,
+        })
+        .map_err(|error| CliWorkspaceError::RetryState(error.to_string()))?;
+        fs::write(&temporary, contents).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to write {}: {error}",
+                temporary.display()
+            ))
+        })?;
+        if let Err(error) = replace_retry_exhaustion_marker(&temporary, &path).await {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(CliWorkspaceError::RetryState(format!(
+                "failed to activate {}: {error}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn clear_retry_exhaustion(&mut self, identifier: &str) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(identifier)?;
+        let path = self
+            .retry_state_root
+            .join("retry-exhaustion")
+            .join(format!("{key}.json"));
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(CliWorkspaceError::RetryState(format!(
+                "failed to clear {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    fn retain_failed_workspaces(&self) -> bool {
+        self.retain_failed
+    }
+}
+
+async fn replace_retry_exhaustion_marker(temporary: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, destination).await
+    }
+
+    #[cfg(windows)]
+    {
+        let temporary = temporary.to_path_buf();
+        let destination = destination.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            replace_retry_exhaustion_marker_windows(&temporary, &destination)
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("marker replacement task failed: {error}")))?
+    }
+}
+
+#[cfg(windows)]
+fn replace_retry_exhaustion_marker_windows(temporary: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing_name: *const u16, new_name: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let existing = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers owned for the call.
+    let replaced = unsafe {
+        MoveFileExW(
+            existing.as_ptr(),
+            replacement.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn retry_reason_for_manifest(reason: RetryReason) -> String {
+    match reason {
+        RetryReason::Continuation => "continuation",
+        RetryReason::Failure => "failure",
+        RetryReason::Stalled => "stalled",
+        RetryReason::Cancelled => "cancelled",
+        RetryReason::Reconciliation => "reconciliation",
+    }
+    .to_owned()
+}
+
+fn interrupt_reason_from_manifest(value: &str) -> Option<HarnessInterruptReason> {
+    match value {
+        "operator_cancel" => Some(HarnessInterruptReason::OperatorCancel),
+        "tracker_merging_supersedes_human_review" => {
+            Some(HarnessInterruptReason::TrackerMergingSupersedesHumanReview)
+        }
+        "scheduler_abort" => Some(HarnessInterruptReason::SchedulerAbort),
+        _ => None,
+    }
+}
+
+fn retry_reason_from_manifest(value: &str) -> Option<RetryReason> {
+    match value {
+        "continuation" => Some(RetryReason::Continuation),
+        "failure" => Some(RetryReason::Failure),
+        "stalled" => Some(RetryReason::Stalled),
+        "cancelled" => Some(RetryReason::Cancelled),
+        "reconciliation" => Some(RetryReason::Reconciliation),
+        _ => None,
     }
 }
 
@@ -786,13 +1176,56 @@ async fn recovered_conversation_manifest(
 }
 
 fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
-    if let Some(transport_target) = &manifest.transport_target {
-        return transport_target.clone();
-    }
     if conversation_manifest_is_codex(manifest) {
         return CODEX_APP_SERVER_KIND.to_string();
     }
-    "<unknown>".to_string()
+    match manifest.transport_target.as_deref() {
+        // Older OpenHands manifests recorded the transport mechanism rather
+        // than the public harness kind. Recovery must route those records
+        // through the OpenHands adapter instead of exposing an unknown kind
+        // to scheduler capability validation.
+        Some("loopback" | "remote" | OPENHANDS_AGENT_SERVER_KIND) => {
+            return OPENHANDS_AGENT_SERVER_KIND.to_string();
+        }
+        Some(transport_target) => return transport_target.to_string(),
+        None => {}
+    }
+    // Manifests written before transport_target was introduced were all
+    // produced by the OpenHands-backed runtime. Keep recovery on that
+    // interrupt path instead of turning a missing optional field into an
+    // unknown harness that can never be stopped.
+    OPENHANDS_AGENT_SERVER_KIND.to_string()
+}
+
+fn recoverable_run_manifest(
+    run_manifest: &RunManifest,
+    conversation_manifest: Option<&IssueConversationManifest>,
+) -> bool {
+    run_manifest.status == RunStatus::Running
+        || (run_manifest.status == RunStatus::Prepared
+            && conversation_manifest.is_some_and(|manifest| {
+                if manifest.issue_id.as_str() != run_manifest.issue_id {
+                    return false;
+                }
+
+                // The prepared marker is written before send_message. A
+                // process crash after the prompt is accepted but before the
+                // active/trigger-pending markers are durable leaves that
+                // marker ambiguous. Reattach it so OpenHands reconciles the
+                // full event backlog and the recovery baseline can decide
+                // whether a prompt was accepted before scheduler retry logic
+                // considers sending another turn.
+                if manifest.prepared_run_id.as_deref() == Some(run_manifest.run_id.as_str()) {
+                    return true;
+                }
+
+                manifest.prepared_run_id.is_none()
+                    && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
+                    && manifest
+                        .trigger_pending_run_id
+                        .as_deref()
+                        .is_none_or(|run_id| run_id == run_manifest.run_id)
+            }))
 }
 
 fn recovered_run_from_manifests(
@@ -819,6 +1252,7 @@ fn recovered_run_from_manifests(
     Some(RecoveredRun {
         worker_id,
         conversation: conversation_metadata_from_manifest(conversation_manifest),
+        normal_retry_count: run_manifest.normal_retry_count,
     })
 }
 
@@ -913,7 +1347,7 @@ impl RuntimeWorkerBackend {
         }
     }
 
-    fn spawn_worker_task(&mut self, request: WorkerStartRequest) -> PendingLaunch {
+    fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
         let mut runner = IssueSessionRunner::with_environment(
             self.client.clone(),
             self.runner_config.clone(),
@@ -933,6 +1367,11 @@ impl RuntimeWorkerBackend {
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
         let route = request.route.clone();
+        let recovered = recovered
+            && matches!(
+                route.harness_kind.as_str(),
+                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND
+            );
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let worker_env = self.worker_env.clone();
@@ -953,18 +1392,89 @@ impl RuntimeWorkerBackend {
                 }
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
-            let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt);
-            let mut run_manifest = match workspace_manager
-                .start_run(&ensured.handle, &run_descriptor)
-                .await
-            {
-                Ok(run_manifest) => run_manifest,
-                Err(error) => {
-                    report_launch_failure(
-                        &mut launch_tx,
-                        format!("failed to prepare workspace run: {error}"),
-                    );
-                    return;
+            let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
+                .with_normal_retry_count(run.normal_retry_count);
+            let mut run_manifest = if recovered {
+                match workspace_manager.load_run_manifest(&ensured.handle).await {
+                    Ok(Some(run_manifest)) => {
+                        let conversation_manifest = if run_manifest.status == RunStatus::Prepared {
+                            if route.harness_kind == CODEX_APP_SERVER_KIND {
+                                match load_codex_conversation_manifest(
+                                    &workspace_manager,
+                                    &ensured.handle,
+                                    &issue,
+                                )
+                                .await
+                                {
+                                    Ok(manifest) => manifest,
+                                    Err(error) => {
+                                        report_launch_failure(&mut launch_tx, error);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                match recovered_conversation_manifest(
+                                    &workspace_manager,
+                                    &ensured.handle,
+                                )
+                                .await
+                                {
+                                    Ok(manifest) => manifest,
+                                    Err(error) => {
+                                        report_launch_failure(
+                                            &mut launch_tx,
+                                            format!(
+                                                "failed to read recovered conversation manifest: {error}"
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if recoverable_run_manifest(&run_manifest, conversation_manifest.as_ref()) {
+                            run_manifest
+                        } else {
+                            report_launch_failure(
+                                &mut launch_tx,
+                                format!(
+                                    "recovered workspace run is not attachable (status {})",
+                                    run_manifest.status
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            "recovered workspace run manifest is missing",
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to load recovered workspace run: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                match workspace_manager
+                    .start_run(&ensured.handle, &run_descriptor)
+                    .await
+                {
+                    Ok(run_manifest) => run_manifest,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to prepare workspace run: {error}"),
+                        );
+                        return;
+                    }
                 }
             };
 
@@ -1004,7 +1514,7 @@ impl RuntimeWorkerBackend {
             }
 
             if route.harness_kind == "codex_app_server" {
-                let outcome = run_codex_stdio_issue(
+                let outcome = run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
                     &ensured.handle,
@@ -1018,6 +1528,7 @@ impl RuntimeWorkerBackend {
                     &updates_tx,
                     &mut launch_tx,
                     &worker_env,
+                    recovered,
                 )
                 .await;
                 let _ = updates_tx.send(WorkerUpdate::Finished {
@@ -1032,17 +1543,30 @@ impl RuntimeWorkerBackend {
                 launch_tx,
                 updates_tx: updates_tx.clone(),
             };
-            let result = runner
-                .run_with_observer(
-                    &workspace_manager,
-                    &ensured.handle,
-                    &mut run_manifest,
-                    &issue,
-                    &run,
-                    &workflow,
-                    &mut observer,
-                )
-                .await;
+            let result = if recovered {
+                runner
+                    .recover_with_observer(
+                        &workspace_manager,
+                        &ensured.handle,
+                        &mut run_manifest,
+                        &issue,
+                        &run,
+                        &mut observer,
+                    )
+                    .await
+            } else {
+                runner
+                    .run_with_observer(
+                        &workspace_manager,
+                        &ensured.handle,
+                        &mut run_manifest,
+                        &issue,
+                        &run,
+                        &workflow,
+                        &mut observer,
+                    )
+                    .await
+            };
 
             if observer.launch_tx.is_some() {
                 report_launch_failure(
@@ -1246,6 +1770,7 @@ impl Drop for RuntimeWorkerBackend {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn run_codex_stdio_issue(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
     workspace_manager: &WorkspaceManager,
@@ -1261,10 +1786,11 @@ async fn run_codex_stdio_issue(
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
 ) -> WorkerOutcomeRecord {
-    match try_run_codex_stdio_issue(
+    run_codex_stdio_issue_with_mode(
         route,
         workspace_manager,
         workspace,
+        run_manifest,
         issue,
         run,
         workflow,
@@ -1274,6 +1800,43 @@ async fn run_codex_stdio_issue(
         updates_tx,
         launch_tx,
         worker_env,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_stdio_issue_with_mode(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    workflow: &ResolvedWorkflow,
+    codex_bin: &str,
+    codex_schema_validators: &CodexSchemaValidatorCache,
+    codex_interrupts: &CodexInterruptRegistry,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    worker_env: &BTreeMap<String, String>,
+    recovered: bool,
+) -> WorkerOutcomeRecord {
+    match try_run_codex_stdio_issue(
+        route,
+        workspace_manager,
+        workspace,
+        run_manifest,
+        issue,
+        run,
+        workflow,
+        codex_bin,
+        codex_schema_validators,
+        codex_interrupts,
+        updates_tx,
+        launch_tx,
+        worker_env,
+        recovered,
     )
     .await
     {
@@ -1340,6 +1903,7 @@ async fn try_run_codex_stdio_issue(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
     workspace_manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
@@ -1349,6 +1913,7 @@ async fn try_run_codex_stdio_issue(
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
+    recovered: bool,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
@@ -1421,6 +1986,31 @@ async fn try_run_codex_stdio_issue(
                 )
             })?;
     }
+    if recovered
+        && run_manifest.status == RunStatus::Prepared
+        && existing_manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .last_turn_id
+                .as_deref()
+                .is_some_and(|turn_id| !turn_id.trim().is_empty())
+        })
+    {
+        run_manifest.status = RunStatus::Running;
+        run_manifest.status_detail = Some("reattaching to an active Codex turn".to_owned());
+        run_manifest.updated_at = chrono::Utc::now();
+        workspace_manager
+            .write_run_manifest(workspace, run_manifest)
+            .await
+            .map_err(|error| format!("failed to persist recovered Codex run state: {error}"))?;
+    }
+    if recovered && existing_manifest.is_none() {
+        return Err(codex_lifecycle_error(
+            issue,
+            None,
+            "recovery",
+            "persisted Codex conversation manifest is missing; refusing to create a new thread",
+        ));
+    }
     let first_run_prompt = if existing_manifest.is_none() {
         Some(
             workflow
@@ -1432,8 +2022,9 @@ async fn try_run_codex_stdio_issue(
     } else {
         None
     };
+    let mut resume_terminal = None;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
-        Some(manifest) => {
+        Some(mut manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
             let resume = adapter
                 .resume_issue_request(
@@ -1501,6 +2092,30 @@ async fn try_run_codex_stdio_issue(
                     format!("returned thread id `{resumed_thread_id}` instead"),
                 ));
             }
+            let resume_turn_id = manifest
+                .last_turn_id
+                .clone()
+                .filter(|turn_id| !turn_id.trim().is_empty())
+                .or_else(|| read_state.pending_turn_id.take())
+                .or_else(|| codex_active_turn_id_from_resume_response(&resume_response));
+            if recovered
+                && let Some(turn_id) = resume_turn_id.as_deref()
+                && manifest.last_turn_id.as_deref() != Some(turn_id)
+            {
+                persist_codex_turn_id(workspace_manager, workspace, &mut manifest, turn_id)
+                    .await
+                    .map_err(|error| {
+                        codex_lifecycle_error(
+                            issue,
+                            Some(&conversation_id),
+                            "recovered turn id persistence",
+                            error,
+                        )
+                    })?;
+            }
+            resume_terminal = resume_turn_id.as_deref().and_then(|turn_id| {
+                codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
+            });
             let prompt_kind = if manifest.workflow_prompt_seeded {
                 IssueSessionPromptKind::Continuation
             } else {
@@ -1612,6 +2227,68 @@ async fn try_run_codex_stdio_issue(
             )
         }
     };
+    if recovered {
+        let turn_id = manifest
+            .last_turn_id
+            .clone()
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .ok_or_else(|| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&conversation_id),
+                    "recovery",
+                    "persisted Codex turn id is missing; refusing to start a new turn",
+                )
+            })?;
+        if let Some(outcome) = resume_terminal {
+            read_state.pending_terminal = Some(outcome);
+        }
+        let _interrupt_registration = register_codex_interrupt_channel(
+            codex_interrupts,
+            conversation_id.clone(),
+            CodexInterruptChannel {
+                stdin,
+                session,
+                schema_validator,
+                thread_id: conversation_id.clone(),
+                turn_id,
+                responses: Arc::clone(&interrupt_responses),
+                stderr_tail: Arc::clone(&stderr_tail),
+            },
+        )?;
+        if let Some(sender) = launch_tx.take() {
+            let _ = sender.send(LaunchReport::Conversation(Box::new(
+                codex_conversation_metadata(conversation_id.clone(), route),
+            )));
+        }
+        let terminal = read_until_codex_terminal(
+            &mut reader,
+            updates_tx,
+            &run.worker_id.to_string(),
+            issue,
+            run,
+            &mut read_state,
+            &interrupt_responses,
+        )
+        .await
+        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+        let summary = format!(
+            "Codex app-server recovery completed with terminal event {:?}",
+            terminal.event_kind
+        );
+        let _ = child.kill().await;
+        stderr_task.abort();
+        return Ok((
+            WorkerOutcomeRecord::from_run(
+                run,
+                terminal.outcome,
+                now_timestamp(),
+                Some(summary),
+                None,
+            ),
+            terminal.status,
+        ));
+    }
     let prompt = match (prompt_kind, first_run_prompt) {
         (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
         (IssueSessionPromptKind::Full, None) => workflow
@@ -1630,6 +2307,16 @@ async fn try_run_codex_stdio_issue(
             prompt,
         )
         .map_err(|source| format!("failed to build Codex turn/start request: {source}"))?;
+    persist_codex_run_prepared(workspace_manager, workspace, &mut manifest, run_manifest)
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(&conversation_id),
+                "turn/start run association persistence",
+                with_codex_stderr(error, &stderr_tail),
+            )
+        })?;
     write_codex_request(
         &mut stdin,
         &schema_validator,
@@ -1681,6 +2368,34 @@ async fn try_run_codex_stdio_issue(
         .await
         .map_err(|error| with_codex_stderr(error, &stderr_tail))?,
     };
+    persist_codex_turn_id(workspace_manager, workspace, &mut manifest, &turn_id)
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(&conversation_id),
+                "turn/start turn id persistence",
+                with_codex_stderr(error, &stderr_tail),
+            )
+        })?;
+    if !recovered {
+        persist_codex_run_started(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &conversation_id,
+            prompt_kind,
+        )
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(&conversation_id),
+                "run status persistence",
+                with_codex_stderr(error, &stderr_tail),
+            )
+        })?;
+    }
     let _interrupt_registration = register_codex_interrupt_channel(
         codex_interrupts,
         conversation_id.clone(),
@@ -2186,6 +2901,7 @@ async fn send_codex_stdio_interrupt(
     Ok(WorkerInterruptAcknowledgement {
         accepted: true,
         detail: Some(detail),
+        timed_out: false,
     })
 }
 
@@ -2324,6 +3040,74 @@ fn codex_thread_id_from_response(value: &serde_json::Value) -> Result<String, St
         .or_else(|| response.thread.map(|thread| thread.id))
         .filter(|thread_id| !thread_id.trim().is_empty())
         .ok_or_else(|| "Codex thread response missing a non-empty thread id".to_string())
+}
+
+fn codex_terminal_outcome_from_resume_response(
+    value: &serde_json::Value,
+    expected_turn_id: &str,
+) -> Option<CodexTerminalOutcome> {
+    let result = value.get("result")?;
+    let turn = result
+        .get("thread")
+        .and_then(|thread| thread.get("turns"))
+        .or_else(|| result.get("turns"))?
+        .as_array()?
+        .iter()
+        .find(|turn| {
+            turn.get("id")
+                .or_else(|| turn.get("turnId"))
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_turn_id)
+        })?;
+    let status = turn
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)?;
+    let (outcome, status) = match status.as_str() {
+        "completed" | "succeeded" | "success" => {
+            (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+        }
+        "failed" | "error" => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+        "cancelled" | "canceled" | "interrupted" => {
+            (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+        }
+        _ => return None,
+    };
+    Some(CodexTerminalOutcome {
+        event_kind: NormalizedCodexEventKind::TurnCompleted,
+        outcome,
+        status,
+    })
+}
+
+fn codex_active_turn_id_from_resume_response(value: &serde_json::Value) -> Option<String> {
+    let turns = value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("thread")
+                .and_then(|thread| thread.get("turns"))
+                .or_else(|| result.get("turns"))
+        })?
+        .as_array()?;
+    turns.iter().rev().find_map(|turn| {
+        let status = turn
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(|status| status.to_ascii_lowercase().replace(['_', '-'], ""))?;
+        if !matches!(
+            status.as_str(),
+            "inprogress" | "running" | "queued" | "pending" | "started" | "starting"
+        ) {
+            return None;
+        }
+        turn.get("id")
+            .or_else(|| turn.get("turnId"))
+            .or_else(|| turn.get("turn_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn codex_lifecycle_error(
@@ -2753,6 +3537,10 @@ async fn write_codex_conversation_manifest(
         reset_reason: None,
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
         codex_archive_state: Some("active".to_string()),
+        last_turn_id: None,
+        active_run_id: None,
+        prepared_run_id: None,
+        trigger_pending_run_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,
@@ -2849,6 +3637,58 @@ async fn update_codex_conversation_manifest(
         .map_err(|error| error.to_string())
 }
 
+async fn persist_codex_turn_id(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    turn_id: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    manifest.last_turn_id = Some(turn_id.to_owned());
+    manifest.updated_at = now;
+    manifest.last_attached_at = now;
+    workspace_manager
+        .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn persist_codex_run_prepared(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    run_manifest: &RunManifest,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    manifest.active_run_id = Some(run_manifest.run_id.clone());
+    manifest.last_turn_id = None;
+    manifest.updated_at = now;
+    manifest.last_attached_at = now;
+    workspace_manager
+        .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn persist_codex_run_started(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    conversation_id: &str,
+    prompt_kind: IssueSessionPromptKind,
+) -> Result<(), String> {
+    run_manifest.status = RunStatus::Running;
+    run_manifest.status_detail = Some(format!(
+        "{} prompt sent to Codex conversation {conversation_id}",
+        prompt_kind.as_str()
+    ));
+    run_manifest.updated_at = chrono::Utc::now();
+    workspace_manager
+        .write_run_manifest(workspace, run_manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn codex_conversation_metadata(
     conversation_id: String,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
@@ -2918,7 +3758,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         &mut self,
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error> {
-        let pending = self.spawn_worker_task(request);
+        let pending = self.spawn_worker_task(request, false);
         let worker_id = pending.worker_id.clone();
         let route = pending.route.clone();
         let launch_timeout = self.launch_timeout_for_route(&route);
@@ -2937,7 +3777,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
     ) -> Vec<Result<WorkerLaunch, Self::Error>> {
         let pending = requests
             .into_iter()
-            .map(|request| self.spawn_worker_task(request))
+            .map(|request| self.spawn_worker_task(request, false))
             .collect::<Vec<_>>();
         let ordered_launches = pending
             .iter()
@@ -2993,6 +3833,23 @@ impl WorkerBackend for RuntimeWorkerBackend {
             );
         }
         launches
+    }
+
+    async fn recover_worker(
+        &mut self,
+        request: WorkerStartRequest,
+    ) -> Result<WorkerLaunch, Self::Error> {
+        let pending = self.spawn_worker_task(request, true);
+        let worker_id = pending.worker_id.clone();
+        let route = pending.route.clone();
+        let launch_timeout = self.launch_timeout_for_route(&route);
+        self.resolve_launch_result(
+            &worker_id,
+            &route,
+            launch_timeout,
+            timeout(launch_timeout, pending.launch_rx).await,
+        )
+        .await
     }
 
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error> {
@@ -3070,8 +3927,12 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .interrupt(&command)
             .await
             .map_err(|error| CliWorkerError::InterruptFailed(openhands_error_detail(&error)))?;
+        let accepted = acknowledgement
+            .execution_status
+            .as_deref()
+            .is_some_and(openhands_execution_stopped);
         Ok(WorkerInterruptAcknowledgement {
-            accepted: true,
+            accepted,
             detail: acknowledgement
                 .diagnostic
                 .or_else(|| {
@@ -3080,8 +3941,13 @@ impl WorkerBackend for RuntimeWorkerBackend {
                         .map(|status| format!("OpenHands interrupt acknowledged with `{status}`"))
                 })
                 .or_else(|| Some("OpenHands interrupt acknowledged".to_string())),
+            timed_out: acknowledgement.timed_out,
         })
     }
+}
+
+fn openhands_execution_stopped(status: &str) -> bool {
+    matches!(status, "paused" | "idle" | "finished" | "error" | "stuck")
 }
 
 fn openhands_error_detail(error: &OpenHandsError) -> String {
@@ -3303,6 +4169,10 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             codex_archive_state: None,
+            last_turn_id: None,
+            active_run_id: None,
+            prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -3457,6 +4327,50 @@ mod tests {
     }
 
     #[test]
+    fn codex_resume_response_reconciles_the_persisted_terminal_turn() {
+        let completed = codex_terminal_outcome_from_resume_response(
+            &serde_json::json!({
+                "result": {
+                    "thread": {
+                        "id": "thread-7",
+                        "turns": [{"id": "turn-7", "status": "completed"}]
+                    }
+                }
+            }),
+            "turn-7",
+        )
+        .expect("completed persisted turn should be terminal");
+        assert_eq!(completed.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(completed.status, RunStatus::Succeeded);
+
+        let cancelled = codex_terminal_outcome_from_resume_response(
+            &serde_json::json!({
+                "result": {
+                    "turns": [{"turnId": "turn-8", "status": "interrupted"}]
+                }
+            }),
+            "turn-8",
+        )
+        .expect("interrupted persisted turn should be terminal");
+        assert_eq!(cancelled.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(cancelled.status, RunStatus::Cancelled);
+
+        assert!(
+            codex_terminal_outcome_from_resume_response(
+                &serde_json::json!({
+                    "result": {
+                        "thread": {
+                            "turns": [{"id": "other-turn", "status": "completed"}]
+                        }
+                    }
+                }),
+                "turn-7",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn codex_manifest_detection_accepts_runtime_contract_only() {
         let manifest = IssueConversationManifest {
             transport_target: None,
@@ -3468,10 +4382,66 @@ mod tests {
     }
 
     #[test]
-    fn recovered_harness_kind_is_unknown_without_transport_target() {
+    fn recovered_harness_kind_defaults_to_openhands_without_transport_target() {
         let manifest = sample_conversation_manifest("legacy-openhands");
 
-        assert_eq!(recovered_harness_kind_from_manifest(&manifest), "<unknown>");
+        assert_eq!(
+            recovered_harness_kind_from_manifest(&manifest),
+            OPENHANDS_AGENT_SERVER_KIND
+        );
+    }
+
+    #[test]
+    fn recovered_harness_kind_maps_legacy_openhands_transport_targets() {
+        for transport_target in ["loopback", "remote"] {
+            let manifest = IssueConversationManifest {
+                transport_target: Some(transport_target.to_owned()),
+                ..sample_conversation_manifest("legacy-openhands-transport")
+            };
+
+            assert_eq!(
+                recovered_harness_kind_from_manifest(&manifest),
+                OPENHANDS_AGENT_SERVER_KIND
+            );
+        }
+    }
+
+    #[test]
+    fn codex_resume_response_finds_the_latest_active_turn() {
+        let turn_id = codex_active_turn_id_from_resume_response(&serde_json::json!({
+            "result": {
+                "thread": {
+                    "turns": [
+                        {"id": "completed-turn", "status": "completed"},
+                        {"id": "active-turn", "status": "in_progress"}
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(turn_id.as_deref(), Some("active-turn"));
+        assert!(
+            codex_active_turn_id_from_resume_response(&serde_json::json!({
+                "result": {
+                    "turns": [{"id": "done", "status": "completed"}]
+                }
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn recovered_harness_kind_preserves_codex_runtime_contract() {
+        let manifest = IssueConversationManifest {
+            transport_target: Some("remote".to_owned()),
+            runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_owned()),
+            ..sample_conversation_manifest("codex-legacy-transport")
+        };
+
+        assert_eq!(
+            recovered_harness_kind_from_manifest(&manifest),
+            CODEX_APP_SERVER_KIND
+        );
     }
 
     #[test]
@@ -4210,6 +5180,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_failed_cleanup_overrides_terminal_workspace_retention() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                hooks: HookConfig::default(),
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("ordinary terminal cleanup should honor retention");
+        assert!(ensured.handle.workspace_path().exists());
+
+        backend
+            .cleanup_failed_workspace(&workspace)
+            .await
+            .expect("failed cleanup should remove retained terminal workspace");
+        assert!(!ensured.handle.workspace_path().exists());
+    }
+
+    #[tokio::test]
     async fn runtime_workspace_cleanup_runs_manager_cleanup_for_invalid_manifest() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
@@ -4454,6 +5468,101 @@ mod tests {
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
         assert!(!log.contains(r#""method":"thread/start""#));
         assert!(!log.contains(r#""method":"thread/archive""#));
+        assert!(!log.contains(r#""method":"turn/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_recovery_reconciles_without_starting_a_new_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-recovery", 1),
+            )
+            .await
+            .expect("run should start");
+        run_manifest.status = RunStatus::Running;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("running status should be persisted");
+
+        let mut conversation_manifest = sample_conversation_manifest("fake-thread");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.persistence_dir = ensured.handle.metadata_dir();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        conversation_manifest.runtime_contract_version =
+            Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        conversation_manifest.codex_archive_state = Some("active".to_string());
+        conversation_manifest.last_turn_id = Some("turn-1".to_string());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-recovery").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-recovery.log");
+        let fake_codex = tempdir.path().join("fake-codex-recovery");
+        write_fake_codex_recovery_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            true,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(run_manifest.status, RunStatus::Cancelled);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
         assert!(!log.contains(r#""method":"turn/start""#));
     }
 
@@ -5142,6 +6251,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn recovered_worker_reuses_running_manifest_without_before_run_hook() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root.clone(),
+                hooks: HookConfig {
+                    before_run: Some(HookDefinition::shell(
+                        "echo before_run >> .opensymphony/logs/before_run.txt",
+                    )),
+                    ..HookConfig::default()
+                },
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let mut run_manifest = workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-recovered", 1))
+            .await
+            .expect("initial run should be persisted");
+        run_manifest.status = RunStatus::Running;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("running recovery manifest should be persisted");
+
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            Arc::clone(&workspace_manager),
+            None,
+            BTreeMap::new(),
+        );
+        let workspace = sample_workspace(&workspace_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-recovered").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+
+        let launch = backend
+            .recover_worker(WorkerStartRequest {
+                issue: issue.clone(),
+                workspace,
+                run,
+                route: codex_test_route(true),
+            })
+            .await
+            .expect("recovered dry-run worker should launch");
+        assert_eq!(
+            launch.conversation.last_event_kind.as_deref(),
+            Some("routing.decision")
+        );
+
+        for _ in 0..10 {
+            if backend
+                .poll_updates()
+                .await
+                .expect("recovered worker updates should poll")
+                .iter()
+                .any(|update| matches!(update, WorkerUpdate::Finished { .. }))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let hook_invocations = fs::read_to_string(ensured.handle.logs_dir().join("before_run.txt"))
+            .expect("initial run should have invoked before_run")
+            .lines()
+            .count();
+        assert_eq!(hook_invocations, 1);
+        assert_eq!(
+            workspace_manager
+                .load_run_manifest(&ensured.handle)
+                .await
+                .expect("recovered run manifest should load")
+                .expect("recovered run manifest should exist")
+                .status,
+            RunStatus::Succeeded
+        );
+    }
+
     #[test]
     fn transport_port_override_reports_missing_port_separately() {
         let url = Url::parse("custom-scheme://openhands.local").expect("URL should parse");
@@ -5291,6 +6495,16 @@ mod tests {
             .start_run(&ensured.handle, &RunDescriptor::new("run-recovery", 2))
             .await
             .expect("run manifest should be written");
+        let mut run_manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        run_manifest.status = RunStatus::Running;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("running status should be persisted");
         let mut conversation_manifest = sample_conversation_manifest("conv-recovery");
         conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
         workspace_manager
@@ -5335,6 +6549,372 @@ mod tests {
             RuntimeStreamState::Closed
         );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_reattaches_ambiguous_prepared_openhands_runs() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-recovery", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest = sample_conversation_manifest("conv-prepared-recovery");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.prepared_run_id = Some("run-prepared-recovery".to_owned());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].recovered_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_reattaches_prepared_codex_run_with_active_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-codex-recovery", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest =
+            sample_conversation_manifest("conv-prepared-codex-recovery");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
+        conversation_manifest.active_run_id = Some("run-prepared-codex-recovery".to_owned());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].recovered_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_reattaches_prepared_openhands_run_with_active_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-openhands-recovery", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest = sample_conversation_manifest("conv-prepared-openhands");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.active_run_id = Some("run-prepared-openhands-recovery".to_owned());
+        conversation_manifest.trigger_pending_run_id =
+            Some("run-prepared-openhands-recovery".to_owned());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].recovered_run.is_some());
+        assert_eq!(
+            recoveries[0].harness_kind.as_deref(),
+            Some(OPENHANDS_AGENT_SERVER_KIND)
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_restores_a_pending_first_retry() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let mut run_manifest = workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-pending-retry", 1))
+            .await
+            .expect("run manifest should be written");
+        workspace_manager
+            .finish_run(&ensured.handle, &mut run_manifest, RunStatus::Failed)
+            .await
+            .expect("completed run should be persisted");
+        run_manifest.pending_retry = true;
+        run_manifest.retry_scheduled_at = Some(250);
+        run_manifest.retry_due_at = Some(1_200);
+        run_manifest.retry_reason = Some("failure".to_owned());
+        run_manifest.retry_error = Some("transient failure".to_owned());
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("pending retry marker should be persisted");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(!recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].pending_retry);
+        assert_eq!(recoveries[0].normal_retry_count, 0);
+        assert_eq!(
+            recoveries[0].retry_scheduled_at,
+            Some(TimestampMs::new(250))
+        );
+        assert_eq!(recoveries[0].retry_due_at, Some(TimestampMs::new(1_200)));
+        assert_eq!(recoveries[0].retry_reason, Some(RetryReason::Failure));
+        assert_eq!(
+            recoveries[0].retry_error.as_deref(),
+            Some("transient failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_retry_pending_creates_manifest_when_launch_failed_before_start_run() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: RetryAttempt::new(1).expect("retry attempt should be valid"),
+            normal_retry_count: 1,
+            scheduled_at: TimestampMs::new(250),
+            due_at: TimestampMs::new(1_200),
+            reason: RetryReason::Failure,
+            error: Some("launch failed".to_owned()),
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &workflow);
+
+        backend
+            .persist_retry_pending(&workspace, &retry)
+            .await
+            .expect("pending retry should create a durable manifest");
+
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.status, RunStatus::PreparationFailed);
+        assert!(manifest.pending_retry);
+        // The pending manifest is synthetic: recovery increments its stored
+        // predecessor once when reconstructing the queued retry.
+        assert_eq!(manifest.normal_retry_count, 0);
+        assert_eq!(manifest.retry_due_at, Some(1_200));
+    }
+
+    #[tokio::test]
+    async fn persist_retry_pending_updates_existing_manifest_predecessor_count() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut existing_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-existing-retry", 1).with_normal_retry_count(7),
+            )
+            .await
+            .expect("existing run manifest should be written");
+        existing_manifest.status = RunStatus::PreparationFailed;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &existing_manifest)
+            .await
+            .expect("existing manifest should be persisted");
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: RetryAttempt::new(2).expect("retry attempt should be valid"),
+            normal_retry_count: 3,
+            scheduled_at: TimestampMs::new(250),
+            due_at: TimestampMs::new(1_200),
+            reason: RetryReason::Failure,
+            error: Some("launch failed again".to_owned()),
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &workflow);
+
+        backend
+            .persist_retry_pending(&workspace, &retry)
+            .await
+            .expect("pending retry should update the durable manifest");
+
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.normal_retry_count, 2);
+        assert!(manifest.pending_retry);
+        assert_eq!(manifest.status, RunStatus::PreparationFailed);
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_is_recovered_from_instance_state() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let state_root = tempdir.path().join("state-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let mut backend = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
+            workspace_manager,
+            &workflow,
+            false,
+            state_root.clone(),
+        );
+
+        backend
+            .persist_retry_exhaustion(&issue, 3)
+            .await
+            .expect("retry exhaustion should persist");
+        backend
+            .persist_retry_exhaustion(&issue, 4)
+            .await
+            .expect("retry exhaustion should replace an existing marker");
+        let records = backend
+            .recover_retry_exhaustion()
+            .await
+            .expect("retry exhaustion should recover");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].issue.identifier, issue.identifier);
+        assert_eq!(records[0].normal_retry_count, 4);
+        assert!(state_root.join("retry-exhaustion/COE-284.json").is_file());
+        assert!(!workspace_root.join("COE-284").exists());
     }
 
     #[tokio::test]
@@ -5500,12 +7080,19 @@ Run the scheduler.
         .expect("workflow should resolve");
         let runtime = RunRuntimeConfig {
             config_path: None,
+            central_config: false,
+            config_generation: "test".to_owned(),
             target_repo: tempdir.path().to_path_buf(),
             workflow_path: tempdir.path().join("WORKFLOW.md"),
             workflow,
             bind: "127.0.0.1:3000".parse().expect("bind should parse"),
             tool_dir: None,
             openhands_conversation_store: None,
+            retry_max_attempts: None,
+            state_root: None,
+            memory_catalog_root: None,
+            retain_failed: true,
+            preserve_terminal_workspaces: true,
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,
@@ -5650,6 +7237,14 @@ Run the scheduler.
         ));
     }
 
+    #[test]
+    fn openhands_interrupt_acknowledgement_requires_a_stopped_state() {
+        assert!(openhands_execution_stopped("paused"));
+        assert!(openhands_execution_stopped("finished"));
+        assert!(!openhands_execution_stopped("running"));
+        assert!(!openhands_execution_stopped("waiting"));
+    }
+
     #[tokio::test]
     async fn codex_route_uses_launch_timeout_buffer() {
         let tempdir = TempDir::new().expect("tempdir should exist");
@@ -5688,6 +7283,25 @@ Run the scheduler.
             DEFAULT_WORKER_LAUNCH_TIMEOUT
         );
         assert!(CODEX_WORKER_LAUNCH_TIMEOUT > CODEX_RESPONSE_TIMEOUT * 2);
+    }
+
+    #[test]
+    fn workspace_manager_config_keeps_terminal_cleanup_outcome_aware() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workflow = sample_workflow(
+            &tempdir.path().join("repo"),
+            &tempdir.path().join("workspaces"),
+        );
+        assert!(
+            !build_workspace_manager_config_with_retention(&workflow, true, true)
+                .cleanup
+                .remove_terminal_workspaces
+        );
+        assert!(
+            build_workspace_manager_config_with_retention(&workflow, false, false)
+                .cleanup
+                .remove_terminal_workspaces
+        );
     }
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
@@ -5839,6 +7453,53 @@ done
                 log = log_path.display(),
                 schema = FAKE_CODEX_SCHEMA,
                 thread_start_setup = thread_start_setup
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_recovery_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/list"'*)
+      if printf '%s' "$line" | grep -q '"archived":true'; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      fi
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-1","status":"interrupted"}}}}}}\n'
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'unexpected turn/start\n' >&2
+      exit 97
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA,
             ),
         );
     }
@@ -6164,6 +7825,10 @@ exit 64
             reset_reason: None,
             runtime_contract_version: None,
             codex_archive_state: None,
+            last_turn_id: None,
+            active_run_id: None,
+            prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

@@ -549,6 +549,10 @@ pub struct MemoryConfig {
     pub code_intel: CodeIntelConfig,
     pub config_path: PathBuf,
     pub repo_root: PathBuf,
+    /// Root that contains the memory catalog for path-checked bundle
+    /// operations. Central instances use their state root instead of the
+    /// repository checkout root.
+    pub containment_root: Option<PathBuf>,
     pub memory_root: PathBuf,
     pub visibility: MemoryVisibility,
     pub index_path: PathBuf,
@@ -1982,6 +1986,46 @@ type: topic-doc
             )
             .expect("doc link count should query");
         assert_eq!(doc_link_count, 1);
+    }
+
+    #[test]
+    fn central_catalog_root_is_used_for_okf_bundle_containment() {
+        let repo = TempDir::new().expect("temp repo");
+        let state = repo.path().join("state");
+        let catalog = state.join("memory");
+        let source = okf_fixture("okf-reindex");
+        fs::create_dir_all(&catalog).expect("catalog root");
+        copy_dir_recursive(&source, &catalog);
+
+        let mut config = config_for(repo.path());
+        config.memory_root = catalog.clone();
+        config.index_path = catalog.join("memory.duckdb");
+        config.containment_root = Some(state.clone());
+
+        let export = export_okf_bundle(
+            &config,
+            MemoryVisibility::Private,
+            Some(Path::new("export")),
+        )
+        .expect("central catalog export should be contained by state root");
+        let canonical_state = state
+            .canonicalize()
+            .expect("state root should canonicalize");
+        assert_eq!(
+            export.output_path,
+            repo.path()
+                .canonicalize()
+                .expect("repo root should canonicalize")
+                .join("export")
+        );
+
+        let repo_bundle = repo.path().join("repo-export");
+        copy_dir_recursive(&source, &repo_bundle);
+        config.memory_root = state.join("imported");
+        config.index_path = config.memory_root.join("memory.duckdb");
+        let import = import_okf_bundle(&config, Path::new("repo-export"), false)
+            .expect("central catalog import should keep repo-contained sources");
+        assert_eq!(import.target_path, canonical_state.join("imported"));
     }
 
     #[test]

@@ -166,6 +166,8 @@ pub struct IssueExecution {
     state: SchedulerState,
     last_worker_outcome: Option<WorkerOutcomeRecord>,
     recent_worker_outcomes: Vec<WorkerOutcomeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry_count_override: Option<u32>,
 }
 
 impl IssueExecution {
@@ -178,6 +180,7 @@ impl IssueExecution {
             state: SchedulerState::Unclaimed { since: observed_at },
             last_worker_outcome: None,
             recent_worker_outcomes: Vec::new(),
+            retry_count_override: None,
         }
     }
 
@@ -201,6 +204,11 @@ impl IssueExecution {
         self.workspace.as_ref()
     }
 
+    pub fn clear_workspace(&mut self) {
+        self.workspace = None;
+        self.conversation = None;
+    }
+
     pub fn state(&self) -> &SchedulerState {
         &self.state
     }
@@ -215,6 +223,14 @@ impl IssueExecution {
 
     pub fn recent_worker_outcomes(&self) -> &[WorkerOutcomeRecord] {
         &self.recent_worker_outcomes
+    }
+
+    pub fn retry_count_override(&self) -> Option<u32> {
+        self.retry_count_override
+    }
+
+    pub fn set_retry_count_override(&mut self, retry_count: u32) {
+        self.retry_count_override = Some(retry_count);
     }
 
     pub fn current_run(&self) -> Option<&RunAttempt> {
@@ -274,24 +290,85 @@ impl IssueExecution {
         let Some(conversation) = &self.conversation else {
             return Err(StateTransitionError::ConversationNotAttached);
         };
+        let command = HarnessInterruptCommand {
+            run_id: run.issue_identifier.to_string(),
+            issue_id: self.issue.id.clone(),
+            harness_kind: harness_kind.into(),
+            conversation_id: conversation.conversation_id.clone(),
+            turn_id,
+            reason,
+            expected_next_state,
+        };
         if let Some(interrupt) = &self.interrupt {
-            return Ok((interrupt.command.clone(), false));
+            match interrupt.status {
+                HarnessInterruptStatus::Requested => {
+                    return Ok((interrupt.command.clone(), false));
+                }
+                HarnessInterruptStatus::Acknowledged => {
+                    // The stop already reached the harness, so a superseding
+                    // operator intent does not need another remote request.
+                    // Keep the acknowledgement state but replace the command
+                    // so recovery and the next outcome honor the new intent.
+                    let interrupt = self.interrupt.as_mut().expect("interrupt is present");
+                    interrupt.replace_command(command.clone());
+                    return Ok((command, false));
+                }
+                HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut => {
+                    self.interrupt = Some(HarnessInterruptState::requested(
+                        command.clone(),
+                        requested_at,
+                    ));
+                    return Ok((command, true));
+                }
+            }
         }
 
-        self.interrupt = Some(HarnessInterruptState::requested(
+        self.interrupt = Some(HarnessInterruptState::requested(command, requested_at));
+        let interrupt = self.interrupt.as_ref().expect("interrupt was just set");
+        Ok((interrupt.command.clone(), true))
+    }
+
+    pub fn restore_interrupt_intent(
+        &mut self,
+        harness_kind: impl Into<String>,
+        reason: HarnessInterruptReason,
+        expected_next_state: HarnessInterruptExpectedNextState,
+        requested_at: TimestampMs,
+    ) -> Result<(), StateTransitionError> {
+        let run = match &self.state {
+            SchedulerState::Claimed { run } | SchedulerState::Running { run, .. } => run,
+            _ => {
+                return Err(StateTransitionError::InvalidTransition {
+                    from: self.status(),
+                    action: TransitionAction::RequestInterrupt,
+                });
+            }
+        };
+        let Some(conversation) = &self.conversation else {
+            return Err(StateTransitionError::ConversationNotAttached);
+        };
+        let mut interrupt = HarnessInterruptState::requested(
             HarnessInterruptCommand {
                 run_id: run.issue_identifier.to_string(),
                 issue_id: self.issue.id.clone(),
                 harness_kind: harness_kind.into(),
                 conversation_id: conversation.conversation_id.clone(),
-                turn_id,
+                turn_id: None,
                 reason,
                 expected_next_state,
             },
             requested_at,
-        ));
-        let interrupt = self.interrupt.as_ref().expect("interrupt was just set");
-        Ok((interrupt.command.clone(), true))
+        );
+        // The persisted workspace record only stores the intent, not whether
+        // the remote request reached the harness. Treat recovery as an
+        // unconfirmed request so the scheduler will retry it instead of
+        // mistaking it for an already-dispatched request.
+        interrupt.fail(
+            requested_at,
+            "interrupt request requires retry after recovery",
+        );
+        self.interrupt = Some(interrupt);
+        Ok(())
     }
 
     pub fn acknowledge_interrupt(
@@ -330,6 +407,18 @@ impl IssueExecution {
             SchedulerState::RetryQueued { retry } => Some(retry),
             _ => None,
         }
+    }
+
+    pub fn restore_retry(mut self, retry: RetryEntry) -> Result<Self, StateTransitionError> {
+        self.validate_retry_binding(&retry)?;
+        if !matches!(self.state, SchedulerState::Unclaimed { .. }) {
+            return Err(StateTransitionError::InvalidTransition {
+                from: self.status(),
+                action: TransitionAction::QueueRetry,
+            });
+        }
+        self.state = SchedulerState::RetryQueued { retry };
+        Ok(self)
     }
 
     pub fn attach_workspace(
@@ -520,6 +609,24 @@ impl IssueExecution {
             self.record_outcome(outcome);
         }
 
+        self.state = SchedulerState::Released {
+            released_at,
+            reason,
+        };
+        Ok(self)
+    }
+
+    pub fn replace_release_reason(
+        mut self,
+        released_at: TimestampMs,
+        reason: ReleaseReason,
+    ) -> Result<Self, StateTransitionError> {
+        if !matches!(self.state, SchedulerState::Released { .. }) {
+            return Err(StateTransitionError::InvalidTransition {
+                from: self.status(),
+                action: TransitionAction::Release,
+            });
+        }
         self.state = SchedulerState::Released {
             released_at,
             reason,

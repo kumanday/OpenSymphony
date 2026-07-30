@@ -10,8 +10,8 @@ use serde::Serialize;
 
 pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
 pub use model::{
-    AgentConfig, AgentFrontMatter, DEFAULT_PROMPT_TEMPLATE, Environment, HooksConfig,
-    HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
+    AgentConfig, AgentFrontMatter, DEFAULT_PROMPT_TEMPLATE, DEFAULT_WORKSPACE_ROOT, Environment,
+    HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
     OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
     OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
     OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
