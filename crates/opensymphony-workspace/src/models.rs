@@ -206,7 +206,7 @@ fn is_bearer_word_byte(byte: u8) -> bool {
 
 fn redact_diagnostic_token(token: &str) -> String {
     if let Some(scheme_end) = token.find("://")
-        && let Some(at) = token[scheme_end + 3..].find('@')
+        && let Some(at) = token[scheme_end + 3..].rfind('@')
     {
         let at = scheme_end + 3 + at;
         let userinfo = &token[scheme_end + 3..at];
@@ -1148,6 +1148,16 @@ mod tests {
         let value = redact_runtime_diagnostic("hook failed https://ghp_secret@example.test/repo");
 
         assert!(!value.contains("ghp_secret"));
+        assert!(value.contains("https://[redacted]@example.test/repo"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_url_userinfo_through_the_final_at() {
+        let value = redact_runtime_diagnostic(
+            "hook failed https://user@example.test:password-canary@example.test/repo",
+        );
+
+        assert!(!value.contains("example.test:password-canary"));
         assert!(value.contains("https://[redacted]@example.test/repo"));
     }
 

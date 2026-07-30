@@ -788,14 +788,13 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 .map(recovered_harness_kind_from_manifest);
             let recovered_run = run_manifest
                 .as_ref()
-                .is_some_and(|run| run.status == RunStatus::Running)
-                .then(|| {
+                .filter(|run| recoverable_run_manifest(run, conversation_manifest.as_ref()))
+                .and_then(|_| {
                     recovered_run_from_manifests(
                         run_manifest.as_ref(),
                         conversation_manifest.as_ref(),
                     )
-                })
-                .flatten();
+                });
 
             recoveries.push(RecoveryRecord {
                 issue: normalized_issue_from_manifest(
@@ -1169,17 +1168,40 @@ async fn recovered_conversation_manifest(
 }
 
 fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
-    if let Some(transport_target) = &manifest.transport_target {
-        return transport_target.clone();
-    }
     if conversation_manifest_is_codex(manifest) {
         return CODEX_APP_SERVER_KIND.to_string();
+    }
+    match manifest.transport_target.as_deref() {
+        // Older OpenHands manifests recorded the transport mechanism rather
+        // than the public harness kind. Recovery must route those records
+        // through the OpenHands adapter instead of exposing an unknown kind
+        // to scheduler capability validation.
+        Some("loopback" | "remote" | OPENHANDS_AGENT_SERVER_KIND) => {
+            return OPENHANDS_AGENT_SERVER_KIND.to_string();
+        }
+        Some(transport_target) => return transport_target.to_string(),
+        None => {}
     }
     // Manifests written before transport_target was introduced were all
     // produced by the OpenHands-backed runtime. Keep recovery on that
     // interrupt path instead of turning a missing optional field into an
     // unknown harness that can never be stopped.
     OPENHANDS_AGENT_SERVER_KIND.to_string()
+}
+
+fn recoverable_run_manifest(
+    run_manifest: &RunManifest,
+    conversation_manifest: Option<&IssueConversationManifest>,
+) -> bool {
+    run_manifest.status == RunStatus::Running
+        || (run_manifest.status == RunStatus::Prepared
+            && conversation_manifest.is_some_and(|manifest| {
+                conversation_manifest_is_codex(manifest)
+                    && manifest
+                        .last_turn_id
+                        .as_deref()
+                        .is_some_and(|turn_id| !turn_id.trim().is_empty())
+            }))
 }
 
 fn recovered_run_from_manifests(
@@ -1350,18 +1372,38 @@ impl RuntimeWorkerBackend {
                 .with_normal_retry_count(run.normal_retry_count);
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
-                    Ok(Some(run_manifest)) if run_manifest.status == RunStatus::Running => {
-                        run_manifest
-                    }
                     Ok(Some(run_manifest)) => {
-                        report_launch_failure(
-                            &mut launch_tx,
-                            format!(
-                                "recovered workspace run is not running (status {})",
-                                run_manifest.status
-                            ),
-                        );
-                        return;
+                        let conversation_manifest = if run_manifest.status == RunStatus::Prepared
+                            && route.harness_kind == CODEX_APP_SERVER_KIND
+                        {
+                            match load_codex_conversation_manifest(
+                                &workspace_manager,
+                                &ensured.handle,
+                                &issue,
+                            )
+                            .await
+                            {
+                                Ok(manifest) => manifest,
+                                Err(error) => {
+                                    report_launch_failure(&mut launch_tx, error);
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if recoverable_run_manifest(&run_manifest, conversation_manifest.as_ref()) {
+                            run_manifest
+                        } else {
+                            report_launch_failure(
+                                &mut launch_tx,
+                                format!(
+                                    "recovered workspace run is not attachable (status {})",
+                                    run_manifest.status
+                                ),
+                            );
+                            return;
+                        }
                     }
                     Ok(None) => {
                         report_launch_failure(
@@ -1901,6 +1943,23 @@ async fn try_run_codex_stdio_issue(
                     error,
                 )
             })?;
+    }
+    if recovered
+        && run_manifest.status == RunStatus::Prepared
+        && existing_manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .last_turn_id
+                .as_deref()
+                .is_some_and(|turn_id| !turn_id.trim().is_empty())
+        })
+    {
+        run_manifest.status = RunStatus::Running;
+        run_manifest.status_detail = Some("reattaching to an active Codex turn".to_owned());
+        run_manifest.updated_at = chrono::Utc::now();
+        workspace_manager
+            .write_run_manifest(workspace, run_manifest)
+            .await
+            .map_err(|error| format!("failed to persist recovered Codex run state: {error}"))?;
     }
     if recovered && existing_manifest.is_none() {
         return Err(codex_lifecycle_error(
@@ -4207,6 +4266,35 @@ mod tests {
     }
 
     #[test]
+    fn recovered_harness_kind_maps_legacy_openhands_transport_targets() {
+        for transport_target in ["loopback", "remote"] {
+            let manifest = IssueConversationManifest {
+                transport_target: Some(transport_target.to_owned()),
+                ..sample_conversation_manifest("legacy-openhands-transport")
+            };
+
+            assert_eq!(
+                recovered_harness_kind_from_manifest(&manifest),
+                OPENHANDS_AGENT_SERVER_KIND
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_harness_kind_preserves_codex_runtime_contract() {
+        let manifest = IssueConversationManifest {
+            transport_target: Some("remote".to_owned()),
+            runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_owned()),
+            ..sample_conversation_manifest("codex-legacy-transport")
+        };
+
+        assert_eq!(
+            recovered_harness_kind_from_manifest(&manifest),
+            CODEX_APP_SERVER_KIND
+        );
+    }
+
+    #[test]
     fn openhands_http_status_diagnostic_truncates_body() {
         let error = OpenHandsError::HttpStatus {
             operation: "interrupt",
@@ -6356,6 +6444,54 @@ mod tests {
         assert_eq!(recoveries.len(), 1);
         assert!(recoveries[0].had_in_flight_run);
         assert!(recoveries[0].recovered_run.is_none());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_reattaches_prepared_codex_run_with_active_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-codex-recovery", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest =
+            sample_conversation_manifest("conv-prepared-codex-recovery");
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
+        conversation_manifest.last_turn_id = Some("turn-active".to_owned());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].recovered_run.is_some());
     }
 
     #[tokio::test]

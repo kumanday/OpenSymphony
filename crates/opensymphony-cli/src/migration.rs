@@ -107,6 +107,8 @@ enum MigrationError {
     MemoryCatalogChanged { path: PathBuf },
     #[error("workflow {path} does not declare an exact `Target branch:`")]
     MissingTargetBranch { path: PathBuf },
+    #[error("migration cannot serialize non-UTF-8 path {path:?}")]
+    NonUtf8Path { path: PathBuf },
     #[error("workflow field {field} is not a valid unsigned integer: {value}")]
     InvalidNumericSetting { field: String, value: String },
     #[error("failed to serialize generated central config: {0}")]
@@ -1914,7 +1916,7 @@ fn migrated_workspace_root(
                 reject_workspace_relocation(&resolved)?;
                 Ok(format!("~/.opensymphony/workspaces/{instance_id}"))
             } else {
-                Ok(resolved.display().to_string())
+                migration_path_to_string(&resolved)
             }
         }
         None => {
@@ -1933,6 +1935,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
     if remote_has_credentials(&source.remote) {
         return Err(MigrationError::CredentialBearingRemote);
     }
+    let checkout_path = migration_path_to_string(&source.target_repo)?;
     let linear_credential_variable =
         tracker_credential_variable(source.workflow.front_matter.tracker.api_key.as_deref())?;
     let project = source
@@ -1956,7 +1959,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
                 .and_then(|name| name.to_str())
                 .unwrap_or("repository")
         ),
-        &sha256(source.target_repo.display().to_string().as_bytes())[7..23]
+        &sha256(checkout_path.as_bytes())[7..23]
     );
     let workspace_root =
         migrated_workspace_root(source, &instance_id, Path::new(DEFAULT_WORKSPACE_ROOT))?;
@@ -2061,7 +2064,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
                 "credential": "legacy-git",
                 "review_profile": "legacy-review",
                 "instructions": {"path": instruction_path},
-                "checkout_path": source.target_repo.display().to_string(),
+                "checkout_path": checkout_path,
             }
         },
         "credentials": {
@@ -2187,11 +2190,30 @@ fn workflow_body(source: &SourceContext) -> Result<Vec<u8>, MigrationError> {
 }
 
 fn target_branch(prompt: &str) -> Option<String> {
-    prompt
+    let markers = prompt
         .lines()
-        .find_map(|line| line.trim().strip_prefix("Target branch:"))
-        .map(|value| value.trim().trim_matches('`').to_owned())
-        .filter(|value| !value.is_empty())
+        .filter_map(|line| line.trim().strip_prefix("Target branch:"))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if markers.len() != 1 {
+        return None;
+    }
+
+    let value = markers[0];
+    let value = value
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+        .unwrap_or(value);
+    (!value.is_empty() && !value.chars().any(char::is_whitespace) && !value.contains('`'))
+        .then(|| value.to_owned())
+}
+
+fn migration_path_to_string(path: &Path) -> Result<String, MigrationError> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| MigrationError::NonUtf8Path {
+            path: path.to_path_buf(),
+        })
 }
 
 fn integer_value(value: &crate::opensymphony_workflow::IntegerLike) -> String {
@@ -2913,6 +2935,28 @@ fn literal_value_after_authorization(command: &str, lower: &str) -> bool {
     false
 }
 
+fn is_prefixed_secret_assignment(
+    command: &str,
+    lower: &str,
+    start: usize,
+    end: usize,
+    marker: &str,
+) -> bool {
+    let key_start = lower[..start]
+        .rfind(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .map_or(0, |index| index + 1);
+    let key = &command[key_start..end];
+    let Some(prefix_end) = key.len().checked_sub(marker.len()) else {
+        return false;
+    };
+    let prefix = &key[..prefix_end];
+    prefix.ends_with('_')
+        && prefix[..prefix.len() - 1].chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && key[prefix_end..].eq_ignore_ascii_case(marker)
+}
+
 fn literal_value_after_marker(command: &str, lower: &str, marker: &str) -> bool {
     let mut search_from = 0;
     while let Some(relative) = lower[search_from..].find(marker) {
@@ -2949,7 +2993,9 @@ fn literal_assignment_value(command: &str, lower: &str, marker: &str) -> bool {
     while let Some(relative) = lower[search_from..].find(marker) {
         let start = search_from + relative;
         let end = start + marker.len();
-        if !is_hook_marker_boundary(lower, start, end) {
+        if !is_hook_marker_boundary(lower, start, end)
+            && !is_prefixed_secret_assignment(command, lower, start, end, marker)
+        {
             search_from = end;
             continue;
         }
@@ -3420,6 +3466,26 @@ mod tests {
             generate_central_config(&source),
             Err(MigrationError::LiteralSecret)
         ));
+        assert!(hook_has_literal_secret("GITHUB_TOKEN=ghp_secret"));
+        assert!(hook_has_literal_secret("export MY_API_KEY=raw-value"));
+        assert!(!hook_has_literal_secret("GITHUB_TOKEN=${SAFE_TOKEN}"));
+    }
+
+    #[test]
+    fn target_branch_rejects_ambiguous_or_prose_markers() {
+        assert_eq!(
+            target_branch("Target branch: develop"),
+            Some("develop".to_owned())
+        );
+        assert_eq!(
+            target_branch("Target branch: `release/1.0`"),
+            Some("release/1.0".to_owned())
+        );
+        assert_eq!(
+            target_branch("Target branch: develop\nTarget branch: main"),
+            None
+        );
+        assert_eq!(target_branch("Target branch: develop by default"), None);
     }
 
     #[test]
@@ -3522,6 +3588,40 @@ mod tests {
             staged.as_os_str().as_bytes(),
             expected.as_os_str().as_bytes()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_non_utf8_checkout_paths_before_serialization() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let target_repo = PathBuf::from(OsString::from_vec(vec![b'r', b'e', b'p', 0x80]));
+        let source = SourceContext {
+            source_config: PathBuf::from("config.yaml"),
+            config_source: String::new(),
+            source_config_present: false,
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            target_repo,
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        assert!(matches!(
+            generate_central_config(&source),
+            Err(MigrationError::NonUtf8Path { .. })
+        ));
     }
 
     #[test]
