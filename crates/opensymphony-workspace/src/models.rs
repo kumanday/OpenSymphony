@@ -15,6 +15,8 @@ pub fn redact_runtime_diagnostic(input: &str) -> String {
         "api_key",
         "apikey",
         "authorization",
+        "pat",
+        "personal_access_token",
         "account_id",
         "accountid",
         "account_identifier",
@@ -1099,5 +1101,16 @@ mod tests {
         assert!(!value.contains("acct_456"));
         assert!(!value.contains("acct_789"));
         assert!(!value.contains("acct_999"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_pat_fields() {
+        let value = redact_runtime_diagnostic(
+            r#"pat=ghp_plain "pat":"ghp_json" personal_access_token=ghp_long"#,
+        );
+
+        assert!(!value.contains("ghp_plain"));
+        assert!(!value.contains("ghp_json"));
+        assert!(!value.contains("ghp_long"));
     }
 }

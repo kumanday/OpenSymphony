@@ -14,6 +14,16 @@ use std::{
     time::Duration,
 };
 
+#[cfg(any(
+    not(unix),
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+use std::process::Command;
+
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker, TimestampMs};
 use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
@@ -35,9 +45,6 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 use tracing::{info, warn};
-
-#[cfg(not(unix))]
-use std::process::Command;
 
 use self::{
     backends::{
@@ -383,8 +390,9 @@ fn acquire_root_ownership_serialization_at(
             .open(&staging_path)
         {
             Ok(mut file) => {
-                let initialize =
-                    writeln!(file, "pid={}", std::process::id()).and_then(|_| file.sync_all());
+                let initialize = file
+                    .write_all(process_marker_fields().as_bytes())
+                    .and_then(|_| file.sync_all());
                 if let Err(source) = initialize {
                     let _ = fs::remove_file(&staging_path);
                     return Err(RunCommandError::RootOwnership {
@@ -454,7 +462,12 @@ fn serialization_lock_owner_alive(marker: &Path) -> bool {
         // is therefore reclaimable.
         return false;
     };
-    process_owner_alive(pid)
+    process_owner_alive(
+        pid,
+        contents
+            .lines()
+            .find_map(|line| line.strip_prefix("start=").map(str::trim)),
+    )
 }
 
 fn root_marker_blocks(marker: &Path) -> bool {
@@ -479,7 +492,7 @@ fn claim_root_registry_marker(root: &Path) -> Result<PathBuf, RunCommandError> {
     let marker = registry.join(format!("root-{}-{sequence}.active", std::process::id()));
     publish_initialized_marker(
         &marker,
-        &format!("pid={}\nroot={}\n", std::process::id(), root.display()),
+        &format!("{}root={}\n", process_marker_fields(), root.display()),
     )
     .map(|_| marker.clone())
     .map_err(|source| RunCommandError::RootOwnership {
@@ -534,7 +547,10 @@ fn find_live_registered_root_marker(
                 detail: format!("ownership registry marker {} has no PID", marker.display()),
             });
         };
-        if !process_owner_alive(pid) {
+        let start = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("start=").map(str::trim));
+        if !process_owner_alive(pid, start) {
             let _ = fs::remove_file(&marker);
             continue;
         }
@@ -558,12 +574,12 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 }
 
 fn initialize_root_marker_atomic(marker: &Path) -> io::Result<File> {
-    publish_initialized_marker(marker, &format!("pid={}\n", std::process::id()))
+    publish_initialized_marker(marker, &process_marker_fields())
 }
 
 #[cfg(test)]
 fn initialize_root_marker(mut file: File, marker: &Path) -> Result<File, RunCommandError> {
-    if let Err(source) = writeln!(file, "pid={}", std::process::id()) {
+    if let Err(source) = file.write_all(process_marker_fields().as_bytes()) {
         drop(file);
         let _ = fs::remove_file(marker);
         return Err(RunCommandError::RootOwnership {
@@ -584,31 +600,92 @@ pub(crate) fn root_lock_owner_alive(marker: &Path) -> bool {
         return true;
     };
 
-    process_owner_alive(pid)
+    process_owner_alive(
+        pid,
+        contents
+            .lines()
+            .find_map(|line| line.strip_prefix("start=").map(str::trim)),
+    )
 }
 
-fn process_owner_alive(pid: i32) -> bool {
-    #[cfg(unix)]
-    {
-        let Some(pid) = rustix::process::Pid::from_raw(pid) else {
-            return true;
-        };
-        match rustix::process::test_kill_process(pid) {
-            Ok(()) => true,
-            Err(error) if error == rustix::io::Errno::SRCH => false,
-            Err(_) => true,
+fn process_owner_alive(pid: i32, expected_start: Option<&str>) -> bool {
+    let alive = {
+        #[cfg(unix)]
+        {
+            let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+                return true;
+            };
+            match rustix::process::test_kill_process(pid) {
+                Ok(()) => true,
+                Err(error) if error == rustix::io::Errno::SRCH => false,
+                Err(_) => true,
+            }
         }
+        #[cfg(not(unix))]
+        {
+            let Ok(output) = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+            else {
+                // If process liveness cannot be determined, fail closed.
+                return true;
+            };
+            tasklist_process_is_alive(output.status.success(), &output.stdout, pid)
+        }
+    };
+    alive
+        && expected_start.is_none_or(|expected| {
+            process_incarnation(pid as u32).is_some_and(|actual| actual == expected)
+        })
+}
+
+fn process_marker_fields() -> String {
+    let mut fields = format!("pid={}\n", std::process::id());
+    if let Some(start) = process_incarnation(std::process::id()) {
+        fields.push_str("start=");
+        fields.push_str(&start);
+        fields.push('\n');
     }
-    #[cfg(not(unix))]
+    fields
+}
+
+fn process_incarnation(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
     {
-        let Ok(output) = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_command = stat.rsplit_once(')')?.1;
+        let start_time = after_command.split_whitespace().nth(19)?;
+        return Some(format!("linux:{start_time}"));
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()
-        else {
-            // If process liveness cannot be determined, fail closed.
-            return true;
-        };
-        tasklist_process_is_alive(output.status.success(), &output.stdout, pid)
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let start = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (!start.is_empty()).then(|| format!("ps:{start}"))
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
+    {
+        let _ = pid;
+        None
     }
 }
 
@@ -1520,12 +1597,23 @@ mod tests {
 
         let owner = acquire_root_ownership_serialization_at(&path)
             .expect("an interrupted marker should be recoverable");
-        assert_eq!(
-            fs::read_to_string(&path).expect("published marker should be readable"),
-            format!("pid={}\n", std::process::id())
-        );
+        let marker = fs::read_to_string(&path).expect("published marker should be readable");
+        assert!(marker.starts_with(&format!("pid={}\n", std::process::id())));
+        assert!(marker.lines().any(|line| line.starts_with("start=")));
         drop(owner);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn runtime_ownership_rejects_a_pid_with_a_different_incarnation() {
+        let marker = tempfile::NamedTempFile::new().expect("marker should exist");
+        fs::write(
+            marker.path(),
+            format!("pid={}\nstart=stale-incarnation\n", std::process::id()),
+        )
+        .expect("marker should be written");
+
+        assert!(!root_lock_owner_alive(marker.path()));
     }
 
     #[test]

@@ -963,6 +963,9 @@ fn resolve_central_config(
             &tracker.active_states,
             &tracker.terminal_states,
         );
+        if let Some(endpoint) = tracker.endpoint.as_deref() {
+            validate_remote_clone(endpoint)?;
+        }
     }
     for (project_id, project) in &config.linear_projects {
         required_literal(project_id, "linear_projects.id")?;
@@ -2352,6 +2355,23 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("tracker credentials without a variable should fail");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_tracker_endpoint_credentials() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        for endpoint in [
+            "https://token@example.test/graphql",
+            "https://api.example.test/graphql?access_token=secret",
+        ] {
+            let source = central_fixture(root.path()).replace(
+                "endpoint: https://api.linear.app/graphql",
+                &format!("endpoint: {endpoint}"),
+            );
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("tracker endpoint credentials should fail");
+            assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
+        }
     }
 
     #[test]

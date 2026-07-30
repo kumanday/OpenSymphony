@@ -3266,6 +3266,85 @@ async fn retry_exhaustion_stays_parked_while_tracker_issue_is_inactive() {
 }
 
 #[tokio::test]
+async fn inactive_retry_exhaustion_retries_failed_workspace_cleanup() {
+    let recovered_workspace =
+        workspace_record("COE-278-EXHAUSTED", "/tmp/recovered/COE-278-EXHAUSTED");
+    let tracker = FakeTracker {
+        states: HashMap::from([(
+            "lin-278-exhausted".to_string(),
+            tracker_state_snapshot(
+                "lin-278-exhausted",
+                "COE-278-EXHAUSTED",
+                "Backlog",
+                "backlog",
+                0,
+            ),
+        )]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-278-exhausted", "COE-278-EXHAUSTED", "Backlog"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        cleanup_results: VecDeque::from([
+            Err(FakeError {
+                message: "cleanup temporarily unavailable".to_string(),
+                category: None,
+                retry_after: None,
+            }),
+            Ok(()),
+        ]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial inactive exhaustion recovery should succeed");
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("inactive exhaustion cleanup retry should succeed");
+
+    assert_eq!(
+        scheduler.workspace().failed_cleaned,
+        vec![
+            "COE-278-EXHAUSTED".to_string(),
+            "COE-278-EXHAUSTED".to_string()
+        ]
+    );
+    let issue_id = IssueId::new("lin-278-exhausted").expect("issue id should be valid");
+    let parked = scheduler
+        .execution(&issue_id)
+        .expect("exhausted issue should remain tracked");
+    assert!(matches!(
+        parked.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn recovery_restores_exhausted_retry_count_without_dispatching() {
     let recovered_workspace = workspace_record("COE-273", "/tmp/recovered/COE-273");
     let tracker = FakeTracker {

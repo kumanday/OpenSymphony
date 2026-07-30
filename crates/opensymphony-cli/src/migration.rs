@@ -97,6 +97,10 @@ enum MigrationError {
     DestinationConflict { path: PathBuf },
     #[error("activated migration file changed after apply: {path}")]
     ActivatedFileChanged { path: PathBuf },
+    #[error("migration backup changed after apply: {path}")]
+    BackupChanged { path: PathBuf },
+    #[error("activation marker does not record a backup generation for {path}")]
+    MissingBackupGeneration { path: PathBuf },
     #[error(
         "migrated memory catalog changed after apply; rollback is blocked to preserve it: {path}"
     )]
@@ -208,6 +212,12 @@ struct ActivationMarker {
     memory_catalog_generation: Option<String>,
     #[serde(default)]
     memory_catalog_copy_in_progress: bool,
+    #[serde(default)]
+    legacy_workspace_root: Option<PathBuf>,
+    #[serde(default)]
+    backup_config_generation: Option<String>,
+    #[serde(default)]
+    backup_workflow_generation: Option<String>,
 }
 
 impl ActivationMarker {
@@ -781,6 +791,43 @@ fn verify_current_generation(path: &Path, expected_generation: &str) -> Result<(
     }
 }
 
+fn verify_backup_generations(marker: &ActivationMarker) -> Result<(), MigrationError> {
+    verify_backup_generation(
+        &marker.backup_dir.join("config.yaml"),
+        marker.had_config,
+        marker.backup_config_generation.as_deref(),
+    )?;
+    verify_backup_generation(
+        &marker.backup_dir.join("WORKFLOW.md"),
+        marker.had_workflow,
+        marker.backup_workflow_generation.as_deref(),
+    )
+}
+
+fn verify_backup_generation(
+    path: &Path,
+    expected: bool,
+    generation: Option<&str>,
+) -> Result<(), MigrationError> {
+    if !expected {
+        return Ok(());
+    }
+    reject_symlink_ancestors(path)?;
+    let generation = generation.ok_or_else(|| MigrationError::MissingBackupGeneration {
+        path: path.to_path_buf(),
+    })?;
+    let contents = fs::read(path).map_err(|source| MigrationError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if sha256(&contents) != generation {
+        return Err(MigrationError::BackupChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     if let Some(active) = active_target_central_config(&paths).await? {
         return Ok(active_report("preflight", &active, true));
@@ -834,7 +881,17 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
     let _ = preflight(paths.clone()).await?;
     if let Some(active) = active_target_central_config(&paths).await? {
         let _strict_run_marker = claim_migration_strict_run_marker(&active.target_config)?;
-        return match resume_partial_apply(&active)? {
+        let resolution = {
+            let _legacy_runtime_ownership = load_activation_marker(&active.target_config)?
+                .filter(|(_, marker)| marker.memory_catalog_copy_in_progress)
+                .map(|(_, marker)| {
+                    recorded_legacy_runtime_workspace_root(&marker)
+                        .and_then(|root| acquire_legacy_runtime_ownership(&root))
+                })
+                .transpose()?;
+            resume_partial_apply(&active)?
+        };
+        return match resolution {
             ActiveMigrationResolution::Complete => Ok(active_report("apply", &active, false)),
             ActiveMigrationResolution::Restored => {
                 drop(_strict_run_marker);
@@ -909,6 +966,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let backup_dir = migration_root
         .join("backups")
         .join(generation.trim_start_matches("sha256:"));
+    reject_symlink_ancestors(&backup_dir)?;
     fs::create_dir_all(&backup_dir).map_err(|source_error| MigrationError::Write {
         path: backup_dir.clone(),
         source: source_error,
@@ -924,21 +982,39 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
             path: source.workflow_path.clone(),
             source: source_error,
         })?;
+    let backup_config_path = backup_dir.join("config.yaml");
+    let backup_workflow_path = backup_dir.join("WORKFLOW.md");
+    reject_symlink_ancestors(&backup_config_path)?;
+    reject_symlink_ancestors(&backup_workflow_path)?;
+    let mut backup_config_generation = None;
+    let mut backup_workflow_generation = None;
     if had_config {
-        fs::copy(&target_config, backup_dir.join("config.yaml")).map_err(|source_error| {
+        fs::copy(&target_config, &backup_config_path).map_err(|source_error| {
             MigrationError::Write {
-                path: backup_dir.join("config.yaml"),
+                path: backup_config_path.clone(),
                 source: source_error,
             }
         })?;
-    }
-    if had_workflow {
-        fs::copy(&source.workflow_path, backup_dir.join("WORKFLOW.md")).map_err(
-            |source_error| MigrationError::Write {
-                path: backup_dir.join("WORKFLOW.md"),
+        backup_config_generation = Some(sha256(&fs::read(&backup_config_path).map_err(
+            |source_error| MigrationError::Read {
+                path: backup_config_path.clone(),
                 source: source_error,
             },
-        )?;
+        )?));
+    }
+    if had_workflow {
+        fs::copy(&source.workflow_path, &backup_workflow_path).map_err(|source_error| {
+            MigrationError::Write {
+                path: backup_workflow_path.clone(),
+                source: source_error,
+            }
+        })?;
+        backup_workflow_generation = Some(sha256(&fs::read(&backup_workflow_path).map_err(
+            |source_error| MigrationError::Read {
+                path: backup_workflow_path.clone(),
+                source: source_error,
+            },
+        )?));
     }
 
     let central_stage = stage_path(&target_config, &generation);
@@ -967,6 +1043,9 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         memory_catalog_root: memory_catalog_root.clone(),
         memory_catalog_generation: memory_catalog_generation_before,
         memory_catalog_copy_in_progress: true,
+        legacy_workspace_root: Some(workspace_root),
+        backup_config_generation,
+        backup_workflow_generation,
     };
     let marker_path = migration_marker_path(&target_config);
     let marker_stage = stage_path(&marker_path, &generation);
@@ -1092,6 +1171,7 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
     memory_locks
         .acquire_catalog_lock(&marker.target_repo(), marker.memory_catalog_root.as_deref())?;
     verify_activated_files(&marker)?;
+    verify_backup_generations(&marker)?;
     if let (Some(root), Some(expected)) = (
         marker.memory_catalog_root.as_deref(),
         marker.memory_catalog_generation.as_deref(),
@@ -1288,6 +1368,36 @@ fn reject_symlink_input(path: &Path) -> Result<(), MigrationError> {
         return Err(MigrationError::SymlinkInput {
             path: path.to_path_buf(),
         });
+    }
+    Ok(())
+}
+
+fn reject_symlink_ancestors(path: &Path) -> Result<(), MigrationError> {
+    let mut current = Some(path);
+    let mut first_existing = true;
+    while let Some(candidate) = current {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(MigrationError::SymlinkInput {
+                    path: candidate.to_path_buf(),
+                });
+            }
+            // Inspect one parent after an existing leaf as well, so a file
+            // reached through a symlinked directory cannot bypass the check.
+            // Then stop at the first ordinary ancestor; this keeps the check
+            // scoped to the destination tree so macOS's `/tmp` alias is not a
+            // false positive.
+            Ok(_) if first_existing => first_existing = false,
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(MigrationError::Read {
+                    path: candidate.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        current = candidate.parent();
     }
     Ok(())
 }
@@ -1788,6 +1898,37 @@ fn legacy_runtime_workspace_root(source: &SourceContext) -> Result<PathBuf, Migr
             detail: format!("workspace.root: {error}"),
         })?;
     Ok(resolve_repo_path(&source.target_repo, &configured))
+}
+
+fn recorded_legacy_runtime_workspace_root(
+    marker: &ActivationMarker,
+) -> Result<PathBuf, MigrationError> {
+    if let Some(root) = marker.legacy_workspace_root.as_ref() {
+        return Ok(root.clone());
+    }
+    let workflow_source =
+        fs::read_to_string(&marker.workflow_path).map_err(|source| MigrationError::Read {
+            path: marker.workflow_path.clone(),
+            source,
+        })?;
+    let workflow = WorkflowDefinition::parse(&workflow_source).map_err(|source| {
+        MigrationError::ParseWorkflow {
+            path: marker.workflow_path.clone(),
+            source,
+        }
+    })?;
+    let configured = workflow
+        .front_matter
+        .workspace
+        .root
+        .as_deref()
+        .unwrap_or(DEFAULT_WORKSPACE_ROOT);
+    let configured =
+        super::expand_env_tokens(configured).map_err(|error| MigrationError::ResolveConfig {
+            path: marker.workflow_path.clone(),
+            detail: format!("workspace.root: {error}"),
+        })?;
+    Ok(resolve_repo_path(&marker.target_repo(), &configured))
 }
 
 fn ensure_legacy_runtime_quiescent(workspace_root: &Path) -> Result<(), MigrationError> {
@@ -2486,6 +2627,8 @@ fn write_file_with_mode(
 }
 
 fn restore_file(backup: &Path, target: &Path, mode: Option<u32>) -> Result<(), MigrationError> {
+    reject_symlink_ancestors(backup)?;
+    reject_symlink_ancestors(target)?;
     let contents = fs::read(backup).map_err(|source| MigrationError::Read {
         path: backup.to_path_buf(),
         source,
@@ -3024,6 +3167,9 @@ mod tests {
             memory_catalog_root: Some(catalog.clone()),
             memory_catalog_generation: Some(expected),
             memory_catalog_copy_in_progress: false,
+            legacy_workspace_root: None,
+            backup_config_generation: None,
+            backup_workflow_generation: None,
         };
 
         assert!(matches!(
@@ -3059,6 +3205,9 @@ mod tests {
                 memory_catalog_generation(&catalog).expect("empty catalog should hash"),
             ),
             memory_catalog_copy_in_progress: true,
+            legacy_workspace_root: None,
+            backup_config_generation: None,
+            backup_workflow_generation: None,
         };
 
         resume_in_progress_catalog_copy(&marker_path, marker)
@@ -3107,6 +3256,9 @@ mod tests {
             memory_catalog_root: None,
             memory_catalog_generation: None,
             memory_catalog_copy_in_progress: true,
+            legacy_workspace_root: None,
+            backup_config_generation: None,
+            backup_workflow_generation: None,
         };
 
         fs::write(&config, "operator edit\n").expect("operator edit should be written");
@@ -3445,6 +3597,57 @@ mod tests {
             fs::read_to_string(&outside).expect("outside file should remain readable"),
             "keep me"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_symlinked_backup_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let real = root.path().join("real-backups");
+        let alias = root.path().join("backups");
+        fs::create_dir(&real).expect("real backup directory should exist");
+        symlink(&real, &alias).expect("backup ancestor symlink should be created");
+
+        let error = reject_symlink_ancestors(&alias.join("generation/config.yaml"))
+            .expect_err("backup symlink ancestors must be rejected");
+        assert!(matches!(error, MigrationError::SymlinkInput { path } if path == alias));
+    }
+
+    #[test]
+    fn rollback_rejects_modified_backup_generations() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let backup_dir = root.path().join("backups");
+        fs::create_dir_all(&backup_dir).expect("backup directory should exist");
+        let config = backup_dir.join("config.yaml");
+        let workflow = backup_dir.join("WORKFLOW.md");
+        fs::write(&config, "legacy config\n").expect("config backup should exist");
+        fs::write(&workflow, "legacy workflow\n").expect("workflow backup should exist");
+        let marker = ActivationMarker {
+            source_config: root.path().join("legacy.yaml"),
+            config_path: root.path().join("config.yaml"),
+            workflow_path: root.path().join("WORKFLOW.md"),
+            backup_dir,
+            generation: "sha256:central".to_owned(),
+            workflow_generation: "sha256:workflow".to_owned(),
+            had_config: true,
+            had_workflow: true,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: None,
+            memory_catalog_generation: None,
+            memory_catalog_copy_in_progress: false,
+            legacy_workspace_root: None,
+            backup_config_generation: Some(sha256(b"legacy config\n")),
+            backup_workflow_generation: Some(sha256(b"legacy workflow\n")),
+        };
+
+        fs::write(&config, "tampered\n").expect("tampered backup should be written");
+        assert!(matches!(
+            verify_backup_generations(&marker),
+            Err(MigrationError::BackupChanged { path }) if path == config
+        ));
     }
 
     #[test]

@@ -1376,6 +1376,8 @@ where
                         .get(&issue_id)
                         .is_some_and(retry_exhausted_release)
                 {
+                    self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
+                        .await;
                     self.refresh_execution_issue(&issue_id, normalized)?;
                     continue;
                 }
