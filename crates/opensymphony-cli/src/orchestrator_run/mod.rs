@@ -398,7 +398,21 @@ fn acquire_root_ownership_serialization_at(
                 .create_new(true)
                 .open(path)
             {
-                Ok(file) => file,
+                Ok(file) => {
+                    // The coordination file lives in the shared host temp
+                    // directory. Defeat a restrictive creator umask before
+                    // publishing the descriptor so later users can open the
+                    // same advisory-lock file.
+                    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o666)).map_err(
+                        |error| RunCommandError::RootOwnership {
+                            detail: format!(
+                                "failed to make {} cross-user-readable: {error}",
+                                path.display()
+                            ),
+                        },
+                    )?;
+                    file
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => OpenOptions::new()
                     .read(true)
                     .open(path)
@@ -642,9 +656,10 @@ fn find_live_registered_root_marker(
             .lines()
             .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())
         else {
-            return Err(RunCommandError::RootOwnership {
-                detail: format!("ownership registry marker {} has no PID", marker.display()),
-            });
+            // The registry is shared through a sticky host directory. Treat
+            // unrelated or truncated entries as untrusted noise rather than
+            // allowing them to block every runtime-root claim.
+            continue;
         };
         let start = contents
             .lines()
@@ -657,9 +672,7 @@ fn find_live_registered_root_marker(
             .lines()
             .find_map(|line| line.strip_prefix("root=").map(PathBuf::from))
         else {
-            return Err(RunCommandError::RootOwnership {
-                detail: format!("ownership registry marker {} has no root", marker.display()),
-            });
+            continue;
         };
         if paths_overlap(root, &owned_root) {
             return Ok(Some((marker, owned_root)));
@@ -1867,6 +1880,41 @@ mod tests {
             .expect("incomplete registry staging files must be ignored");
         drop(ownership);
         fs::remove_file(staging).expect("staging marker should be removed");
+    }
+
+    #[test]
+    fn runtime_root_ownership_ignores_malformed_registry_entries() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let registry = root_ownership_registry_path();
+        fs::create_dir_all(&registry).expect("ownership registry should exist");
+        let marker = registry.join(format!("root-{}-malformed.active", std::process::id()));
+        fs::write(&marker, "not a runtime marker\n").expect("malformed marker should be written");
+
+        let ownership = acquire_root_ownership([root.path().join("workspace")])
+            .expect("malformed registry entries must be ignored");
+        drop(ownership);
+        fs::remove_file(marker).expect("malformed marker should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serialization_lock_is_cross_user_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("serialization root");
+        let path = root.path().join("serialization.lock");
+        let owner = acquire_root_ownership_serialization_at(&path)
+            .expect("advisory lock should be acquired");
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("lock metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o666
+        );
+        drop(owner);
+        fs::remove_file(path).expect("test lock should be removed");
     }
 
     #[tokio::test]

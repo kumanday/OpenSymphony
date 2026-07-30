@@ -1591,17 +1591,35 @@ fn openhands_front_matter_has_literal_secret(front_matter: &OpenHandsFrontMatter
 fn openhands_yaml_value_has_literal_secret(value: &serde_yaml::Value) -> bool {
     if let Some(mapping) = value.as_mapping() {
         return mapping.iter().any(|(key, value)| {
+            let command_secret = key.as_str().is_some_and(|key| {
+                normalize_secret_field_name(key) == "command"
+                    && openhands_command_has_literal_secret(value)
+            });
             let secret_name = key.as_str().is_some_and(openhands_secret_field_name)
                 && match value.as_str() {
                     Some(value) => !is_central_credential_reference(value),
                     None => !value.is_null(),
                 };
-            secret_name || openhands_yaml_value_has_literal_secret(value)
+            command_secret || secret_name || openhands_yaml_value_has_literal_secret(value)
         });
     }
     value
         .as_sequence()
         .is_some_and(|values| values.iter().any(openhands_yaml_value_has_literal_secret))
+}
+
+fn openhands_command_has_literal_secret(value: &serde_yaml::Value) -> bool {
+    let Some(values) = value.as_sequence() else {
+        return false;
+    };
+    let Some(values) = values
+        .iter()
+        .map(serde_yaml::Value::as_str)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return true;
+    };
+    crate::opensymphony_cli::migration::hook_has_literal_secret(&values.join(" "))
 }
 
 fn validate_openhands_env_references(
@@ -2577,6 +2595,25 @@ scheduler:
 
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("literal OpenHands credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_literal_openhands_local_server_command_secret() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nopenhands:\n  front_matter:\n    local_server:\n      command: [curl, --oauth2-bearer, literal-secret]\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("literal OpenHands command credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
     }

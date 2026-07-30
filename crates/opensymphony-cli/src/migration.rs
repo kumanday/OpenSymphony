@@ -1060,7 +1060,6 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
                 .filter(|(_, marker)| marker.memory_catalog_copy_in_progress)
                 .map(|(_, marker)| recorded_legacy_runtime_workspace_root(&marker))
                 .transpose()?
-                .filter(|root| root.exists())
                 .map(|root| acquire_legacy_runtime_ownership(&root))
                 .transpose()?;
             resume_partial_apply(&active)?
@@ -2867,6 +2866,12 @@ fn workflow_has_literal_secret(front_matter: &WorkflowFrontMatter) -> bool {
         .as_deref()
         .is_some_and(|value| credential_variable(value).is_none())
         || openhands_environment_has_literal_secret(&front_matter.openhands.local_server.env)
+        || front_matter
+            .openhands
+            .local_server
+            .command
+            .as_deref()
+            .is_some_and(|command| hook_has_literal_secret(&command.join(" ")))
         || openhands_credential_selector_is_literal(front_matter)
         || [
             front_matter.hooks.after_create.as_deref(),
@@ -3609,6 +3614,16 @@ mod tests {
             generate_central_config(&source),
             Err(MigrationError::LiteralSecret)
         ));
+    }
+
+    #[test]
+    fn migration_rejects_literal_openhands_local_server_command_secret() {
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nopenhands:\n  local_server:\n    command: [curl, --oauth2-bearer, literal-secret]\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+
+        assert!(workflow_has_literal_secret(&workflow.front_matter));
     }
 
     #[test]
