@@ -608,7 +608,7 @@ pub(crate) fn root_lock_owner_alive(marker: &Path) -> bool {
     )
 }
 
-fn process_owner_alive(pid: i32, expected_start: Option<&str>) -> bool {
+pub(crate) fn process_owner_alive(pid: i32, expected_start: Option<&str>) -> bool {
     let alive = {
         #[cfg(unix)]
         {
@@ -639,7 +639,7 @@ fn process_owner_alive(pid: i32, expected_start: Option<&str>) -> bool {
         })
 }
 
-fn process_marker_fields() -> String {
+pub(crate) fn process_marker_fields() -> String {
     let mut fields = format!("pid={}\n", std::process::id());
     if let Some(start) = process_incarnation(std::process::id()) {
         fields.push_str("start=");
@@ -675,13 +675,58 @@ fn process_incarnation(pid: u32) -> Option<String> {
         let start = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         (!start.is_empty()).then(|| format!("ps:{start}"))
     }
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+
+        type Handle = *mut c_void;
+        #[repr(C)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+            fn GetProcessTimes(
+                process: Handle,
+                creation: *mut FileTime,
+                exit: *mut FileTime,
+                kernel: *mut FileTime,
+                user: *mut FileTime,
+            ) -> i32;
+            fn CloseHandle(object: Handle) -> i32;
+        }
+
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation = FileTime { low: 0, high: 0 };
+        let mut exit = FileTime { low: 0, high: 0 };
+        let mut kernel = FileTime { low: 0, high: 0 };
+        let mut user = FileTime { low: 0, high: 0 };
+        let result =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        if result == 0 {
+            return None;
+        }
+        let ticks = (u64::from(creation.high) << 32) | u64::from(creation.low);
+        Some(format!("windows:{ticks}"))
+    }
     #[cfg(not(any(
         target_os = "linux",
         target_os = "macos",
         target_os = "ios",
         target_os = "freebsd",
         target_os = "openbsd",
-        target_os = "netbsd"
+        target_os = "netbsd",
+        target_os = "windows"
     )))]
     {
         let _ = pid;

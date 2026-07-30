@@ -26,9 +26,6 @@ use super::orchestrator_run::config::{
     validate_central_config_text,
 };
 
-#[cfg(unix)]
-use rustix::process::{Pid, test_kill_process};
-
 #[derive(Debug, Args)]
 pub struct MigrationArgs {
     #[command(subcommand)]
@@ -97,6 +94,8 @@ enum MigrationError {
     DestinationConflict { path: PathBuf },
     #[error("activated migration file changed after apply: {path}")]
     ActivatedFileChanged { path: PathBuf },
+    #[error("legacy migration source changed during apply: {path}")]
+    LegacySourceChanged { path: PathBuf },
     #[error("migration backup changed after apply: {path}")]
     BackupChanged { path: PathBuf },
     #[error("activation marker does not record a backup generation for {path}")]
@@ -233,6 +232,7 @@ impl ActivationMarker {
 struct SourceContext {
     source_config: PathBuf,
     config_source: String,
+    source_config_present: bool,
     target_repo: PathBuf,
     workflow_path: PathBuf,
     workflow_source: String,
@@ -289,6 +289,28 @@ async fn active_target_central_config(
         .unwrap_or_else(|| repo.join("config.yaml"));
     let target_config = migration_target_config(paths, &cwd, &source_config);
     let activation = load_activation_marker(&target_config)?;
+    let marker_source = if activation.is_some() && target_config != source_config {
+        Some(load_source(paths)?)
+    } else {
+        None
+    };
+    if let Some((_, marker)) = activation.as_ref() {
+        let target_repo = marker_source
+            .as_ref()
+            .map(|source| source.target_repo.as_path())
+            .unwrap_or(repo.as_path());
+        let expected_memory_catalog_root =
+            central_memory_catalog_root_for_marker(&target_config, marker).await?;
+        validate_activation_marker(
+            &target_config,
+            marker,
+            target_repo,
+            marker_source
+                .as_ref()
+                .map(|source| source.source_config.as_path()),
+            expected_memory_catalog_root.as_deref(),
+        )?;
+    }
     if let Some((activation_marker, marker)) = activation.as_ref()
         && marker.memory_catalog_copy_in_progress
     {
@@ -321,7 +343,9 @@ async fn active_target_central_config(
     if target_config != source_config
         && let Some((_, marker)) = marker.as_ref()
     {
-        let source = load_source(paths)?;
+        let source = marker_source
+            .as_ref()
+            .expect("active marker source is loaded");
         let source_matches = marker.config_path == target_config
             && marker.workflow_path == source.workflow_path
             && (marker.source_config.as_os_str().is_empty()
@@ -349,6 +373,151 @@ async fn active_target_central_config(
         generation: central.generation,
         activation_marker,
     }))
+}
+
+async fn central_memory_catalog_root_for_marker(
+    target_config: &Path,
+    marker: &ActivationMarker,
+) -> Result<Option<PathBuf>, MigrationError> {
+    let staged_config = stage_path(&marker.config_path, &marker.generation);
+    let config_path = if target_config.is_file() {
+        target_config.to_path_buf()
+    } else if staged_config.is_file() {
+        staged_config
+    } else {
+        return Ok(None);
+    };
+    let raw = fs::read_to_string(&config_path).map_err(|source| MigrationError::Read {
+        path: config_path.clone(),
+        source,
+    })?;
+    if !looks_like_central_config(&raw) {
+        return Ok(None);
+    }
+    Ok(load_central_config(&config_path).await?.memory_catalog_root)
+}
+
+fn validate_activation_marker(
+    target_config: &Path,
+    marker: &ActivationMarker,
+    target_repo: &Path,
+    expected_source_config: Option<&Path>,
+    expected_memory_catalog_root: Option<&Path>,
+) -> Result<(), MigrationError> {
+    let target_config = canonicalize_destination(target_config);
+    if canonicalize_destination(&marker.config_path) != target_config {
+        return Err(MigrationError::DestinationConflict {
+            path: marker.config_path.clone(),
+        });
+    }
+
+    let target_repo = canonicalize_destination(target_repo);
+    let expected_workflow = target_repo.join("WORKFLOW.md");
+    if canonicalize_destination(&marker.workflow_path)
+        != canonicalize_destination(&expected_workflow)
+    {
+        return Err(MigrationError::DestinationConflict {
+            path: marker.workflow_path.clone(),
+        });
+    }
+
+    if let Some(expected_source_config) = expected_source_config {
+        if canonicalize_destination(&marker.source_config)
+            != canonicalize_destination(expected_source_config)
+        {
+            return Err(MigrationError::DestinationConflict {
+                path: marker.source_config.clone(),
+            });
+        }
+    } else if !marker.source_config.as_os_str().is_empty()
+        && marker
+            .source_config
+            .parent()
+            .is_none_or(|parent| canonicalize_destination(parent) != target_repo)
+    {
+        return Err(MigrationError::DestinationConflict {
+            path: marker.source_config.clone(),
+        });
+    }
+
+    let Some(generation) = marker.generation.strip_prefix("sha256:") else {
+        return Err(MigrationError::DestinationConflict {
+            path: marker.config_path.clone(),
+        });
+    };
+    if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MigrationError::DestinationConflict {
+            path: marker.config_path.clone(),
+        });
+    }
+    let expected_backup = migration_root(&target_config)
+        .join("backups")
+        .join(generation);
+    if normalize_path(&marker.backup_dir) != normalize_path(&expected_backup) {
+        return Err(MigrationError::DestinationConflict {
+            path: marker.backup_dir.clone(),
+        });
+    }
+    reject_symlink_ancestors(&marker.backup_dir)?;
+
+    if let Some(expected_memory_catalog_root) = expected_memory_catalog_root {
+        if marker
+            .memory_catalog_root
+            .as_deref()
+            .map(canonicalize_destination)
+            != Some(canonicalize_destination(expected_memory_catalog_root))
+        {
+            return Err(MigrationError::DestinationConflict {
+                path: marker
+                    .memory_catalog_root
+                    .clone()
+                    .unwrap_or_else(|| expected_memory_catalog_root.to_path_buf()),
+            });
+        }
+    } else if let Some(memory_catalog_root) = marker.memory_catalog_root.as_ref() {
+        return Err(MigrationError::DestinationConflict {
+            path: memory_catalog_root.clone(),
+        });
+    }
+
+    if let Some(workspace_root) = marker.legacy_workspace_root.as_deref() {
+        let expected_workspace_root = legacy_workspace_root_from_backup(marker, &target_repo)?;
+        if canonicalize_destination(workspace_root)
+            != canonicalize_destination(&expected_workspace_root)
+        {
+            return Err(MigrationError::DestinationConflict {
+                path: workspace_root.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn legacy_workspace_root_from_backup(
+    marker: &ActivationMarker,
+    target_repo: &Path,
+) -> Result<PathBuf, MigrationError> {
+    let configured = if marker.had_workflow {
+        let path = marker.backup_dir.join("WORKFLOW.md");
+        let source = fs::read_to_string(&path).map_err(|source| MigrationError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        WorkflowDefinition::parse(&source)
+            .map_err(|source| MigrationError::ParseWorkflow { path, source })?
+            .front_matter
+            .workspace
+            .root
+            .unwrap_or_else(|| DEFAULT_WORKSPACE_ROOT.to_owned())
+    } else {
+        DEFAULT_WORKSPACE_ROOT.to_owned()
+    };
+    let configured =
+        super::expand_env_tokens(&configured).map_err(|error| MigrationError::ResolveConfig {
+            path: marker.workflow_path.clone(),
+            detail: format!("workspace.root: {error}"),
+        })?;
+    Ok(resolve_repo_path(target_repo, &configured))
 }
 
 fn active_report(
@@ -416,7 +585,8 @@ impl StrictRunMarkerGuard {
                 .write(true)
                 .create_new(true)
                 .open(&temporary)?;
-            writeln!(file, "pid={}\ngeneration={generation}", std::process::id())?;
+            let owner = super::orchestrator_run::process_marker_fields();
+            writeln!(file, "{owner}generation={generation}")?;
             replace_staged_file(&temporary, &self.path)
                 .map_err(|error| std::io::Error::other(error.to_string()))
         })();
@@ -494,7 +664,10 @@ pub(crate) fn claim_strict_run_marker(
         }
         match super::orchestrator_run::publish_initialized_marker(
             &marker,
-            &format!("pid={}\ngeneration={generation}\n", std::process::id()),
+            &format!(
+                "{}generation={generation}\n",
+                super::orchestrator_run::process_marker_fields()
+            ),
         ) {
             Ok(_) => {
                 return Ok(StrictRunMarkerGuard { path: marker });
@@ -529,35 +702,12 @@ fn strict_run_marker_owner_alive(marker: &Path) -> bool {
         return true;
     };
 
-    #[cfg(unix)]
-    {
-        let Some(pid) = Pid::from_raw(pid) else {
-            return true;
-        };
-        match test_kill_process(pid) {
-            Ok(()) => true,
-            Err(error) if error == rustix::io::Errno::SRCH => false,
-            Err(_) => true,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let Ok(output) = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-        else {
-            return true;
-        };
-        if !output.status.success() {
-            return true;
-        }
-        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-            line.split_whitespace()
-                .nth(1)
-                .and_then(|value| value.parse::<u32>().ok())
-                == Some(pid as u32)
-        })
-    }
+    super::orchestrator_run::process_owner_alive(
+        pid,
+        contents
+            .lines()
+            .find_map(|line| line.strip_prefix("start=").map(str::trim)),
+    )
 }
 
 fn migration_marker_path(target_config: &Path) -> PathBuf {
@@ -587,10 +737,14 @@ fn load_activation_marker(
 ) -> Result<Option<(PathBuf, ActivationMarker)>, MigrationError> {
     let target_path = migration_marker_path(target_config);
     if target_path.is_file() {
-        return Ok(Some((
-            target_path.clone(),
-            parse_activation_marker(&target_path)?,
-        )));
+        let marker = parse_activation_marker(&target_path)?;
+        if canonicalize_destination(&marker.config_path) != canonicalize_destination(target_config)
+        {
+            return Err(MigrationError::DestinationConflict {
+                path: marker.config_path.clone(),
+            });
+        }
+        return Ok(Some((target_path.clone(), marker)));
     }
 
     // Keep reading the pre-namespace marker for one-way compatibility, but never
@@ -600,7 +754,7 @@ fn load_activation_marker(
         return Ok(None);
     }
     let marker = parse_activation_marker(&legacy_path)?;
-    if marker.config_path == target_config {
+    if canonicalize_destination(&marker.config_path) == canonicalize_destination(target_config) {
         Ok(Some((legacy_path, marker)))
     } else {
         Ok(None)
@@ -1069,6 +1223,20 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let marker_raw = serde_yaml::to_string(&marker).map_err(MigrationError::SerializeConfig)?;
     write_file(&marker_stage, marker_raw.as_bytes())?;
     replace_staged_file(&marker_stage, &marker_path)?;
+    if let Err(error) = verify_legacy_source_generations(&source) {
+        remove_staged_files(&[&central_stage, &workflow_stage, &marker_stage]);
+        match fs::remove_file(&marker_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source_error) => {
+                return Err(MigrationError::Write {
+                    path: marker_path,
+                    source: source_error,
+                });
+            }
+        }
+        return Err(error);
+    }
     if let Err(error) = replace_staged_file(&central_stage, &target_config) {
         return recover_failed_apply(
             &marker_path,
@@ -1151,6 +1319,19 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
             path: migration_marker_path(&config_path),
         });
     };
+    let central = if config_path.is_file() {
+        load_central_config(&config_path).await?
+    } else {
+        load_central_config(&stage_path(&marker.config_path, &marker.generation)).await?
+    };
+    let target_repo = central.require_legacy_target_repo()?;
+    validate_activation_marker(
+        &config_path,
+        &marker,
+        &target_repo,
+        None,
+        central.memory_catalog_root.as_deref(),
+    )?;
     let active_run_marker = strict_run_marker_path(&config_path);
     let _strict_run_marker = match claim_strict_run_marker(&config_path, "rollback") {
         Ok(marker) => marker,
@@ -1411,7 +1592,8 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
         .map(|path| absolute_path(&cwd, path))
         .unwrap_or_else(|| repo.join("config.yaml"));
     reject_symlink_input(&source_config)?;
-    let config_source = if source_config.is_file() {
+    let source_config_present = source_config.is_file();
+    let config_source = if source_config_present {
         fs::read_to_string(&source_config).map_err(|source| MigrationError::Read {
             path: source_config.clone(),
             source,
@@ -1472,6 +1654,7 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
     Ok(SourceContext {
         source_config,
         config_source,
+        source_config_present,
         target_repo,
         workflow_path,
         workflow_source,
@@ -1479,6 +1662,45 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
         config,
         remote,
     })
+}
+
+fn verify_legacy_source_generations(source: &SourceContext) -> Result<(), MigrationError> {
+    let current_config = match fs::read(&source.source_config) {
+        Ok(contents) if source.source_config_present => contents,
+        Ok(_) => {
+            return Err(MigrationError::LegacySourceChanged {
+                path: source.source_config.clone(),
+            });
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && !source.source_config_present =>
+        {
+            Vec::new()
+        }
+        Err(_) => {
+            return Err(MigrationError::LegacySourceChanged {
+                path: source.source_config.clone(),
+            });
+        }
+    };
+    if source.source_config_present
+        && sha256(&current_config) != sha256(source.config_source.as_bytes())
+    {
+        return Err(MigrationError::LegacySourceChanged {
+            path: source.source_config.clone(),
+        });
+    }
+
+    let current_workflow =
+        fs::read(&source.workflow_path).map_err(|_| MigrationError::LegacySourceChanged {
+            path: source.workflow_path.clone(),
+        })?;
+    if sha256(&current_workflow) != sha256(source.workflow_source.as_bytes()) {
+        return Err(MigrationError::LegacySourceChanged {
+            path: source.workflow_path.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn build_report(
@@ -2842,6 +3064,7 @@ mod tests {
         let source = SourceContext {
             source_config: PathBuf::from("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo: PathBuf::from("repo"),
             workflow_path: PathBuf::from("repo/WORKFLOW.md"),
             workflow_source: String::new(),
@@ -2871,6 +3094,7 @@ mod tests {
         let source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo: target_repo.clone(),
             workflow_path: target_repo.join("WORKFLOW.md"),
             workflow_source: String::new(),
@@ -2909,6 +3133,7 @@ mod tests {
         let source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo: target_repo.clone(),
             workflow_path: target_repo.join("WORKFLOW.md"),
             workflow_source: String::new(),
@@ -2938,6 +3163,7 @@ mod tests {
         let source = SourceContext {
             source_config: PathBuf::from("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo: PathBuf::from("repo"),
             workflow_path: PathBuf::from("repo/WORKFLOW.md"),
             workflow_source: workflow_source.to_string(),
@@ -3006,6 +3232,25 @@ mod tests {
         assert!(marker.is_file());
         drop(guard);
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn strict_run_markers_reject_a_reused_pid_with_a_different_incarnation() {
+        let root = tempfile::tempdir().expect("marker root should exist");
+        let config = root.path().join("config.yaml");
+        let marker = strict_run_marker_path(&config);
+        fs::create_dir_all(marker.parent().expect("marker parent should exist"))
+            .expect("marker parent should be created");
+        fs::write(
+            &marker,
+            format!(
+                "pid={}\nstart=incarnation-that-is-not-current\n",
+                std::process::id()
+            ),
+        )
+        .expect("marker should be written");
+
+        assert!(!strict_run_marker_owner_alive(&marker));
     }
 
     #[test]
@@ -3481,6 +3726,7 @@ mod tests {
         let mut source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo,
             workflow_path,
             workflow_source: String::new(),
@@ -3520,6 +3766,7 @@ mod tests {
         let mut source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo: target_repo.clone(),
             workflow_path: target_repo.join("WORKFLOW.md"),
             workflow_source: String::new(),
@@ -3651,6 +3898,75 @@ mod tests {
     }
 
     #[test]
+    fn activation_marker_paths_are_bound_to_the_selected_config_and_repository() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let target_config = root.path().join("central/config.yaml");
+        let generation = sha256(b"central generation");
+        let backup_dir = migration_root(&target_config)
+            .join("backups")
+            .join(generation.trim_start_matches("sha256:"));
+        fs::create_dir_all(&backup_dir).expect("backup directory should exist");
+        let marker = ActivationMarker {
+            source_config: repo.join("config.yaml"),
+            config_path: root.path().join("other/config.yaml"),
+            workflow_path: repo.join("WORKFLOW.md"),
+            backup_dir,
+            generation,
+            workflow_generation: String::new(),
+            had_config: false,
+            had_workflow: false,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: None,
+            memory_catalog_generation: None,
+            memory_catalog_copy_in_progress: false,
+            legacy_workspace_root: None,
+            backup_config_generation: None,
+            backup_workflow_generation: None,
+        };
+
+        assert!(matches!(
+            validate_activation_marker(&target_config, &marker, &repo, None, None),
+            Err(MigrationError::DestinationConflict { path }) if path == marker.config_path
+        ));
+    }
+
+    #[test]
+    fn migration_rejects_edited_legacy_sources_before_promotion() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let config_path = root.path().join("config.yaml");
+        let workflow_path = root.path().join("WORKFLOW.md");
+        let workflow_source =
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n---\nlegacy\n";
+        fs::write(&config_path, "legacy config\n").expect("legacy config should exist");
+        fs::write(&workflow_path, workflow_source).expect("legacy workflow should exist");
+        let workflow = WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+        let source = SourceContext {
+            source_config: config_path.clone(),
+            config_source: "legacy config\n".to_owned(),
+            source_config_present: true,
+            target_repo: root.path().to_path_buf(),
+            workflow_path: workflow_path.clone(),
+            workflow_source: workflow_source.to_owned(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+        fs::write(&workflow_path, "operator edit\n").expect("operator edit should be written");
+
+        assert!(matches!(
+            verify_legacy_source_generations(&source),
+            Err(MigrationError::LegacySourceChanged { path }) if path == workflow_path
+        ));
+    }
+
+    #[test]
     fn migration_rejects_nonempty_repo_relative_workspace_root() {
         let root = tempfile::tempdir().expect("migration root should exist");
         let target_repo = root.path().join("repo");
@@ -3666,6 +3982,7 @@ mod tests {
         let source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo,
             workflow_path,
             workflow_source: String::new(),
@@ -3699,6 +4016,7 @@ mod tests {
         let source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             target_repo: target_repo.clone(),
             workflow_path: target_repo.join("WORKFLOW.md"),
             workflow_source: String::new(),
@@ -3727,6 +4045,7 @@ mod tests {
         let source = SourceContext {
             source_config: target_repo.join("config.yaml"),
             config_source: String::new(),
+            source_config_present: false,
             workflow_path: target_repo.join("WORKFLOW.md"),
             workflow_source: String::new(),
             target_repo,

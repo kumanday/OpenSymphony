@@ -34,7 +34,7 @@ pub fn redact_runtime_diagnostic(input: &str) -> String {
         "token",
     ];
 
-    let mut redacted = redact_authorization_headers(input)
+    let mut redacted = redact_standalone_bearer(&redact_authorization_headers(input))
         .split_whitespace()
         .map(redact_diagnostic_token)
         .collect::<Vec<_>>()
@@ -153,6 +153,55 @@ fn authorization_value_replacement(value: &str) -> String {
     } else {
         "[redacted]".to_owned()
     }
+}
+
+fn redact_standalone_bearer(input: &str) -> String {
+    let mut redacted = input.to_owned();
+    let mut search_from = 0;
+    loop {
+        let lower = redacted.to_ascii_lowercase();
+        let Some(relative_start) = lower
+            .get(search_from..)
+            .and_then(|text| text.find("bearer"))
+        else {
+            return redacted;
+        };
+        let scheme_start = search_from + relative_start;
+        let scheme_end = scheme_start + "bearer".len();
+        let bytes = redacted.as_bytes();
+        if (scheme_start > 0 && is_bearer_word_byte(bytes[scheme_start - 1]))
+            || bytes
+                .get(scheme_end)
+                .is_none_or(|character| !character.is_ascii_whitespace())
+        {
+            search_from = scheme_end;
+            continue;
+        }
+        let mut token_start = scheme_end;
+        while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
+            token_start += 1;
+        }
+        let mut token_end = token_start;
+        while token_end < bytes.len()
+            && !bytes[token_end].is_ascii_whitespace()
+            && !matches!(
+                bytes[token_end],
+                b',' | b';' | b'}' | b']' | b'&' | b'"' | b'\''
+            )
+        {
+            token_end += 1;
+        }
+        if token_start == token_end {
+            search_from = scheme_end;
+            continue;
+        }
+        redacted.replace_range(token_start..token_end, "[redacted]");
+        search_from = token_start + "[redacted]".len();
+    }
+}
+
+fn is_bearer_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
 }
 
 fn redact_diagnostic_token(token: &str) -> String {
@@ -1036,6 +1085,17 @@ mod tests {
         assert!(!value.contains("first"));
         assert!(!value.contains("second"));
         assert!(!value.contains("third"));
+    }
+
+    #[test]
+    fn runtime_diagnostics_redact_standalone_bearer_values() {
+        let value = redact_runtime_diagnostic(
+            "hook failed Bearer oauth-token-canary and bearer second-token",
+        );
+
+        assert!(!value.contains("oauth-token-canary"));
+        assert!(!value.contains("second-token"));
+        assert!(value.contains("Bearer [redacted]"));
     }
 
     #[test]
