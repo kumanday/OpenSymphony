@@ -1323,6 +1323,80 @@ impl IssueSessionRunner {
         .await
     }
 
+    /// Reattach to an in-flight conversation after scheduler recovery and
+    /// observe it until the runtime reports a terminal outcome. Recovery must
+    /// not send a duplicate prompt; the existing conversation is already the
+    /// source of truth for the active turn.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_with_observer<O>(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        observer: &mut O,
+    ) -> Result<IssueSessionResult, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
+        let observed_run = observed_run_for_turn(run);
+        let raw_manifest = workspace_manager
+            .read_text_artifact(workspace, &workspace.conversation_manifest_path())
+            .await?
+            .ok_or_else(|| {
+                IssueSessionError::RehydrationFailed(
+                    "recovered run has no conversation manifest to reattach".to_string(),
+                )
+            })?;
+        let manifest =
+            serde_json::from_str::<IssueConversationManifest>(&raw_manifest).map_err(|error| {
+                IssueSessionError::RehydrationFailed(format!(
+                    "recovered conversation manifest is invalid: {error}"
+                ))
+            })?;
+        if manifest.issue_id != issue.id
+            || manifest.identifier != issue.identifier
+            || manifest.reuse_policy != self.config.reuse_policy.as_str()
+            || manifest.runtime_contract_version.as_deref() != Some(RUNTIME_CONTRACT_VERSION)
+        {
+            return Err(IssueSessionError::RehydrationFailed(
+                "recovered conversation manifest is incompatible with the active issue or runtime"
+                    .to_string(),
+            ));
+        }
+        let conversation_id = parse_uuid(manifest.conversation_id.as_str())
+            .map_err(IssueSessionError::RehydrationFailed)?;
+        let active_session = match self
+            .try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
+            .await?
+        {
+            ReuseSession::Active(session) => *session,
+            ReuseSession::Reset(reason) => {
+                return Err(IssueSessionError::RehydrationFailed(reason));
+            }
+        };
+
+        observer.on_launch(
+            &active_session
+                .manifest
+                .to_domain_metadata(RuntimeStreamState::Ready),
+        );
+        let mut active_session = active_session;
+        let outcome = self
+            .await_terminal_outcome(&mut active_session, &HashSet::new(), observer)
+            .await;
+        self.finalize_active_session(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &observed_run,
+            active_session,
+            outcome,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn run_with_observer<O>(
         &self,

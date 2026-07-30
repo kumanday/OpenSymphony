@@ -1293,7 +1293,7 @@ impl RuntimeWorkerBackend {
         }
     }
 
-    fn spawn_worker_task(&mut self, request: WorkerStartRequest) -> PendingLaunch {
+    fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
         let mut runner = IssueSessionRunner::with_environment(
             self.client.clone(),
             self.runner_config.clone(),
@@ -1313,6 +1313,7 @@ impl RuntimeWorkerBackend {
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
         let route = request.route.clone();
+        let recovered = recovered && route.harness_kind == OPENHANDS_AGENT_SERVER_KIND;
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let worker_env = self.worker_env.clone();
@@ -1413,17 +1414,30 @@ impl RuntimeWorkerBackend {
                 launch_tx,
                 updates_tx: updates_tx.clone(),
             };
-            let result = runner
-                .run_with_observer(
-                    &workspace_manager,
-                    &ensured.handle,
-                    &mut run_manifest,
-                    &issue,
-                    &run,
-                    &workflow,
-                    &mut observer,
-                )
-                .await;
+            let result = if recovered {
+                runner
+                    .recover_with_observer(
+                        &workspace_manager,
+                        &ensured.handle,
+                        &mut run_manifest,
+                        &issue,
+                        &run,
+                        &mut observer,
+                    )
+                    .await
+            } else {
+                runner
+                    .run_with_observer(
+                        &workspace_manager,
+                        &ensured.handle,
+                        &mut run_manifest,
+                        &issue,
+                        &run,
+                        &workflow,
+                        &mut observer,
+                    )
+                    .await
+            };
 
             if observer.launch_tx.is_some() {
                 report_launch_failure(
@@ -3300,7 +3314,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         &mut self,
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error> {
-        let pending = self.spawn_worker_task(request);
+        let pending = self.spawn_worker_task(request, false);
         let worker_id = pending.worker_id.clone();
         let route = pending.route.clone();
         let launch_timeout = self.launch_timeout_for_route(&route);
@@ -3319,7 +3333,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
     ) -> Vec<Result<WorkerLaunch, Self::Error>> {
         let pending = requests
             .into_iter()
-            .map(|request| self.spawn_worker_task(request))
+            .map(|request| self.spawn_worker_task(request, false))
             .collect::<Vec<_>>();
         let ordered_launches = pending
             .iter()
@@ -3375,6 +3389,23 @@ impl WorkerBackend for RuntimeWorkerBackend {
             );
         }
         launches
+    }
+
+    async fn recover_worker(
+        &mut self,
+        request: WorkerStartRequest,
+    ) -> Result<WorkerLaunch, Self::Error> {
+        let pending = self.spawn_worker_task(request, true);
+        let worker_id = pending.worker_id.clone();
+        let route = pending.route.clone();
+        let launch_timeout = self.launch_timeout_for_route(&route);
+        self.resolve_launch_result(
+            &worker_id,
+            &route,
+            launch_timeout,
+            timeout(launch_timeout, pending.launch_rx).await,
+        )
+        .await
     }
 
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error> {

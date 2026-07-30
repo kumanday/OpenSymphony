@@ -357,6 +357,13 @@ pub trait WorkerBackend {
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error>;
 
+    async fn recover_worker(
+        &mut self,
+        request: WorkerStartRequest,
+    ) -> Result<WorkerLaunch, Self::Error> {
+        self.start_worker(request).await
+    }
+
     async fn start_workers(
         &mut self,
         requests: Vec<WorkerStartRequest>,
@@ -1458,16 +1465,29 @@ where
             return Ok(false);
         };
 
-        let command = Self::prepare_merging_interrupt(
-            &mut execution,
-            issue,
-            &run,
-            harness_kind,
-            observed_at,
-        )?;
+        let command =
+            Self::prepare_merging_interrupt(&mut execution, issue, harness_kind, observed_at)?;
         if let Some(command) = command {
             self.persist_interrupt_intent(&execution).await?;
             let result = self.worker.interrupt_worker(command).await;
+            execution.observe_runtime_event(
+                observed_at,
+                Some(format!(
+                    "tracker-merging-supersedes-human-review-{}",
+                    observed_at.as_u64()
+                )),
+                Some("scheduler.interrupt_requested".to_string()),
+                Some(
+                    "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
+                        .to_string(),
+                ),
+                Some(serde_json::json!({
+                    "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
+                    "from_state": HUMAN_REVIEW_STATE,
+                    "to_state": issue.state.name,
+                    "worker_id": run.worker_id.as_str(),
+                })),
+            )?;
             Self::apply_interrupt_result(
                 &mut execution,
                 HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
@@ -1564,7 +1584,6 @@ where
     fn prepare_merging_interrupt(
         execution: &mut IssueExecution,
         issue: &NormalizedIssue,
-        run: &RunAttempt,
         harness_kind: String,
         observed_at: TimestampMs,
     ) -> Result<Option<HarnessInterruptCommand>, SchedulerError> {
@@ -1581,24 +1600,6 @@ where
             return Ok(None);
         }
 
-        execution.observe_runtime_event(
-            observed_at,
-            Some(format!(
-                "tracker-merging-supersedes-human-review-{}",
-                observed_at.as_u64()
-            )),
-            Some("scheduler.interrupt_requested".to_string()),
-            Some(
-                "Tracker state Merging superseded Human Review polling: tracker_merging_supersedes_human_review"
-                    .to_string(),
-            ),
-            Some(serde_json::json!({
-                "reason": HarnessInterruptReason::TrackerMergingSupersedesHumanReview.as_str(),
-                "from_state": HUMAN_REVIEW_STATE,
-                "to_state": issue.state.name,
-                "worker_id": run.worker_id.as_str(),
-            })),
-        )?;
         Ok(Some(command))
     }
 
@@ -1730,7 +1731,7 @@ where
             route: route.clone(),
         };
         self.remove_execution(issue_id);
-        let launch = match self.worker.start_worker(start_request).await {
+        let launch = match self.worker.recover_worker(start_request).await {
             Ok(launch) => launch,
             Err(error) => {
                 let detail = error.to_string();
