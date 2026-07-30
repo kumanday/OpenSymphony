@@ -222,8 +222,13 @@ fn map_issue(
             .map(|retry| retry.normal_retry_count)
             .or(issue.retry_count_override)
             .or_else(|| {
-                (issue.runtime.release_reason
-                    == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted))
+                matches!(
+                    issue.runtime.release_reason,
+                    Some(
+                        crate::opensymphony_domain::ReleaseReason::RetryExhausted
+                            | crate::opensymphony_domain::ReleaseReason::Completed
+                    )
+                )
                 .then(|| {
                     issue
                         .last_worker_outcome
@@ -921,6 +926,27 @@ tracker:
             issue.runtime_state,
             crate::opensymphony_control::IssueRuntimeState::Failed
         );
+    }
+
+    #[test]
+    fn completed_final_retry_preserves_attempt_count() {
+        let mut domain_issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::Completed,
+        );
+        domain_issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-532")),
+            attempt: Some(must(RetryAttempt::new(3))),
+            outcome: WorkerOutcomeKind::Succeeded,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: None,
+            error: None,
+        });
+
+        assert_eq!(map_single_issue(domain_issue).retry_count, 3);
     }
 
     #[test]

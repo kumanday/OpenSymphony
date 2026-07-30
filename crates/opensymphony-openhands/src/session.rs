@@ -1390,11 +1390,17 @@ impl IssueSessionRunner {
         }
         let conversation_id = parse_uuid(manifest.conversation_id.as_str())
             .map_err(IssueSessionError::RehydrationFailed)?;
-        let recovery_client = manifest
-            .server_base_url
-            .as_deref()
-            .map(|base_url| self.client.with_base_url(base_url))
-            .unwrap_or_else(|| self.client.clone());
+        let recovery_client = match manifest.server_base_url.as_deref() {
+            Some(base_url) => self
+                .client
+                .with_persisted_base_url(base_url)
+                .map_err(|error| {
+                    IssueSessionError::RehydrationFailed(format!(
+                        "recovered conversation server identity is not trusted: {error}"
+                    ))
+                })?,
+            None => self.client.clone(),
+        };
         let active_session = match self
             .try_attach_and_resume(
                 &recovery_client,
@@ -1418,18 +1424,38 @@ impl IssueSessionRunner {
         // keep a prior `finished` state in the baseline so the stale mirror
         // cannot complete the recovered turn before its post-trigger events
         // arrive.
-        let pre_trigger_baseline_event_ids =
+        let mut pre_trigger_baseline_event_ids =
             trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
-            match recovery_client.run_conversation(conversation_id).await {
-                Ok(_)
-                | Err(OpenHandsError::HttpStatus {
-                    status_code: 409, ..
-                }) => {}
-                Err(error) => {
-                    return Err(IssueSessionError::RehydrationFailed(format!(
-                        "failed to trigger recovered OpenHands run: {error}"
-                    )));
+            loop {
+                match recovery_client.run_conversation(conversation_id).await {
+                    Ok(_) => break,
+                    Err(OpenHandsError::HttpStatus {
+                        status_code: 409, ..
+                    }) => {
+                        if let Err(error) = active_session.stream.reconcile_events().await {
+                            debug!(
+                                %error,
+                                conversation_id = %active_session.manifest.conversation_id,
+                                "pre-wait reconcile failed after recovered run retry conflict, proceeding anyway"
+                            );
+                        }
+                        if let Err(error) = self
+                            .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                            .await
+                        {
+                            return Err(IssueSessionError::RehydrationFailed(format!(
+                                "previous OpenHands turn did not finish before recovered run retry: {error}"
+                            )));
+                        }
+                        pre_trigger_baseline_event_ids =
+                            Some(all_event_ids(active_session.stream.event_cache().items()));
+                    }
+                    Err(error) => {
+                        return Err(IssueSessionError::RehydrationFailed(format!(
+                            "failed to trigger recovered OpenHands run: {error}"
+                        )));
+                    }
                 }
             }
             active_session.manifest.trigger_pending_run_id = None;
@@ -4343,19 +4369,38 @@ mod tests {
     }
 
     #[test]
-    fn recovery_client_uses_persisted_server_base_url_and_current_auth() {
+    fn recovery_client_uses_trusted_persisted_server_base_url_and_current_auth() {
         let client = OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:8000").with_auth(
             super::super::AuthConfig::header_api_key("x-session-api-key", "redacted"),
         ));
-        let recovery_client = client.with_base_url("http://127.0.0.1:9000");
+        let recovery_client = client
+            .with_persisted_base_url("http://127.0.0.1:8000/api")
+            .expect("same-origin recovery transport should remain trusted");
 
-        assert_eq!(recovery_client.base_url(), "http://127.0.0.1:9000");
+        assert_eq!(recovery_client.base_url(), "http://127.0.0.1:8000/api");
         let diagnostics = recovery_client
             .transport_diagnostics()
             .expect("recovery transport should remain valid");
         assert_eq!(
             diagnostics.http_auth_kind,
             super::super::TransportAuthKind::Header
+        );
+    }
+
+    #[test]
+    fn recovery_client_rejects_changed_persisted_server_origin() {
+        let client = OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:8000").with_auth(
+            super::super::AuthConfig::header_api_key("x-session-api-key", "redacted"),
+        ));
+
+        let error = match client.with_persisted_base_url("http://attacker.example.test:9000") {
+            Ok(_) => panic!("recovery must not carry auth to a changed origin"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the configured OpenHands server")
         );
     }
 

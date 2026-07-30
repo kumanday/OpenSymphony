@@ -1639,6 +1639,13 @@ fn validate_openhands_transport_url(value: &str, field: &str) -> Result<(), Cent
     let url = Url::parse(value).map_err(|_| CentralConfigError::InvalidReference {
         field: field.to_owned(),
     })?;
+    if !matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https")
+        || url.host_str().is_none()
+    {
+        return Err(CentralConfigError::InvalidReference {
+            field: field.to_owned(),
+        });
+    }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(CentralConfigError::InvalidReference {
             field: field.to_owned(),
@@ -2584,6 +2591,28 @@ scheduler:
                     if actual == field
             ));
             assert!(!error.to_string().contains("secret-canary"));
+        }
+    }
+
+    #[test]
+    fn central_config_rejects_non_http_openhands_transport_urls() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        for base_url in [
+            "ws://api.example.test",
+            "ftp://api.example.test",
+            "file:///tmp",
+        ] {
+            let source = format!(
+                "{}\nopenhands:\n  transport_base_url: {base_url}\n",
+                central_fixture(root.path())
+            );
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("OpenHands transport must use an HTTP(S) URL with a host");
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field }
+                    if field == "openhands.transport_base_url"
+            ));
         }
     }
 

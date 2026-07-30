@@ -565,6 +565,24 @@ fn migration_target_config(paths: &MigrationPaths, cwd: &Path, source: &Path) ->
     canonicalize_destination(&target)
 }
 
+fn validate_migration_destination(
+    target_config: &Path,
+    source: &SourceContext,
+) -> Result<(), MigrationError> {
+    let target_config = canonicalize_destination(target_config);
+    if target_config == canonicalize_destination(&source.workflow_path) {
+        return Err(MigrationError::DestinationConflict {
+            path: target_config,
+        });
+    }
+    if target_config.exists() && !target_config.is_file() {
+        return Err(MigrationError::DestinationConflict {
+            path: target_config,
+        });
+    }
+    Ok(())
+}
+
 fn migration_root(target_config: &Path) -> PathBuf {
     canonicalize_destination(target_config)
         .parent()
@@ -1083,6 +1101,7 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
         });
     }
     let target_config = migration_target_config(&paths, &current_dir()?, &source.source_config);
+    validate_migration_destination(&target_config, &source)?;
     reject_symlink_input(&target_config)?;
     let report = build_report(
         "preflight",
@@ -1176,6 +1195,7 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
 
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
+    validate_migration_destination(&target_config, &source)?;
     let _strict_run_marker = claim_migration_strict_run_marker(&target_config)?;
     let workspace_root = legacy_runtime_workspace_root(&source)?;
     ensure_legacy_runtime_quiescent(&workspace_root)?;
@@ -4995,6 +5015,54 @@ mod tests {
         .expect("read-only preflight should not require memory quiescence");
         assert!(report.preflight_only);
         assert!(!root.path().join("config.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_managed_or_non_file_destinations_before_writes() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init should run");
+        Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:example/repo.git"])
+            .current_dir(root.path())
+            .status()
+            .expect("git remote should be configured");
+        fs::write(
+            root.path().join("WORKFLOW.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n\nTarget branch: develop\n",
+        )
+        .expect("workflow should be written");
+
+        let workflow_destination = preflight(MigrationPaths {
+            config: None,
+            repo: root.path().to_path_buf(),
+            output: Some(root.path().join("WORKFLOW.md")),
+        })
+        .await
+        .expect_err("the workflow is a managed migration input");
+        assert!(matches!(
+            workflow_destination,
+            MigrationError::DestinationConflict { .. }
+        ));
+
+        let directory_destination = root.path().join("central.yaml");
+        fs::create_dir(&directory_destination).expect("destination directory should be created");
+        let directory_destination_error = preflight(MigrationPaths {
+            config: None,
+            repo: root.path().to_path_buf(),
+            output: Some(directory_destination.clone()),
+        })
+        .await
+        .expect_err("a directory cannot be replaced by central config");
+        assert!(matches!(
+            directory_destination_error,
+            MigrationError::DestinationConflict { .. }
+        ));
+        assert!(directory_destination.is_dir());
+        assert!(!root.path().join(".opensymphony/migration").exists());
     }
 
     #[tokio::test]

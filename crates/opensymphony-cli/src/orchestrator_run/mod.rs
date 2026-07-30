@@ -203,7 +203,7 @@ pub(crate) fn publish_initialized_marker(path: &Path, contents: &str) -> io::Res
         return Err(error);
     }
     #[cfg(unix)]
-    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o666)).map_err(|error| {
+    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o644)).map_err(|error| {
         let _ = fs::remove_file(&staging);
         io::Error::other(format!(
             "failed to make marker cross-user-readable: {error}"
@@ -412,7 +412,7 @@ fn acquire_root_ownership_serialization_at(
                     // directory. Defeat a restrictive creator umask before
                     // publishing the descriptor so later users can open the
                     // same advisory-lock file.
-                    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o666)).map_err(
+                    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o644)).map_err(
                         |error| RunCommandError::RootOwnership {
                             detail: format!(
                                 "failed to make {} cross-user-readable: {error}",
@@ -1929,7 +1929,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o666
+            0o644
         );
         fs::remove_file(marker).expect("registry marker should be removed");
     }
@@ -1949,7 +1949,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o666
+            0o644
         );
         drop(owner);
         fs::remove_file(path).expect("test lock should be removed");
