@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::BTreeMap,
     fs,
@@ -1581,7 +1583,7 @@ fn memory_catalog_generation(root: &Path) -> Result<String, MigrationError> {
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest_input = Vec::new();
     for (relative, kind, contents) in entries {
-        digest_input.extend_from_slice(relative.as_bytes());
+        digest_input.extend_from_slice(&relative);
         digest_input.push(0);
         digest_input.push(kind);
         digest_input.push(0);
@@ -1594,7 +1596,7 @@ fn memory_catalog_generation(root: &Path) -> Result<String, MigrationError> {
 fn collect_memory_catalog_entries(
     root: &Path,
     current: &Path,
-    entries: &mut Vec<(String, u8, Vec<u8>)>,
+    entries: &mut Vec<(Vec<u8>, u8, Vec<u8>)>,
 ) -> Result<(), MigrationError> {
     let read_dir = fs::read_dir(current).map_err(|source| MigrationError::Read {
         path: current.to_path_buf(),
@@ -1611,11 +1613,7 @@ fn collect_memory_catalog_entries(
             continue;
         }
         let path = entry.path();
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
+        let relative = memory_catalog_relative_path_bytes(root, &path)?;
         let file_type = entry.file_type().map_err(|source| MigrationError::Read {
             path: path.clone(),
             source,
@@ -1641,6 +1639,27 @@ fn collect_memory_catalog_entries(
         }
     }
     Ok(())
+}
+
+// The non-Unix implementation can reject paths that cannot be represented as
+// UTF-8; keep one fallible helper signature across platforms.
+#[allow(clippy::unnecessary_wraps)]
+fn memory_catalog_relative_path_bytes(root: &Path, path: &Path) -> Result<Vec<u8>, MigrationError> {
+    let relative_path = path.strip_prefix(root).unwrap_or(path);
+    #[cfg(unix)]
+    {
+        Ok(relative_path.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        relative_path
+            .to_str()
+            .map(str::as_bytes)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| MigrationError::NonUtf8Path {
+                path: path.to_path_buf(),
+            })
+    }
 }
 
 fn reject_symlink_input(path: &Path) -> Result<(), MigrationError> {
@@ -4233,6 +4252,23 @@ mod tests {
         let after = memory_catalog_generation(root.path()).expect("generation should succeed");
 
         assert_eq!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_catalog_generation_distinguishes_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().expect("catalog root");
+        let first = root.path().join(OsString::from_vec(vec![b'c', 0x80]));
+        let second = root.path().join(OsString::from_vec(vec![b'c', 0x81]));
+        let first_bytes = memory_catalog_relative_path_bytes(root.path(), &first)
+            .expect("first raw path should encode");
+        let second_bytes = memory_catalog_relative_path_bytes(root.path(), &second)
+            .expect("second raw path should encode");
+
+        assert_ne!(first_bytes, second_bytes);
     }
 
     #[test]

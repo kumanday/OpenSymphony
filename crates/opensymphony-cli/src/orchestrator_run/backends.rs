@@ -1199,6 +1199,7 @@ fn recoverable_run_manifest(
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {
                 manifest.issue_id.as_str() == run_manifest.issue_id
+                    && manifest.prepared_run_id.is_none()
                     && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
             }))
 }
@@ -3514,6 +3515,7 @@ async fn write_codex_conversation_manifest(
         codex_archive_state: Some("active".to_string()),
         last_turn_id: None,
         active_run_id: None,
+        prepared_run_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,
@@ -4144,6 +4146,7 @@ mod tests {
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
+            prepared_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -6523,7 +6526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_workspaces_retries_pre_run_records_instead_of_reattaching() {
+    async fn recover_workspaces_retries_pre_dispatch_openhands_runs_instead_of_reattaching() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
         fs::create_dir_all(&workspace_root).expect("workspace root should be created");
@@ -6545,7 +6548,11 @@ mod tests {
             )
             .await
             .expect("prepared run should be persisted");
-        let conversation_manifest = sample_conversation_manifest("conv-prepared-recovery");
+        let mut conversation_manifest = sample_conversation_manifest("conv-prepared-recovery");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.active_run_id = Some("run-prepared-recovery".to_owned());
+        conversation_manifest.prepared_run_id = Some("run-prepared-recovery".to_owned());
         workspace_manager
             .write_text_artifact(
                 &ensured.handle,
@@ -7729,6 +7736,7 @@ exit 64
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
+            prepared_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

@@ -272,7 +272,14 @@ pub(crate) fn acquire_root_ownership(
         let root = fs::canonicalize(&root).map_err(|source| RunCommandError::RootOwnership {
             detail: format!("failed to resolve {}: {source}", root.display()),
         })?;
-        canonical_roots.insert(root);
+        if !canonical_roots.insert(root.clone()) {
+            return Err(RunCommandError::RootOwnership {
+                detail: format!(
+                    "configured roots resolve to the same directory: {}",
+                    root.display()
+                ),
+            });
+        }
     }
 
     let canonical_roots_vec = canonical_roots.iter().collect::<Vec<_>>();
@@ -1810,6 +1817,18 @@ mod tests {
         assert!(matches!(result, Err(RunCommandError::RootOwnership { .. })));
         assert!(!parent.join(".opensymphony-instance.lock").exists());
         assert!(!child.join(".opensymphony-instance.lock").exists());
+    }
+
+    #[test]
+    fn runtime_root_ownership_rejects_duplicate_canonical_roots() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let first = root.path().join("shared");
+        let equivalent = root.path().join("shared/./");
+
+        let result = acquire_root_ownership([first.clone(), equivalent]);
+
+        assert!(matches!(result, Err(RunCommandError::RootOwnership { .. })));
+        assert!(!first.join(".opensymphony-instance.lock").exists());
     }
 
     #[test]

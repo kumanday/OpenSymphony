@@ -752,9 +752,13 @@ pub struct IssueConversationManifest {
     /// Codex-only active turn id used to interrupt a recovered turn safely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_id: Option<String>,
-    /// Codex-only run id associated with the active turn preparation.
+    /// Runtime run id associated with the current turn. OpenHands writes this
+    /// after prompt acceptance; Codex may persist it during turn preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run_id: Option<String>,
+    /// OpenHands-only marker for a run prepared before its prompt was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_kind: Option<IssueSessionPromptKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -822,6 +826,7 @@ impl IssueConversationManifest {
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
+            prepared_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -1938,7 +1943,7 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
-        active_session.manifest.active_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.prepared_run_id = Some(run_manifest.run_id.clone());
         active_session.manifest.updated_at = Utc::now();
         workspace_manager
             .write_json_artifact(
@@ -1956,6 +1961,7 @@ impl IssueSessionRunner {
             )
             .await
         {
+            active_session.manifest.prepared_run_id = None;
             let summary = format!(
                 "failed to send {} prompt event",
                 active_session.prompt_kind.as_str()
@@ -1974,6 +1980,9 @@ impl IssueSessionRunner {
                 .map(Step::EarlyResult);
         }
 
+        active_session.manifest.active_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.prepared_run_id = None;
+        active_session.manifest.updated_at = Utc::now();
         if active_session.prompt_kind == IssueSessionPromptKind::Full {
             active_session.manifest.workflow_prompt_seeded = true;
         }
@@ -4350,6 +4359,7 @@ mod tests {
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
+            prepared_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

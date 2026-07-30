@@ -659,6 +659,7 @@ pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<
 }
 
 const CENTRAL_CONFIG_KEYS: &[&str] = &[
+    "schema_version",
     "instance",
     "routing",
     "tracker_profiles",
@@ -2243,7 +2244,7 @@ scheduler:
 
     #[test]
     fn central_config_discriminator_requires_instance_and_routing_mode() {
-        assert!(!looks_like_central_config("schema_version: 1\n"));
+        assert!(looks_like_central_config("schema_version: 1\n"));
         assert!(looks_like_central_config(
             "memory:\n  catalog_root: state/memory\n"
         ));
