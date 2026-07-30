@@ -1133,13 +1133,11 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let workspace_root = legacy_runtime_workspace_root(&source)?;
     ensure_legacy_runtime_quiescent(&workspace_root)?;
     let generated = generate_central_config(&source)?;
-    let _runtime_ownership = legacy_runtime_root_requires_ownership(
-        source.workflow.front_matter.workspace.root.as_deref(),
-        &workspace_root,
-        true,
-    )
-    .then(|| acquire_legacy_runtime_ownership(&workspace_root))
-    .transpose()?;
+    // The strict-run marker excludes new strict launches, but it does not
+    // replace the legacy root lock: a legacy run may already be starting from
+    // the implicit default while the marker is held. Claim even an absent
+    // default root before staging the replacement files.
+    let _runtime_ownership = acquire_legacy_runtime_ownership(&workspace_root)?;
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
     let generation = sha256(generated.as_bytes());
     let migration_root = migration_root(&target_config);
@@ -2304,14 +2302,6 @@ fn legacy_runtime_workspace_root(source: &SourceContext) -> Result<PathBuf, Migr
             detail: format!("workspace.root: {error}"),
         })?;
     Ok(resolve_repo_path(&source.target_repo, &configured))
-}
-
-fn legacy_runtime_root_requires_ownership(
-    configured_workspace_root: Option<&str>,
-    workspace_root: &Path,
-    strict_run_claimed: bool,
-) -> bool {
-    configured_workspace_root.is_some() || workspace_root.exists() || !strict_run_claimed
 }
 
 fn recorded_legacy_runtime_workspace_root(
@@ -4188,35 +4178,6 @@ mod tests {
         drop(runtime);
         acquire_legacy_runtime_ownership(&workspace_root)
             .expect("migration should acquire the released legacy root");
-    }
-
-    #[test]
-    fn migration_does_not_claim_an_absent_implicit_legacy_root() {
-        let root = tempfile::tempdir().expect("migration root");
-        let workspace_root = root.path().join("implicit-workspaces");
-
-        assert!(!legacy_runtime_root_requires_ownership(
-            None,
-            &workspace_root,
-            true
-        ));
-        assert!(legacy_runtime_root_requires_ownership(
-            Some("/explicit/workspaces"),
-            &workspace_root,
-            true
-        ));
-        assert!(legacy_runtime_root_requires_ownership(
-            None,
-            &workspace_root,
-            false
-        ));
-
-        fs::create_dir(&workspace_root).expect("workspace root should be creatable");
-        assert!(legacy_runtime_root_requires_ownership(
-            None,
-            &workspace_root,
-            true
-        ));
     }
 
     #[test]

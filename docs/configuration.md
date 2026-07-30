@@ -52,6 +52,9 @@ backoff instead of redispatching immediately.
 If a crash leaves a `Preparing` or `Prepared` run without a conversation
 manifest, recovery consumes that attempt as a reconciliation retry and still
 enforces `scheduler.retry.max_attempts`.
+If OpenHands has accepted a prompt but the process exits before its run trigger
+is acknowledged, the conversation manifest records a trigger-pending phase;
+recovery reissues the idempotent trigger before observing the turn.
 
 The supported routing variants are explicit:
 

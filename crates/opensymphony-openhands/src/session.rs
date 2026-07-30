@@ -759,6 +759,11 @@ pub struct IssueConversationManifest {
     /// OpenHands-only marker for a run prepared before its prompt was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_run_id: Option<String>,
+    /// OpenHands-only marker for an accepted prompt whose run trigger has not
+    /// yet been acknowledged. Recovery reissues the idempotent trigger before
+    /// observing the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_pending_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_kind: Option<IssueSessionPromptKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -827,6 +832,7 @@ impl IssueConversationManifest {
             last_turn_id: None,
             active_run_id: None,
             prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -1368,6 +1374,10 @@ impl IssueSessionRunner {
                     "recovered conversation manifest is invalid: {error}"
                 ))
             })?;
+        let trigger_pending = manifest
+            .trigger_pending_run_id
+            .as_deref()
+            .is_some_and(|run_id| run_id == run_manifest.run_id);
         let baseline_last_event_id = manifest.last_event_id.clone();
         if manifest.issue_id != issue.id
             || manifest.identifier != issue.identifier
@@ -1390,12 +1400,43 @@ impl IssueSessionRunner {
             }
         };
 
+        let mut active_session = active_session;
+        if trigger_pending {
+            match self.client.run_conversation(conversation_id).await {
+                Ok(_)
+                | Err(OpenHandsError::HttpStatus {
+                    status_code: 409, ..
+                }) => {}
+                Err(error) => {
+                    return Err(IssueSessionError::RehydrationFailed(format!(
+                        "failed to trigger recovered OpenHands run: {error}"
+                    )));
+                }
+            }
+            active_session.manifest.trigger_pending_run_id = None;
+            active_session.manifest.updated_at = Utc::now();
+            workspace_manager
+                .write_json_artifact(
+                    workspace,
+                    &workspace.conversation_manifest_path(),
+                    &active_session.manifest,
+                )
+                .await?;
+            run_manifest.status = RunStatus::Running;
+            run_manifest.status_detail = Some(format!(
+                "recovered {} prompt trigger for conversation {}",
+                active_session.prompt_kind.as_str(),
+                active_session.manifest.conversation_id
+            ));
+            workspace_manager
+                .write_run_manifest(workspace, run_manifest)
+                .await?;
+        }
         observer.on_launch(
             &active_session
                 .manifest
                 .to_domain_metadata(RuntimeStreamState::Ready),
         );
-        let mut active_session = active_session;
         let baseline_event_ids = recovery_baseline_event_ids(
             active_session.stream.event_cache().items(),
             baseline_last_event_id.as_deref(),
@@ -1944,6 +1985,7 @@ impl IssueSessionRunner {
         O: IssueSessionObserver,
     {
         active_session.manifest.prepared_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.trigger_pending_run_id = None;
         active_session.manifest.updated_at = Utc::now();
         workspace_manager
             .write_json_artifact(
@@ -1982,6 +2024,7 @@ impl IssueSessionRunner {
 
         active_session.manifest.active_run_id = Some(run_manifest.run_id.clone());
         active_session.manifest.prepared_run_id = None;
+        active_session.manifest.trigger_pending_run_id = Some(run_manifest.run_id.clone());
         active_session.manifest.updated_at = Utc::now();
         if active_session.prompt_kind == IssueSessionPromptKind::Full {
             active_session.manifest.workflow_prompt_seeded = true;
@@ -2071,6 +2114,15 @@ impl IssueSessionRunner {
                 }
             }
         }
+        active_session.manifest.trigger_pending_run_id = None;
+        active_session.manifest.updated_at = Utc::now();
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &active_session.manifest,
+            )
+            .await?;
         if (prepared_turn.waited_for_prior_turn || had_run_conflict)
             && let Err(error) = active_session.stream.reconcile_events().await
         {
@@ -3067,6 +3119,8 @@ impl IssueSessionRunner {
         mut session: ActiveSession,
         outcome: NormalizedOutcome,
     ) -> Result<IssueSessionResult, IssueSessionError> {
+        session.manifest.prepared_run_id = None;
+        session.manifest.trigger_pending_run_id = None;
         session.manifest.apply_runtime_snapshot(&session.stream);
         workspace_manager
             .write_json_artifact(
@@ -4360,6 +4414,7 @@ mod tests {
             last_turn_id: None,
             active_run_id: None,
             prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

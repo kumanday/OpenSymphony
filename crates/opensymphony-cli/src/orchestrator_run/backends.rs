@@ -1201,6 +1201,10 @@ fn recoverable_run_manifest(
                 manifest.issue_id.as_str() == run_manifest.issue_id
                     && manifest.prepared_run_id.is_none()
                     && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
+                    && manifest
+                        .trigger_pending_run_id
+                        .as_deref()
+                        .is_none_or(|run_id| run_id == run_manifest.run_id)
             }))
 }
 
@@ -3516,6 +3520,7 @@ async fn write_codex_conversation_manifest(
         last_turn_id: None,
         active_run_id: None,
         prepared_run_id: None,
+        trigger_pending_run_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,
@@ -4147,6 +4152,7 @@ mod tests {
             last_turn_id: None,
             active_run_id: None,
             prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -6651,6 +6657,8 @@ mod tests {
         conversation_manifest.issue_id = issue.id.clone();
         conversation_manifest.identifier = issue.identifier.clone();
         conversation_manifest.active_run_id = Some("run-prepared-openhands-recovery".to_owned());
+        conversation_manifest.trigger_pending_run_id =
+            Some("run-prepared-openhands-recovery".to_owned());
         workspace_manager
             .write_text_artifact(
                 &ensured.handle,
@@ -7737,6 +7745,7 @@ exit 64
             last_turn_id: None,
             active_run_id: None,
             prepared_run_id: None,
+            trigger_pending_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

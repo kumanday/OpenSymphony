@@ -1568,7 +1568,7 @@ async fn successful_worker_exit_queues_continuation_retry_for_active_issue() {
 }
 
 #[tokio::test]
-async fn retry_limit_parks_successful_continuations() {
+async fn retry_limit_preserves_successful_continuation_semantics() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-269", "COE-269", "In Progress", 0)],
         ..Default::default()
@@ -1619,14 +1619,14 @@ async fn retry_limit_parks_successful_continuations() {
                 &second_run,
                 WorkerOutcomeKind::Succeeded,
                 ts(1_400),
-                Some("retry limit should park continuation".to_owned()),
+                Some("successful final continuation should remain successful".to_owned()),
                 None,
             ),
         });
     scheduler
         .tick(ts(1_400))
         .await
-        .expect("exhausted continuation should release");
+        .expect("successful final continuation should release as completed");
 
     let issue_id = IssueId::new("lin-269").expect("issue id should be valid");
     assert!(matches!(
@@ -1635,16 +1635,17 @@ async fn retry_limit_parks_successful_continuations() {
             .expect("released execution should remain recorded")
             .state(),
         crate::opensymphony_orchestrator::SchedulerState::Released {
-            reason: ReleaseReason::RetryExhausted,
+            reason: ReleaseReason::Completed,
             ..
         }
     ));
     scheduler
         .tick(ts(61_400))
         .await
-        .expect("exhausted continuation should remain parked");
+        .expect("completed continuation should remain parked");
     assert_eq!(scheduler.worker().launches.len(), 2);
     assert!(scheduler.workspace().cleaned.is_empty());
+    assert!(scheduler.workspace().persisted_retry_exhaustions.is_empty());
 }
 
 #[tokio::test]
@@ -1995,14 +1996,7 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
         ..Default::default()
     };
     let workspace = FakeWorkspace {
-        cleanup_results: VecDeque::from([
-            Err(FakeError {
-                message: "failed cleanup should retry".to_string(),
-                category: None,
-                retry_after: None,
-            }),
-            Ok(()),
-        ]),
+        cleanup_results: VecDeque::from([Ok(())]),
         ..Default::default()
     };
     let worker = FakeWorker::default();
@@ -2041,14 +2035,14 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
                 &second_run,
                 WorkerOutcomeKind::Succeeded,
                 ts(1_400),
-                Some("exhaust retry budget".to_string()),
+                Some("successful final run should not exhaust retry budget".to_string()),
                 None,
             ),
         });
     scheduler
         .tick(ts(1_400))
         .await
-        .expect("retry exhaustion should release");
+        .expect("successful final run should release as completed");
 
     scheduler.tracker_mut().active.clear();
     scheduler.tracker_mut().terminal = vec![tracker_issue("lin-542", "COE-542", "Done", 0)];
@@ -2057,10 +2051,12 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
         .await
         .expect("terminal transition should reconcile cleanup");
 
+    assert_eq!(scheduler.workspace().failed_cleaned, Vec::<String>::new());
     assert_eq!(
-        scheduler.workspace().failed_cleaned,
-        vec!["COE-542", "COE-542"]
+        scheduler.workspace().cleaned,
+        vec![("COE-542".to_string(), true)]
     );
+    assert!(scheduler.workspace().persisted_retry_exhaustions.is_empty());
     assert!(matches!(
         scheduler
             .execution(&IssueId::new("lin-542").expect("issue id should be valid"))
@@ -2082,11 +2078,8 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
     scheduler
         .tick(ts(600_300))
         .await
-        .expect("terminal reconciliation should retry forced cleanup");
-    assert_eq!(
-        scheduler.workspace().cleared_retry_exhaustion,
-        vec!["COE-542".to_string()]
-    );
+        .expect("terminal reconciliation should remain idempotent");
+    assert!(scheduler.workspace().cleared_retry_exhaustion.is_empty());
     assert!(matches!(
         scheduler
             .execution(&IssueId::new("lin-542").expect("issue id should be valid"))

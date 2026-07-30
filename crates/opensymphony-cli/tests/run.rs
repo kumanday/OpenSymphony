@@ -507,6 +507,7 @@ async fn seed_recovered_human_review_workspace(
         last_turn_id: None,
         active_run_id: None,
         prepared_run_id: None,
+        trigger_pending_run_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,

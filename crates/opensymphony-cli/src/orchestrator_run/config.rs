@@ -659,7 +659,6 @@ pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<
 }
 
 const CENTRAL_CONFIG_KEYS: &[&str] = &[
-    "schema_version",
     "instance",
     "routing",
     "tracker_profiles",
@@ -675,6 +674,8 @@ const CENTRAL_CONFIG_KEYS: &[&str] = &[
     "memory_catalog",
     "compatibility",
 ];
+
+const VERSIONED_CENTRAL_SHARED_KEYS: &[&str] = &["control_plane", "openhands"];
 
 fn has_central_top_level_key(raw: &str) -> bool {
     raw.lines().any(|line| {
@@ -719,9 +720,32 @@ fn has_central_memory_catalog_key(raw: &str) -> bool {
     false
 }
 
+fn has_schema_versioned_central_shared_key(raw: &str) -> bool {
+    let has_schema_version = raw.lines().any(|line| {
+        if line.starts_with(char::is_whitespace) {
+            return false;
+        }
+        line.split_once(':')
+            .is_some_and(|(key, _)| key.trim() == "schema_version")
+    });
+    has_schema_version
+        && raw.lines().any(|line| {
+            if line.starts_with(char::is_whitespace) {
+                return false;
+            }
+            line.split_once(':').is_some_and(|(key, _)| {
+                VERSIONED_CENTRAL_SHARED_KEYS
+                    .iter()
+                    .any(|candidate| key.trim() == *candidate)
+            })
+        })
+}
+
 pub fn looks_like_central_config(raw: &str) -> bool {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(raw) else {
-        return has_central_top_level_key(raw) || has_central_memory_catalog_key(raw);
+        return has_central_top_level_key(raw)
+            || has_central_memory_catalog_key(raw)
+            || has_schema_versioned_central_shared_key(raw);
     };
     let Some(mapping) = value.as_mapping() else {
         return false;
@@ -729,6 +753,10 @@ pub fn looks_like_central_config(raw: &str) -> bool {
     CENTRAL_CONFIG_KEYS
         .iter()
         .any(|key| mapping.contains_key(serde_yaml::Value::String((*key).to_owned())))
+        || mapping.contains_key(serde_yaml::Value::String("schema_version".to_owned()))
+            && VERSIONED_CENTRAL_SHARED_KEYS
+                .iter()
+                .any(|key| mapping.contains_key(serde_yaml::Value::String((*key).to_owned())))
         || mapping
             .get(serde_yaml::Value::String("memory".to_owned()))
             .and_then(serde_yaml::Value::as_mapping)
@@ -2244,7 +2272,16 @@ scheduler:
 
     #[test]
     fn central_config_discriminator_requires_instance_and_routing_mode() {
-        assert!(looks_like_central_config("schema_version: 1\n"));
+        // Legacy config files may carry schema metadata without opting into
+        // the central parser. Shared runtime sections are central-only and
+        // still make malformed central files fail closed.
+        assert!(!looks_like_central_config("schema_version: 1\n"));
+        assert!(looks_like_central_config(
+            "schema_version: 1\ncontrol_plane:\n  bind: 127.0.0.1:2468\n"
+        ));
+        assert!(looks_like_central_config(
+            "schema_version: 1\nopenhands: {}\n"
+        ));
         assert!(looks_like_central_config(
             "memory:\n  catalog_root: state/memory\n"
         ));

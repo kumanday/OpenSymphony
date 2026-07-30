@@ -2656,13 +2656,16 @@ where
             .max_retry_attempts
             .is_some_and(|max_attempts| retry_count >= max_attempts)
         {
+            let reason = if outcome.outcome == WorkerOutcomeKind::Succeeded {
+                // A successful final turn is equivalent to successful recovery:
+                // keep its completed semantics even when tracker propagation
+                // is delayed and the issue still appears active.
+                ReleaseReason::Completed
+            } else {
+                ReleaseReason::RetryExhausted
+            };
             return self
-                .release_finished_execution(
-                    execution,
-                    observed_at,
-                    ReleaseReason::RetryExhausted,
-                    Some(outcome),
-                )
+                .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
         }
 
