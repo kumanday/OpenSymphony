@@ -786,6 +786,18 @@ fn resolve_central_config(
     {
         return Err(CentralConfigError::LiteralSecret);
     }
+    if [
+        config.hooks.after_create.as_deref(),
+        config.hooks.before_run.as_deref(),
+        config.hooks.after_run.as_deref(),
+        config.hooks.before_remove.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(crate::opensymphony_cli::migration::hook_has_literal_secret)
+    {
+        return Err(CentralConfigError::LiteralSecret);
+    }
     for (field, value) in [
         (
             "memory.token_env",
@@ -2515,6 +2527,25 @@ scheduler:
             .expect_err("literal OpenHands credentials must be rejected");
         assert!(matches!(error, CentralConfigError::LiteralSecret));
         assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_literal_hook_credential() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\nhooks:\n  before_run: \"curl -H 'Authorization: Bearer hook-secret-canary' https://example.invalid\"\n",
+            central_fixture(root.path())
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("literal hook credentials must be rejected");
+        assert!(matches!(error, CentralConfigError::LiteralSecret));
+        assert!(!error.to_string().contains("hook-secret-canary"));
     }
 
     #[test]

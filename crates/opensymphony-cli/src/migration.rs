@@ -2824,13 +2824,10 @@ fn workflow_has_literal_secret(front_matter: &WorkflowFrontMatter) -> bool {
         .any(hook_has_literal_secret)
 }
 
-fn hook_has_literal_secret(command: &str) -> bool {
+pub(crate) fn hook_has_literal_secret(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
 
-    if literal_value_after_marker(command, &lower, "authorization")
-        || literal_value_after_marker(command, &lower, "bearer")
-        || literal_value_after_marker(command, &lower, "basic")
-    {
+    if literal_value_after_authorization(command, &lower) {
         return true;
     }
 
@@ -2867,6 +2864,42 @@ fn hook_has_literal_secret(command: &str) -> bool {
     ]
     .into_iter()
     .any(|marker| literal_value_after_marker(command, &lower, marker))
+}
+
+fn literal_value_after_authorization(command: &str, lower: &str) -> bool {
+    let marker = "authorization";
+    let mut search_from = 0;
+    while let Some(relative) = lower[search_from..].find(marker) {
+        let start = search_from + relative;
+        let end = start + marker.len();
+        if !is_hook_marker_boundary(lower, start, end) {
+            search_from = end;
+            continue;
+        }
+        let tail = &command[end..];
+        if !tail
+            .chars()
+            .next()
+            .is_some_and(|character| matches!(character, ':' | '='))
+        {
+            search_from = end;
+            continue;
+        }
+        let tail = trim_hook_value_prefix(tail);
+        if let Some(value) = next_hook_word(tail) {
+            if ["bearer", "basic", "token"]
+                .into_iter()
+                .any(|scheme| value.eq_ignore_ascii_case(scheme))
+            {
+                let credential = trim_hook_value_prefix(&tail[value.len()..]);
+                return next_hook_word(credential)
+                    .is_some_and(|value| credential_variable(value).is_none());
+            }
+            return credential_variable(value).is_none();
+        }
+        search_from = end;
+    }
+    false
 }
 
 fn literal_value_after_marker(command: &str, lower: &str, marker: &str) -> bool {
@@ -3074,7 +3107,9 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn stage_path(path: &Path, generation: &str) -> PathBuf {
     let suffix = generation.trim_start_matches("sha256:");
-    PathBuf::from(format!("{}.staging-{suffix}", path.display()))
+    let mut staged = path.as_os_str().to_os_string();
+    staged.push(format!(".staging-{suffix}"));
+    PathBuf::from(staged)
 }
 
 fn write_file(path: &Path, contents: &[u8]) -> Result<(), MigrationError> {
@@ -3445,6 +3480,29 @@ mod tests {
         assert!(!hook_has_literal_secret(
             "curl -H 'Authorization: Bearer ${HOOK_TOKEN}' https://example.invalid"
         ));
+        assert!(!hook_has_literal_secret(
+            "echo 'basic authentication disabled'"
+        ));
+        assert!(!hook_has_literal_secret("echo 'authorization complete'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_path_preserves_non_utf8_path_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let path = PathBuf::from(OsString::from_vec(vec![
+            b'c', b'o', b'n', b'f', b'i', b'g', 0x80,
+        ]));
+        let staged = stage_path(&path, "sha256:generation");
+        let mut expected = path.as_os_str().to_os_string();
+        expected.push(".staging-generation");
+
+        assert_eq!(
+            staged.as_os_str().as_bytes(),
+            expected.as_os_str().as_bytes()
+        );
     }
 
     #[test]

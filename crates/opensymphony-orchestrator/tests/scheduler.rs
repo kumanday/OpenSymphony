@@ -1361,7 +1361,11 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
             .status(),
         SchedulerStatus::Running
     );
-    assert!(scheduler.worker().launches.is_empty());
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0].run.worker_id,
+        recovered_worker_id
+    );
 
     scheduler.tracker_mut().states.insert(
         "lin-492".to_string(),
@@ -1385,6 +1389,61 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
         scheduler.worker().interrupts[0].conversation_id,
         conversation(&recovered_worker_id).conversation_id
     );
+}
+
+#[tokio::test]
+async fn recovered_retry_run_restores_retry_state_before_launch() {
+    let recovered_worker_id =
+        WorkerId::new("worker-recovered-retry").expect("recovered worker id should be valid");
+    let recovered_workspace = workspace_record("COE-494", "/tmp/recovered/COE-494");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-494", "COE-494", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-494", "COE-494", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 1,
+            }),
+        }],
+        records: HashMap::from([("lin-494".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup recovery should launch the recovered retry");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-494").expect("issue id should be valid"))
+        .expect("recovered execution should exist");
+    let run = execution
+        .current_run()
+        .expect("recovered execution should have a running attempt");
+    assert_eq!(execution.status(), SchedulerStatus::Running);
+    assert_eq!(run.attempt.map(|attempt| attempt.get()), Some(1));
+    assert_eq!(run.normal_retry_count, 1);
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.worker().launches[0].run.attempt, run.attempt);
 }
 
 #[tokio::test]

@@ -1042,7 +1042,8 @@ where
                             recovered_harness_kind,
                             record.interrupt_reason,
                             observed_at,
-                        )?;
+                        )
+                        .await?;
                         if record.interrupt_reason.is_some() {
                             self.retry_recovered_interrupt(&issue_id, observed_at)
                                 .await?;
@@ -1670,7 +1671,7 @@ where
         Ok(())
     }
 
-    fn restore_recovered_run(
+    async fn restore_recovered_run(
         &mut self,
         issue_id: &IssueId,
         recovered_run: Option<RecoveredRun>,
@@ -1681,19 +1682,37 @@ where
         let Some(recovered_run) = recovered_run else {
             return Ok(());
         };
-        let Some(execution) = self.executions.get(issue_id).cloned() else {
+        let Some(current_execution) = self.executions.get(issue_id).cloned() else {
             return Ok(());
         };
-        if execution.status() != SchedulerStatus::Unclaimed {
+        if current_execution.status() != SchedulerStatus::Unclaimed {
             return Ok(());
         }
-        let Some(workspace) = execution.workspace().cloned() else {
+        let Some(workspace) = current_execution.workspace().cloned() else {
             return Ok(());
         };
+        let retry = if recovered_run.normal_retry_count > 0 {
+            Some(RetryEntry {
+                issue_id: current_execution.issue().id.clone(),
+                identifier: current_execution.issue().identifier.clone(),
+                attempt: RetryAttempt::new(recovered_run.normal_retry_count)?,
+                normal_retry_count: recovered_run.normal_retry_count,
+                scheduled_at: observed_at,
+                due_at: observed_at,
+                reason: RetryReason::Reconciliation,
+                error: None,
+            })
+        } else {
+            None
+        };
+        let mut execution = current_execution.clone();
+        if let Some(retry) = retry {
+            execution = execution.restore_retry(retry)?;
+        }
         let run = RunAttempt::new(
             recovered_run.worker_id.clone(),
-            execution.issue().id.clone(),
-            execution.issue().identifier.clone(),
+            current_execution.issue().id.clone(),
+            current_execution.issue().identifier.clone(),
             workspace.path.clone(),
             observed_at,
             (recovered_run.normal_retry_count > 0)
@@ -1702,11 +1721,43 @@ where
             self.config.max_turns,
         )
         .with_normal_retry_count(recovered_run.normal_retry_count);
-        let mut execution = execution.claim(run.clone())?;
+        let route = decide_issue_route(current_execution.issue(), &self.config)?;
+        execution = execution.claim(run.clone())?;
+        let start_request = WorkerStartRequest {
+            issue: current_execution.issue().clone(),
+            workspace: workspace.clone(),
+            run: run.clone(),
+            route: route.clone(),
+        };
+        self.remove_execution(issue_id);
+        let launch = match self.worker.start_worker(start_request).await {
+            Ok(launch) => launch,
+            Err(error) => {
+                let detail = error.to_string();
+                warn!(
+                    issue_id = %issue_id,
+                    error = %detail,
+                    "failed to reattach recovered scheduler worker"
+                );
+                let outcome = WorkerOutcomeRecord::from_run(
+                    &run,
+                    WorkerOutcomeKind::Failed,
+                    observed_at,
+                    Some("failed to reattach recovered worker".to_string()),
+                    Some(detail),
+                );
+                let execution = self
+                    .resolve_finished_execution(execution, outcome, observed_at)
+                    .await?;
+                self.insert_execution(issue_id.clone(), execution);
+                self.persist_retry_if_queued(issue_id).await?;
+                return Ok(());
+            }
+        };
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
-            Some(recovered_run.conversation),
+            Some(launch.conversation),
         )?;
         execution.record_turn_started(observed_at)?;
         if let Some(reason) = interrupt_reason {
@@ -1732,7 +1783,9 @@ where
             run.worker_id.clone(),
             WorkerMetadata::new(
                 issue_id.clone(),
-                harness_kind.filter(|kind| !kind.trim().is_empty()),
+                harness_kind
+                    .filter(|kind| !kind.trim().is_empty())
+                    .or(Some(route.harness_kind)),
             ),
         );
         self.insert_execution(issue_id.clone(), execution);
