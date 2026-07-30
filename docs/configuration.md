@@ -113,8 +113,9 @@ restores the backup and refuses to run while the instance's strict-run marker
 is active; it restores the original file permissions as well as file contents.
 Repeating a complete `apply` is a no-op; a partially published activation
 promotes its staged workflow or restores the backup before retrying.
-When preserving a legacy `.opensymphony/memory` tree, preflight refuses an
-active memory writer without changing files. Apply, direct CLI memory writers,
+When preserving a legacy `.opensymphony/memory` tree, preflight inspects the
+legacy inputs without requiring memory quiescence and does not copy or write
+files. Apply, direct CLI memory writers,
 automatic capture, archive, and the local memory server claim the same atomic
 coordination lock; the server holds it for its lifetime while publishing an
 activity marker. Owner PIDs allow stale lock and marker recovery after an

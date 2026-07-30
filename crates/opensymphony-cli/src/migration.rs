@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use clap::{Args, Subcommand};
@@ -278,10 +279,13 @@ pub async fn run(args: MigrationArgs) -> std::process::ExitCode {
 
 async fn active_target_central_config(
     paths: &MigrationPaths,
+    enforce_quiescence: bool,
 ) -> Result<Option<ActiveCentralConfig>, MigrationError> {
     let cwd = current_dir()?;
     let repo = absolute_path(&cwd, &paths.repo);
-    ensure_memory_migration_inactive(&repo)?;
+    if enforce_quiescence {
+        ensure_memory_migration_inactive(&repo)?;
+    }
     let source_config = paths
         .config
         .as_ref()
@@ -290,7 +294,7 @@ async fn active_target_central_config(
     let target_config = migration_target_config(paths, &cwd, &source_config);
     let activation = load_activation_marker(&target_config)?;
     let marker_source = if activation.is_some() && target_config != source_config {
-        Some(load_source(paths)?)
+        Some(load_source(paths, enforce_quiescence)?)
     } else {
         None
     };
@@ -314,7 +318,9 @@ async fn active_target_central_config(
     if let Some((activation_marker, marker)) = activation.as_ref()
         && marker.memory_catalog_copy_in_progress
     {
-        ensure_memory_migration_inactive(&marker.target_repo())?;
+        if enforce_quiescence {
+            ensure_memory_migration_inactive(&marker.target_repo())?;
+        }
         return Ok(Some(ActiveCentralConfig {
             source_config: marker.source_config.clone(),
             target_config: target_config.clone(),
@@ -364,7 +370,9 @@ async fn active_target_central_config(
     let (target_repo, workflow) = marker
         .map(|marker| (marker.target_repo(), marker.workflow_path))
         .unwrap_or_else(|| (repo.clone(), repo.join("WORKFLOW.md")));
-    ensure_memory_migration_inactive(&target_repo)?;
+    if enforce_quiescence {
+        ensure_memory_migration_inactive(&target_repo)?;
+    }
     Ok(Some(ActiveCentralConfig {
         source_config,
         target_config,
@@ -695,11 +703,18 @@ pub(crate) fn claim_strict_run_marker(
 
 fn stale_strict_run_marker_path(path: &Path) -> PathBuf {
     let sequence = STRICT_STALE_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("strict-run.active");
-    path.with_file_name(format!(".{name}.stale-{}-{sequence}", std::process::id()))
+    path.with_file_name(format!(
+        ".{name}.stale-{}-{timestamp}-{sequence}",
+        std::process::id()
+    ))
 }
 
 fn strict_run_marker_owner_alive(marker: &Path) -> bool {
@@ -994,10 +1009,10 @@ fn verify_backup_generation(
 }
 
 async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
-    if let Some(active) = active_target_central_config(&paths).await? {
+    if let Some(active) = active_target_central_config(&paths, false).await? {
         return Ok(active_report("preflight", &active, true));
     }
-    let source = load_source(&paths)?;
+    let source = load_source(&paths, false)?;
     if looks_like_central_config(&source.config_source) {
         let central = load_central_config(&source.source_config).await?;
         let _ = (
@@ -1044,7 +1059,7 @@ async fn preflight(paths: MigrationPaths) -> Result<MigrationReport, MigrationEr
 
 async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
     let _ = preflight(paths.clone()).await?;
-    if let Some(active) = active_target_central_config(&paths).await? {
+    if let Some(active) = active_target_central_config(&paths, true).await? {
         let _strict_run_marker = claim_migration_strict_run_marker(&active.target_config)?;
         let resolution = {
             let _legacy_runtime_ownership = load_activation_marker(&active.target_config)?
@@ -1072,7 +1087,7 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
 }
 
 async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, MigrationError> {
-    let source = load_source(&paths)?;
+    let source = load_source(&paths, true)?;
     if looks_like_central_config(&source.config_source) {
         let central = load_central_config(&source.source_config).await?;
         let _ = (
@@ -1686,7 +1701,10 @@ fn is_safe_system_path_alias(path: &Path) -> bool {
     }
 }
 
-fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> {
+fn load_source(
+    paths: &MigrationPaths,
+    enforce_quiescence: bool,
+) -> Result<SourceContext, MigrationError> {
     let cwd = current_dir()?;
     let repo = absolute_path(&cwd, &paths.repo);
     let source_config = paths
@@ -1731,8 +1749,10 @@ fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> 
         })
         .transpose()?
         .unwrap_or(repo);
-    ensure_memory_migration_inactive(&target_repo)?;
-    ensure_legacy_memory_quiescent(&target_repo)?;
+    if enforce_quiescence {
+        ensure_memory_migration_inactive(&target_repo)?;
+        ensure_legacy_memory_quiescent(&target_repo)?;
+    }
     let workflow_path = target_repo.join("WORKFLOW.md");
     reject_symlink_input(&workflow_path)?;
     let workflow_source = fs::read_to_string(&workflow_path).map_err(|source| {
@@ -2793,6 +2813,138 @@ fn workflow_has_literal_secret(front_matter: &WorkflowFrontMatter) -> bool {
         .is_some_and(|value| credential_variable(value).is_none())
         || openhands_environment_has_literal_secret(&front_matter.openhands.local_server.env)
         || openhands_credential_selector_is_literal(front_matter)
+        || [
+            front_matter.hooks.after_create.as_deref(),
+            front_matter.hooks.before_run.as_deref(),
+            front_matter.hooks.after_run.as_deref(),
+            front_matter.hooks.before_remove.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(hook_has_literal_secret)
+}
+
+fn hook_has_literal_secret(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+
+    if literal_value_after_marker(command, &lower, "authorization")
+        || literal_value_after_marker(command, &lower, "bearer")
+        || literal_value_after_marker(command, &lower, "basic")
+    {
+        return true;
+    }
+
+    for marker in [
+        "api_key",
+        "api-key",
+        "api_token",
+        "api-token",
+        "access_token",
+        "access-token",
+        "oauth_token",
+        "oauth-token",
+        "client_secret",
+        "client-secret",
+        "private_key",
+        "private-key",
+        "password",
+        "secret",
+        "pat",
+        "token",
+    ] {
+        if literal_assignment_value(command, &lower, marker) {
+            return true;
+        }
+    }
+    [
+        "--api-key",
+        "--access-token",
+        "--client-secret",
+        "--password",
+        "--secret",
+        "--pat",
+        "--token",
+    ]
+    .into_iter()
+    .any(|marker| literal_value_after_marker(command, &lower, marker))
+}
+
+fn literal_value_after_marker(command: &str, lower: &str, marker: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(relative) = lower[search_from..].find(marker) {
+        let start = search_from + relative;
+        let end = start + marker.len();
+        if !is_hook_marker_boundary(lower, start, end) {
+            search_from = end;
+            continue;
+        }
+        let mut tail = &command[end..];
+        tail = trim_hook_value_prefix(tail);
+        if let Some(value) = next_hook_word(tail) {
+            if marker == "authorization"
+                && ["bearer", "basic", "token"]
+                    .into_iter()
+                    .any(|scheme| value.eq_ignore_ascii_case(scheme))
+            {
+                let credential = trim_hook_value_prefix(&tail[value.len()..]);
+                return next_hook_word(credential)
+                    .is_some_and(|value| credential_variable(value).is_none());
+            }
+            return credential_variable(value).is_none();
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn literal_assignment_value(command: &str, lower: &str, marker: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(relative) = lower[search_from..].find(marker) {
+        let start = search_from + relative;
+        let end = start + marker.len();
+        if !is_hook_marker_boundary(lower, start, end) {
+            search_from = end;
+            continue;
+        }
+        let before = &lower[..start];
+        let preceded_by_flag = before.ends_with("--");
+        let tail = &command[end..];
+        if preceded_by_flag
+            || tail
+                .chars()
+                .next()
+                .is_some_and(|character| matches!(character, ':' | '='))
+        {
+            let tail = trim_hook_value_prefix(tail);
+            if let Some(value) = next_hook_word(tail) {
+                return credential_variable(value).is_none();
+            }
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn is_hook_marker_boundary(value: &str, start: usize, end: usize) -> bool {
+    let before = value[..start].chars().next_back();
+    let after = value[end..].chars().next();
+    before.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
+        && after.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
+}
+
+fn trim_hook_value_prefix(value: &str) -> &str {
+    value.trim_start_matches(|character: char| {
+        character.is_ascii_whitespace() || matches!(character, ':' | '=' | '\'' | '"')
+    })
+}
+
+fn next_hook_word(value: &str) -> Option<&str> {
+    let end = value
+        .find(|character: char| {
+            character.is_ascii_whitespace() || matches!(character, '\'' | '"' | ',' | ';' | ')')
+        })
+        .unwrap_or(value.len());
+    (end > 0).then(|| &value[..end])
 }
 
 fn openhands_credential_selector_is_literal(front_matter: &WorkflowFrontMatter) -> bool {
@@ -3259,6 +3411,43 @@ mod tests {
     }
 
     #[test]
+    fn migration_rejects_literal_hook_credentials_but_allows_environment_references() {
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\nhooks:\n  before_run: \"curl -H 'Authorization: Bearer hook-secret-canary' https://example.invalid\"\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let target_repo = PathBuf::from("repo");
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            source_config_present: false,
+            target_repo: target_repo.clone(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        let report = build_report("preflight", &source, None, None, true);
+        let serialized = serde_json::to_string(&report).expect("report should serialize");
+        assert!(report.literal_secret_detected);
+        assert!(!serialized.contains("hook-secret-canary"));
+        assert!(matches!(
+            generate_central_config(&source),
+            Err(MigrationError::LiteralSecret)
+        ));
+        assert!(!hook_has_literal_secret(
+            "curl -H 'Authorization: Bearer ${HOOK_TOKEN}' https://example.invalid"
+        ));
+    }
+
+    #[test]
     fn migration_keeps_delimiter_leading_prompt_outside_front_matter() {
         let workflow_source = "---\ntracker:\n  kind: linear\n  project_slug: project\n---\n\n---\nTarget branch: develop\n---\n";
         let workflow =
@@ -3394,11 +3583,14 @@ mod tests {
         symlink(&real_config, &config).expect("config symlink should be created");
         symlink(&real_workflow, &workflow).expect("workflow symlink should be created");
 
-        let error = load_source(&MigrationPaths {
-            config: Some(config.clone()),
-            repo: root.path().to_path_buf(),
-            output: None,
-        })
+        let error = load_source(
+            &MigrationPaths {
+                config: Some(config.clone()),
+                repo: root.path().to_path_buf(),
+                output: None,
+            },
+            true,
+        )
         .expect_err("migration should reject symlinked inputs");
         assert!(matches!(error, MigrationError::SymlinkInput { path } if path == config));
         assert!(
@@ -3416,11 +3608,14 @@ mod tests {
 
         fs::remove_file(&config).expect("config symlink should be removable");
         fs::copy(&real_config, &config).expect("regular config should be restored");
-        let error = load_source(&MigrationPaths {
-            config: Some(config),
-            repo: root.path().to_path_buf(),
-            output: None,
-        })
+        let error = load_source(
+            &MigrationPaths {
+                config: Some(config),
+                repo: root.path().to_path_buf(),
+                output: None,
+            },
+            true,
+        )
         .expect_err("migration should reject a symlinked workflow");
         assert!(matches!(error, MigrationError::SymlinkInput { path } if path == workflow));
     }
@@ -4357,6 +4552,43 @@ mod tests {
         assert!(!serialized.contains("secret-canary"));
         assert!(!root.path().join("config.yaml").exists());
         assert!(!root.path().join(".opensymphony").exists());
+    }
+
+    #[tokio::test]
+    async fn preflight_reads_legacy_inputs_while_memory_is_active() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init should run");
+        Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:example/repo.git"])
+            .current_dir(root.path())
+            .status()
+            .expect("git remote should be configured");
+        fs::write(
+            root.path().join("WORKFLOW.md"),
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n\nTarget branch: develop\n",
+        )
+        .expect("workflow should be written");
+        let memory_root = root.path().join(".opensymphony/memory");
+        fs::create_dir_all(&memory_root).expect("memory root should exist");
+        fs::write(
+            memory_activity_marker_path(&memory_root),
+            format!("pid={}\n", std::process::id()),
+        )
+        .expect("active memory marker should be written");
+
+        let report = preflight(MigrationPaths {
+            config: None,
+            repo: root.path().to_path_buf(),
+            output: None,
+        })
+        .await
+        .expect("read-only preflight should not require memory quiescence");
+        assert!(report.preflight_only);
+        assert!(!root.path().join("config.yaml").exists());
     }
 
     #[tokio::test]

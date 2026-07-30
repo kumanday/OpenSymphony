@@ -1938,11 +1938,7 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
                 category: None,
                 retry_after: None,
             }),
-            Err(FakeError {
-                message: "terminal cleanup should retry".to_string(),
-                category: None,
-                retry_after: None,
-            }),
+            Ok(()),
         ]),
         ..Default::default()
     };
@@ -2008,10 +2004,17 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
             .expect("execution should remain recorded")
             .state(),
         crate::opensymphony_orchestrator::SchedulerState::Released {
-            reason: ReleaseReason::RetryExhausted,
+            reason: ReleaseReason::TrackerTerminal,
             ..
         }
     ));
+    assert!(
+        scheduler
+            .execution(&IssueId::new("lin-542").expect("issue id should be valid"))
+            .expect("execution should remain recorded")
+            .workspace()
+            .is_none()
+    );
 
     scheduler
         .tick(ts(600_300))

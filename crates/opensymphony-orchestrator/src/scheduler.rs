@@ -2394,7 +2394,10 @@ where
             } else {
                 self.workspace.cleanup_workspace(&workspace, true).await
             } {
-                Ok(()) => retry_cleanup_succeeded = true,
+                Ok(()) => {
+                    retry_cleanup_succeeded = true;
+                    execution.clear_workspace();
+                }
                 Err(error) => {
                     tracing::warn!(
                         issue = %issue_id,

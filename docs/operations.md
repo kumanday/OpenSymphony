@@ -658,12 +658,15 @@ If apply is interrupted after staging or replacement, run
 `opensymphony migrate rollback --config <central-config>` once the strict-run
 marker is absent. Rollback restores the backed-up runnable generation and
 leaves the backup evidence in place. Migration rejects repository-creation
-hooks, query/fragment-bearing remotes, and ambiguous credential expressions
-before activation. Existing repository-local memory entries are copied into
+hooks, query/fragment-bearing remotes, literal credentials embedded in hook
+commands, and ambiguous credential expressions before activation; hook
+credentials must use environment indirection. Existing repository-local
+memory entries are copied into
 the central catalog; identical repeat applies are idempotent, while divergent
 entries fail as a recoverable conflict instead of silently keeping stale data.
-The memory server marks its catalog as active while running, so preflight
-refuses to copy from a live legacy writer without writing anything. Apply and
+The memory server marks its catalog as active while running, so read-only
+preflight can inspect a live legacy writer without copying or writing anything.
+Apply and
 the server claim the same atomic `.opensymphony/memory.migration.lock` before
 reading or copying the catalog; the server holds it for its lifetime. The lock
 and activity marker record an owner PID and process incarnation, so stale
