@@ -380,20 +380,31 @@ async fn central_memory_catalog_root_for_marker(
     marker: &ActivationMarker,
 ) -> Result<Option<PathBuf>, MigrationError> {
     let staged_config = stage_path(&marker.config_path, &marker.generation);
-    let config_path = if target_config.is_file() {
+    let active = if target_config.is_file() {
+        let raw = fs::read_to_string(target_config).map_err(|source| MigrationError::Read {
+            path: target_config.to_path_buf(),
+            source,
+        })?;
+        if looks_like_central_config(&raw) {
+            Some(load_central_config(target_config).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let config_path = if active
+        .as_ref()
+        .is_some_and(|config| config.generation == marker.generation)
+    {
         target_config.to_path_buf()
     } else if staged_config.is_file() {
         staged_config
+    } else if active.is_some() {
+        target_config.to_path_buf()
     } else {
         return Ok(None);
     };
-    let raw = fs::read_to_string(&config_path).map_err(|source| MigrationError::Read {
-        path: config_path.clone(),
-        source,
-    })?;
-    if !looks_like_central_config(&raw) {
-        return Ok(None);
-    }
     Ok(load_central_config(&config_path).await?.memory_catalog_root)
 }
 
@@ -1640,21 +1651,16 @@ fn reject_symlink_input(path: &Path) -> Result<(), MigrationError> {
 
 fn reject_symlink_ancestors(path: &Path) -> Result<(), MigrationError> {
     let mut current = Some(path);
-    let mut first_existing = true;
     while let Some(candidate) = current {
         match fs::symlink_metadata(candidate) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() && !is_safe_system_path_alias(candidate) =>
+            {
                 return Err(MigrationError::SymlinkInput {
                     path: candidate.to_path_buf(),
                 });
             }
-            // Inspect one parent after an existing leaf as well, so a file
-            // reached through a symlinked directory cannot bypass the check.
-            // Then stop at the first ordinary ancestor; this keeps the check
-            // scoped to the destination tree so macOS's `/tmp` alias is not a
-            // false positive.
-            Ok(_) if first_existing => first_existing = false,
-            Ok(_) => break,
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(MigrationError::Read {
@@ -1666,6 +1672,18 @@ fn reject_symlink_ancestors(path: &Path) -> Result<(), MigrationError> {
         current = candidate.parent();
     }
     Ok(())
+}
+
+fn is_safe_system_path_alias(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        path == Path::new("/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 fn load_source(paths: &MigrationPaths) -> Result<SourceContext, MigrationError> {
@@ -3945,6 +3963,71 @@ mod tests {
         let error = reject_symlink_ancestors(&alias.join("generation/config.yaml"))
             .expect_err("backup symlink ancestors must be rejected");
         assert!(matches!(error, MigrationError::SymlinkInput { path } if path == alias));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_symlinked_backup_ancestors_beyond_existing_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let repo = root.path().join("repo");
+        let external = root.path().join("external");
+        fs::create_dir_all(&repo).expect("repository should exist");
+        fs::create_dir_all(external.join("migration/backups/generation"))
+            .expect("external backup tree should exist");
+        symlink(&external, repo.join(".opensymphony"))
+            .expect("opensymphony directory symlink should be created");
+
+        let path = repo.join(".opensymphony/migration/backups/generation/config.yaml");
+        let error = reject_symlink_ancestors(&path)
+            .expect_err("distant backup symlink ancestors must be rejected");
+        assert!(
+            matches!(error, MigrationError::SymlinkInput { path } if path == repo.join(".opensymphony"))
+        );
+    }
+
+    #[tokio::test]
+    async fn central_memory_catalog_root_prefers_staged_generation_over_legacy_target() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let config_path = root.path().join("config.yaml");
+        let central = format!(
+            "schema_version: 1\ninstance:\n  id: staged\n  state_root: {0}/state\nrouting:\n  mode: legacy_single\n  repository: repo\ntracker_profiles:\n  linear:\n    provider: linear\n    credential: linear-key\n    active_states: [Todo]\n    terminal_states: [Done]\nlinear_projects:\n  project:\n    provider_project_id: project\n    repositories: [repo]\nrepositories:\n  repo:\n    aliases: [repo]\n    remote:\n      provider: git\n      locator: example/repo\n      clone: git@github.com:example/repo.git\n    target_branch: develop\n    credential: git-key\n    review_profile: review\n    instructions:\n      path: AGENTS.md\n    checkout_path: {0}/checkout\ncredentials:\n  linear-key:\n    kind: environment\n    variable: LINEAR_API_KEY\n  git-key:\n    kind: ssh-agent\nreview_profiles:\n  review:\n    provider: git\n    credential: git-key\nworkspace:\n  root: {0}/workspace\nmemory:\n  catalog_root: {0}/state/memory\n",
+            root.path().display()
+        );
+        let generation = sha256(central.as_bytes());
+        fs::write(&config_path, "legacy: true\n").expect("legacy config should exist");
+        let staged = stage_path(&config_path, &generation);
+        write_file(&staged, central.as_bytes()).expect("staged config should be written");
+        let marker = ActivationMarker {
+            source_config: config_path.clone(),
+            config_path: config_path.clone(),
+            workflow_path: root.path().join("WORKFLOW.md"),
+            backup_dir: migration_root(&config_path)
+                .join("backups")
+                .join(generation.trim_start_matches("sha256:")),
+            generation,
+            workflow_generation: String::new(),
+            had_config: true,
+            had_workflow: false,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: Some(root.path().join("state/memory")),
+            memory_catalog_generation: None,
+            memory_catalog_copy_in_progress: true,
+            legacy_workspace_root: None,
+            backup_config_generation: None,
+            backup_workflow_generation: None,
+        };
+
+        let catalog = central_memory_catalog_root_for_marker(&config_path, &marker)
+            .await
+            .expect("staged central config should resolve")
+            .expect("staged central config should provide a catalog root");
+        assert_eq!(
+            catalog,
+            canonicalize_destination(&root.path().join("state/memory"))
+        );
     }
 
     #[test]

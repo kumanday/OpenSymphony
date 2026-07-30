@@ -533,9 +533,11 @@ only.
 Each `opensymphony run` claims the configured state and workspace roots before
 constructing tracker, memory, or workspace services. A second live process
 using either root fails without polling Linear or creating a workspace. The
-ownership marker records only the process ID; stale markers from an unclean
-exit are atomically quarantined before the root is reclaimed. The marker is
-released when the run shuts down, including legacy single-repository runs.
+ownership marker records the process ID and, when available, a process-start
+incarnation; stale markers are atomically quarantined before the root is
+reclaimed, and a reused PID does not keep an old marker live when its
+incarnation differs. The marker is released when the run shuts down, including
+legacy single-repository runs.
 
 When a worker outcome schedules a retry, the run manifest records the retry's
 scheduled time, due deadline, reason, and redacted error summary. Restart
@@ -664,8 +666,9 @@ The memory server marks its catalog as active while running, so preflight
 refuses to copy from a live legacy writer without writing anything. Apply and
 the server claim the same atomic `.opensymphony/memory.migration.lock` before
 reading or copying the catalog; the server holds it for its lifetime. The lock
-and activity marker record an owner PID, so stale ownership from an unclean
-exit can be reclaimed while a live owner still blocks migration/startup.
+and activity marker record an owner PID and process incarnation, so stale
+ownership from an unclean exit can be reclaimed while a live owner still
+blocks migration/startup.
 Stale lock recovery atomically renames the old lock to a unique quarantine file
 before removing it; it never removes a newly-created owner lock at the shared
 path. A project-set central config is also rejected by every doctor mode until
@@ -691,8 +694,10 @@ cannot replace the active generation underneath a running instance, and stale
 markers are reclaimed only after owner liveness is disproved. Graceful run
 shutdown awaits the memory-server task before returning, ensuring its activity
 marker and coordination lock are released.
-Lock ownership treats permission-denied Unix PIDs as live and uses `tasklist`
-for stale-lock recovery on Windows. Restart recovery preserves successful
+Lock ownership treats permission-denied Unix PIDs as live, compares the
+recorded process incarnation when available, and uses native process creation
+times alongside `tasklist` for stale-lock recovery on Windows. Restart recovery
+preserves successful
 terminal workspaces according to the configured retention policy, rejects
 pending retries that exceed a newly lowered retry limit, and redacts
 credential-shaped diagnostics before persisting them in `run.json`. If a
