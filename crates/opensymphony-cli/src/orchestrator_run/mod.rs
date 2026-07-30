@@ -482,7 +482,17 @@ fn root_marker_blocks(marker: &Path) -> bool {
 }
 
 fn root_ownership_registry_path() -> PathBuf {
-    root_ownership_coordination_directory().join("opensymphony-runtime-root-ownership-registry")
+    #[cfg(unix)]
+    {
+        // Unix's sticky host temp directory lets every user publish and own
+        // its own marker without requiring a shared child directory owned by
+        // whichever user happened to start the first process.
+        root_ownership_coordination_directory()
+    }
+    #[cfg(not(unix))]
+    {
+        root_ownership_coordination_directory().join("opensymphony-runtime-root-ownership-registry")
+    }
 }
 
 fn root_ownership_coordination_directory() -> PathBuf {
@@ -504,6 +514,7 @@ fn root_ownership_coordination_directory() -> PathBuf {
 
 fn claim_root_registry_marker(root: &Path) -> Result<PathBuf, RunCommandError> {
     let registry = root_ownership_registry_path();
+    #[cfg(not(unix))]
     fs::create_dir_all(&registry).map_err(|source| RunCommandError::RootOwnership {
         detail: format!("failed to create {}: {source}", registry.display()),
     })?;

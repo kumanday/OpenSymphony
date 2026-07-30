@@ -3648,6 +3648,37 @@ async fn recovery_reopens_exhausted_execution_after_retry_limit_increase() {
 
     assert_eq!(scheduler.worker().launches.len(), 1);
     assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 2);
+
+    let run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("the reopened final retry failed".to_owned()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("the reopened retry should exhaust the raised limit");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-279").expect("issue id should be valid"))
+        .expect("exhausted execution should remain tracked");
+    assert_eq!(execution.retry_count_override(), Some(2));
+    assert!(matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]

@@ -2703,7 +2703,12 @@ where
             let persisted = self
                 .persist_retry_exhaustion(execution.issue(), normal_retry_count)
                 .await?;
+            // A retry-exhausted execution may have been reopened after the
+            // configured limit increased. Keep the durable override aligned
+            // with the retry that just exhausted the new budget so the next
+            // reconciliation cannot reopen it repeatedly.
             let mut execution = execution.release(observed_at, reason, outcome)?;
+            execution.set_retry_count_override(normal_retry_count);
             let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
             if cleanup_terminal
                 && !retain_failed

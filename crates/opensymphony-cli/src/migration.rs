@@ -2677,13 +2677,9 @@ fn migrated_stall_timeout_ms(
 
 fn git_remote(repo: &Path) -> Result<String, MigrationError> {
     let output = Command::new("git")
-        .args([
-            "-C",
-            &repo.display().to_string(),
-            "config",
-            "--get",
-            "remote.origin.url",
-        ])
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "--get", "remote.origin.url"])
         .output()
         .map_err(|source| MigrationError::Read {
             path: repo.to_path_buf(),
