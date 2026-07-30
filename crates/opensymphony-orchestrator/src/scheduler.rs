@@ -1166,11 +1166,17 @@ where
                     let execution = self
                         .remove_execution(&issue_id)
                         .expect("active recovery execution should be present");
+                    let already_exhausted = retry_exhausted_release(&execution);
                     if self.retry_limit_reached(record.normal_retry_count) {
-                        self.insert_execution(
-                            issue_id.clone(),
-                            execution.release(observed_at, ReleaseReason::Completed, None)?,
-                        );
+                        let mut execution = if already_exhausted {
+                            execution
+                        } else {
+                            execution.release(observed_at, ReleaseReason::Completed, None)?
+                        };
+                        if already_exhausted {
+                            execution.set_retry_count_override(record.normal_retry_count);
+                        }
+                        self.insert_execution(issue_id.clone(), execution);
                     } else {
                         let previous_attempt = (record.normal_retry_count > 0)
                             .then(|| RetryAttempt::new(record.normal_retry_count))
@@ -1182,6 +1188,11 @@ where
                             observed_at,
                             self.config.retry_policy,
                         )?;
+                        let execution = if already_exhausted {
+                            execution.reopen(observed_at)?
+                        } else {
+                            execution
+                        };
                         self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
                     }
                 } else if record.completed_run {

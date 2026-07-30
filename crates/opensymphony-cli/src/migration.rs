@@ -1135,19 +1135,20 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
         });
     }
 
+    let cwd = current_dir()?;
+    let target_config = migration_target_config(&paths, &cwd, &source.source_config);
+    let _strict_run_marker = claim_migration_strict_run_marker(&target_config)?;
     let workspace_root = legacy_runtime_workspace_root(&source)?;
     ensure_legacy_runtime_quiescent(&workspace_root)?;
     let generated = generate_central_config(&source)?;
     let _runtime_ownership = legacy_runtime_root_requires_ownership(
         source.workflow.front_matter.workspace.root.as_deref(),
         &workspace_root,
+        true,
     )
     .then(|| acquire_legacy_runtime_ownership(&workspace_root))
     .transpose()?;
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
-    let cwd = current_dir()?;
-    let target_config = migration_target_config(&paths, &cwd, &source.source_config);
-    let _strict_run_marker = claim_migration_strict_run_marker(&target_config)?;
     let generation = sha256(generated.as_bytes());
     let migration_root = migration_root(&target_config);
     let backup_dir = migration_root
@@ -2299,8 +2300,9 @@ fn legacy_runtime_workspace_root(source: &SourceContext) -> Result<PathBuf, Migr
 fn legacy_runtime_root_requires_ownership(
     configured_workspace_root: Option<&str>,
     workspace_root: &Path,
+    strict_run_claimed: bool,
 ) -> bool {
-    configured_workspace_root.is_some() || workspace_root.exists()
+    configured_workspace_root.is_some() || workspace_root.exists() || !strict_run_claimed
 }
 
 fn recorded_legacy_runtime_workspace_root(
@@ -4144,17 +4146,25 @@ mod tests {
 
         assert!(!legacy_runtime_root_requires_ownership(
             None,
-            &workspace_root
+            &workspace_root,
+            true
         ));
         assert!(legacy_runtime_root_requires_ownership(
             Some("/explicit/workspaces"),
-            &workspace_root
+            &workspace_root,
+            true
+        ));
+        assert!(legacy_runtime_root_requires_ownership(
+            None,
+            &workspace_root,
+            false
         ));
 
         fs::create_dir(&workspace_root).expect("workspace root should be creatable");
         assert!(legacy_runtime_root_requires_ownership(
             None,
-            &workspace_root
+            &workspace_root,
+            true
         ));
     }
 

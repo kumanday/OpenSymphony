@@ -610,17 +610,27 @@ fn find_live_registered_root_marker(
         if !name.starts_with("root-") || !name.ends_with(".active") {
             continue;
         }
-        let metadata =
-            fs::symlink_metadata(&marker).map_err(|source| RunCommandError::RootOwnership {
-                detail: format!("failed to inspect {}: {source}", marker.display()),
-            })?;
+        let metadata = match fs::symlink_metadata(&marker) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(RunCommandError::RootOwnership {
+                    detail: format!("failed to inspect {}: {source}", marker.display()),
+                });
+            }
+        };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
-        let contents =
-            fs::read_to_string(&marker).map_err(|source| RunCommandError::RootOwnership {
-                detail: format!("failed to read {}: {source}", marker.display()),
-            })?;
+        let contents = match fs::read_to_string(&marker) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(RunCommandError::RootOwnership {
+                    detail: format!("failed to read {}: {source}", marker.display()),
+                });
+            }
+        };
         let Some(pid) = contents
             .lines()
             .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())

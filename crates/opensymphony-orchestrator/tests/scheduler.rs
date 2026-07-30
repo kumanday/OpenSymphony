@@ -3280,6 +3280,62 @@ async fn recovery_releases_an_active_successful_run_when_retry_limit_reached() {
 }
 
 #[tokio::test]
+async fn recovery_merges_successful_run_with_pending_retry_exhaustion() {
+    let recovered_workspace = workspace_record("COE-281", "/tmp/recovered/COE-281");
+    let issue = normalized_issue("lin-281", "COE-281", "In Progress");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-281", "COE-281", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: issue.clone(),
+            workspace: recovered_workspace,
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        retry_exhaustion: vec![RetryExhaustionRecord {
+            issue,
+            normal_retry_count: 1,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(2);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("successful recovery should merge with pending exhaustion");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-281").expect("issue id should be valid"))
+        .expect("merged execution should remain visible");
+    assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+    assert_eq!(
+        execution
+            .retry()
+            .expect("continuation retry")
+            .normal_retry_count,
+        2
+    );
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
 async fn recovery_dispatches_persisted_pending_retry_before_limit() {
     let recovered_workspace = workspace_record("COE-276", "/tmp/recovered/COE-276");
     let tracker = FakeTracker {

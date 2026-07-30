@@ -992,6 +992,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             }
         };
         manifest.pending_retry = true;
+        manifest.status = RunStatus::PreparationFailed;
+        manifest.status_detail = Some("retry pending after worker stop".to_owned());
         manifest.retry_scheduled_at = Some(retry.scheduled_at.as_u64());
         manifest.retry_due_at = Some(retry.due_at.as_u64());
         manifest.retry_reason = Some(retry_reason_for_manifest(retry.reason));
@@ -1197,10 +1199,6 @@ fn recoverable_run_manifest(
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {
                 conversation_manifest_is_codex(manifest)
-                    && manifest
-                        .last_turn_id
-                        .as_deref()
-                        .is_some_and(|turn_id| !turn_id.trim().is_empty())
                     && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
             }))
 }
@@ -1983,7 +1981,7 @@ async fn try_run_codex_stdio_issue(
     };
     let mut resume_terminal = None;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
-        Some(manifest) => {
+        Some(mut manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
             let resume = adapter
                 .resume_issue_request(
@@ -2051,7 +2049,28 @@ async fn try_run_codex_stdio_issue(
                     format!("returned thread id `{resumed_thread_id}` instead"),
                 ));
             }
-            resume_terminal = manifest.last_turn_id.as_deref().and_then(|turn_id| {
+            let resume_turn_id = manifest
+                .last_turn_id
+                .clone()
+                .filter(|turn_id| !turn_id.trim().is_empty())
+                .or_else(|| read_state.pending_turn_id.take())
+                .or_else(|| codex_active_turn_id_from_resume_response(&resume_response));
+            if recovered
+                && let Some(turn_id) = resume_turn_id.as_deref()
+                && manifest.last_turn_id.as_deref() != Some(turn_id)
+            {
+                persist_codex_turn_id(workspace_manager, workspace, &mut manifest, turn_id)
+                    .await
+                    .map_err(|error| {
+                        codex_lifecycle_error(
+                            issue,
+                            Some(&conversation_id),
+                            "recovered turn id persistence",
+                            error,
+                        )
+                    })?;
+            }
+            resume_terminal = resume_turn_id.as_deref().and_then(|turn_id| {
                 codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
             });
             let prompt_kind = if manifest.workflow_prompt_seeded {
@@ -3015,6 +3034,36 @@ fn codex_terminal_outcome_from_resume_response(
         event_kind: NormalizedCodexEventKind::TurnCompleted,
         outcome,
         status,
+    })
+}
+
+fn codex_active_turn_id_from_resume_response(value: &serde_json::Value) -> Option<String> {
+    let turns = value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("thread")
+                .and_then(|thread| thread.get("turns"))
+                .or_else(|| result.get("turns"))
+        })?
+        .as_array()?;
+    turns.iter().rev().find_map(|turn| {
+        let status = turn
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(|status| status.to_ascii_lowercase().replace(['_', '-'], ""))?;
+        if !matches!(
+            status.as_str(),
+            "inprogress" | "running" | "queued" | "pending" | "started" | "starting"
+        ) {
+            return None;
+        }
+        turn.get("id")
+            .or_else(|| turn.get("turnId"))
+            .or_else(|| turn.get("turn_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .map(ToOwned::to_owned)
     })
 }
 
@@ -4308,6 +4357,30 @@ mod tests {
                 OPENHANDS_AGENT_SERVER_KIND
             );
         }
+    }
+
+    #[test]
+    fn codex_resume_response_finds_the_latest_active_turn() {
+        let turn_id = codex_active_turn_id_from_resume_response(&serde_json::json!({
+            "result": {
+                "thread": {
+                    "turns": [
+                        {"id": "completed-turn", "status": "completed"},
+                        {"id": "active-turn", "status": "in_progress"}
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(turn_id.as_deref(), Some("active-turn"));
+        assert!(
+            codex_active_turn_id_from_resume_response(&serde_json::json!({
+                "result": {
+                    "turns": [{"id": "done", "status": "completed"}]
+                }
+            }))
+            .is_none()
+        );
     }
 
     #[test]
@@ -6502,7 +6575,6 @@ mod tests {
         let mut conversation_manifest =
             sample_conversation_manifest("conv-prepared-codex-recovery");
         conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
-        conversation_manifest.last_turn_id = Some("turn-active".to_owned());
         conversation_manifest.active_run_id = Some("run-prepared-codex-recovery".to_owned());
         workspace_manager
             .write_text_artifact(
