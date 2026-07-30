@@ -1319,6 +1319,54 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
             path: migration_marker_path(&config_path),
         });
     };
+    if rollback_files_match_backup(&marker)? {
+        validate_activation_marker(
+            &config_path,
+            &marker,
+            &marker.target_repo(),
+            None,
+            marker.memory_catalog_root.as_deref(),
+        )?;
+        let active_run_marker = strict_run_marker_path(&config_path);
+        let _strict_run_marker = match claim_strict_run_marker(&config_path, "rollback") {
+            Ok(marker) => marker,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(MigrationError::ActiveStrictRun {
+                    path: active_run_marker,
+                });
+            }
+            Err(source) => {
+                return Err(MigrationError::Write {
+                    path: active_run_marker,
+                    source,
+                });
+            }
+        };
+
+        let mut memory_locks = acquire_memory_migration_lock(&marker.target_repo())?;
+        memory_locks
+            .acquire_catalog_lock(&marker.target_repo(), marker.memory_catalog_root.as_deref())?;
+        verify_backup_generations(&marker)?;
+        if let (Some(root), Some(expected)) = (
+            marker.memory_catalog_root.as_deref(),
+            marker.memory_catalog_generation.as_deref(),
+        ) && memory_catalog_generation(root)? != expected
+        {
+            return Err(MigrationError::MemoryCatalogChanged {
+                path: root.to_path_buf(),
+            });
+        }
+        if !rollback_files_match_backup(&marker)? {
+            return Err(MigrationError::ActivatedFileChanged {
+                path: marker.config_path.clone(),
+            });
+        }
+        fs::remove_file(&marker_path).map_err(|source| MigrationError::Write {
+            path: marker_path.clone(),
+            source,
+        })?;
+        return Ok(rollback_report(marker_path, marker));
+    }
     let central = if config_path.is_file() {
         load_central_config(&config_path).await?
     } else {
@@ -1390,7 +1438,11 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         source,
     })?;
 
-    Ok(MigrationReport {
+    Ok(rollback_report(marker_path, marker))
+}
+
+fn rollback_report(marker_path: PathBuf, marker: ActivationMarker) -> MigrationReport {
+    MigrationReport {
         operation: "rollback",
         source_config: marker.config_path.clone(),
         target_repo: marker
@@ -1409,7 +1461,40 @@ async fn rollback(args: RollbackArgs) -> Result<MigrationReport, MigrationError>
         credential_bearing_remote_detected: false,
         backup: Some(marker.backup_dir),
         activation_marker: Some(marker_path),
-    })
+    }
+}
+
+fn rollback_files_match_backup(marker: &ActivationMarker) -> Result<bool, MigrationError> {
+    Ok(rollback_file_matches_backup(
+        &marker.config_path,
+        &marker.backup_dir.join("config.yaml"),
+        marker.had_config,
+    )? && rollback_file_matches_backup(
+        &marker.workflow_path,
+        &marker.backup_dir.join("WORKFLOW.md"),
+        marker.had_workflow,
+    )?)
+}
+
+fn rollback_file_matches_backup(
+    target: &Path,
+    backup: &Path,
+    had_original: bool,
+) -> Result<bool, MigrationError> {
+    if !had_original {
+        return Ok(!target.exists());
+    }
+    let backup_contents = fs::read(backup).map_err(|source| MigrationError::Read {
+        path: backup.to_path_buf(),
+        source,
+    })?;
+    match fs::read(target) {
+        Ok(contents) => Ok(contents == backup_contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(MigrationError::ActivatedFileChanged {
+            path: target.to_path_buf(),
+        }),
+    }
 }
 
 fn verify_activated_files(marker: &ActivationMarker) -> Result<(), MigrationError> {
@@ -4400,6 +4485,17 @@ mod tests {
             "blocked rollback must keep central config"
         );
         fs::remove_dir_all(&memory_root).expect("test memory catalog should be removed");
+
+        // Simulate an interrupted rollback after both legacy files were
+        // restored but before the activation marker was removed.
+        restore_file(
+            &marker.backup_dir.join("WORKFLOW.md"),
+            &workflow_path,
+            marker.workflow_mode,
+        )
+        .expect("interrupted rollback should restore the legacy workflow");
+        assert!(!marker.had_config);
+        fs::remove_file(&output_path).expect("interrupted rollback should remove central config");
 
         rollback(RollbackArgs {
             config: Some(output_path.clone()),

@@ -3470,6 +3470,34 @@ async fn recovery_reopens_exhausted_execution_after_retry_limit_increase() {
 }
 
 #[tokio::test]
+async fn recovery_reopens_marker_only_exhaustion_with_consumed_retry_count() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-280", "COE-280", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        retain_failed: false,
+        retry_exhaustion: vec![RetryExhaustionRecord {
+            issue: normalized_issue("lin-280", "COE-280", "In Progress"),
+            normal_retry_count: 1,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(2);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("marker-only exhaustion should reopen as a retry");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 2);
+}
+
+#[tokio::test]
 async fn terminal_recovery_honors_failed_workspace_retention() {
     let recovered_workspace = workspace_record("COE-274", "/tmp/recovered/COE-274");
     let tracker = FakeTracker {

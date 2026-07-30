@@ -2280,6 +2280,9 @@ where
             && execution
                 .retry_count_override()
                 .is_some_and(|count| !self.retry_limit_reached(count));
+        let retry_exhausted_marker_only_reopen =
+            retry_exhausted_can_reopen && recovered_workspace.is_none();
+        let retry_count_override = execution.retry_count_override();
         let was_terminal_outcome =
             terminal_worker_outcome_prevents_reopen(&execution) && !retry_exhausted_can_reopen;
         let mut execution =
@@ -2292,6 +2295,22 @@ where
         execution.refresh_issue(issue.clone())?;
         if let Some(workspace) = recovered_workspace {
             execution.attach_workspace(workspace)?;
+        }
+        if retry_exhausted_marker_only_reopen {
+            let normal_retry_count = retry_count_override
+                .expect("retry-exhausted recovery should record its consumed retry count")
+                .saturating_add(1);
+            let retry = RetryEntry {
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                attempt: RetryAttempt::new(normal_retry_count)?,
+                normal_retry_count,
+                scheduled_at: observed_at,
+                due_at: observed_at,
+                reason: RetryReason::Reconciliation,
+                error: None,
+            };
+            execution = execution.restore_retry(retry)?;
         }
         self.insert_execution(issue_id, execution);
         Ok(())

@@ -726,7 +726,9 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         ),
         MemoryCommand::Capture(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            let _coordination_lock = acquire_memory_writer_lock(&config)?;
+            let _coordination_lock = (!args.dry_run)
+                .then(|| acquire_memory_writer_lock(&config))
+                .transpose()?;
             run_capture(
                 &repo_root,
                 &config,
@@ -737,12 +739,16 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Import(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            let _coordination_lock = acquire_memory_writer_lock(&config)?;
+            let _coordination_lock = (!args.dry_run)
+                .then(|| acquire_memory_writer_lock(&config))
+                .transpose()?;
             run_import(&config, args)
         }
         MemoryCommand::SyncDocs(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            let _coordination_lock = acquire_memory_writer_lock(&config)?;
+            let _coordination_lock = (!args.dry_run)
+                .then(|| acquire_memory_writer_lock(&config))
+                .transpose()?;
             run_sync_docs(&config, args)
         }
         MemoryCommand::Status(args) => {
