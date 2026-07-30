@@ -1032,6 +1032,9 @@ where
 
         let mut retry_records = Vec::new();
         for record in records {
+            if let Some(recovered_run) = record.recovered_run.as_ref() {
+                self.reserve_recovered_worker_id(&recovered_run.worker_id);
+            }
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
@@ -1163,10 +1166,24 @@ where
                     let execution = self
                         .remove_execution(&issue_id)
                         .expect("active recovery execution should be present");
-                    self.insert_execution(
-                        issue_id.clone(),
-                        execution.release(observed_at, ReleaseReason::Completed, None)?,
-                    );
+                    if self.retry_limit_reached(record.normal_retry_count) {
+                        self.insert_execution(
+                            issue_id.clone(),
+                            execution.release(observed_at, ReleaseReason::Completed, None)?,
+                        );
+                    } else {
+                        let previous_attempt = (record.normal_retry_count > 0)
+                            .then(|| RetryAttempt::new(record.normal_retry_count))
+                            .transpose()?;
+                        let retry = RetryEntry::continuation(
+                            &normalized,
+                            previous_attempt,
+                            record.normal_retry_count,
+                            observed_at,
+                            self.config.retry_policy,
+                        )?;
+                        self.insert_execution(issue_id.clone(), execution.restore_retry(retry)?);
+                    }
                 } else if record.completed_run {
                     if self.retry_limit_reached(record.normal_retry_count) {
                         self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
@@ -2919,6 +2936,12 @@ where
             .map_err(SchedulerError::Identifier)
     }
 
+    fn reserve_recovered_worker_id(&mut self, worker_id: &WorkerId) {
+        if let Some(ordinal) = recovered_worker_ordinal(worker_id) {
+            self.next_worker_ordinal = self.next_worker_ordinal.max(ordinal);
+        }
+    }
+
     fn remove_execution(&mut self, issue_id: &IssueId) -> Option<IssueExecution> {
         let execution = self.executions.remove(issue_id)?;
         self.decrement_running_count(&execution);
@@ -3077,6 +3100,13 @@ fn routing_reason(routing: &RoutingConfig) -> String {
         });
     }
     parts.join("; ")
+}
+
+fn recovered_worker_ordinal(worker_id: &WorkerId) -> Option<u64> {
+    worker_id
+        .as_str()
+        .strip_prefix("scheduler-worker-")
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
@@ -3480,4 +3510,18 @@ fn current_epoch_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovered_scheduler_worker_ids_expose_their_allocator_ordinal() {
+        let recovered = WorkerId::new("scheduler-worker-7").expect("worker id should be valid");
+        let custom = WorkerId::new("worker-from-legacy").expect("worker id should be valid");
+
+        assert_eq!(recovered_worker_ordinal(&recovered), Some(7));
+        assert_eq!(recovered_worker_ordinal(&custom), None);
+    }
 }

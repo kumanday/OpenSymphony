@@ -1064,10 +1064,10 @@ async fn apply(paths: MigrationPaths) -> Result<MigrationReport, MigrationError>
         let resolution = {
             let _legacy_runtime_ownership = load_activation_marker(&active.target_config)?
                 .filter(|(_, marker)| marker.memory_catalog_copy_in_progress)
-                .map(|(_, marker)| {
-                    recorded_legacy_runtime_workspace_root(&marker)
-                        .and_then(|root| acquire_legacy_runtime_ownership(&root))
-                })
+                .map(|(_, marker)| recorded_legacy_runtime_workspace_root(&marker))
+                .transpose()?
+                .filter(|root| root.exists())
+                .map(|root| acquire_legacy_runtime_ownership(&root))
                 .transpose()?;
             resume_partial_apply(&active)?
         };
@@ -1136,7 +1136,12 @@ async fn apply_legacy_source(paths: MigrationPaths) -> Result<MigrationReport, M
     let workspace_root = legacy_runtime_workspace_root(&source)?;
     ensure_legacy_runtime_quiescent(&workspace_root)?;
     let generated = generate_central_config(&source)?;
-    let _runtime_ownership = acquire_legacy_runtime_ownership(&workspace_root)?;
+    let _runtime_ownership = legacy_runtime_root_requires_ownership(
+        source.workflow.front_matter.workspace.root.as_deref(),
+        &workspace_root,
+    )
+    .then(|| acquire_legacy_runtime_ownership(&workspace_root))
+    .transpose()?;
     let mut memory_locks = acquire_memory_migration_lock(&source.target_repo)?;
     let cwd = current_dir()?;
     let target_config = migration_target_config(&paths, &cwd, &source.source_config);
@@ -2243,6 +2248,13 @@ fn legacy_runtime_workspace_root(source: &SourceContext) -> Result<PathBuf, Migr
             detail: format!("workspace.root: {error}"),
         })?;
     Ok(resolve_repo_path(&source.target_repo, &configured))
+}
+
+fn legacy_runtime_root_requires_ownership(
+    configured_workspace_root: Option<&str>,
+    workspace_root: &Path,
+) -> bool {
+    configured_workspace_root.is_some() || workspace_root.exists()
 }
 
 fn recorded_legacy_runtime_workspace_root(
@@ -3986,6 +3998,27 @@ mod tests {
         drop(runtime);
         acquire_legacy_runtime_ownership(&workspace_root)
             .expect("migration should acquire the released legacy root");
+    }
+
+    #[test]
+    fn migration_does_not_claim_an_absent_implicit_legacy_root() {
+        let root = tempfile::tempdir().expect("migration root");
+        let workspace_root = root.path().join("implicit-workspaces");
+
+        assert!(!legacy_runtime_root_requires_ownership(
+            None,
+            &workspace_root
+        ));
+        assert!(legacy_runtime_root_requires_ownership(
+            Some("/explicit/workspaces"),
+            &workspace_root
+        ));
+
+        fs::create_dir(&workspace_root).expect("workspace root should be creatable");
+        assert!(legacy_runtime_root_requires_ownership(
+            None,
+            &workspace_root
+        ));
     }
 
     #[test]

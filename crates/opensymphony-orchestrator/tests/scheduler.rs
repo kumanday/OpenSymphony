@@ -3172,7 +3172,7 @@ async fn recovery_advances_consumed_retry_budget_before_dispatch() {
 }
 
 #[tokio::test]
-async fn recovery_releases_an_active_successful_run_as_completed() {
+async fn recovery_queues_an_active_successful_run_for_continuation() {
     let recovered_workspace = workspace_record("COE-278", "/tmp/recovered/COE-278");
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-278", "COE-278", "In Progress", 0)],
@@ -3207,9 +3207,68 @@ async fn recovery_releases_an_active_successful_run_as_completed() {
         .await
         .expect("completed initial recovery should succeed");
 
+    let execution = scheduler
+        .execution(&IssueId::new("lin-278").expect("issue id should be valid"))
+        .expect("recovered execution should remain visible");
+    assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+    assert_eq!(
+        execution
+            .retry()
+            .expect("continuation retry should exist")
+            .reason,
+        RetryReason::Continuation
+    );
+    assert_eq!(
+        execution
+            .retry()
+            .expect("continuation retry should exist")
+            .due_at,
+        ts(1_100)
+    );
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_releases_an_active_successful_run_when_retry_limit_reached() {
+    let recovered_workspace = workspace_record("COE-279", "/tmp/recovered/COE-279");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-279", "COE-279", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-279", "COE-279", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([("lin-279".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(0);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("completed initial recovery should succeed");
+
     assert!(matches!(
         scheduler
-            .execution(&IssueId::new("lin-278").expect("issue id should be valid"))
+            .execution(&IssueId::new("lin-279").expect("issue id should be valid"))
             .expect("recovered execution should remain visible")
             .state(),
         crate::opensymphony_orchestrator::SchedulerState::Released {

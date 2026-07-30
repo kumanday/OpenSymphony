@@ -1348,17 +1348,49 @@ impl RuntimeWorkerBackend {
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
                 .with_normal_retry_count(run.normal_retry_count);
-            let mut run_manifest = match workspace_manager
-                .start_run(&ensured.handle, &run_descriptor)
-                .await
-            {
-                Ok(run_manifest) => run_manifest,
-                Err(error) => {
-                    report_launch_failure(
-                        &mut launch_tx,
-                        format!("failed to prepare workspace run: {error}"),
-                    );
-                    return;
+            let mut run_manifest = if recovered {
+                match workspace_manager.load_run_manifest(&ensured.handle).await {
+                    Ok(Some(run_manifest)) if run_manifest.status == RunStatus::Running => {
+                        run_manifest
+                    }
+                    Ok(Some(run_manifest)) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!(
+                                "recovered workspace run is not running (status {})",
+                                run_manifest.status
+                            ),
+                        );
+                        return;
+                    }
+                    Ok(None) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            "recovered workspace run manifest is missing",
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to load recovered workspace run: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                match workspace_manager
+                    .start_run(&ensured.handle, &run_descriptor)
+                    .await
+                {
+                    Ok(run_manifest) => run_manifest,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to prepare workspace run: {error}"),
+                        );
+                        return;
+                    }
                 }
             };
 
@@ -5978,6 +6010,101 @@ mod tests {
                 .status_detail
                 .as_deref()
                 .is_some_and(|detail| detail.contains("routing dry-run ended"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_worker_reuses_running_manifest_without_before_run_hook() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root.clone(),
+                hooks: HookConfig {
+                    before_run: Some(HookDefinition::shell(
+                        "echo before_run >> .opensymphony/logs/before_run.txt",
+                    )),
+                    ..HookConfig::default()
+                },
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let mut run_manifest = workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-recovered", 1))
+            .await
+            .expect("initial run should be persisted");
+        run_manifest.status = RunStatus::Running;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("running recovery manifest should be persisted");
+
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            Arc::clone(&workspace_manager),
+            None,
+            BTreeMap::new(),
+        );
+        let workspace = sample_workspace(&workspace_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-recovered").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+
+        let launch = backend
+            .recover_worker(WorkerStartRequest {
+                issue: issue.clone(),
+                workspace,
+                run,
+                route: codex_test_route(true),
+            })
+            .await
+            .expect("recovered dry-run worker should launch");
+        assert_eq!(
+            launch.conversation.last_event_kind.as_deref(),
+            Some("routing.decision")
+        );
+
+        for _ in 0..10 {
+            if backend
+                .poll_updates()
+                .await
+                .expect("recovered worker updates should poll")
+                .iter()
+                .any(|update| matches!(update, WorkerUpdate::Finished { .. }))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let hook_invocations = fs::read_to_string(ensured.handle.logs_dir().join("before_run.txt"))
+            .expect("initial run should have invoked before_run")
+            .lines()
+            .count();
+        assert_eq!(hook_invocations, 1);
+        assert_eq!(
+            workspace_manager
+                .load_run_manifest(&ensured.handle)
+                .await
+                .expect("recovered run manifest should load")
+                .expect("recovered run manifest should exist")
+                .status,
+            RunStatus::Succeeded
         );
     }
 
