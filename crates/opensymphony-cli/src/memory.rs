@@ -1994,7 +1994,11 @@ async fn acquire_memory_writer_guard(
     writer_gate: Option<MemoryWriterGate>,
 ) -> Result<MemoryWriterGuard, MemoryError> {
     if let Some(writer_gate) = writer_gate {
-        return Ok(MemoryWriterGuard::Shared(writer_gate.lock_owned().await));
+        let guard = writer_gate.lock_owned().await;
+        if guard.is_some() {
+            return Ok(MemoryWriterGuard::Shared(guard));
+        }
+        drop(guard);
     }
     Ok(MemoryWriterGuard::File(acquire_memory_writer_lock(config)?))
 }
@@ -6621,6 +6625,18 @@ mod tests {
             .expect("the server shutdown lock release should complete");
         super::acquire_memory_coordination_lock(&config.repo_root)
             .expect("the filesystem lock should release after guards drain");
+    }
+
+    #[tokio::test]
+    async fn memory_writer_gate_falls_back_after_server_consumes_lock() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let guard = super::acquire_memory_writer_guard(&config, Some(gate))
+            .await
+            .expect("writer should fall back to the filesystem lock");
+        assert!(matches!(guard, super::MemoryWriterGuard::File(_)));
     }
 
     #[test]

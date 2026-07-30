@@ -984,6 +984,16 @@ impl OpenHandsClient {
         self.transport.base_url()
     }
 
+    /// Clone this client while targeting a persisted runtime server. Auth
+    /// configuration is retained, but the endpoint comes from the durable
+    /// conversation manifest used during recovery.
+    pub fn with_base_url(&self, base_url: impl Into<String>) -> Self {
+        Self {
+            http: self.http.clone(),
+            transport: TransportConfig::new(base_url).with_auth(self.transport.auth.clone()),
+        }
+    }
+
     pub fn transport_diagnostics(&self) -> Result<TransportDiagnostics, OpenHandsError> {
         self.transport.diagnostics()
     }

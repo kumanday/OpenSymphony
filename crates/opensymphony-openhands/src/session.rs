@@ -1390,8 +1390,19 @@ impl IssueSessionRunner {
         }
         let conversation_id = parse_uuid(manifest.conversation_id.as_str())
             .map_err(IssueSessionError::RehydrationFailed)?;
+        let recovery_client = manifest
+            .server_base_url
+            .as_deref()
+            .map(|base_url| self.client.with_base_url(base_url))
+            .unwrap_or_else(|| self.client.clone());
         let active_session = match self
-            .try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
+            .try_attach_and_resume(
+                &recovery_client,
+                workspace_manager,
+                workspace,
+                manifest,
+                conversation_id,
+            )
             .await?
         {
             ReuseSession::Active(session) => *session,
@@ -1410,7 +1421,7 @@ impl IssueSessionRunner {
         let pre_trigger_baseline_event_ids =
             trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
-            match self.client.run_conversation(conversation_id).await {
+            match recovery_client.run_conversation(conversation_id).await {
                 Ok(_)
                 | Err(OpenHandsError::HttpStatus {
                     status_code: 409, ..
@@ -2281,12 +2292,19 @@ impl IssueSessionRunner {
         // The conversation's stored LLM config in meta.json is used as-is.
         // If the API key has changed, the attach will fail naturally and
         // the caller can use explicit rehydration via the CLI.
-        self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
-            .await
+        self.try_attach_and_resume(
+            &self.client,
+            workspace_manager,
+            workspace,
+            manifest,
+            conversation_id,
+        )
+        .await
     }
 
     async fn try_attach_and_resume(
         &self,
+        client: &OpenHandsClient,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         mut manifest: IssueConversationManifest,
@@ -2297,8 +2315,7 @@ impl IssueSessionRunner {
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
-        let stream = match self
-            .client
+        let stream = match client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
         {
@@ -2318,9 +2335,8 @@ impl IssueSessionRunner {
         manifest.llm_config_fingerprint.get_or_insert_with(|| {
             LlmConfigFingerprint::from_llm_config(&stream.conversation().agent.llm)
         });
-        let transport_diagnostics = self.client.transport_diagnostics().ok();
-        manifest
-            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
+        let transport_diagnostics = client.transport_diagnostics().ok();
+        manifest.apply_transport_diagnostics(transport_diagnostics.as_ref(), client.base_url());
         manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
         manifest.last_attached_at = attached_at;
         manifest.updated_at = attached_at;
@@ -4323,6 +4339,23 @@ mod tests {
                 .as_deref()
                 .is_some_and(|diagnostic| diagnostic
                     .contains("timed out waiting for interrupt acknowledgement"))
+        );
+    }
+
+    #[test]
+    fn recovery_client_uses_persisted_server_base_url_and_current_auth() {
+        let client = OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:8000").with_auth(
+            super::super::AuthConfig::header_api_key("x-session-api-key", "redacted"),
+        ));
+        let recovery_client = client.with_base_url("http://127.0.0.1:9000");
+
+        assert_eq!(recovery_client.base_url(), "http://127.0.0.1:9000");
+        let diagnostics = recovery_client
+            .transport_diagnostics()
+            .expect("recovery transport should remain valid");
+        assert_eq!(
+            diagnostics.http_auth_kind,
+            super::super::TransportAuthKind::Header
         );
     }
 

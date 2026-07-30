@@ -197,10 +197,18 @@ pub(crate) fn publish_initialized_marker(path: &Path, contents: &str) -> io::Res
         .write(true)
         .create_new(true)
         .open(&staging)?;
-    if let Err(error) = file
-        .write_all(contents.as_bytes())
-        .and_then(|_| file.sync_all())
-    {
+    if let Err(error) = file.write_all(contents.as_bytes()) {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o666)).map_err(|error| {
+        let _ = fs::remove_file(&staging);
+        io::Error::other(format!(
+            "failed to make marker cross-user-readable: {error}"
+        ))
+    })?;
+    if let Err(error) = file.sync_all() {
         let _ = fs::remove_file(&staging);
         return Err(error);
     }
@@ -633,7 +641,14 @@ fn find_live_registered_root_marker(
         }
         let metadata = match fs::symlink_metadata(&marker) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
             Err(source) => {
                 return Err(RunCommandError::RootOwnership {
                     detail: format!("failed to inspect {}: {source}", marker.display()),
@@ -1894,6 +1909,24 @@ mod tests {
             .expect("malformed registry entries must be ignored");
         drop(ownership);
         fs::remove_file(marker).expect("malformed marker should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_registry_markers_are_cross_user_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("runtime root");
+        let marker = claim_root_registry_marker(root.path()).expect("registry marker");
+        assert_eq!(
+            fs::metadata(&marker)
+                .expect("registry marker metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o666
+        );
+        fs::remove_file(marker).expect("registry marker should be removed");
     }
 
     #[cfg(unix)]

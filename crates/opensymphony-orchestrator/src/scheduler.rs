@@ -1169,6 +1169,18 @@ where
                     let already_exhausted = retry_exhausted_release(&execution);
                     if self.retry_limit_reached(record.normal_retry_count) {
                         let mut execution = if already_exhausted {
+                            let execution = execution
+                                .replace_release_reason(observed_at, ReleaseReason::Completed)?;
+                            if let Err(error) = self
+                                .workspace
+                                .clear_retry_exhaustion(record.issue.identifier.as_str())
+                                .await
+                            {
+                                self.insert_execution(issue_id.clone(), execution);
+                                return Err(SchedulerError::Workspace {
+                                    detail: error.to_string(),
+                                });
+                            }
                             execution
                         } else {
                             execution.release(observed_at, ReleaseReason::Completed, None)?

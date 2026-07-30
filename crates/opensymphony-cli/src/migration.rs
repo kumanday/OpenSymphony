@@ -586,6 +586,8 @@ static STRICT_STALE_MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct StrictRunMarkerGuard {
     path: PathBuf,
+    #[cfg(unix)]
+    _file: fs::File,
 }
 
 impl StrictRunMarkerGuard {
@@ -664,16 +666,8 @@ pub(crate) fn claim_strict_run_marker(
         fs::create_dir_all(parent)?;
     }
     loop {
-        if marker.exists() && !strict_run_marker_owner_alive(&marker) {
-            let quarantine = stale_strict_run_marker_path(&marker);
-            match fs::rename(&marker, &quarantine) {
-                Ok(()) => {
-                    fs::remove_file(&quarantine)?;
-                    continue;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            }
+        if reclaim_stale_strict_run_marker(&marker)? {
+            continue;
         }
         match super::orchestrator_run::publish_initialized_marker(
             &marker,
@@ -682,8 +676,22 @@ pub(crate) fn claim_strict_run_marker(
                 super::orchestrator_run::process_marker_fields()
             ),
         ) {
-            Ok(_) => {
-                return Ok(StrictRunMarkerGuard { path: marker });
+            Ok(file) => {
+                #[cfg(unix)]
+                rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).map_err(
+                    |error| {
+                        let _ = fs::remove_file(&marker);
+                        std::io::Error::other(format!(
+                            "failed to lock strict-run marker {}: {error}",
+                            marker.display()
+                        ))
+                    },
+                )?;
+                return Ok(StrictRunMarkerGuard {
+                    path: marker,
+                    #[cfg(unix)]
+                    _file: file,
+                });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if strict_run_marker_owner_alive(&marker) {
@@ -692,6 +700,42 @@ pub(crate) fn claim_strict_run_marker(
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+fn reclaim_stale_strict_run_marker(marker: &Path) -> std::io::Result<bool> {
+    let file = match fs::OpenOptions::new().read(true).write(true).open(marker) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+
+    #[cfg(unix)]
+    if let Err(error) =
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+    {
+        if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN {
+            return Ok(false);
+        }
+        return Err(std::io::Error::other(format!(
+            "failed to inspect strict-run marker {}: {error}",
+            marker.display()
+        )));
+    }
+
+    let contents = fs::read_to_string(marker)?;
+    if strict_run_marker_owner_alive_contents(&contents) {
+        return Ok(false);
+    }
+
+    let quarantine = stale_strict_run_marker_path(marker);
+    match fs::rename(marker, &quarantine) {
+        Ok(()) => {
+            fs::remove_file(quarantine)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -715,6 +759,10 @@ fn strict_run_marker_owner_alive(marker: &Path) -> bool {
     let Ok(contents) = fs::read_to_string(marker) else {
         return true;
     };
+    strict_run_marker_owner_alive_contents(&contents)
+}
+
+fn strict_run_marker_owner_alive_contents(contents: &str) -> bool {
     let Some(pid) = contents
         .lines()
         .find_map(|line| line.strip_prefix("pid=")?.trim().parse::<i32>().ok())
@@ -3798,6 +3846,20 @@ mod tests {
             .expect("stale marker should be written");
         let guard = claim_strict_run_marker(&first, "generation").expect("stale marker claim");
         assert!(marker.is_file());
+        drop(guard);
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_run_marker_reclamation_respects_the_live_marker_lock() {
+        let root = tempfile::tempdir().expect("marker root should exist");
+        let config = root.path().join("config.yaml");
+        let guard = claim_strict_run_marker(&config, "generation").expect("marker claim");
+        let marker = strict_run_marker_path(&config);
+
+        assert!(!reclaim_stale_strict_run_marker(&marker).expect("marker inspection"));
+        assert!(marker.exists());
         drop(guard);
         assert!(!marker.exists());
     }
