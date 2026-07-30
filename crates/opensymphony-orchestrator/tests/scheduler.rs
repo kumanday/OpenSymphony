@@ -3196,6 +3196,7 @@ async fn recovery_parks_pending_retry_when_current_limit_is_lowered() {
             ..
         }
     ));
+    assert_eq!(scheduler.workspace().persisted_retry_exhaustions, vec![1]);
     assert!(scheduler.worker().launches.is_empty());
 }
 

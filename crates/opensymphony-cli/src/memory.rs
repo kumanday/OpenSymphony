@@ -2001,11 +2001,15 @@ async fn acquire_memory_writer_guard(
 
 fn stale_memory_lock_path(path: &Path) -> PathBuf {
     let sequence = MEMORY_STALE_LOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let incarnation = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(MEMORY_MIGRATION_LOCK);
-    path.with_file_name(format!(".{name}.stale-{}-{sequence}", process::id()))
+    path.with_file_name(format!(
+        ".{name}.stale-{}-{incarnation}-{sequence}",
+        process::id()
+    ))
 }
 
 pub(crate) fn memory_lock_is_stale(repo_root: &Path) -> bool {
@@ -6526,6 +6530,22 @@ mod tests {
         )
         .expect("coordination marker");
         assert!(super::memory_lock_owner_is_stale(&lock_path));
+    }
+
+    #[test]
+    fn stale_memory_lock_quarantine_names_are_unique() {
+        let repo = TempDir::new().expect("repo");
+        let path = super::memory_migration_lock_path(repo.path());
+        let first = super::stale_memory_lock_path(&path);
+        let second = super::stale_memory_lock_path(&path);
+
+        assert_ne!(first, second);
+        assert!(
+            first
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(&std::process::id().to_string()))
+        );
     }
 
     #[test]

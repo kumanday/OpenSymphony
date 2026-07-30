@@ -1125,11 +1125,14 @@ where
                     // still the final permitted dispatch; only a pending
                     // retry beyond that count must be parked here.
                     if self.retry_count_exceeds_limit(normal_retry_count) {
-                        self.persist_retry_exhaustion(&record.issue, normal_retry_count)
+                        // The durable pending marker's count is the next
+                        // undispatched attempt. Parking it must not turn
+                        // that attempt into an already-consumed retry.
+                        self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
                             .await?;
                         self.mark_recovered_retry_exhausted(
                             &issue_id,
-                            normal_retry_count,
+                            record.normal_retry_count,
                             observed_at,
                         )?;
                     } else {
