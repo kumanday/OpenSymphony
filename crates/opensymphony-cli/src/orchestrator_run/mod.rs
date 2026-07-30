@@ -665,7 +665,17 @@ fn find_live_registered_root_marker(
         }
         let contents = match fs::read_to_string(&marker) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                // Registry entries are untrusted cross-user coordination
+                // artifacts. An unreadable foreign entry cannot safely prove
+                // ownership, so ignore it like a concurrently removed one.
+                continue;
+            }
             Err(source) => {
                 return Err(RunCommandError::RootOwnership {
                     detail: format!("failed to read {}: {source}", marker.display()),
@@ -1914,6 +1924,32 @@ mod tests {
             .expect("malformed registry entries must be ignored");
         drop(ownership);
         fs::remove_file(marker).expect("malformed marker should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_ownership_ignores_unreadable_registry_entries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("runtime root");
+        let registry = root_ownership_registry_path();
+        fs::create_dir_all(&registry).expect("ownership registry should exist");
+        let marker = registry.join(format!(
+            "root-{}-unreadable-{}.active",
+            std::process::id(),
+            ATOMIC_MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&marker, "pid=1\nroot=/foreign\n").expect("marker should be written");
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o000))
+            .expect("marker should become unreadable");
+
+        let ownership = acquire_root_ownership([root.path().join("workspace")])
+            .expect("unreadable registry entries must be ignored");
+        drop(ownership);
+
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))
+            .expect("marker should be restorable");
+        fs::remove_file(marker).expect("unreadable marker should be removed");
     }
 
     #[cfg(unix)]

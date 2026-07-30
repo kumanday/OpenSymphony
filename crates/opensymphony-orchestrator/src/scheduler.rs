@@ -1169,25 +1169,13 @@ where
                     let already_exhausted = retry_exhausted_release(&execution);
                     if self.retry_limit_reached(record.normal_retry_count) {
                         let mut execution = if already_exhausted {
-                            let execution = execution
-                                .replace_release_reason(observed_at, ReleaseReason::Completed)?;
-                            if let Err(error) = self
-                                .workspace
-                                .clear_retry_exhaustion(record.issue.identifier.as_str())
-                                .await
-                            {
-                                self.insert_execution(issue_id.clone(), execution);
-                                return Err(SchedulerError::Workspace {
-                                    detail: error.to_string(),
-                                });
-                            }
                             execution
                         } else {
-                            execution.release(observed_at, ReleaseReason::Completed, None)?
+                            self.persist_retry_exhaustion(&record.issue, record.normal_retry_count)
+                                .await?;
+                            execution.release(observed_at, ReleaseReason::RetryExhausted, None)?
                         };
-                        if already_exhausted {
-                            execution.set_retry_count_override(record.normal_retry_count);
-                        }
+                        execution.set_retry_count_override(record.normal_retry_count);
                         self.insert_execution(issue_id.clone(), execution);
                     } else {
                         let previous_attempt = (record.normal_retry_count > 0)
@@ -2668,14 +2656,11 @@ where
             .max_retry_attempts
             .is_some_and(|max_attempts| retry_count >= max_attempts)
         {
-            let reason = if outcome.outcome == WorkerOutcomeKind::Succeeded {
-                // A successful final turn is equivalent to successful recovery:
-                // keep its completed semantics even when tracker propagation
-                // is delayed and the issue still appears active.
-                ReleaseReason::Completed
-            } else {
-                ReleaseReason::RetryExhausted
-            };
+            // The tracker refresh above is the only authority that can prove
+            // the issue is no longer active. If it still appears active (or
+            // the refresh failed), park the exhausted run rather than making
+            // a successful worker turn look like a completed Linear task.
+            let reason = ReleaseReason::RetryExhausted;
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;

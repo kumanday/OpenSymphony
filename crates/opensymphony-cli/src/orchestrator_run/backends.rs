@@ -1204,8 +1204,22 @@ fn recoverable_run_manifest(
     run_manifest.status == RunStatus::Running
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {
-                manifest.issue_id.as_str() == run_manifest.issue_id
-                    && manifest.prepared_run_id.is_none()
+                if manifest.issue_id.as_str() != run_manifest.issue_id {
+                    return false;
+                }
+
+                // The prepared marker is written before send_message. A
+                // process crash after the prompt is accepted but before the
+                // active/trigger-pending markers are durable leaves that
+                // marker ambiguous. Reattach it so OpenHands reconciles the
+                // full event backlog and the recovery baseline can decide
+                // whether a prompt was accepted before scheduler retry logic
+                // considers sending another turn.
+                if manifest.prepared_run_id.as_deref() == Some(run_manifest.run_id.as_str()) {
+                    return true;
+                }
+
+                manifest.prepared_run_id.is_none()
                     && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
                     && manifest
                         .trigger_pending_run_id
@@ -6538,7 +6552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_workspaces_retries_pre_dispatch_openhands_runs_instead_of_reattaching() {
+    async fn recover_workspaces_reattaches_ambiguous_prepared_openhands_runs() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
         fs::create_dir_all(&workspace_root).expect("workspace root should be created");
@@ -6563,7 +6577,6 @@ mod tests {
         let mut conversation_manifest = sample_conversation_manifest("conv-prepared-recovery");
         conversation_manifest.issue_id = issue.id.clone();
         conversation_manifest.identifier = issue.identifier.clone();
-        conversation_manifest.active_run_id = Some("run-prepared-recovery".to_owned());
         conversation_manifest.prepared_run_id = Some("run-prepared-recovery".to_owned());
         workspace_manager
             .write_text_artifact(
@@ -6583,7 +6596,7 @@ mod tests {
 
         assert_eq!(recoveries.len(), 1);
         assert!(recoveries[0].had_in_flight_run);
-        assert!(recoveries[0].recovered_run.is_none());
+        assert!(recoveries[0].recovered_run.is_some());
     }
 
     #[tokio::test]
