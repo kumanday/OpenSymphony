@@ -752,6 +752,9 @@ pub struct IssueConversationManifest {
     /// Codex-only active turn id used to interrupt a recovered turn safely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_id: Option<String>,
+    /// Codex-only run id associated with the active turn preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_kind: Option<IssueSessionPromptKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -818,6 +821,7 @@ impl IssueConversationManifest {
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
             codex_archive_state: None,
             last_turn_id: None,
+            active_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -1359,9 +1363,9 @@ impl IssueSessionRunner {
                     "recovered conversation manifest is invalid: {error}"
                 ))
             })?;
+        let baseline_last_event_id = manifest.last_event_id.clone();
         if manifest.issue_id != issue.id
             || manifest.identifier != issue.identifier
-            || manifest.reuse_policy != self.config.reuse_policy.as_str()
             || manifest.runtime_contract_version.as_deref() != Some(RUNTIME_CONTRACT_VERSION)
         {
             return Err(IssueSessionError::RehydrationFailed(
@@ -1387,8 +1391,12 @@ impl IssueSessionRunner {
                 .to_domain_metadata(RuntimeStreamState::Ready),
         );
         let mut active_session = active_session;
+        let baseline_event_ids = recovery_baseline_event_ids(
+            active_session.stream.event_cache().items(),
+            baseline_last_event_id.as_deref(),
+        );
         let outcome = self
-            .await_terminal_outcome(&mut active_session, &HashSet::new(), observer)
+            .await_terminal_outcome(&mut active_session, &baseline_event_ids, observer)
             .await;
         self.finalize_active_session(
             workspace_manager,
@@ -3633,6 +3641,25 @@ fn latest_current_turn_error(
         .map(conversation_error_detail)
 }
 
+fn recovery_baseline_event_ids(
+    events: &[EventEnvelope],
+    last_event_id: Option<&str>,
+) -> HashSet<String> {
+    let baseline_len = last_event_id
+        .and_then(|last_event_id| {
+            events
+                .iter()
+                .position(|event| event.id == last_event_id)
+                .map(|index| index + 1)
+        })
+        .unwrap_or(events.len());
+    events
+        .iter()
+        .take(baseline_len)
+        .map(|event| event.id.clone())
+        .collect()
+}
+
 fn conversation_error_detail(event: &EventEnvelope) -> String {
     let message = event
         .payload
@@ -4292,6 +4319,7 @@ mod tests {
             runtime_contract_version: None,
             codex_archive_state: None,
             last_turn_id: None,
+            active_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -4321,6 +4349,24 @@ mod tests {
         assert_eq!(
             session.stream.state_mirror().terminal_status(),
             Some(TerminalExecutionStatus::Finished)
+        );
+    }
+
+    #[test]
+    fn recovery_baseline_includes_events_through_persisted_marker() {
+        let events = vec![
+            EventEnvelope::new("old-1", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new("old-2", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new("current", Utc::now(), "runtime", "current", Value::Null),
+        ];
+
+        assert_eq!(
+            recovery_baseline_event_ids(&events, Some("old-2")),
+            HashSet::from(["old-1".to_owned(), "old-2".to_owned()])
+        );
+        assert_eq!(
+            recovery_baseline_event_ids(&events, Some("missing")),
+            HashSet::from(["old-1".to_owned(), "old-2".to_owned(), "current".to_owned()])
         );
     }
 

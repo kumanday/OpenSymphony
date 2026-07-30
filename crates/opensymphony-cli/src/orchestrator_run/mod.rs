@@ -10,9 +10,11 @@ use std::{
     process::ExitCode,
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock},
-    thread,
     time::Duration,
 };
+
+#[cfg(not(unix))]
+use std::thread;
 
 #[cfg(any(
     not(unix),
@@ -170,7 +172,10 @@ struct RuntimeRootLock {
 }
 
 struct RootOwnershipSerialization {
+    #[cfg(not(unix))]
     path: PathBuf,
+    #[cfg(unix)]
+    _file: File,
 }
 
 static ATOMIC_MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -212,9 +217,13 @@ pub(crate) fn publish_initialized_marker(path: &Path, contents: &str) -> io::Res
 }
 
 impl Drop for RootOwnershipSerialization {
+    #[cfg(not(unix))]
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+
+    #[cfg(unix)]
+    fn drop(&mut self) {}
 }
 
 impl Drop for RuntimeRootOwnership {
@@ -369,6 +378,48 @@ fn acquire_root_ownership_serialization() -> Result<RootOwnershipSerialization, 
     acquire_root_ownership_serialization_at(&path)
 }
 
+#[cfg(unix)]
+fn acquire_root_ownership_serialization_at(
+    path: &Path,
+) -> Result<RootOwnershipSerialization, RunCommandError> {
+    let file = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => OpenOptions::new()
+                    .read(true)
+                    .open(path)
+                    .map_err(|error| RunCommandError::RootOwnership {
+                        detail: format!("failed to open {}: {error}", path.display()),
+                    })?,
+                Err(error) => {
+                    return Err(RunCommandError::RootOwnership {
+                        detail: format!("failed to create {}: {error}", path.display()),
+                    });
+                }
+            }
+        }
+        Err(error) => {
+            return Err(RunCommandError::RootOwnership {
+                detail: format!("failed to open {}: {error}", path.display()),
+            });
+        }
+    };
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).map_err(|error| {
+        RunCommandError::RootOwnership {
+            detail: format!("failed to lock {}: {error}", path.display()),
+        }
+    })?;
+    Ok(RootOwnershipSerialization { _file: file })
+}
+
+#[cfg(not(unix))]
 fn acquire_root_ownership_serialization_at(
     path: &Path,
 ) -> Result<RootOwnershipSerialization, RunCommandError> {
@@ -450,6 +501,7 @@ fn acquire_root_ownership_serialization_at(
     }
 }
 
+#[cfg(not(unix))]
 fn serialization_lock_owner_alive(marker: &Path) -> bool {
     let Ok(contents) = fs::read_to_string(marker) else {
         return true;
@@ -1665,6 +1717,7 @@ mod tests {
         assert_eq!(config.containment_root, Some(state));
     }
 
+    #[cfg(not(unix))]
     #[test]
     fn serialization_lock_reclaims_an_uninitialized_marker() {
         let root = tempfile::tempdir().expect("serialization root");
@@ -1678,6 +1731,20 @@ mod tests {
         assert!(marker.lines().any(|line| line.starts_with("start=")));
         drop(owner);
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serialization_lock_uses_advisory_lock_without_marker_reclamation() {
+        let root = tempfile::tempdir().expect("serialization root");
+        let path = root.path().join("serialization.lock");
+
+        let owner = acquire_root_ownership_serialization_at(&path)
+            .expect("advisory lock should be acquired");
+        assert!(path.exists());
+        drop(owner);
+        assert!(path.exists());
+        fs::remove_file(path).expect("test lock should be removed");
     }
 
     #[test]

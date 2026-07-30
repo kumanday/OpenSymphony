@@ -1201,6 +1201,7 @@ fn recoverable_run_manifest(
                         .last_turn_id
                         .as_deref()
                         .is_some_and(|turn_id| !turn_id.trim().is_empty())
+                    && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
             }))
 }
 
@@ -2244,6 +2245,16 @@ async fn try_run_codex_stdio_issue(
             prompt,
         )
         .map_err(|source| format!("failed to build Codex turn/start request: {source}"))?;
+    persist_codex_run_prepared(workspace_manager, workspace, &mut manifest, run_manifest)
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(&conversation_id),
+                "turn/start run association persistence",
+                with_codex_stderr(error, &stderr_tail),
+            )
+        })?;
     write_codex_request(
         &mut stdin,
         &schema_validator,
@@ -3435,6 +3446,7 @@ async fn write_codex_conversation_manifest(
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
         codex_archive_state: Some("active".to_string()),
         last_turn_id: None,
+        active_run_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,
@@ -3539,6 +3551,23 @@ async fn persist_codex_turn_id(
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
     manifest.last_turn_id = Some(turn_id.to_owned());
+    manifest.updated_at = now;
+    manifest.last_attached_at = now;
+    workspace_manager
+        .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn persist_codex_run_prepared(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    run_manifest: &RunManifest,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    manifest.active_run_id = Some(run_manifest.run_id.clone());
+    manifest.last_turn_id = None;
     manifest.updated_at = now;
     manifest.last_attached_at = now;
     workspace_manager
@@ -4047,6 +4076,7 @@ mod tests {
             runtime_contract_version: None,
             codex_archive_state: None,
             last_turn_id: None,
+            active_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -6473,6 +6503,7 @@ mod tests {
             sample_conversation_manifest("conv-prepared-codex-recovery");
         conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
         conversation_manifest.last_turn_id = Some("turn-active".to_owned());
+        conversation_manifest.active_run_id = Some("run-prepared-codex-recovery".to_owned());
         workspace_manager
             .write_text_artifact(
                 &ensured.handle,
@@ -7553,6 +7584,7 @@ exit 64
             runtime_contract_version: None,
             codex_archive_state: None,
             last_turn_id: None,
+            active_run_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

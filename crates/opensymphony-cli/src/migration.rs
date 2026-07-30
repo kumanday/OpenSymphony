@@ -2190,11 +2190,35 @@ fn workflow_body(source: &SourceContext) -> Result<Vec<u8>, MigrationError> {
 }
 
 fn target_branch(prompt: &str) -> Option<String> {
-    let markers = prompt
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("Target branch:"))
-        .map(str::trim)
-        .collect::<Vec<_>>();
+    let lines = prompt.lines().collect::<Vec<_>>();
+    let managed_section = lines
+        .iter()
+        .position(|line| line.trim() == "## Branch target");
+    let mut in_fence = false;
+    let mut markers = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some(section_start) = managed_section {
+            if index <= section_start {
+                continue;
+            }
+            if trimmed.starts_with('#') {
+                break;
+            }
+        } else if trimmed.starts_with('#') {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Target branch:") {
+            markers.push(value.trim());
+        }
+    }
     if markers.len() != 1 {
         return None;
     }
@@ -2886,6 +2910,7 @@ pub(crate) fn hook_has_literal_secret(command: &str) -> bool {
     [
         "--api-key",
         "--access-token",
+        "--oauth2-bearer",
         "--client-secret",
         "--password",
         "--secret",
@@ -3468,7 +3493,13 @@ mod tests {
         ));
         assert!(hook_has_literal_secret("GITHUB_TOKEN=ghp_secret"));
         assert!(hook_has_literal_secret("export MY_API_KEY=raw-value"));
+        assert!(hook_has_literal_secret(
+            "curl --oauth2-bearer raw-access-token https://example.invalid"
+        ));
         assert!(!hook_has_literal_secret("GITHUB_TOKEN=${SAFE_TOKEN}"));
+        assert!(!hook_has_literal_secret(
+            "curl --oauth2-bearer $SAFE_TOKEN https://example.invalid"
+        ));
     }
 
     #[test]
@@ -3486,6 +3517,16 @@ mod tests {
             None
         );
         assert_eq!(target_branch("Target branch: develop by default"), None);
+        assert_eq!(
+            target_branch(
+                "# Notes\nTarget branch: `example`\n\n## Branch target\n\nTarget branch: `main`"
+            ),
+            Some("main".to_owned())
+        );
+        assert_eq!(
+            target_branch("# Notes\n\n```\nTarget branch: `example`\n```"),
+            None
+        );
     }
 
     #[test]
