@@ -1198,7 +1198,7 @@ fn recoverable_run_manifest(
     run_manifest.status == RunStatus::Running
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {
-                conversation_manifest_is_codex(manifest)
+                manifest.issue_id.as_str() == run_manifest.issue_id
                     && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
             }))
 }
@@ -1372,20 +1372,38 @@ impl RuntimeWorkerBackend {
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
-                        let conversation_manifest = if run_manifest.status == RunStatus::Prepared
-                            && route.harness_kind == CODEX_APP_SERVER_KIND
-                        {
-                            match load_codex_conversation_manifest(
-                                &workspace_manager,
-                                &ensured.handle,
-                                &issue,
-                            )
-                            .await
-                            {
-                                Ok(manifest) => manifest,
-                                Err(error) => {
-                                    report_launch_failure(&mut launch_tx, error);
-                                    return;
+                        let conversation_manifest = if run_manifest.status == RunStatus::Prepared {
+                            if route.harness_kind == CODEX_APP_SERVER_KIND {
+                                match load_codex_conversation_manifest(
+                                    &workspace_manager,
+                                    &ensured.handle,
+                                    &issue,
+                                )
+                                .await
+                                {
+                                    Ok(manifest) => manifest,
+                                    Err(error) => {
+                                        report_launch_failure(&mut launch_tx, error);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                match recovered_conversation_manifest(
+                                    &workspace_manager,
+                                    &ensured.handle,
+                                )
+                                .await
+                                {
+                                    Ok(manifest) => manifest,
+                                    Err(error) => {
+                                        report_launch_failure(
+                                            &mut launch_tx,
+                                            format!(
+                                                "failed to read recovered conversation manifest: {error}"
+                                            ),
+                                        );
+                                        return;
+                                    }
                                 }
                             }
                         } else {
@@ -6574,6 +6592,8 @@ mod tests {
             .expect("prepared run should be persisted");
         let mut conversation_manifest =
             sample_conversation_manifest("conv-prepared-codex-recovery");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
         conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
         conversation_manifest.active_run_id = Some("run-prepared-codex-recovery".to_owned());
         workspace_manager
@@ -6595,6 +6615,58 @@ mod tests {
         assert_eq!(recoveries.len(), 1);
         assert!(recoveries[0].had_in_flight_run);
         assert!(recoveries[0].recovered_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_reattaches_prepared_openhands_run_with_active_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-openhands-recovery", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest = sample_conversation_manifest("conv-prepared-openhands");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.active_run_id = Some("run-prepared-openhands-recovery".to_owned());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].recovered_run.is_some());
+        assert_eq!(
+            recoveries[0].harness_kind.as_deref(),
+            Some(OPENHANDS_AGENT_SERVER_KIND)
+        );
     }
 
     #[tokio::test]

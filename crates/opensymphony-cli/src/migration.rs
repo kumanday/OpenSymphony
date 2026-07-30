@@ -442,19 +442,9 @@ fn validate_activation_marker(
         });
     }
 
-    if let Some(expected_source_config) = expected_source_config {
-        if canonicalize_destination(&marker.source_config)
+    if let Some(expected_source_config) = expected_source_config
+        && canonicalize_destination(&marker.source_config)
             != canonicalize_destination(expected_source_config)
-        {
-            return Err(MigrationError::DestinationConflict {
-                path: marker.source_config.clone(),
-            });
-        }
-    } else if !marker.source_config.as_os_str().is_empty()
-        && marker
-            .source_config
-            .parent()
-            .is_none_or(|parent| canonicalize_destination(parent) != target_repo)
     {
         return Err(MigrationError::DestinationConflict {
             path: marker.source_config.clone(),
@@ -2886,6 +2876,9 @@ pub(crate) fn hook_has_literal_secret(command: &str) -> bool {
     if literal_value_after_authorization(command, &lower) {
         return true;
     }
+    if literal_value_after_user_flag(command, &lower) {
+        return true;
+    }
 
     for marker in [
         "api_key",
@@ -2921,6 +2914,36 @@ pub(crate) fn hook_has_literal_secret(command: &str) -> bool {
     ]
     .into_iter()
     .any(|marker| literal_value_after_marker(command, &lower, marker))
+}
+
+fn literal_value_after_user_flag(command: &str, lower: &str) -> bool {
+    for marker in ["--user", "-u"] {
+        let mut search_from = 0;
+        while let Some(relative) = lower[search_from..].find(marker) {
+            let start = search_from + relative;
+            let end = start + marker.len();
+            if !is_hook_marker_boundary(lower, start, end) {
+                search_from = end;
+                continue;
+            }
+            let tail = trim_hook_value_prefix(&command[end..]);
+            let Some(value) = next_hook_word(tail) else {
+                search_from = end;
+                continue;
+            };
+            if credential_variable(value).is_some() {
+                search_from = end;
+                continue;
+            }
+            if let Some((_, password)) = value.split_once(':')
+                && credential_variable(password).is_none()
+            {
+                return true;
+            }
+            search_from = end;
+        }
+    }
+    false
 }
 
 fn literal_value_after_authorization(command: &str, lower: &str) -> bool {
@@ -3498,9 +3521,18 @@ mod tests {
         assert!(hook_has_literal_secret(
             "curl --oauth2-bearer raw-access-token https://example.invalid"
         ));
+        assert!(hook_has_literal_secret(
+            "curl --user account:raw-oauth-token https://example.invalid"
+        ));
+        assert!(hook_has_literal_secret(
+            "curl --user=account:raw-oauth-token https://example.invalid"
+        ));
         assert!(!hook_has_literal_secret("GITHUB_TOKEN=${SAFE_TOKEN}"));
         assert!(!hook_has_literal_secret(
             "curl --oauth2-bearer $SAFE_TOKEN https://example.invalid"
+        ));
+        assert!(!hook_has_literal_secret(
+            "curl --user account:${SAFE_TOKEN} https://example.invalid"
         ));
     }
 
@@ -5136,5 +5168,38 @@ mod tests {
                 0o640
             );
         }
+    }
+
+    #[test]
+    fn rollback_accepts_a_legacy_config_outside_the_target_repository() {
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let target_repo = root.path().join("repo");
+        fs::create_dir_all(&target_repo).expect("target repository should exist");
+        let source_config = root.path().join("legacy.yaml");
+        let generation = format!("sha256:{}", "a".repeat(64));
+        let target_config = source_config.clone();
+        let marker = ActivationMarker {
+            source_config,
+            config_path: target_config.clone(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            backup_dir: migration_root(&target_config)
+                .join("backups")
+                .join(generation.trim_start_matches("sha256:")),
+            generation,
+            workflow_generation: String::new(),
+            had_config: false,
+            had_workflow: false,
+            config_mode: None,
+            workflow_mode: None,
+            memory_catalog_root: None,
+            memory_catalog_generation: None,
+            memory_catalog_copy_in_progress: false,
+            legacy_workspace_root: None,
+            backup_config_generation: None,
+            backup_workflow_generation: None,
+        };
+
+        validate_activation_marker(&target_config, &marker, &target_repo, None, None)
+            .expect("external legacy config sources should remain rollback-valid");
     }
 }

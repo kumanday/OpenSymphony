@@ -1938,6 +1938,16 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        active_session.manifest.active_run_id = Some(run_manifest.run_id.clone());
+        active_session.manifest.updated_at = Utc::now();
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &active_session.manifest,
+            )
+            .await?;
+
         if let Err(error) = self
             .client
             .send_message(
@@ -3645,23 +3655,6 @@ fn recovery_baseline_event_ids(
     events: &[EventEnvelope],
     last_event_id: Option<&str>,
 ) -> HashSet<String> {
-    if let Some(baseline_len) = last_event_id.and_then(|last_event_id| {
-        events
-            .iter()
-            .position(|event| event.id == last_event_id)
-            .map(|index| index + 1)
-    }) {
-        return events
-            .iter()
-            .take(baseline_len)
-            .map(|event| event.id.clone())
-            .collect();
-    }
-
-    // A missing marker can happen when an older runtime crashed before it
-    // persisted the event cursor. Keep historical errors in the baseline, but
-    // leave the newest terminal state update visible so recovery can finish
-    // instead of waiting for activity that has already happened.
     let terminal_state_event_id = events.iter().rev().find_map(|event| {
         let KnownEvent::ConversationStateUpdate(payload) = KnownEvent::from_envelope(event) else {
             return None;
@@ -3672,6 +3665,24 @@ fn recovery_baseline_event_ids(
             .filter(|status| matches!(*status, "finished" | "error" | "stuck"))
             .map(|_| event.id.as_str())
     });
+    if let Some(baseline_len) = last_event_id.and_then(|last_event_id| {
+        events
+            .iter()
+            .position(|event| event.id == last_event_id)
+            .map(|index| index + 1)
+    }) {
+        return events
+            .iter()
+            .take(baseline_len)
+            .filter(|event| Some(event.id.as_str()) != terminal_state_event_id)
+            .map(|event| event.id.clone())
+            .collect();
+    }
+
+    // A missing marker can happen when an older runtime crashed before it
+    // persisted the event cursor. Keep historical errors in the baseline, but
+    // leave the newest terminal state update visible so recovery can finish
+    // instead of waiting for activity that has already happened.
     events
         .iter()
         .filter(|event| Some(event.id.as_str()) != terminal_state_event_id)
@@ -4411,6 +4422,25 @@ mod tests {
         assert_eq!(
             recovery_baseline_event_ids(&events, None),
             HashSet::from(["old-error".to_owned()])
+        );
+    }
+
+    #[test]
+    fn recovery_baseline_keeps_persisted_terminal_state_current() {
+        let events = vec![
+            EventEnvelope::new("old", Utc::now(), "runtime", "old", Value::Null),
+            EventEnvelope::new(
+                "terminal",
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                serde_json::json!({"execution_status": "finished"}),
+            ),
+        ];
+
+        assert_eq!(
+            recovery_baseline_event_ids(&events, Some("terminal")),
+            HashSet::from(["old".to_owned()])
         );
     }
 

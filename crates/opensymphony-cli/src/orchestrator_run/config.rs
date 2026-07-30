@@ -1743,6 +1743,7 @@ fn resolve_central_path(
     value: &str,
     field: &'static str,
 ) -> Result<PathBuf, CentralConfigError> {
+    required_literal(value, field)?;
     let value = expand_central_value(config_root, value)?;
     let path = if value.is_absolute() {
         value
@@ -2777,6 +2778,23 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("overlapping instance roots should fail");
         assert!(matches!(error, CentralConfigError::OverlappingRoots { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_empty_required_roots_before_expansion() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path()).replace(
+            &format!("state_root: {}/state", root.path().display()),
+            "state_root: \"\"",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("empty state roots should fail before path expansion");
+        assert!(matches!(
+            error,
+            CentralConfigError::EmptyField {
+                field: "instance.state_root"
+            }
+        ));
     }
 
     #[test]
