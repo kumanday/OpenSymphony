@@ -1481,7 +1481,17 @@ where
         issue: &NormalizedIssue,
     ) -> Option<(IssueId, IssueExecution, RunAttempt, String)> {
         let existing = self.executions.get(&issue.id)?;
-        if !is_human_review_to_merging(existing.issue(), issue)
+        let retrying_failed_merging_interrupt = existing.interrupt().is_some_and(|interrupt| {
+            interrupt.command.reason == HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+                && matches!(
+                    interrupt.status,
+                    HarnessInterruptStatus::Failed | HarnessInterruptStatus::TimedOut
+                )
+                && normalized_state_name(&existing.issue().state.name) == MERGING_STATE
+                && normalized_state_name(&issue.state.name) == MERGING_STATE
+        });
+        if (!is_human_review_to_merging(existing.issue(), issue)
+            && !retrying_failed_merging_interrupt)
             || !matches!(
                 existing.status(),
                 SchedulerStatus::Claimed | SchedulerStatus::Running
@@ -2266,7 +2276,12 @@ where
         // Do not reopen executions that were released due to terminal worker outcomes.
         // These represent either runs that could not be safely stopped or explicit
         // operator cancels, so reopening would duplicate or restart unwanted work.
-        let was_terminal_outcome = terminal_worker_outcome_prevents_reopen(&execution);
+        let retry_exhausted_can_reopen = retry_exhausted_release(&execution)
+            && execution
+                .retry_count_override()
+                .is_some_and(|count| !self.retry_limit_reached(count));
+        let was_terminal_outcome =
+            terminal_worker_outcome_prevents_reopen(&execution) && !retry_exhausted_can_reopen;
         let mut execution =
             if execution.status() == SchedulerStatus::Released && !was_terminal_outcome {
                 execution.reopen(observed_at)?

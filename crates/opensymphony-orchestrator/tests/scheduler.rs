@@ -1162,7 +1162,21 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
         ..Default::default()
     };
     let workspace = FakeWorkspace::default();
-    let worker = FakeWorker::default();
+    let worker = FakeWorker {
+        interrupt_results: VecDeque::from([
+            Ok(WorkerInterruptAcknowledgement {
+                accepted: false,
+                detail: Some("first interrupt attempt failed".to_string()),
+                timed_out: false,
+            }),
+            Ok(WorkerInterruptAcknowledgement {
+                accepted: true,
+                detail: None,
+                timed_out: false,
+            }),
+        ]),
+        ..Default::default()
+    };
     let mut config = scheduler_config();
     config.stall_timeout_ms = None;
     config.active_states.push("Human Review".to_string());
@@ -1194,7 +1208,7 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
         .expect("execution should still be active");
     assert_eq!(execution.issue().state.name, "Merging");
     let interrupt = execution.interrupt().expect("interrupt should be recorded");
-    assert_eq!(interrupt.status, HarnessInterruptStatus::Acknowledged);
+    assert_eq!(interrupt.status, HarnessInterruptStatus::Failed);
     assert_eq!(
         interrupt.command.reason,
         HarnessInterruptReason::TrackerMergingSupersedesHumanReview
@@ -1223,12 +1237,19 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
     scheduler
         .tick(ts(60_100))
         .await
-        .expect("repeated Merging observation should stay idempotent");
-    assert_eq!(scheduler.worker().interrupts.len(), 1);
+        .expect("failed Merging interrupt should be retried");
+    assert_eq!(scheduler.worker().interrupts.len(), 2);
     assert_eq!(scheduler.worker().launches.len(), 1);
     let execution = scheduler
         .execution(&IssueId::new("lin-492").expect("issue id should be valid"))
         .expect("execution should still be active");
+    assert_eq!(
+        execution
+            .interrupt()
+            .expect("interrupt should remain recorded")
+            .status,
+        HarnessInterruptStatus::Acknowledged
+    );
     assert_eq!(
         execution
             .conversation()
@@ -1237,8 +1258,14 @@ async fn merging_supersedes_human_review_polling_once_and_continues_same_issue()
             .iter()
             .filter(|event| event.kind == "scheduler.interrupt_requested")
             .count(),
-        1
+        2
     );
+
+    scheduler
+        .tick(ts(90_100))
+        .await
+        .expect("acknowledged Merging interrupt should stay idempotent");
+    assert_eq!(scheduler.worker().interrupts.len(), 2);
 
     scheduler
         .worker_mut()
@@ -3394,6 +3421,52 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
         }
     ));
     assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_reopens_exhausted_execution_after_retry_limit_increase() {
+    let recovered_workspace = workspace_record("COE-279", "/tmp/workspaces/COE-279");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-279", "COE-279", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        retain_failed: true,
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-279", "COE-279", "In Progress"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 1,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        retry_exhaustion: vec![RetryExhaustionRecord {
+            issue: normalized_issue("lin-279", "COE-279", "In Progress"),
+            normal_retry_count: 1,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(2);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("raising the retry limit should reopen the recovered execution");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 2);
 }
 
 #[tokio::test]

@@ -4399,6 +4399,12 @@ async fn get_run_detail(
         || state
             .active_states
             .contains(&issue.tracker_state.trim().to_ascii_lowercase());
+    // Retry exhaustion is a distinct lifecycle state even though the control
+    // plane keeps it under the Failed runtime bucket. Terminal tracker state
+    // remains authoritative and is mapped to Completed by the scheduler.
+    let terminal_tracker_state = state
+        .terminal_states
+        .contains(&issue.tracker_state.trim().to_ascii_lowercase());
     let (status, lifecycle_state) = match issue.runtime_state {
         ControlPlaneIssueRuntimeState::Idle if !dispatchable => {
             (RunStatus::Unclaimed, RunLifecycleState::Backlog)
@@ -4415,6 +4421,12 @@ async fn get_run_detail(
         ControlPlaneIssueRuntimeState::Completed => {
             (RunStatus::Released, RunLifecycleState::Completed)
         }
+        ControlPlaneIssueRuntimeState::Failed
+            if issue.release_reason == Some(DomainReleaseReason::RetryExhausted)
+                && !terminal_tracker_state =>
+        {
+            (RunStatus::Released, RunLifecycleState::RetryExhausted)
+        }
         ControlPlaneIssueRuntimeState::Failed => (RunStatus::Released, RunLifecycleState::Failed),
     };
 
@@ -4422,9 +4434,6 @@ async fn get_run_detail(
     // category. A successful worker can be released as TrackerInactive while
     // its issue remains in a nonterminal tracker state, so only a configured
     // terminal tracker state may override the scheduler's explicit reason.
-    let terminal_tracker_state = state
-        .terminal_states
-        .contains(&issue.tracker_state.trim().to_ascii_lowercase());
     let release_reason = if issue.cancel_failed {
         Some(ReleaseReason::CancelFailed)
     } else if terminal_tracker_state

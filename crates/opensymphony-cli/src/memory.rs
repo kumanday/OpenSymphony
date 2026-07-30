@@ -23,11 +23,6 @@ use tokio::{
     task::JoinHandle,
 };
 
-#[cfg(unix)]
-use rustix::process::{Pid, test_kill_process};
-#[cfg(not(unix))]
-use std::process::Command;
-
 use crate::{
     opensymphony_code_intel::{
         AstDiagnosticKind, CaptureRecord, CodeIntelArtifact, CodeIntelProvider, CodeIntelScope,
@@ -1856,7 +1851,7 @@ async fn start_memory_server_with_auth(
     }
     super::orchestrator_run::publish_initialized_marker(
         &activity_marker,
-        &format!("pid={}\n", process::id()),
+        &super::orchestrator_run::process_marker_fields(),
     )
     .map_err(|source| {
         MemoryError::InvalidInput(format!(
@@ -1926,7 +1921,7 @@ pub(crate) fn acquire_memory_coordination_lock(
     loop {
         match super::orchestrator_run::publish_initialized_marker(
             &path,
-            &format!("pid={}\n", process::id()),
+            &super::orchestrator_run::process_marker_fields(),
         ) {
             Ok(_) => {
                 return Ok(MemoryCoordinationLock {
@@ -1968,7 +1963,8 @@ fn initialize_memory_coordination_lock(
     mut file: fs::File,
     path: &Path,
 ) -> io::Result<MemoryCoordinationLock> {
-    if let Err(error) = writeln!(file, "pid={}", process::id()) {
+    if let Err(error) = file.write_all(super::orchestrator_run::process_marker_fields().as_bytes())
+    {
         let _ = fs::remove_file(path);
         return Err(error);
     }
@@ -2020,13 +2016,7 @@ pub(crate) fn memory_activity_status(memory_root: &Path) -> io::Result<MemoryAct
         }
         Err(error) => return Err(error),
     };
-    let Some(pid) = raw.lines().find_map(|line| {
-        line.strip_prefix("pid=")
-            .and_then(|value| value.parse().ok())
-    }) else {
-        return Ok(MemoryActivityStatus::Live);
-    };
-    Ok(if process_is_alive(pid) {
+    Ok(if memory_marker_owner_alive(&raw) {
         MemoryActivityStatus::Live
     } else {
         MemoryActivityStatus::Stale
@@ -2037,49 +2027,24 @@ fn memory_lock_owner_is_stale(path: &Path) -> bool {
     let Ok(raw) = fs::read_to_string(path) else {
         return false;
     };
-    raw.lines()
-        .find_map(|line| {
-            line.strip_prefix("pid=")
-                .and_then(|value| value.parse().ok())
-        })
-        .is_some_and(|pid| !process_is_alive(pid))
+    !memory_marker_owner_alive(&raw)
 }
 
-fn process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        if pid > i32::MAX as u32 {
-            return false;
-        }
-        let Some(pid) = Pid::from_raw(pid as _) else {
-            return false;
-        };
-        match test_kill_process(pid) {
-            Ok(()) => true,
-            // EPERM means the process exists but belongs to another account;
-            // treating it as stale would allow a second writer to enter.
-            Err(error) if error == rustix::io::Errno::SRCH => false,
-            Err(_) => true,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let Ok(output) = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-        else {
-            return true;
-        };
-        if !output.status.success() {
-            return true;
-        }
-        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-            line.split_whitespace()
-                .nth(1)
-                .and_then(|value| value.parse::<u32>().ok())
-                == Some(pid)
-        })
-    }
+fn memory_marker_owner_alive(raw: &str) -> bool {
+    let Some(pid) = raw.lines().find_map(|line| {
+        line.strip_prefix("pid=")
+            .and_then(|value| value.parse::<u32>().ok())
+    }) else {
+        return true;
+    };
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    super::orchestrator_run::process_owner_alive(
+        pid,
+        raw.lines()
+            .find_map(|line| line.strip_prefix("start=").map(str::trim)),
+    )
 }
 
 async fn memory_server_health(
@@ -6523,6 +6488,38 @@ mod tests {
             .await
             .expect("memory server should shut down gracefully");
         assert!(!marker_path.exists());
+    }
+
+    #[test]
+    fn memory_markers_reject_reused_pid_incarnation() {
+        let repo = TempDir::new().expect("repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        std::fs::create_dir_all(&config.memory_root).expect("memory root");
+        let marker_path = super::memory_activity_marker_path(&config.memory_root);
+        std::fs::write(
+            &marker_path,
+            format!(
+                "pid={}\nstart=not-the-current-process\n",
+                std::process::id()
+            ),
+        )
+        .expect("activity marker");
+        assert_eq!(
+            super::memory_activity_status(&config.memory_root).expect("activity status"),
+            super::MemoryActivityStatus::Stale
+        );
+
+        let lock_path = super::memory_migration_lock_path(repo.path());
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("lock parent");
+        std::fs::write(
+            &lock_path,
+            format!(
+                "pid={}\nstart=not-the-current-process\n",
+                std::process::id()
+            ),
+        )
+        .expect("coordination marker");
+        assert!(super::memory_lock_owner_is_stale(&lock_path));
     }
 
     #[test]
