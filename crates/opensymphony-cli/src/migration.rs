@@ -1525,8 +1525,8 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         .agent
         .max_concurrent_agents
         .as_ref()
-        .and_then(|value| integer_value(value).parse::<u64>().ok())
-        .filter(|value| *value > 0)
+        .map(|value| migrated_positive_u64(value, "agent.max_concurrent_agents"))
+        .transpose()?
         .unwrap_or(10);
     let state_root = format!("~/.opensymphony/state/{instance_id}");
     let max_concurrent_agents_by_state = source
@@ -1539,13 +1539,11 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             limits
                 .iter()
                 .map(|(state, value)| {
-                    integer_value(value)
-                        .parse::<u64>()
-                        .map(|value| (state.clone(), value))
-                        .map_err(|_| MigrationError::InvalidNumericSetting {
-                            field: format!("agent.max_concurrent_agents_by_state.{state}"),
-                            value: integer_value(value),
-                        })
+                    migrated_positive_u64(
+                        value,
+                        &format!("agent.max_concurrent_agents_by_state.{state}"),
+                    )
+                    .map(|value| (state.clone(), value))
                 })
                 .collect::<Result<BTreeMap<_, _>, _>>()
         })
@@ -1617,17 +1615,17 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
         "scheduler": {
             "max_concurrent_tasks": max_concurrent_tasks,
             "max_concurrent_agents_by_state": max_concurrent_agents_by_state,
-            "max_turns": source.workflow.front_matter.agent.max_turns.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
-            "max_retry_backoff_ms": source.workflow.front_matter.agent.max_retry_backoff_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
-            "stall_timeout_ms": source.workflow.front_matter.agent.stall_timeout_ms.as_ref().and_then(migrated_stall_timeout_ms),
-            "poll_interval_ms": source.workflow.front_matter.polling.interval_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
+            "max_turns": source.workflow.front_matter.agent.max_turns.as_ref().map(|value| migrated_positive_u64(value, "agent.max_turns")).transpose()?,
+            "max_retry_backoff_ms": source.workflow.front_matter.agent.max_retry_backoff_ms.as_ref().map(|value| migrated_positive_u64(value, "agent.max_retry_backoff_ms")).transpose()?,
+            "stall_timeout_ms": source.workflow.front_matter.agent.stall_timeout_ms.as_ref().map(migrated_stall_timeout_ms).transpose()?,
+            "poll_interval_ms": source.workflow.front_matter.polling.interval_ms.as_ref().map(|value| migrated_positive_u64(value, "polling.interval_ms")).transpose()?,
         },
         "hooks": {
             "after_create": source.workflow.front_matter.hooks.after_create.clone(),
             "before_run": source.workflow.front_matter.hooks.before_run.clone(),
             "after_run": source.workflow.front_matter.hooks.after_run.clone(),
             "before_remove": source.workflow.front_matter.hooks.before_remove.clone(),
-            "timeout_ms": source.workflow.front_matter.hooks.timeout_ms.as_ref().and_then(|value| integer_value(value).parse::<u64>().ok()),
+            "timeout_ms": source.workflow.front_matter.hooks.timeout_ms.as_ref().map(|value| migrated_non_positive_to_default(value, "hooks.timeout_ms")).transpose()?,
         },
         "integration": {"policy": "builtin:legacy-single", "use_shared_git_worktrees": false},
         "memory": {
@@ -2132,9 +2130,51 @@ fn copy_directory_contents_unchecked(
     Ok(())
 }
 
-fn migrated_stall_timeout_ms(value: &crate::opensymphony_workflow::IntegerLike) -> Option<u64> {
-    let parsed = integer_value(value).parse::<i64>().ok()?;
-    Some(if parsed <= 0 { 0 } else { parsed as u64 })
+fn migrated_positive_u64(
+    value: &crate::opensymphony_workflow::IntegerLike,
+    field: &str,
+) -> Result<u64, MigrationError> {
+    let raw = integer_value(value);
+    let parsed = raw
+        .parse::<i64>()
+        .map_err(|_| MigrationError::InvalidNumericSetting {
+            field: field.to_owned(),
+            value: raw.clone(),
+        })?;
+    if parsed <= 0 {
+        return Err(MigrationError::InvalidNumericSetting {
+            field: field.to_owned(),
+            value: raw,
+        });
+    }
+    Ok(parsed as u64)
+}
+
+fn migrated_non_positive_to_default(
+    value: &crate::opensymphony_workflow::IntegerLike,
+    field: &str,
+) -> Result<u64, MigrationError> {
+    let raw = integer_value(value);
+    let parsed = raw
+        .parse::<i64>()
+        .map_err(|_| MigrationError::InvalidNumericSetting {
+            field: field.to_owned(),
+            value: raw,
+        })?;
+    Ok(if parsed <= 0 { 0 } else { parsed as u64 })
+}
+
+fn migrated_stall_timeout_ms(
+    value: &crate::opensymphony_workflow::IntegerLike,
+) -> Result<Option<u64>, MigrationError> {
+    let raw = integer_value(value);
+    let parsed = raw
+        .parse::<i64>()
+        .map_err(|_| MigrationError::InvalidNumericSetting {
+            field: "agent.stall_timeout_ms".to_owned(),
+            value: raw,
+        })?;
+    Ok(Some(if parsed <= 0 { 0 } else { parsed as u64 }))
 }
 
 fn git_remote(repo: &Path) -> Result<String, MigrationError> {
@@ -2434,6 +2474,7 @@ fn write_file_with_mode(
             source,
         })?;
     }
+    reject_symlink_input(path)?;
     fs::write(path, contents).map_err(|source| MigrationError::Write {
         path: path.to_path_buf(),
         source,
@@ -3318,6 +3359,95 @@ mod tests {
     }
 
     #[test]
+    fn migration_rejects_invalid_numeric_scheduler_settings() {
+        let target_repo = PathBuf::from("/repo");
+        let workflow = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: project\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse");
+        let mut source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            target_repo: target_repo.clone(),
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source: String::new(),
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+
+        source.workflow.front_matter.agent.max_concurrent_agents =
+            Some(crate::opensymphony_workflow::IntegerLike::Integer(0));
+        assert!(matches!(
+            generate_central_config(&source),
+            Err(MigrationError::InvalidNumericSetting { field, .. })
+                if field == "agent.max_concurrent_agents"
+        ));
+        source.workflow.front_matter.agent.max_concurrent_agents = None;
+
+        for field in [
+            "agent.max_turns",
+            "agent.max_retry_backoff_ms",
+            "agent.stall_timeout_ms",
+            "polling.interval_ms",
+            "hooks.timeout_ms",
+        ] {
+            let invalid =
+                crate::opensymphony_workflow::IntegerLike::String("not-a-number".to_owned());
+            match field {
+                "agent.max_turns" => source.workflow.front_matter.agent.max_turns = Some(invalid),
+                "agent.max_retry_backoff_ms" => {
+                    source.workflow.front_matter.agent.max_retry_backoff_ms = Some(invalid)
+                }
+                "agent.stall_timeout_ms" => {
+                    source.workflow.front_matter.agent.stall_timeout_ms = Some(invalid)
+                }
+                "polling.interval_ms" => {
+                    source.workflow.front_matter.polling.interval_ms = Some(invalid)
+                }
+                "hooks.timeout_ms" => source.workflow.front_matter.hooks.timeout_ms = Some(invalid),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                generate_central_config(&source),
+                Err(MigrationError::InvalidNumericSetting { field: actual, .. })
+                    if actual == field
+            ));
+            source.workflow.front_matter.agent.max_turns = None;
+            source.workflow.front_matter.agent.max_retry_backoff_ms = None;
+            source.workflow.front_matter.agent.stall_timeout_ms = None;
+            source.workflow.front_matter.polling.interval_ms = None;
+            source.workflow.front_matter.hooks.timeout_ms = None;
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_symlinked_staging_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("migration root should exist");
+        let target = root.path().join("central.yaml");
+        let outside = root.path().join("outside.txt");
+        let stage = stage_path(&target, "sha256:generation");
+        fs::write(&outside, "keep me").expect("outside file should be written");
+        symlink(&outside, &stage).expect("staging symlink should be created");
+
+        let error = write_file(&stage, b"overwrite me")
+            .expect_err("symlinked staging files must be rejected");
+        assert!(matches!(error, MigrationError::SymlinkInput { path } if path == stage));
+        assert_eq!(
+            fs::read_to_string(&outside).expect("outside file should remain readable"),
+            "keep me"
+        );
+    }
+
+    #[test]
     fn migration_rejects_nonempty_repo_relative_workspace_root() {
         let root = tempfile::tempdir().expect("migration root should exist");
         let target_repo = root.path().join("repo");
@@ -3439,11 +3569,13 @@ mod tests {
         assert_eq!(
             migrated_stall_timeout_ms(&crate::opensymphony_workflow::IntegerLike::String(
                 "-1".to_owned()
-            )),
+            ))
+            .expect("negative stall timeout should be accepted"),
             Some(0)
         );
         assert_eq!(
-            migrated_stall_timeout_ms(&crate::opensymphony_workflow::IntegerLike::Integer(-1)),
+            migrated_stall_timeout_ms(&crate::opensymphony_workflow::IntegerLike::Integer(-1))
+                .expect("negative stall timeout should be accepted"),
             Some(0)
         );
     }

@@ -859,7 +859,7 @@ fn resolve_central_config(
     let memory_catalog_root = if let Some(memory) = config.memory.as_ref() {
         let memory_root =
             resolve_central_path(config_root, &memory.catalog_root, "memory.catalog_root")?;
-        if !is_contained(&state_root, &memory_root) {
+        if memory_root == state_root || !is_contained(&state_root, &memory_root) {
             return Err(CentralConfigError::InvalidRoot);
         }
         let _ = (memory.auto_capture, memory.auto_archive, memory.serve);
@@ -2691,6 +2691,18 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("overlapping instance roots should fail");
         assert!(matches!(error, CentralConfigError::OverlappingRoots { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_memory_catalog_at_state_root() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path()).replace(
+            &format!("catalog_root: {}/state/memory", root.path().display()),
+            &format!("catalog_root: {}/state", root.path().display()),
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("memory catalog must have its own state subdirectory");
+        assert!(matches!(error, CentralConfigError::InvalidRoot));
     }
 
     #[test]

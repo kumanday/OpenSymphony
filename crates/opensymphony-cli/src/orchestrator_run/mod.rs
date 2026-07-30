@@ -1206,6 +1206,7 @@ fn load_runtime_memory_config(
     if let Some(memory_root) = runtime.memory_catalog_root.as_ref() {
         config.memory_root = memory_root.clone();
         config.index_path = memory_root.join(crate::opensymphony_memory::DEFAULT_INDEX_FILE_NAME);
+        config.containment_root = runtime.state_root.clone();
     }
     Ok(config)
 }
@@ -1463,6 +1464,46 @@ mod tests {
         drop(first);
         acquire_root_ownership([root.path().to_path_buf()])
             .expect("root should be available after owner drops");
+    }
+
+    #[test]
+    fn central_runtime_memory_config_uses_state_root_containment() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let repo = root.path().join("repo");
+        let state = root.path().join("state");
+        let memory = state.join("memory");
+        fs::create_dir_all(&repo).expect("repository should exist");
+        fs::create_dir_all(&memory).expect("memory catalog should exist");
+        let workflow = crate::opensymphony_workflow::WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  api_key: test-linear-key\n  project_slug: project\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nTarget branch: develop\n",
+        )
+        .expect("workflow should parse")
+        .resolve(&repo, &BTreeMap::new())
+        .expect("workflow should resolve");
+        let runtime = RunRuntimeConfig {
+            config_path: None,
+            central_config: true,
+            config_generation: "test-generation".to_owned(),
+            target_repo: repo.clone(),
+            workflow_path: repo.join("WORKFLOW.md"),
+            workflow,
+            bind: "127.0.0.1:3000".parse().expect("bind should parse"),
+            tool_dir: None,
+            openhands_conversation_store: None,
+            retry_max_attempts: None,
+            state_root: Some(state.clone()),
+            memory_catalog_root: Some(memory),
+            retain_failed: true,
+            preserve_terminal_workspaces: true,
+            memory: config::RunMemoryConfig {
+                auto_capture: true,
+                auto_archive: false,
+                server: None,
+            },
+        };
+
+        let config = load_runtime_memory_config(&runtime).expect("memory config should load");
+        assert_eq!(config.containment_root, Some(state));
     }
 
     #[test]
