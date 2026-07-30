@@ -655,7 +655,7 @@ fn process_incarnation(pid: u32) -> Option<String> {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after_command = stat.rsplit_once(')')?.1;
         let start_time = after_command.split_whitespace().nth(19)?;
-        return Some(format!("linux:{start_time}"));
+        Some(format!("linux:{start_time}"))
     }
     #[cfg(any(
         target_os = "macos",
