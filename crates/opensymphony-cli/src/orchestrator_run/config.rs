@@ -1015,12 +1015,7 @@ fn resolve_central_config(
         }
     }
     let retry_max_attempts = if let Some(scheduler) = config.scheduler.as_ref() {
-        if scheduler.max_concurrent_tasks == 0
-            || scheduler
-                .retry
-                .max_attempts
-                .is_some_and(|attempts| attempts == 0)
-        {
+        if scheduler.max_concurrent_tasks == 0 {
             return Err(CentralConfigError::InvalidReference {
                 field: "scheduler".to_owned(),
             });
@@ -2225,6 +2220,24 @@ scheduler:
                 .expect("central root should canonicalize")
                 .join("integration.md")
         );
+    }
+
+    #[test]
+    fn central_config_allows_zero_automatic_retries() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "  max_concurrent_tasks: 2\n",
+            "  max_concurrent_tasks: 2\n  retry:\n    max_attempts: 0\n",
+        );
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("zero automatic retries should be valid");
+        assert_eq!(resolved.retry_max_attempts, Some(0));
     }
 
     #[test]

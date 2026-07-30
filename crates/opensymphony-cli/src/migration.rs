@@ -2887,15 +2887,18 @@ fn literal_value_after_authorization(command: &str, lower: &str) -> bool {
         }
         let tail = trim_hook_value_prefix(tail);
         if let Some(value) = next_hook_word(tail) {
-            if ["bearer", "basic", "token"]
+            let literal = if ["bearer", "basic", "token"]
                 .into_iter()
                 .any(|scheme| value.eq_ignore_ascii_case(scheme))
             {
                 let credential = trim_hook_value_prefix(&tail[value.len()..]);
-                return next_hook_word(credential)
-                    .is_some_and(|value| credential_variable(value).is_none());
+                next_hook_word(credential).is_some_and(|value| credential_variable(value).is_none())
+            } else {
+                credential_variable(value).is_none()
+            };
+            if literal {
+                return true;
             }
-            return credential_variable(value).is_none();
         }
         search_from = end;
     }
@@ -2914,16 +2917,19 @@ fn literal_value_after_marker(command: &str, lower: &str, marker: &str) -> bool 
         let mut tail = &command[end..];
         tail = trim_hook_value_prefix(tail);
         if let Some(value) = next_hook_word(tail) {
-            if marker == "authorization"
+            let literal = if marker == "authorization"
                 && ["bearer", "basic", "token"]
                     .into_iter()
                     .any(|scheme| value.eq_ignore_ascii_case(scheme))
             {
                 let credential = trim_hook_value_prefix(&tail[value.len()..]);
-                return next_hook_word(credential)
-                    .is_some_and(|value| credential_variable(value).is_none());
+                next_hook_word(credential).is_some_and(|value| credential_variable(value).is_none())
+            } else {
+                credential_variable(value).is_none()
+            };
+            if literal {
+                return true;
             }
-            return credential_variable(value).is_none();
         }
         search_from = end;
     }
@@ -2949,8 +2955,10 @@ fn literal_assignment_value(command: &str, lower: &str, marker: &str) -> bool {
                 .is_some_and(|character| matches!(character, ':' | '='))
         {
             let tail = trim_hook_value_prefix(tail);
-            if let Some(value) = next_hook_word(tail) {
-                return credential_variable(value).is_none();
+            if let Some(value) = next_hook_word(tail)
+                && credential_variable(value).is_none()
+            {
+                return true;
             }
         }
         search_from = end;
@@ -3484,6 +3492,9 @@ mod tests {
             "echo 'basic authentication disabled'"
         ));
         assert!(!hook_has_literal_secret("echo 'authorization complete'"));
+        assert!(hook_has_literal_secret(
+            "echo 'Authorization: Bearer $SAFE'; curl -H 'Authorization: Bearer raw-token' https://example.invalid"
+        ));
     }
 
     #[cfg(unix)]

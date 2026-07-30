@@ -786,8 +786,16 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             let harness_kind = conversation_manifest
                 .as_ref()
                 .map(recovered_harness_kind_from_manifest);
-            let recovered_run =
-                recovered_run_from_manifests(run_manifest.as_ref(), conversation_manifest.as_ref());
+            let recovered_run = run_manifest
+                .as_ref()
+                .is_some_and(|run| run.status == RunStatus::Running)
+                .then(|| {
+                    recovered_run_from_manifests(
+                        run_manifest.as_ref(),
+                        conversation_manifest.as_ref(),
+                    )
+                })
+                .flatten();
 
             recoveries.push(RecoveryRecord {
                 issue: normalized_issue_from_manifest(
@@ -1313,7 +1321,11 @@ impl RuntimeWorkerBackend {
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
         let route = request.route.clone();
-        let recovered = recovered && route.harness_kind == OPENHANDS_AGENT_SERVER_KIND;
+        let recovered = recovered
+            && matches!(
+                route.harness_kind.as_str(),
+                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND
+            );
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let worker_env = self.worker_env.clone();
@@ -1386,7 +1398,7 @@ impl RuntimeWorkerBackend {
             }
 
             if route.harness_kind == "codex_app_server" {
-                let outcome = run_codex_stdio_issue(
+                let outcome = run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
                     &ensured.handle,
@@ -1400,6 +1412,7 @@ impl RuntimeWorkerBackend {
                     &updates_tx,
                     &mut launch_tx,
                     &worker_env,
+                    recovered,
                 )
                 .await;
                 let _ = updates_tx.send(WorkerUpdate::Finished {
@@ -1641,6 +1654,7 @@ impl Drop for RuntimeWorkerBackend {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn run_codex_stdio_issue(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
     workspace_manager: &WorkspaceManager,
@@ -1656,6 +1670,42 @@ async fn run_codex_stdio_issue(
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
 ) -> WorkerOutcomeRecord {
+    run_codex_stdio_issue_with_mode(
+        route,
+        workspace_manager,
+        workspace,
+        run_manifest,
+        issue,
+        run,
+        workflow,
+        codex_bin,
+        codex_schema_validators,
+        codex_interrupts,
+        updates_tx,
+        launch_tx,
+        worker_env,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_stdio_issue_with_mode(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    workflow: &ResolvedWorkflow,
+    codex_bin: &str,
+    codex_schema_validators: &CodexSchemaValidatorCache,
+    codex_interrupts: &CodexInterruptRegistry,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    worker_env: &BTreeMap<String, String>,
+    recovered: bool,
+) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
         route,
         workspace_manager,
@@ -1669,6 +1719,7 @@ async fn run_codex_stdio_issue(
         updates_tx,
         launch_tx,
         worker_env,
+        recovered,
     )
     .await
     {
@@ -1744,6 +1795,7 @@ async fn try_run_codex_stdio_issue(
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
+    recovered: bool,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
@@ -1815,6 +1867,14 @@ async fn try_run_codex_stdio_issue(
                     error,
                 )
             })?;
+    }
+    if recovered && existing_manifest.is_none() {
+        return Err(codex_lifecycle_error(
+            issue,
+            None,
+            "recovery",
+            "persisted Codex conversation manifest is missing; refusing to create a new thread",
+        ));
     }
     let first_run_prompt = if existing_manifest.is_none() {
         Some(
@@ -2007,6 +2067,65 @@ async fn try_run_codex_stdio_issue(
             )
         }
     };
+    if recovered {
+        let turn_id = manifest
+            .last_turn_id
+            .clone()
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .ok_or_else(|| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&conversation_id),
+                    "recovery",
+                    "persisted Codex turn id is missing; refusing to start a new turn",
+                )
+            })?;
+        let _interrupt_registration = register_codex_interrupt_channel(
+            codex_interrupts,
+            conversation_id.clone(),
+            CodexInterruptChannel {
+                stdin,
+                session,
+                schema_validator,
+                thread_id: conversation_id.clone(),
+                turn_id,
+                responses: Arc::clone(&interrupt_responses),
+                stderr_tail: Arc::clone(&stderr_tail),
+            },
+        )?;
+        if let Some(sender) = launch_tx.take() {
+            let _ = sender.send(LaunchReport::Conversation(Box::new(
+                codex_conversation_metadata(conversation_id.clone(), route),
+            )));
+        }
+        let terminal = read_until_codex_terminal(
+            &mut reader,
+            updates_tx,
+            &run.worker_id.to_string(),
+            issue,
+            run,
+            &mut read_state,
+            &interrupt_responses,
+        )
+        .await
+        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+        let summary = format!(
+            "Codex app-server recovery completed with terminal event {:?}",
+            terminal.event_kind
+        );
+        let _ = child.kill().await;
+        stderr_task.abort();
+        return Ok((
+            WorkerOutcomeRecord::from_run(
+                run,
+                terminal.outcome,
+                now_timestamp(),
+                Some(summary),
+                None,
+            ),
+            terminal.status,
+        ));
+    }
     let prompt = match (prompt_kind, first_run_prompt) {
         (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
         (IssueSessionPromptKind::Full, None) => workflow
@@ -2076,6 +2195,16 @@ async fn try_run_codex_stdio_issue(
         .await
         .map_err(|error| with_codex_stderr(error, &stderr_tail))?,
     };
+    persist_codex_turn_id(workspace_manager, workspace, &mut manifest, &turn_id)
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(&conversation_id),
+                "turn/start turn id persistence",
+                with_codex_stderr(error, &stderr_tail),
+            )
+        })?;
     let _interrupt_registration = register_codex_interrupt_channel(
         codex_interrupts,
         conversation_id.clone(),
@@ -3149,6 +3278,7 @@ async fn write_codex_conversation_manifest(
         reset_reason: None,
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
         codex_archive_state: Some("active".to_string()),
+        last_turn_id: None,
         last_prompt_kind: None,
         last_prompt_at: None,
         last_prompt_path: None,
@@ -3239,6 +3369,22 @@ async fn update_codex_conversation_manifest(
     manifest.last_event_kind = Some("turn/start".to_string());
     manifest.last_event_at = Some(now);
     manifest.last_event_summary = Some(route.summary());
+    workspace_manager
+        .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn persist_codex_turn_id(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &mut IssueConversationManifest,
+    turn_id: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    manifest.last_turn_id = Some(turn_id.to_owned());
+    manifest.updated_at = now;
+    manifest.last_attached_at = now;
     workspace_manager
         .write_json_artifact(workspace, &workspace.conversation_manifest_path(), manifest)
         .await
@@ -3725,6 +3871,7 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             codex_archive_state: None,
+            last_turn_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -4928,6 +5075,101 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn codex_stdio_worker_recovery_reconciles_without_starting_a_new_turn() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-recovery", 1),
+            )
+            .await
+            .expect("run should start");
+        run_manifest.status = RunStatus::Running;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("running status should be persisted");
+
+        let mut conversation_manifest = sample_conversation_manifest("fake-thread");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.persistence_dir = ensured.handle.metadata_dir();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        conversation_manifest.runtime_contract_version =
+            Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        conversation_manifest.codex_archive_state = Some("active".to_string());
+        conversation_manifest.last_turn_id = Some("turn-1".to_string());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-recovery").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-recovery.log");
+        let fake_codex = tempdir.path().join("fake-codex-recovery");
+        write_fake_codex_recovery_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            true,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Cancelled);
+        assert_eq!(run_manifest.status, RunStatus::Cancelled);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
+        assert!(!log.contains(r#""method":"turn/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn codex_stdio_worker_accepts_scheduler_interrupt_for_active_turn() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
@@ -5760,6 +6002,16 @@ mod tests {
             .start_run(&ensured.handle, &RunDescriptor::new("run-recovery", 2))
             .await
             .expect("run manifest should be written");
+        let mut run_manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        run_manifest.status = RunStatus::Running;
+        workspace_manager
+            .write_run_manifest(&ensured.handle, &run_manifest)
+            .await
+            .expect("running status should be persisted");
         let mut conversation_manifest = sample_conversation_manifest("conv-recovery");
         conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
         workspace_manager
@@ -5804,6 +6056,51 @@ mod tests {
             RuntimeStreamState::Closed
         );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_retries_pre_run_records_instead_of_reattaching() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-recovery", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let conversation_manifest = sample_conversation_manifest("conv-prepared-recovery");
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].had_in_flight_run);
+        assert!(recoveries[0].recovered_run.is_none());
     }
 
     #[tokio::test]
@@ -6497,6 +6794,53 @@ done
     }
 
     #[cfg(unix)]
+    fn write_fake_codex_recovery_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/list"'*)
+      if printf '%s' "$line" | grep -q '"archived":true'; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      fi
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-1","status":"interrupted"}}}}}}\n'
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'unexpected turn/start\n' >&2
+      exit 97
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA,
+            ),
+        );
+    }
+
+    #[cfg(unix)]
     fn write_fake_codex_resume_error_child(path: &Path, log_path: &Path) {
         write_executable(
             path,
@@ -6817,6 +7161,7 @@ exit 64
             reset_reason: None,
             runtime_contract_version: None,
             codex_archive_state: None,
+            last_turn_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,

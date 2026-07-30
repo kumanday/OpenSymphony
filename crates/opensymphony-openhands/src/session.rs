@@ -749,6 +749,9 @@ pub struct IssueConversationManifest {
     /// Codex-only archive state. Missing values from older manifests mean active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_archive_state: Option<String>,
+    /// Codex-only active turn id used to interrupt a recovered turn safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_kind: Option<IssueSessionPromptKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -814,6 +817,7 @@ impl IssueConversationManifest {
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
             codex_archive_state: None,
+            last_turn_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
@@ -4287,6 +4291,7 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             codex_archive_state: None,
+            last_turn_id: None,
             last_prompt_kind: None,
             last_prompt_at: None,
             last_prompt_path: None,
