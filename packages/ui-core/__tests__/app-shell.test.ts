@@ -728,6 +728,7 @@ describe("OpenSymphonyApp mount", () => {
     expect((root.querySelector("[data-testid='workspace-lower-columns']") as HTMLElement).style.getPropertyValue("--os-left-column")).toBe("52%");
     expect(root.querySelector("[data-profile-label]")).toBeNull();
     expect(root.querySelector(".os-strip-metrics")).not.toBeNull();
+    expect(root.querySelector(".os-strip-metrics")?.textContent).toContain("5.6K tokens");
     expect(root.querySelector("[data-project-id='proj-alpha']")).toBeNull();
     expect(root.querySelectorAll("[data-testid='event-log-mini'] li")).toHaveLength(2);
     const compactEvents = root.querySelector("[data-testid='event-log-mini']");

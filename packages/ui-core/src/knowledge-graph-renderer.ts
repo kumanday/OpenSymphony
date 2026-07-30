@@ -133,6 +133,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
   const { snapshot, state } = surface;
   const selectedRepo = state.repos?.repos.find((repo) => repo.repo_id === state.repoId) ?? null;
   const indexReport = state.indexReport?.repo_id === state.repoId ? state.indexReport : null;
+  const indexing = state.indexing || indexReport?.status === "accepted" || indexReport?.status === "progress";
   const diffOverlay = state.mode === "diff" && state.diffOverlay
     ? normalizeCodeDiffOverlay(state.diffOverlay)
     : null;
@@ -178,7 +179,7 @@ export function renderCodeGraphSurface(surface: CodeGraphSurface): string {
             `<button type="button" class="${state.mode === mode ? "is-selected" : ""}" data-code-mode="${mode}"${(mode === "diff" && diffUnavailable) || emptySnapshot ? " disabled" : ""}>${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}
         </div>
         ${narrowed ? `<button type="button" class="os-icon-button os-kg-reset" data-code-reset data-testid="code-graph-reset">Show full graph</button>` : ""}
-        <span class="os-kg-status" data-testid="code-graph-status">${escapeHtml(state.layoutStatus === "failed" ? state.layoutError ?? "Unavailable" : state.stale ? "Refreshing" : state.layoutStatus === "ready" ? "Ready" : "Idle")}</span>
+        <span class="os-kg-status" data-testid="code-graph-status">${escapeHtml(indexing ? "Indexing repository…" : state.layoutStatus === "failed" ? state.layoutError ?? "Unavailable" : state.stale ? "Refreshing" : state.layoutStatus === "ready" ? "Ready" : "Idle")}</span>
       </div>
       ${renderCodeGraphProvenance(surface, hasTruncation, hasPartialCoverage)}
       ${emptySnapshot ? renderCodeGraphIndexState(surface) : renderCodeGraphFilters(surface)}

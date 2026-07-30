@@ -1301,6 +1301,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     if (this.destroyed || navigationVersion !== this.codeGraphNavigationVersion || requestKey !== this.codeGraphRequestKey()) return;
     this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "SNAPSHOT_LOADED", snapshot });
+    if (this.state.codeGraph.selectedNodeIds.length === 0) {
+      const targetNode = this.state.codeGraph.symbolKey
+        ? snapshot.nodes.find((node) => node.symbol_key === this.state.codeGraph.symbolKey)
+        : this.state.codeGraph.path
+          ? snapshot.nodes.find((node) => node.path_display === this.state.codeGraph.path)
+          : undefined;
+      if (targetNode) {
+        this.state.codeGraph = codeGraphReducer(this.state.codeGraph, { type: "NODE_SELECTED", nodeId: targetNode.id });
+      }
+    }
     if (this.state.codeGraph.snapshot !== previousSnapshot && (!previousSnapshot || !sameCodeGraphTopology(previousSnapshot, snapshot))) {
       this.invalidateCodeGraphLayout();
     } else if (retainedReadyLayout) {
@@ -2001,16 +2011,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private runCodeDeepLink(symbolKey?: string, path?: string): string | null {
     const run = this.state.runDetail;
     const overlay = this.state.runCodeOverlay;
-    if (!run || !overlay || (symbolKey && path)) return null;
+    const repoId = overlay?.repo_id ?? this.state.runCodeOutline?.repo_id;
+    if (!run || !repoId || (symbolKey && path)) return null;
     try {
       return formatCodeDeepLink({
-        repoId: overlay.repo_id,
-        mode: "diff",
+        repoId,
         symbolKey: symbolKey ?? null,
         path: path ?? null,
         runId: run.run_id,
-        baseRevision: overlay.base_revision,
-        headRevision: overlay.head_revision,
+        baseRevision: overlay?.base_revision ?? null,
+        headRevision: overlay?.head_revision ?? null,
       });
     } catch {
       return null;
@@ -2066,7 +2076,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!this.state.runCodeOverlay) await this.loadRunCodeOverlay(runId);
     if (this.state.runDetail?.run_id !== runId) return;
     const link = this.runCodeDeepLink(symbolKey, path);
-    if (link) await this.openCodeDeepLink(link);
+    if (link && !(await this.openCodeDeepLink(link)) && !this.state.runCodeOverlay) {
+      await this.startCodeGraphIndex();
+    }
   }
 
   private selectEvidenceView(view: AppState["evidenceView"]): void {
@@ -2904,7 +2916,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const snapshot = this.state.snapshot;
     const totalTokens = snapshot
       ? snapshot.metrics.total_input_tokens
-        + snapshot.metrics.total_cache_read_tokens
         + snapshot.metrics.total_output_tokens
       : 0;
     const metrics = snapshot
@@ -3672,7 +3683,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       `<div><span>Input</span><strong>${formatNumber(run.input_tokens)}</strong></div>`,
       `<div><span>Cache</span><strong>${formatNumber(run.cache_read_tokens)}</strong></div>`,
       `<div><span>Output</span><strong>${formatNumber(run.output_tokens)}</strong></div>`,
-      `<div><span>Total</span><strong>${formatNumber(run.input_tokens + run.cache_read_tokens + run.output_tokens)}</strong></div>`,
+      `<div><span>Total</span><strong>${formatNumber(run.input_tokens + run.output_tokens)}</strong></div>`,
       run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : "",
       run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : "",
     ].filter(Boolean).join("");

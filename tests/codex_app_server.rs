@@ -507,7 +507,7 @@ fn codex_token_usage_notification_maps_to_normalized_usage_payload() {
             input_tokens: 5,
             output_tokens: 7,
             cache_read_tokens: 3,
-            total_tokens: 15,
+            total_tokens: 12,
         })
     );
 

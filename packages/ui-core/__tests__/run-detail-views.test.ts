@@ -275,6 +275,69 @@ describe("Run detail views", () => {
     handle.destroy();
   });
 
+  it("indexes a missing run base before opening the workspace symbol graph", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = buildTransport(runDetail);
+    const codePath = codeGraphFixtureOutlines[0].path;
+    const fixtureAdapter = createFixtureCodeGraphAdapter();
+    let indexed = false;
+    let indexCalls = 0;
+    Object.assign(transport, {
+      runFiles: async () => [{ ...files[0], path: codePath }],
+      runDiffs: async () => ({
+        ...diff,
+        file_path: codePath,
+        hunks: [{ ...diff.hunks[0], file_path: codePath, header: "@@ -10,1 +10,1 @@", start_line: 10 }],
+      }),
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport,
+      codeGraphAdapter: {
+        ...fixtureAdapter,
+        indexRepo: async (repoId) => {
+          indexCalls += 1;
+          const report = await fixtureAdapter.indexRepo(repoId);
+          return {
+            ...report,
+            status: "accepted",
+            parsed_files: 0,
+            persisted_documents: 0,
+            persisted_symbols: 0,
+            persisted_edges: 0,
+          };
+        },
+        getRunGraphSnapshot: async (_runId, repoId, options) => {
+          if (!indexed) throw new Error("code_revision_not_found");
+          return fixtureAdapter.getGraphSnapshot(repoId ?? "opensymphony", options);
+        },
+        getFileOutline: async () => ({ ...codeGraphFixtureOutlines[0], run_id: runDetail.run_id }),
+        getRunDiffOverlay: async () => {
+          throw new Error("diff overlay unavailable");
+        },
+      },
+    });
+    await openRun(root);
+    await flushUntil(() => root.querySelector("[data-diff-symbol-action]") !== null);
+
+    (root.querySelector("[data-diff-symbol-action]") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector("[data-active-graph-surface='code']") !== null);
+    await flushUntil(() => indexCalls === 1);
+    expect(root.querySelector("[data-testid='code-graph-status']")?.textContent).toContain("Indexing repository");
+    expect(root.querySelector("[data-code-mode='neighborhood']")?.classList.contains("is-selected")).toBe(true);
+    const app = handle as unknown as {
+      pollCodeGraphIndex(): Promise<void>;
+      state: { codeGraph: { selectedNodeIds: string[] } };
+    };
+    indexed = true;
+    await app.pollCodeGraphIndex();
+    await flushUntil(() => app.state.codeGraph.selectedNodeIds.includes("symbol:graphReducer"));
+    expect(root.querySelector("[data-testid='code-graph-view-provenance']")?.textContent).toContain("Workspace-composed");
+    await handle.destroy();
+  });
+
   it("keeps a pending run overlay alive while selecting another file", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -327,7 +390,7 @@ describe("Run detail views", () => {
     expect(metricText).toContain("Input100");
     expect(metricText).toContain("Cache25");
     expect(metricText).toContain("Output50");
-    expect(metricText).toContain("Total175");
+    expect(metricText).toContain("Total150");
     expect(root.querySelector("[data-testid='run-branch']")?.textContent).toContain("feat/coe-414-run-detail");
     const pr = root.querySelector("a[href='https://github.com/kumanday/OpenSymphony/pull/414']") as HTMLAnchorElement;
     expect(pr).not.toBeNull();
