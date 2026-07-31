@@ -88,6 +88,14 @@ Each conversation request sets `workspace.working_dir` to the deterministic
 issue workspace path. This preserves issue isolation without requiring a
 separate server per issue.
 
+For a repository-bound terminal task, that path is the published, verified
+checkout generation, not the orchestrator repository or a staging directory.
+The launch envelope records the checkout generation, target commit, instruction
+provenance, harness/model profile, requested single-checkout scope, and the
+truthful trusted-host process-`cwd` containment receipt. A compatible persisted
+conversation may be reused only when its envelope matches; a mismatch is
+rejected before attach.
+
 ## 6. Conversation model
 
 Each issue gets a stable conversation manifest under:

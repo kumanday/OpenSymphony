@@ -21,7 +21,8 @@ use crate::opensymphony_workflow::{
     Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
 };
 use crate::opensymphony_workspace::{
-    RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
+    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
+    WorkspaceManager,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -84,6 +85,7 @@ pub struct IssueSessionRunnerConfig {
     pub total_runtime_cap_ms: Option<Duration>,
     pub finished_drain_timeout: Duration,
     pub memory: Option<MemoryWorkerAccess>,
+    pub repository_instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,6 +320,7 @@ impl Default for IssueSessionRunnerConfig {
             total_runtime_cap_ms: None,
             finished_drain_timeout: Duration::from_millis(100),
             memory: None,
+            repository_instructions: None,
         }
     }
 }
@@ -342,11 +345,17 @@ impl IssueSessionRunnerConfig {
             total_runtime_cap_ms: None,
             finished_drain_timeout: Duration::from_millis(100),
             memory: None,
+            repository_instructions: None,
         }
     }
 
     pub fn with_memory(mut self, memory: Option<MemoryWorkerAccess>) -> Self {
         self.memory = memory;
+        self
+    }
+
+    pub fn with_repository_instructions(mut self, instructions: Option<String>) -> Self {
+        self.repository_instructions = instructions;
         self
     }
 }
@@ -746,6 +755,8 @@ pub struct IssueConversationManifest {
     pub reset_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_contract_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
     /// Codex-only archive state. Missing values from older manifests mean active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_archive_state: Option<String>,
@@ -828,6 +839,7 @@ impl IssueConversationManifest {
             workflow_prompt_seeded: false,
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -1211,6 +1223,11 @@ impl IssueSessionRunner {
         workpad_comment_source: Arc<dyn WorkpadCommentSource>,
     ) -> Self {
         self.workpad_comment_source = Some(workpad_comment_source);
+        self
+    }
+
+    pub fn with_repository_instructions(mut self, instructions: Option<String>) -> Self {
+        self.config.repository_instructions = instructions;
         self
     }
 
@@ -1797,6 +1814,20 @@ impl IssueSessionRunner {
                     .await?;
 
                 match loaded.manifest {
+                    Some(manifest)
+                        if run_manifest.runtime_envelope.as_ref().is_some_and(|expected| {
+                            manifest.runtime_envelope.as_ref() != Some(expected)
+                        }) => self
+                        .create_fresh_session(
+                            workspace_manager,
+                            workspace,
+                            run_manifest,
+                            observed_run,
+                            issue,
+                            workflow,
+                            Some("terminal runtime envelope changed; superseding conversation".into()),
+                        )
+                        .await,
                     Some(manifest) => match self
                         .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
                         .await?
@@ -2538,6 +2569,7 @@ impl IssueSessionRunner {
         );
         manifest.llm_config_fingerprint =
             Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
+        manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -2762,6 +2794,14 @@ impl IssueSessionRunner {
         match prompt_kind {
             IssueSessionPromptKind::Full => workflow
                 .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+                .map(|prompt| {
+                    self.config.repository_instructions.as_deref().map_or(
+                        prompt.clone(),
+                        |instructions| {
+                            format!("{prompt}\n\n## Repository Instructions\n\n{instructions}\n")
+                        },
+                    )
+                })
                 .map_err(|error| error.to_string()),
             IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
         }
@@ -4477,6 +4517,7 @@ mod tests {
                 total_runtime_cap_ms: None,
                 finished_drain_timeout: Duration::from_millis(25),
                 memory: None,
+                repository_instructions: None,
             },
         );
 
@@ -4503,6 +4544,7 @@ mod tests {
             workflow_prompt_seeded: false,
             reset_reason: None,
             runtime_contract_version: None,
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,

@@ -9,6 +9,72 @@ use serde::{Deserialize, Serialize};
 
 use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutRepository {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    pub remote: String,
+    pub target_branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_env: Option<String>,
+    pub instructions_path: PathBuf,
+    pub review_profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionProvenance {
+    pub path: PathBuf,
+    pub content_hash: String,
+    pub source_commit: String,
+    pub source: String,
+    #[serde(default)]
+    pub native_discovery_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRuntimeEnvelope {
+    pub repository_binding: RepositoryBinding,
+    pub config_generation: String,
+    pub inventory_generation: String,
+    pub policy_generation: String,
+    pub checkout_generation: String,
+    pub checkout_path: PathBuf,
+    pub target_branch: String,
+    pub target_commit: String,
+    pub instruction: InstructionProvenance,
+    pub harness: String,
+    pub model_profile: String,
+    pub requested_execution_scope: String,
+    pub effective_containment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_binding: Option<String>,
+    pub cleanup_intent: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutManifest {
+    pub schema_version: u32,
+    pub generation: String,
+    pub issue_id: String,
+    pub identifier: String,
+    pub run_id: String,
+    pub sanitized_workspace_key: String,
+    pub workspace_path: PathBuf,
+    pub repository_binding: RepositoryBinding,
+    pub remote_fingerprint: String,
+    pub target_branch: String,
+    pub target_commit: String,
+    pub current_branch: String,
+    pub head: String,
+    pub shallow: bool,
+    pub clean: bool,
+    pub instruction: InstructionProvenance,
+    pub created_at: DateTime<Utc>,
+    pub verified_at: DateTime<Utc>,
+    pub quarantined: bool,
+}
+
 /// Keep transient runtime diagnostics useful without allowing common
 /// credential-shaped values to become durable workspace metadata.
 pub fn redact_runtime_diagnostic(input: &str) -> String {
@@ -380,6 +446,7 @@ pub struct RunDescriptor {
     pub attempt: u32,
     pub normal_retry_count: u32,
     pub repository_binding: Option<RepositoryBinding>,
+    pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
 }
 
 impl RunDescriptor {
@@ -389,6 +456,7 @@ impl RunDescriptor {
             attempt,
             normal_retry_count: 0,
             repository_binding: None,
+            runtime_envelope: None,
         }
     }
 
@@ -402,6 +470,14 @@ impl RunDescriptor {
         repository_binding: Option<RepositoryBinding>,
     ) -> Self {
         self.repository_binding = repository_binding;
+        self
+    }
+
+    pub fn with_runtime_envelope(
+        mut self,
+        runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    ) -> Self {
+        self.runtime_envelope = runtime_envelope;
         self
     }
 }
@@ -465,6 +541,7 @@ pub struct WorkspaceHandle {
     identifier: String,
     workspace_key: String,
     workspace_path: PathBuf,
+    checkout_generation: Option<String>,
 }
 
 impl WorkspaceHandle {
@@ -479,7 +556,13 @@ impl WorkspaceHandle {
             identifier: identifier.into(),
             workspace_key: workspace_key.into(),
             workspace_path,
+            checkout_generation: None,
         }
+    }
+
+    pub(crate) fn with_checkout_generation(mut self, generation: impl Into<String>) -> Self {
+        self.checkout_generation = Some(generation.into());
+        self
     }
 
     pub fn issue_id(&self) -> &str {
@@ -496,6 +579,10 @@ impl WorkspaceHandle {
 
     pub fn workspace_path(&self) -> &Path {
         &self.workspace_path
+    }
+
+    pub fn checkout_generation(&self) -> Option<&str> {
+        self.checkout_generation.as_deref()
     }
 
     pub fn metadata_dir(&self) -> PathBuf {
@@ -516,6 +603,10 @@ impl WorkspaceHandle {
 
     pub fn conversation_manifest_path(&self) -> PathBuf {
         self.metadata_dir().join("conversation.json")
+    }
+
+    pub fn checkout_manifest_path(&self) -> PathBuf {
+        self.metadata_dir().join("checkout.json")
     }
 
     pub fn logs_dir(&self) -> PathBuf {
@@ -739,6 +830,8 @@ pub struct RunManifest {
     pub workspace_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_binding: Option<RepositoryBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
     pub attempt: u32,
     #[serde(default)]
     pub normal_retry_count: u32,
@@ -773,6 +866,7 @@ impl RunManifest {
             sanitized_workspace_key: workspace.workspace_key().to_string(),
             workspace_path: workspace.workspace_path().to_path_buf(),
             repository_binding: run.repository_binding.clone(),
+            runtime_envelope: run.runtime_envelope.clone(),
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
             pending_retry: false,
@@ -804,6 +898,8 @@ pub struct ConversationManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_reason: Option<String>,
     pub runtime_contract_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
 }
 
 impl ConversationManifest {
@@ -825,6 +921,7 @@ impl ConversationManifest {
             fresh_conversation: true,
             reset_reason: None,
             runtime_contract_version: runtime_contract_version.into(),
+            runtime_envelope: None,
         }
     }
 }

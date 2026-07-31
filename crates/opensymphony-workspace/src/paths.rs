@@ -1,5 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use super::WorkspaceError;
 
 pub fn sanitize_workspace_key(identifier: &str) -> Result<String, WorkspaceError> {
@@ -41,6 +43,23 @@ pub fn workspace_path_for_root(
     let root = normalize_absolute_path(root.as_ref())?;
     let key = sanitize_workspace_key(issue_identifier)?;
     resolve_path_within_root(root, key)
+}
+
+/// Derive a collision-resistant key for a repository-scoped checkout.
+pub fn checkout_workspace_key(
+    issue_identifier: &str,
+    issue_id: &str,
+    repository_id: &str,
+) -> Result<String, WorkspaceError> {
+    let display = sanitize_workspace_key(issue_identifier)?;
+    let mut hasher = Sha256::new();
+    hasher.update(issue_identifier.as_bytes());
+    hasher.update([0]);
+    hasher.update(issue_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(repository_id.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(format!("{display}-{}", &digest[..16]))
 }
 
 pub fn resolve_path_within_root(
@@ -92,7 +111,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::WorkspaceError;
-    use super::{resolve_path_within_root, sanitize_workspace_key};
+    use super::{checkout_workspace_key, resolve_path_within_root, sanitize_workspace_key};
 
     #[test]
     fn sanitizes_documented_examples() {
@@ -143,5 +162,19 @@ mod tests {
             .expect("descendant path should remain within root");
 
         assert!(candidate.ends_with(PathBuf::from("child/.opensymphony")));
+    }
+
+    #[test]
+    fn checkout_keys_keep_unicode_and_sanitized_collisions_distinct() {
+        let slash = checkout_workspace_key("feature/42", "one", "github:repository:1")
+            .expect("checkout key should be valid");
+        let colon = checkout_workspace_key("feature:42", "two", "github:repository:1")
+            .expect("checkout key should be valid");
+        let unicode = checkout_workspace_key("feature-é", "three", "github:repository:1")
+            .expect("checkout key should be valid");
+
+        assert_ne!(slash, colon);
+        assert_ne!(slash, unicode);
+        assert_ne!(colon, unicode);
     }
 }

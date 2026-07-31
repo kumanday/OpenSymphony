@@ -485,6 +485,11 @@ Expected assertions:
 - the first run records the exact assistant reply `run 1: workspace-created`
 - `.opensymphony/` manifests and prompt captures exist for debugging
 
+The focused terminal-envelope tests additionally use temporary Git remotes to
+prove atomic staged publication, target-branch and non-shallow verification,
+clean-worktree enforcement, wrong-remote quarantine, collision-resistant
+checkout keys, instruction hashing, and repository-only prompt composition.
+
 ### Scenario B: conversation reuse
 
 - run the same issue a second time against the same workspace

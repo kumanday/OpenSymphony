@@ -18,6 +18,7 @@ use crate::opensymphony_workflow::{
     ResolvedWorkflow, RoutingFrontMatter, TrackerFrontMatter, WorkflowDefinition,
     WorkflowFrontMatter, WorkspaceFrontMatter,
 };
+use crate::opensymphony_workspace::CheckoutRepository;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -319,6 +320,7 @@ pub struct ResolvedCentralConfig {
     pub repository_instruction_path: Option<PathBuf>,
     pub generation: String,
     pub repository_routing: RepositoryRouting,
+    pub repository_checkouts: BTreeMap<String, CheckoutRepository>,
     pub retry_max_attempts: Option<u32>,
     runtime: RunConfigFile,
     pub workflow_front_matter: WorkflowFrontMatter,
@@ -456,6 +458,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     pub(super) retry_max_attempts: Option<u32>,
     pub(super) repository_routing: Option<RepositoryRouting>,
+    pub(super) repository_checkouts: Option<BTreeMap<String, CheckoutRepository>>,
     pub(super) state_root: Option<PathBuf>,
     pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) retain_failed: bool,
@@ -480,6 +483,7 @@ pub(super) async fn resolve_runtime_config(
         central_workflow_front_matter,
         retry_max_attempts,
         central_repository_routing,
+        central_repository_checkouts,
     ) = match &config_path {
         Some(path) => {
             let raw =
@@ -491,11 +495,6 @@ pub(super) async fn resolve_runtime_config(
                     })?;
             if looks_like_central_config(&raw) {
                 let central = resolve_central_config(path, &raw)?;
-                if central.mode == CentralRoutingMode::ProjectSet {
-                    return Err(RunCommandError::StrictRoutingDisabled {
-                        generation: central.generation,
-                    });
-                }
                 (
                     central.runtime,
                     central.generation,
@@ -508,11 +507,13 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
                     Some(central.repository_routing),
+                    Some(central.repository_checkouts),
                 )
             } else {
                 (
                     parse_legacy_run_config(path, &raw)?,
                     generation_hash(raw.as_bytes()),
+                    None,
                     None,
                     None,
                     None,
@@ -528,6 +529,7 @@ pub(super) async fn resolve_runtime_config(
         None => (
             RunConfigFile::default(),
             "legacy-unconfigured".to_string(),
+            None,
             None,
             None,
             None,
@@ -658,6 +660,7 @@ pub(super) async fn resolve_runtime_config(
         openhands_conversation_store,
         retry_max_attempts,
         repository_routing: central_repository_routing,
+        repository_checkouts: central_repository_checkouts,
         state_root: central_state_root,
         memory_catalog_root: central_memory_catalog_root,
         retain_failed: central_retain_failed.unwrap_or(true),
@@ -1267,6 +1270,7 @@ fn resolve_central_config(
         active_repositories,
         generation.clone(),
     )?;
+    let repository_checkouts = build_repository_checkouts(&config)?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     Ok(ResolvedCentralConfig {
         instance_id,
@@ -1280,10 +1284,44 @@ fn resolve_central_config(
         repository_instruction_path: legacy_repository_instruction_path,
         generation,
         repository_routing,
+        repository_checkouts,
         retry_max_attempts,
         runtime,
         workflow_front_matter,
     })
+}
+
+fn build_repository_checkouts(
+    config: &CentralConfigFile,
+) -> Result<BTreeMap<String, CheckoutRepository>, CentralConfigError> {
+    let mut checkouts = BTreeMap::new();
+    for repository in config.repositories.values() {
+        let identity = CanonicalRepositoryId::from_remote(
+            &repository.remote.provider,
+            repository.remote.provider_id.as_deref(),
+            &repository.remote.locator,
+        )
+        .map_err(|_| CentralConfigError::InvalidReference {
+            field: "repositories.remote".to_owned(),
+        })?;
+        let credential_env = config
+            .credentials
+            .get(&repository.credential)
+            .and_then(|credential| credential.variable.clone());
+        checkouts.insert(
+            identity.to_string(),
+            CheckoutRepository {
+                provider: repository.remote.provider.clone(),
+                provider_id: repository.remote.provider_id.clone(),
+                remote: repository.remote.clone.clone(),
+                target_branch: repository.target_branch.clone(),
+                credential_env,
+                instructions_path: PathBuf::from(&repository.instructions.path),
+                review_profile: repository.review_profile.clone(),
+            },
+        );
+    }
+    Ok(checkouts)
 }
 
 fn central_workflow_front_matter(

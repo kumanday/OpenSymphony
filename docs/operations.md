@@ -684,6 +684,15 @@ For `legacy_single`, the same central policy resolves the selected repository's
 `instructions.path` beneath its checkout instead of silently reverting to the
 checkout root `WORKFLOW.md`.
 
+Strict repository-bound runs publish checkout generations under the configured
+workspace root. Operators should treat a generation manifest as immutable
+provenance: it records the canonical remote fingerprint, target branch and
+commit, instruction hash/source commit, and verification state. Drift or
+partial publication is quarantined and retried as a new generation; do not
+manually reset a quarantined checkout into service. The runtime envelope also
+records that current local containment is process `cwd` containment on a
+trusted host, not a sandbox boundary.
+
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after
 migration visible instead of restoring a legacy config that would hide them;

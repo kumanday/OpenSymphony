@@ -100,10 +100,6 @@ pub(crate) enum RunCommandError {
     ResolveConfig { path: PathBuf, detail: String },
     #[error("central config validation failed: {0}")]
     CentralConfig(#[from] config::CentralConfigError),
-    #[error(
-        "strict multi-repository routing is disabled until its release gates pass (config generation {generation})"
-    )]
-    StrictRoutingDisabled { generation: String },
     #[error("invalid control-plane bind address `{value}`: {source}")]
     InvalidBind {
         value: String,
@@ -995,7 +991,20 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 runtime.preserve_terminal_workspaces,
             ),
         )?
-        .with_legacy_repository(legacy_repository),
+        .with_legacy_repository(legacy_repository)
+        .with_repository_checkouts(
+            runtime
+                .repository_routing
+                .as_ref()
+                .filter(|routing| {
+                    matches!(
+                        routing.mode,
+                        crate::opensymphony_domain::RepositoryRoutingMode::ProjectSet
+                    )
+                })
+                .and(runtime.repository_checkouts.clone())
+                .unwrap_or_default(),
+        ),
     );
     let retry_state_root = runtime.state_root.clone().unwrap_or_else(|| {
         workspace_manager
@@ -1774,6 +1783,7 @@ mod tests {
             openhands_conversation_store: None,
             retry_max_attempts: None,
             repository_routing: None,
+            repository_checkouts: None,
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
             retain_failed: true,

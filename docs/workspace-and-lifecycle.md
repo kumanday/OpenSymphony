@@ -59,6 +59,25 @@ requested repository.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 
+### Verified repository checkout generations
+
+When a resolved terminal binding has a central repository checkout policy, the
+workspace manager derives a collision-resistant key from the issue and
+canonical repository identity. It clones into a staging directory, verifies
+the remote fingerprint, target branch, non-shallow history, clean worktree,
+Git integrity, and instruction provenance, then publishes the generation with
+an atomic rename. Existing generations are reused only after the same checks;
+remote, branch, HEAD, instruction, or cleanliness drift is quarantined rather
+than reset in place.
+
+The checkout manifest records the generation, binding, target commit,
+instruction path/hash/source commit, and verification timestamps. Runtime
+manifests copy this provenance into a terminal envelope. Harness adapters must
+launch with the verified checkout as `cwd`; the current trusted-host
+containment receipt describes process working-directory containment and does
+not claim sandbox isolation. Checkout retention and deletion remain
+`WorkspaceManager` decisions.
+
 ## 4. Workspace directory layout
 
 Recommended layout inside each issue workspace:

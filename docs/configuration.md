@@ -52,6 +52,13 @@ the legacy retry behavior.
 The explicit `legacy_single` compatibility path retains terminal workspaces as
 before, including successful, cancelled, and tracker-terminal releases. Future
 strict routing may opt into terminal cleanup only through an explicit policy.
+
+For strict repository-bound terminal tasks, each inventory entry also resolves
+the target branch, credential environment-variable reference, instruction
+path, and review profile into the checkout policy. Credential values are used
+only while staging the clone; they are not written to remotes, manifests,
+prompts, logs, or process arguments. The resulting config and inventory
+generations are copied into the run envelope and must match on recovery.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before

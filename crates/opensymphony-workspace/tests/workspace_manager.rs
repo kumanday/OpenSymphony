@@ -1,14 +1,15 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, process::Command, time::Duration};
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
     SafeRemoteFingerprint,
 };
 use crate::opensymphony_workspace::{
-    CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
-    HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
-    IssueLifecycleState, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunStatus,
-    SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest, HookConfig,
+    HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact,
+    IssueDescriptor, IssueLifecycleState, PromptCaptureDescriptor, PromptKind, RunDescriptor,
+    RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    compose_terminal_prompt,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -37,6 +38,37 @@ fn manager_config(
         hooks,
         cleanup,
     }
+}
+
+fn git(path: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn terminal_prompt_keeps_repository_instructions_in_one_section() {
+    let prompt = compose_terminal_prompt(
+        "central policy",
+        "issue facts",
+        "verified checkout",
+        Some("repository-only instruction"),
+        "trusted host",
+    );
+
+    assert!(prompt.contains("## Central Execution Procedure\n\ncentral policy"));
+    assert!(prompt.contains("## Repository Instructions\n\nrepository-only instruction"));
+    assert!(!prompt.contains("other repository"));
 }
 
 #[cfg(unix)]
@@ -186,6 +218,147 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
         )
         .await
         .expect("attempt marker lookup should succeed")
+    );
+}
+
+#[tokio::test]
+async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let source = temp_dir.path().join("source");
+    let origin = temp_dir.path().join("origin.git");
+    std::fs::create_dir_all(&source).expect("source should exist");
+    std::fs::create_dir_all(&origin).expect("origin should exist");
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    git(&source, &["config", "user.name", "OpenSymphony Test"]);
+    std::fs::write(source.join("AGENTS.md"), "source-only instructions\n")
+        .expect("instructions should be written");
+    std::fs::write(source.join("README.md"), "clean\n").expect("readme should be written");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(&origin, &["init", "--bare"]);
+    git(
+        &source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path"),
+        ],
+    );
+    git(&source, &["push", "-u", "origin", "main"]);
+
+    let binding = RepositoryBinding {
+        alias: "source".to_owned(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::from_remote(
+                "local",
+                None,
+                origin.to_str().expect("origin path"),
+            )
+            .expect("repository id should be valid"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "local",
+                None,
+                origin.to_str().expect("origin path"),
+            )
+            .expect("fingerprint should be valid"),
+        },
+        config_generation: "config-1".to_owned(),
+        inventory_generation: "inventory-1".to_owned(),
+    };
+    let repository = CheckoutRepository {
+        provider: "local".to_owned(),
+        provider_id: None,
+        remote: origin.to_str().expect("origin path").to_owned(),
+        target_branch: "main".to_owned(),
+        credential_env: Some("CHECKOUT_SECRET_CANARY".to_owned()),
+        instructions_path: "AGENTS.md".into(),
+        review_profile: "local".to_owned(),
+    };
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        repository,
+    )]));
+    let mut issue = sample_issue("COE-549/terminal");
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+
+    let first = manager
+        .ensure(&issue)
+        .await
+        .expect("checkout should publish");
+    assert!(first.created);
+    assert!(first.handle.checkout_generation().is_some());
+    assert!(first.handle.workspace_path().join("AGENTS.md").is_file());
+    assert_eq!(
+        manager
+            .read_checkout_instructions(&first.handle)
+            .await
+            .expect("instructions should load")
+            .expect("instructions should exist")
+            .trim(),
+        "source-only instructions"
+    );
+    let manifest = tokio::fs::read_to_string(first.handle.checkout_manifest_path())
+        .await
+        .expect("checkout manifest should exist");
+    assert!(!manifest.contains("CHECKOUT_SECRET_CANARY"));
+    assert!(!manifest.contains(origin.to_str().expect("origin path")));
+
+    let reused = manager.ensure(&issue).await.expect("checkout should reuse");
+    assert!(!reused.created);
+    assert_eq!(
+        reused.handle.workspace_path(),
+        first.handle.workspace_path()
+    );
+
+    git(
+        first.handle.workspace_path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            source.to_str().expect("source path"),
+        ],
+    );
+    let repaired = manager
+        .ensure(&issue)
+        .await
+        .expect("wrong remote should quarantine and retry");
+    assert!(repaired.created);
+    assert_ne!(
+        repaired.handle.workspace_path(),
+        first.handle.workspace_path()
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join("workspaces/.opensymphony-quarantine")
+            .read_dir()
+            .expect("quarantine should exist")
+            .next()
+            .is_some()
+    );
+
+    std::fs::write(
+        repaired.handle.workspace_path().join("dirty.txt"),
+        "dirty\n",
+    )
+    .expect("dirty marker should be written");
+    let clean_retry = manager
+        .ensure(&issue)
+        .await
+        .expect("dirty checkout should retry");
+    assert!(clean_retry.created);
+    assert_ne!(
+        clean_retry.handle.workspace_path(),
+        repaired.handle.workspace_path()
     );
 }
 

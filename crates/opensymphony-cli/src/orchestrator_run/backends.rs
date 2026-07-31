@@ -38,8 +38,8 @@ use crate::opensymphony_orchestrator::{
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
-    RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
-    WorkspaceManagerConfig,
+    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
+    WorkspaceManager, WorkspaceManagerConfig,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -1299,6 +1299,17 @@ fn recoverable_run_manifest(
     run_manifest: &RunManifest,
     conversation_manifest: Option<&IssueConversationManifest>,
 ) -> bool {
+    let envelope_compatible = run_manifest
+        .runtime_envelope
+        .as_ref()
+        .is_none_or(|expected| {
+            conversation_manifest
+                .and_then(|manifest| manifest.runtime_envelope.as_ref())
+                .is_some_and(|actual| actual == expected)
+        });
+    if !envelope_compatible {
+        return false;
+    }
     run_manifest.status == RunStatus::Running
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {
@@ -1491,9 +1502,66 @@ impl RuntimeWorkerBackend {
                 }
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
+            let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
+                match workspace_manager.verify_checkout(&ensured.handle).await {
+                    Ok(checkout) => Some(TerminalRuntimeEnvelope {
+                        repository_binding: checkout.repository_binding.clone(),
+                        config_generation: checkout.repository_binding.config_generation.clone(),
+                        inventory_generation: checkout
+                            .repository_binding
+                            .inventory_generation
+                            .clone(),
+                        policy_generation: checkout.repository_binding.config_generation.clone(),
+                        checkout_generation: checkout.generation.clone(),
+                        checkout_path: ensured.handle.workspace_path().to_path_buf(),
+                        target_branch: checkout.target_branch.clone(),
+                        target_commit: checkout.target_commit.clone(),
+                        instruction: checkout.instruction.clone(),
+                        harness: route.harness_kind.clone(),
+                        model_profile: route
+                            .model_profile
+                            .clone()
+                            .unwrap_or_else(|| "default".to_owned()),
+                        requested_execution_scope: "single_checkout".to_owned(),
+                        effective_containment: "trusted_host_process_cwd".to_owned(),
+                        conversation_binding: None,
+                        cleanup_intent: "workspace_manager_owned".to_owned(),
+                    }),
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("verified checkout is not attachable: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let repository_instructions = if ensured.handle.checkout_generation().is_some() {
+                match workspace_manager
+                    .read_checkout_instructions(&ensured.handle)
+                    .await
+                {
+                    Ok(instructions) => {
+                        runner = runner.with_repository_instructions(instructions.clone());
+                        instructions
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to load verified checkout instructions: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
                 .with_normal_retry_count(run.normal_retry_count)
-                .with_repository_binding(run.repository_binding.clone());
+                .with_repository_binding(run.repository_binding.clone())
+                .with_runtime_envelope(runtime_envelope);
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
@@ -1622,6 +1690,7 @@ impl RuntimeWorkerBackend {
                     &issue,
                     &run,
                     &workflow,
+                    repository_instructions.as_deref(),
                     &codex_bin,
                     &codex_schema_validators,
                     &codex_interrupts,
@@ -1894,6 +1963,7 @@ async fn run_codex_stdio_issue(
         issue,
         run,
         workflow,
+        None,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
@@ -1914,6 +1984,7 @@ async fn run_codex_stdio_issue_with_mode(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
+    repository_instructions: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
@@ -1930,6 +2001,7 @@ async fn run_codex_stdio_issue_with_mode(
         issue,
         run,
         workflow,
+        repository_instructions,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
@@ -2007,6 +2079,7 @@ async fn try_run_codex_stdio_issue(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
+    repository_instructions: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
@@ -2074,6 +2147,21 @@ async fn try_run_codex_stdio_issue(
         load_codex_conversation_manifest(workspace_manager, workspace, issue)
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    if let Some(expected) = run_manifest.runtime_envelope.as_ref()
+        && existing_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.runtime_envelope.as_ref() != Some(expected))
+    {
+        return Err(codex_lifecycle_error(
+            issue,
+            existing_manifest
+                .as_ref()
+                .map(|manifest| manifest.conversation_id.to_string())
+                .as_deref(),
+            "conversation compatibility",
+            "persisted Codex conversation runtime envelope does not match the verified checkout",
+        ));
+    }
     if let Some(manifest) = existing_manifest.as_mut() {
         ensure_codex_thread_active(workspace_manager, workspace, manifest, codex_bin)
             .await
@@ -2268,6 +2356,7 @@ async fn try_run_codex_stdio_issue(
                 issue,
                 &conversation_id,
                 route,
+                run_manifest.runtime_envelope.clone(),
             )
             .await
             {
@@ -2398,6 +2487,9 @@ async fn try_run_codex_stdio_issue(
             })?,
         (IssueSessionPromptKind::Continuation, _) => build_continuation_guidance(issue, run),
     };
+    let prompt = repository_instructions.map_or(prompt.clone(), |instructions| {
+        format!("{prompt}\n\n## Repository Instructions\n\n{instructions}\n")
+    });
     let turn_start = adapter
         .start_issue_turn_request(
             &mut session,
@@ -3612,6 +3704,7 @@ async fn write_codex_conversation_manifest(
     issue: &NormalizedIssue,
     thread_id: &str,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    runtime_envelope: Option<TerminalRuntimeEnvelope>,
 ) -> Result<IssueConversationManifest, String> {
     let now = chrono::Utc::now();
     let conversation_id = ConversationId::new(thread_id.to_string())
@@ -3636,6 +3729,7 @@ async fn write_codex_conversation_manifest(
         workflow_prompt_seeded: false,
         reset_reason: None,
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
+        runtime_envelope,
         codex_archive_state: Some("active".to_string()),
         last_turn_id: None,
         active_run_id: None,
@@ -4270,6 +4364,7 @@ mod tests {
             workflow_prompt_seeded: true,
             reset_reason: None,
             runtime_contract_version: None,
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -5644,6 +5739,7 @@ mod tests {
             &issue,
             &run,
             &workflow,
+            None,
             fake_codex
                 .to_str()
                 .expect("fake codex path should be utf-8"),
@@ -7233,6 +7329,7 @@ Run the scheduler.
             openhands_conversation_store: None,
             retry_max_attempts: None,
             repository_routing: None,
+            repository_checkouts: None,
             state_root: None,
             memory_catalog_root: None,
             retain_failed: true,
@@ -7969,6 +8066,7 @@ exit 64
             workflow_prompt_seeded: true,
             reset_reason: None,
             runtime_contract_version: None,
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
