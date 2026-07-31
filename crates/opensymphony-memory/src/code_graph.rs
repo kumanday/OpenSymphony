@@ -4085,6 +4085,61 @@ pub fn migrate_code_repository_identity(
         }
     }
 
+    let symbol_rows = transaction
+        .prepare(
+            "SELECT symbol_id, symbol_key, path, language, kind, name, container_chain FROM code_symbols WHERE repo_id = ? ORDER BY path, start_line, start_col, symbol_id",
+        )?
+        .query_map(params![legacy_repo_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut symbol_key_counts = BTreeMap::<String, usize>::new();
+    let symbol_key_migrations = symbol_rows
+        .into_iter()
+        .map(|(symbol_id, old_key, path, language, kind, name, container_chain)| {
+            let base_key = code_row_id(&[
+                canonical_repo_id,
+                &path,
+                &language,
+                &kind,
+                &container_chain,
+                &name,
+            ]);
+            let ordinal = symbol_key_counts.entry(base_key.clone()).or_default();
+            *ordinal += 1;
+            let new_key = if *ordinal == 1 {
+                base_key
+            } else {
+                format!("{base_key}#{ordinal}")
+            };
+            (symbol_id, old_key, new_key)
+        })
+        .collect::<Vec<_>>();
+    for (symbol_id, old_key, new_key) in &symbol_key_migrations {
+        transaction.execute(
+            "UPDATE code_symbols SET symbol_key = ? WHERE repo_id = ? AND symbol_id = ?",
+            params![new_key, legacy_repo_id, symbol_id],
+        )?;
+        for table in ["code_edges", "code_edge_revisions"] {
+            for column in ["source_symbol_key", "target_symbol_key"] {
+                transaction.execute(
+                    &format!(
+                        "UPDATE {table} SET {column} = ? WHERE repo_id = ? AND {column} = ?"
+                    ),
+                    params![new_key, legacy_repo_id, old_key],
+                )?;
+            }
+        }
+    }
+
     let edge_ids = transaction
         .prepare(
             "SELECT edge_id FROM code_edges WHERE repo_id = ? UNION SELECT edge_id FROM code_edge_revisions WHERE repo_id = ?",
@@ -4805,7 +4860,7 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
     validate_code_index_branch(root, &branch)
 }
 
-fn code_index_branch_for_config(
+pub(crate) fn code_index_branch_for_config(
     config: &MemoryConfig,
 ) -> Result<String, CodeGraphProjectionError> {
     match config.code_index_target_branch.as_deref() {
@@ -10011,14 +10066,15 @@ mod code_graph_tests {
             .expect("migrated symbol");
         assert_eq!(symbol.0, "canonical-repo");
         assert_ne!(symbol.1, "legacy-symbol");
-        let container_symbol_id: Option<String> = connection
+        let (container_symbol_id, child_symbol_key): (Option<String>, String) = connection
             .query_row(
-                "SELECT container_symbol_id FROM code_symbols WHERE symbol_key = ?",
-                ["legacy-child-key"],
-                |row| row.get(0),
+                "SELECT container_symbol_id, symbol_key FROM code_symbols WHERE name = 'child'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migrated child symbol");
         assert_eq!(container_symbol_id.as_deref(), Some(symbol.1.as_str()));
+        assert_ne!(child_symbol_key, "legacy-child-key");
         let edge = connection
             .query_row(
                 "SELECT repo_id, edge_id, source_symbol_id FROM code_edges",

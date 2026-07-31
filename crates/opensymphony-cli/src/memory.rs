@@ -44,7 +44,7 @@ use crate::{
         MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource, SourceFile,
         archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief,
         brief_with_scope, code_graph_context, code_graph_workspace_context_overlay,
-        code_index_branch, code_repository_has_rows, context_for_issue_with_options,
+        code_index_branch_for_config, code_repository_has_rows, context_for_issue_with_options,
         docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
         lint_okf_bundle, load_source_file, mark_archived, merge_legacy_memory_index,
         merge_memory_index_from_okf, migrate_code_repository_identity,
@@ -2148,6 +2148,9 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 ) {
                     let mut import_config = config.clone();
                     import_config.repo_root = source.root.clone();
+                    import_config.visibility = local_config.visibility;
+                    import_config.docs.default_visibility = local_config.docs.default_visibility;
+                    import_config.areas = local_config.areas.clone();
                     merge_memory_index_from_okf(
                         &import_config,
                         &root,
@@ -2926,6 +2929,15 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.status" => {
             let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let effective_scope = if scope.all_accessible
+                && (scope.project_set.is_some() || scope.project.is_some() || scope.repo.is_some())
+            {
+                let mut narrowed = scope.clone();
+                narrowed.all_accessible = false;
+                narrowed
+            } else {
+                scope.clone()
+            };
             let report = status_with_scope(
                 config,
                 &IssueSelection {
@@ -2933,12 +2945,12 @@ async fn call_memory_tool_with_workspace(
                     milestone: optional_string_arg(&arguments, "milestone"),
                     ..IssueSelection::default()
                 },
-                &scope,
+                &effective_scope,
             )?;
             let sources = registered_memory_sources(config)?
                 .into_iter()
                 .filter(|source| {
-                    repository_matches_memory_scope(config, &source.repository_id, &scope)
+                    repository_matches_memory_scope(config, &source.repository_id, &effective_scope)
                 })
                 .collect::<Vec<_>>();
             Ok(json!({
@@ -3034,8 +3046,18 @@ async fn call_code_graph_context_tool(
         let overlay = optional_string_arg(&arguments, "runId")
             .or_else(|| optional_string_arg(&arguments, "run"))
             .map(|run_id| {
+                let overlay_config = config
+                    .repository_sources
+                    .get(&repo_id)
+                    .map(|source| {
+                        let mut selected = config.clone();
+                        selected.repo_root = source.root.clone();
+                        selected.code_index_target_branch = source.target_branch.clone();
+                        selected
+                    })
+                    .unwrap_or_else(|| config.clone());
                 resolve_code_graph_overlay(
-                    &config,
+                    &overlay_config,
                     workspace_root.as_deref(),
                     &repo_id,
                     &run_id,
@@ -3120,7 +3142,7 @@ fn resolve_code_graph_overlay(
             "run workspace ownership manifest does not match the requested run".to_string(),
         ));
     }
-    let branch = code_index_branch(&config.repo_root)
+    let branch = code_index_branch_for_config(config)
         .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
     let base_revision = workspace_merge_base(&workspace_path, &branch)?;
     code_graph_workspace_context_overlay(
@@ -5133,25 +5155,27 @@ fn memory_config_for_docs_scope(
         }
         None if scope.project.is_none() && scope.project_set.is_none() => return Ok(config.clone()),
         None => {
-            let candidates = config
-                .repository_sources
-                .values()
-                .filter(|source| {
-                    repository_matches_memory_scope(config, &source.repository_id, scope)
-                })
-                .filter(|source| {
-                    if scope.project_set.is_none() {
-                        return true;
-                    }
-                    let Ok(local_config) = MemoryConfig::load(&source.root, None) else {
-                        return false;
-                    };
+            let mut candidates = Vec::new();
+            for source in config.repository_sources.values() {
+                if !repository_matches_memory_scope(config, &source.repository_id, scope) {
+                    continue;
+                }
+                if scope.project_set.is_some() {
+                    let local_config = MemoryConfig::load(&source.root, None).map_err(|error| {
+                        MemoryError::InvalidInput(format!(
+                            "failed to load memory config for repository `{}`: {error}",
+                            source.repository_id
+                        ))
+                    })?;
                     let area = area.trim().to_ascii_lowercase();
-                    local_config.areas.contains_key(&area)
-                        || local_config.area_or_default(&area).docs_target.is_file()
-                })
-                .map(|source| source.repository_id.as_str())
-                .collect::<Vec<_>>();
+                    if !local_config.areas.contains_key(&area)
+                        && !local_config.area_or_default(&area).docs_target.is_file()
+                    {
+                        continue;
+                    }
+                }
+                candidates.push(source.repository_id.as_str());
+            }
             match candidates.as_slice() {
                 [repository_id] => Some(*repository_id),
                 [] if config.repository_sources.is_empty() => return Ok(config.clone()),
