@@ -1327,6 +1327,14 @@ fn recoverable_run_manifest(
     if !envelope_compatible {
         return false;
     }
+    let conversation_binding_compatible = conversation_manifest.is_none_or(|manifest| {
+        manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+            envelope.conversation_binding.as_deref() == Some(manifest.conversation_id.as_str())
+        })
+    });
+    if !conversation_binding_compatible {
+        return false;
+    }
     run_manifest.status == RunStatus::Running
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {

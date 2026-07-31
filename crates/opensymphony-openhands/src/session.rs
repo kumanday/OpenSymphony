@@ -2416,12 +2416,18 @@ impl IssueSessionRunner {
         manifest: &IssueConversationManifest,
         reason: &str,
     ) -> Result<(), IssueSessionError> {
-        let conversation_id = parse_uuid(manifest.conversation_id.as_str()).map_err(|error| {
-            IssueSessionError::ConversationRetirementFailed(format!(
-                "cannot retire conversation {} for {reason}: {error}",
-                manifest.conversation_id
-            ))
-        })?;
+        let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
+            Ok(conversation_id) => conversation_id,
+            Err(error) => {
+                tracing::warn!(
+                    conversation_id = %manifest.conversation_id,
+                    %reason,
+                    %error,
+                    "superseding conversation has no parseable ID; continuing without remote retirement"
+                );
+                return Ok(());
+            }
+        };
         match self.client.delete_conversation(conversation_id).await {
             Ok(())
             | Err(OpenHandsError::HttpStatus {
