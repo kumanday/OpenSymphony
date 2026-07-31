@@ -29,6 +29,12 @@ Examples:
 
 Because this sanitization is not injective, workspace reuse must be gated by the persisted issue manifest for the current path. If an existing current-path manifest claims the same sanitized key for a different issue, OpenSymphony must refuse reuse instead of silently aliasing two issues onto one workspace.
 
+For repository-bound tasks, reuse is also gated by the persisted canonical
+repository identity. If the requested binding differs from the manifest's
+identity, workspace ensuring fails before the manifest is rewritten; checkout
+replacement remains an explicit lifecycle operation rather than an implicit
+reuse side effect.
+
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.

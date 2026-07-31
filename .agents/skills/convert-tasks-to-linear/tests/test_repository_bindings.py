@@ -86,3 +86,16 @@ class RepositoryBindingTests(unittest.TestCase):
             label_ids,
             ["unmanaged-label", "area-label", "repository-label"],
         )
+
+    def test_linear_conversion_can_clear_the_last_managed_label(self):
+        source = task("PARENT", [])
+        source.areas = []
+
+        label_ids = CONVERTER.merge_issue_label_ids(
+            source,
+            [{"id": "old-repository-label", "name": "repo:old"}],
+            {},
+            {},
+        )
+
+        self.assertEqual(label_ids, [])

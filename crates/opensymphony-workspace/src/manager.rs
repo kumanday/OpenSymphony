@@ -119,6 +119,32 @@ impl WorkspaceManager {
             });
         }
 
+        if matches!(
+            &existing_state,
+            ExistingWorkspaceState::Owned | ExistingWorkspaceState::AfterCreateCompleted
+        ) {
+            let existing_repository = self
+                .load_issue_manifest(&handle)
+                .await?
+                .and_then(|manifest| manifest.repository_binding)
+                .and_then(|binding| binding.repository_id().cloned())
+                .map(|repository| repository.to_string());
+            let requested_repository = issue
+                .repository_binding
+                .as_ref()
+                .and_then(|binding| binding.repository_id().cloned())
+                .map(|repository| repository.to_string());
+            if existing_repository != requested_repository
+                && (existing_repository.is_some() || requested_repository.is_some())
+            {
+                return Err(WorkspaceError::RepositoryBindingMismatch {
+                    workspace: handle.workspace_path().to_path_buf(),
+                    existing_repository,
+                    requested_repository,
+                });
+            }
+        }
+
         let created = matches!(
             existing_state,
             ExistingWorkspaceState::Missing | ExistingWorkspaceState::ForeignArtifact

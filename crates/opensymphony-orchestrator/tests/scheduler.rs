@@ -873,6 +873,61 @@ async fn dispatch_discovery_uses_sixty_second_cadence_and_selected_detail_reads(
 }
 
 #[tokio::test]
+async fn dispatch_discovery_skips_blocked_bindings_when_filling_capacity() {
+    let tracker = FakeTracker::default();
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_concurrent_agents = 1;
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should succeed");
+
+    let mut blocked = tracker_issue(
+        "lin-repo-discovery-blocked",
+        "COE-548-BLOCKED",
+        "In Progress",
+        0,
+    );
+    blocked.priority = Some(1);
+    blocked.project_id = Some("project-id".to_string());
+    blocked.labels = vec!["repo:missing".to_string()];
+    let mut valid = tracker_issue(
+        "lin-repo-discovery-valid",
+        "COE-548-VALID",
+        "In Progress",
+        1,
+    );
+    valid.priority = Some(2);
+    valid.project_id = Some("project-id".to_string());
+    valid.labels = vec!["repo:one".to_string()];
+    scheduler.tracker_mut().active = vec![blocked, valid];
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("blocked discovery candidate should not consume capacity");
+
+    assert_eq!(
+        scheduler.tracker().detail_requests,
+        vec![vec![
+            "COE-548-BLOCKED".to_string(),
+            "COE-548-VALID".to_string()
+        ]]
+    );
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0].issue.identifier.as_str(),
+        "COE-548-VALID"
+    );
+}
+
+#[tokio::test]
 async fn running_state_polling_uses_lightweight_state_refresh_interval() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-502", "COE-502", "In Progress", 0)],
@@ -2236,6 +2291,65 @@ async fn failures_schedule_exponential_backoff() {
         "second retry should increment the retry attempt"
     );
     assert_eq!(retry.due_at, ts(30_400));
+}
+
+#[tokio::test]
+async fn blocked_binding_preserves_a_due_retry_execution() {
+    let mut issue = tracker_issue("lin-repo-retry", "COE-548-RETRY", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial repository-bound run should launch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("worker failed".to_string()),
+                Some("retry".to_string()),
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("failure should queue retry");
+    let retry_before_block = scheduler
+        .execution(&IssueId::new("lin-repo-retry").expect("issue id should be valid"))
+        .expect("execution should remain tracked")
+        .retry()
+        .expect("retry should exist")
+        .clone();
+
+    scheduler.tracker_mut().active[0].labels = vec!["repo:missing".to_string()];
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("blocked retry should remain owned");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-retry").expect("issue id should be valid"))
+        .expect("execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+    assert_eq!(execution.retry(), Some(&retry_before_block));
+    assert_eq!(scheduler.worker().launches.len(), 1);
 }
 
 #[tokio::test]
@@ -4471,6 +4585,39 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
     ));
     assert!(scheduler.workspace().ensured.is_empty());
     assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn unlabeled_parent_remains_repository_neutral() {
+    let mut issue = tracker_issue("lin-repo-parent", "COE-548-PARENT", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.sub_issues = vec![crate::opensymphony_domain::TrackerIssueRef {
+        id: "lin-repo-parent-child".to_string(),
+        identifier: "COE-548-CHILD".to_string(),
+        title: Some("Child".to_string()),
+        url: Some("https://linear.app/trilogy-ai-coe/issue/COE-548-CHILD".to_string()),
+        state: "Done".to_string(),
+    }];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("unlabeled parent should be observable without a binding failure");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-parent").expect("issue id should be valid"))
+        .expect("parent execution should remain observable");
+    assert_eq!(execution.issue().repository_binding, None);
 }
 
 #[tokio::test]

@@ -26,8 +26,9 @@ impl CanonicalRepositoryId {
     ) -> Result<Self, RepositoryIdentityError> {
         let provider = normalize_component(provider.as_ref());
         let durable_key = provider_id
-            .map(normalize_component)
+            .map(str::trim)
             .filter(|value| !value.is_empty())
+            .map(str::to_owned)
             .unwrap_or_else(|| normalize_locator(locator.as_ref()));
         if provider.is_empty() || durable_key.is_empty() {
             return Err(RepositoryIdentityError::MissingRemoteIdentity);
@@ -58,7 +59,7 @@ impl SafeRemoteFingerprint {
     ) -> Result<Self, RepositoryIdentityError> {
         let provider = normalize_component(provider.as_ref());
         let provider_id = provider_id
-            .map(normalize_component)
+            .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
         let locator = normalize_locator(locator.as_ref());
@@ -291,7 +292,7 @@ mod tests {
     fn canonical_identity_prefers_provider_native_id() {
         let id = CanonicalRepositoryId::from_remote("GitHub", Some("Repo-42"), "owner/renamed")
             .expect("identity");
-        assert_eq!(id.as_str(), "github:repository:repo-42");
+        assert_eq!(id.as_str(), "github:repository:Repo-42");
     }
 
     #[test]
@@ -311,6 +312,23 @@ mod tests {
         let after = SafeRemoteFingerprint::from_remote("github", Some("42"), "new-owner/new-name")
             .expect("fingerprint");
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn provider_native_repository_ids_preserve_case() {
+        let upper = CanonicalRepositoryId::from_remote("github", Some("RepoA"), "owner/repo")
+            .expect("upper-case provider id should be valid");
+        let lower = CanonicalRepositoryId::from_remote("github", Some("repoa"), "owner/repo")
+            .expect("lower-case provider id should be valid");
+        let upper_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", Some("RepoA"), "owner/repo")
+                .expect("upper-case provider id should fingerprint");
+        let lower_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", Some("repoa"), "owner/repo")
+                .expect("lower-case provider id should fingerprint");
+
+        assert_ne!(upper, lower);
+        assert_ne!(upper_fingerprint, lower_fingerprint);
     }
 
     #[test]

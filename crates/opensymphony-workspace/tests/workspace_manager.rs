@@ -626,6 +626,51 @@ async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
 }
 
 #[tokio::test]
+async fn existing_workspace_rejects_a_changed_repository_identity() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let binding = |alias: &str, id: &str| RepositoryBinding {
+        alias: alias.to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new(id).expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some(id),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let first_binding = binding("core", "github:repository:core");
+    let second_binding = binding("web", "github:repository:web");
+    let mut first_issue = sample_issue("COE-548-rebind");
+    first_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(first_binding));
+    manager
+        .ensure(&first_issue)
+        .await
+        .expect("initial workspace should exist");
+
+    let mut changed_issue = first_issue;
+    changed_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(second_binding));
+    let error = manager
+        .ensure(&changed_issue)
+        .await
+        .expect_err("changed repository identity must not reuse the old workspace");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::RepositoryBindingMismatch { .. }
+    ));
+}
+
+#[tokio::test]
 async fn run_manifest_redacts_hook_credentials_before_persisting() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let manager = WorkspaceManager::new(manager_config(

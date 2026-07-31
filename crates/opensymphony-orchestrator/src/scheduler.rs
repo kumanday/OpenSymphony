@@ -14,7 +14,7 @@ use crate::opensymphony_domain::{
     SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue,
     TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceRecord,
+    WorkerOutcomeRecord, WorkspaceRecord, managed_repository_aliases,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -2031,7 +2031,6 @@ where
 
         let identifiers = ready
             .iter()
-            .take(available_capacity)
             .map(|issue| issue.identifier.clone())
             .collect::<Vec<_>>();
         if identifiers.is_empty() {
@@ -2063,7 +2062,7 @@ where
         };
 
         let mut detailed = Vec::new();
-        for summary in ready.into_iter().take(available_capacity) {
+        for summary in ready {
             let key = summary.identifier.to_ascii_uppercase();
             let Some(detailed_issue) = detailed_by_identifier.remove(&key) else {
                 warn!(
@@ -2154,7 +2153,11 @@ where
             {
                 // Keep typed routing failures visible to the control plane but
                 // never materialize a workspace for a blocked candidate.
-                self.insert_execution(issue_id, IssueExecution::new(normalized, observed_at));
+                let mut execution = self
+                    .remove_execution(&issue_id)
+                    .unwrap_or_else(|| IssueExecution::new(normalized.clone(), observed_at));
+                execution.refresh_issue(normalized)?;
+                self.insert_execution(issue_id, execution);
                 continue;
             }
 
@@ -3248,13 +3251,21 @@ fn normalize_tracker_issue(
     issue: &TrackerIssue,
     config: &SchedulerConfig,
 ) -> Result<NormalizedIssue, SchedulerError> {
-    let repository_binding = config.repository_routing.as_ref().map(|routing| {
-        routing.resolve(
-            &issue.labels,
-            issue.project_id.as_deref(),
-            issue.project_slug.as_deref(),
-            !issue.sub_issues.is_empty(),
-        )
+    let is_parent = !issue.sub_issues.is_empty();
+    let repository_binding = config.repository_routing.as_ref().and_then(|routing| {
+        // An unlabeled parent is intentionally repository-neutral. Only a
+        // managed label on a parent is invalid; terminal children still use
+        // strict routing outcomes for missing or malformed bindings.
+        if is_parent && managed_repository_aliases(&issue.labels).is_empty() {
+            None
+        } else {
+            Some(routing.resolve(
+                &issue.labels,
+                issue.project_id.as_deref(),
+                issue.project_slug.as_deref(),
+                is_parent,
+            ))
+        }
     });
     Ok(NormalizedIssue {
         id: IssueId::new(issue.id.clone())?,

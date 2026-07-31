@@ -106,7 +106,9 @@ Important normalization rules:
   aliases are propagated through planning and conversion without storing
   remotes or workspace paths in Linear. Conversion removes stale managed
   `repo:*` labels before adding the current binding, while preserving unrelated
-  labels; strict project-set packages must declare a non-empty alias inventory.
+  labels. When the final managed binding is removed from an existing issue, the
+  conversion mutation explicitly sends an empty label list. Strict project-set
+  packages must declare a non-empty alias inventory.
 
 ## 3. Agent-side Linear access
 

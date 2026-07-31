@@ -803,7 +803,7 @@ def ensure_issues(
                 area_label_ids,
                 repository_label_ids,
             )
-            if label_ids:
+            if label_ids or existing is not None:
                 input_data["labelIds"] = label_ids
 
             if existing:
