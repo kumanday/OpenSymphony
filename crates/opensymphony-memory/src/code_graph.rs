@@ -5755,6 +5755,11 @@ fn ensure_code_repo(
     repo_id: &str,
     include_stale: bool,
 ) -> Result<(), CodeGraphProjectionError> {
+    if !config.repository_sources.is_empty()
+        && !config.repository_sources.contains_key(repo_id)
+    {
+        return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
+    }
     if code_graph_repos(config, include_stale)?
         .repos
         .iter()

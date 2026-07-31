@@ -322,6 +322,7 @@ pub struct ResolvedCentralConfig {
     pub retry_max_attempts: Option<u32>,
     runtime: RunConfigFile,
     pub workflow_front_matter: WorkflowFrontMatter,
+    pub(crate) memory_sources: BTreeMap<String, ResolvedMemorySource>,
 }
 
 impl ResolvedCentralConfig {
@@ -352,6 +353,12 @@ impl ResolvedCentralConfig {
 pub struct ResolvedIntegrationInstructions {
     pub path: PathBuf,
     pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedMemorySource {
+    pub(crate) repository_id: String,
+    pub(crate) checkout_path: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -458,6 +465,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) repository_routing: Option<RepositoryRouting>,
     pub(super) state_root: Option<PathBuf>,
     pub(super) memory_catalog_root: Option<PathBuf>,
+    pub(super) memory_sources: BTreeMap<String, ResolvedMemorySource>,
     pub(super) retain_failed: bool,
     pub(super) preserve_terminal_workspaces: bool,
     pub(super) memory: RunMemoryConfig,
@@ -476,6 +484,7 @@ pub(super) async fn resolve_runtime_config(
         central_retain_failed,
         central_preserve_terminal_workspaces,
         central_memory_catalog_root,
+        central_memory_sources,
         central_repository_instruction_path,
         central_workflow_front_matter,
         retry_max_attempts,
@@ -504,6 +513,7 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.retain_failed),
                     Some(central.mode == CentralRoutingMode::LegacySingle),
                     central.memory_catalog_root,
+                    central.memory_sources,
                     central.repository_instruction_path,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
@@ -518,6 +528,7 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    BTreeMap::new(),
                     None,
                     None,
                     None,
@@ -533,6 +544,7 @@ pub(super) async fn resolve_runtime_config(
             None,
             None,
             None,
+            BTreeMap::new(),
             None,
             None,
             None,
@@ -660,6 +672,7 @@ pub(super) async fn resolve_runtime_config(
         repository_routing: central_repository_routing,
         state_root: central_state_root,
         memory_catalog_root: central_memory_catalog_root,
+        memory_sources: central_memory_sources,
         retain_failed: central_retain_failed.unwrap_or(true),
         preserve_terminal_workspaces: central_preserve_terminal_workspaces.unwrap_or(true),
         memory,
@@ -1267,6 +1280,7 @@ fn resolve_central_config(
         active_repositories,
         generation.clone(),
     )?;
+    let memory_sources = resolve_memory_sources(&config, config_root)?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     Ok(ResolvedCentralConfig {
         instance_id,
@@ -1283,7 +1297,41 @@ fn resolve_central_config(
         retry_max_attempts,
         runtime,
         workflow_front_matter,
+        memory_sources,
     })
+}
+
+fn resolve_memory_sources(
+    config: &CentralConfigFile,
+    config_root: &Path,
+) -> Result<BTreeMap<String, ResolvedMemorySource>, CentralConfigError> {
+    let mut sources = BTreeMap::new();
+    for repository in config.repositories.values() {
+        let Some(checkout_path) = repository.checkout_path.as_deref() else {
+            continue;
+        };
+        let repository_id = CanonicalRepositoryId::from_remote(
+            &repository.remote.provider,
+            repository.remote.provider_id.as_deref(),
+            &repository.remote.locator,
+        )
+        .map_err(|_| CentralConfigError::InvalidReference {
+            field: "repositories.remote".to_owned(),
+        })?;
+        let repository_id = repository_id.to_string();
+        sources.insert(
+            repository_id.clone(),
+            ResolvedMemorySource {
+                repository_id,
+                checkout_path: resolve_central_path(
+                    config_root,
+                    checkout_path,
+                    "repositories.checkout_path",
+                )?,
+            },
+        );
+    }
+    Ok(sources)
 }
 
 fn central_workflow_front_matter(
@@ -2442,6 +2490,12 @@ scheduler:
                 .repository_instruction_path
                 .as_ref()
                 .is_some_and(|path| path.ends_with("configs/checkout/AGENTS.md"))
+        );
+        assert_eq!(resolved.memory_sources.len(), 1);
+        assert!(
+            resolved
+                .memory_sources
+                .contains_key("git:repository:example/repo")
         );
         assert_eq!(resolved.runtime.memory.auto_capture, Some(true));
     }

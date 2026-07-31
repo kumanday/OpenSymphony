@@ -204,6 +204,62 @@ pub struct MemoryRecord {
     pub freshness: MemoryFreshness,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySourceKind {
+    Policy,
+    PublicDocs,
+    OkfBundle,
+    LegacyStore,
+}
+
+impl MemorySourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Policy => "policy",
+            Self::PublicDocs => "public_docs",
+            Self::OkfBundle => "okf_bundle",
+            Self::LegacyStore => "legacy_store",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySourceRegistrationStatus {
+    Pending,
+    Registered,
+    Failed,
+}
+
+impl MemorySourceRegistrationStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Registered => "registered",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredMemorySource {
+    pub source_id: String,
+    pub repository_id: String,
+    pub commit_sha: String,
+    pub kind: MemorySourceKind,
+    pub root: PathBuf,
+    pub status: MemorySourceRegistrationStatus,
+    pub generation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRepositorySource {
+    pub repository_id: String,
+    pub root: PathBuf,
+    pub commit_sha: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     pub provider: String,
@@ -562,6 +618,8 @@ pub struct MemoryConfig {
     pub docs: DocsConfig,
     pub areas: BTreeMap<String, AreaConfig>,
     pub redaction: RedactionConfig,
+    pub repository_sources: BTreeMap<String, MemoryRepositorySource>,
+    pub default_repository_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1086,6 +1144,7 @@ struct IndexedIssue {
 }
 
 include!("config.rs");
+include!("catalog.rs");
 include!("okf.rs");
 include!("capture.rs");
 include!("query.rs");

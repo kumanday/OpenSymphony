@@ -51,6 +51,12 @@ are rendered from local files on demand.
 There is no filesystem watcher in V1. Re-run `memory.context` after editing
 source files.
 
+In a central multi-repository catalog, persisted snapshots are addressed by
+the configured canonical repository ID and commit. The memory server resolves
+that ID to the registered checkout root; local filesystem paths are not
+accepted as repository identity. A central catalog also rejects persistence
+for repositories that are not present in the configured source registry.
+
 ## Target-branch repository snapshots
 
 The Code Graph repository index is an explicit, server-side operation:

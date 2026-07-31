@@ -37,15 +37,17 @@ use crate::{
     opensymphony_memory::{
         ArchivePlan, CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput,
-        CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
+        CodeWorkspaceOverlay, CommentEvidence, DEFAULT_MEMORY_ROOT,
+        DEFAULT_PRIVATE_MEMORY_CONFIG_FILE, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
-        MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
-        archive_blocking_warning_count, brief, code_graph_context,
-        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, refresh_memory_index, refresh_memory_index_from_okf,
+        MemoryReindexReport, MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
+        MemoryVisibility, RegisteredMemorySource, SourceFile, archive_blocking_warning_count,
+        brief, code_graph_context, code_graph_workspace_context_overlay, code_index_branch,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, persist_code_intel_documents, persist_code_intel_skipped_files,
+        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
+        refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
         sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
@@ -1829,6 +1831,7 @@ async fn start_memory_server_with_auth(
                 memory_migration_lock_path(&coordination_root).display()
             ))
         })?;
+    register_configured_memory_sources(&config)?;
     fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
         path: config.memory_root.clone(),
         source,
@@ -1907,6 +1910,50 @@ async fn start_memory_server_with_auth(
         shutdown,
         writer_gate,
     })
+}
+
+fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
+    for source in config.repository_sources.values() {
+        let Some(commit_sha) = source
+            .commit_sha
+            .clone()
+            .or_else(|| git_commit_sha_for_repo(&source.root))
+        else {
+            continue;
+        };
+        let mut roots = vec![
+            (
+                MemorySourceKind::Policy,
+                source.root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE),
+            ),
+            (MemorySourceKind::PublicDocs, source.root.join("docs")),
+            (
+                MemorySourceKind::LegacyStore,
+                source.root.join(DEFAULT_MEMORY_ROOT),
+            ),
+        ];
+        for export_name in ["okf-export-public", "okf-export-private"] {
+            roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+        }
+        for (kind, root) in roots {
+            if !root.exists() {
+                continue;
+            }
+            register_memory_source(
+                config,
+                &RegisteredMemorySource {
+                    source_id: format!("{}:{}", source.repository_id, kind.as_str()),
+                    repository_id: source.repository_id.clone(),
+                    commit_sha: commit_sha.clone(),
+                    kind,
+                    root,
+                    status: MemorySourceRegistrationStatus::Registered,
+                    generation: commit_sha.clone(),
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn memory_activity_marker_path(memory_root: &Path) -> PathBuf {
@@ -2077,6 +2124,7 @@ fn memory_server_health_payload(auth: &MemoryServerAuth) -> Value {
         "status": "ok",
         "protocol": "mcp-streamable-http-2025-06-18",
         "mode": if admin_tools { "read_write" } else { "read_only" },
+        "catalog": "per_instance",
         "adminTools": admin_tools
     })
 }
@@ -2456,10 +2504,19 @@ async fn call_memory_tool_with_workspace(
                 },
                 &scope,
             )?;
+            let sources = registered_memory_sources(config)?;
             Ok(json!({
                 "issueCount": report.issue_count,
                 "warningCount": report.warning_count,
                 "docsPendingCount": report.docs_pending_count,
+                "sources": sources.into_iter().map(|source| json!({
+                    "sourceId": source.source_id,
+                    "repositoryId": source.repository_id,
+                    "commit": source.commit_sha,
+                    "kind": source.kind.as_str(),
+                    "status": source.status,
+                    "generation": source.generation,
+                })).collect::<Vec<_>>(),
                 "issues": report.issues.into_iter().map(|issue| json!({
                     "issueKey": issue.issue_key,
                     "title": issue.title,
@@ -2515,6 +2572,7 @@ async fn call_code_graph_context_tool(
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = optional_string_arg(&arguments, "repository")
             .or_else(|| optional_string_arg(&arguments, "repo"))
+            .or_else(|| config.default_repository_id.clone())
             .unwrap_or_else(|| {
                 config
                     .repo_root
@@ -3948,14 +4006,18 @@ fn normalized_string_set_args(arguments: &Value, keys: &[&str]) -> BTreeSet<Stri
 }
 
 fn repo_id_for_code_intel(config: &MemoryConfig, scope: &MemoryScopeFilter) -> String {
-    scope.repo.clone().unwrap_or_else(|| {
-        config
-            .repo_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("repo")
-            .to_string()
-    })
+    scope
+        .repo
+        .clone()
+        .or_else(|| config.default_repository_id.clone())
+        .unwrap_or_else(|| {
+            config
+                .repo_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("repo")
+                .to_string()
+        })
 }
 
 fn git_commit_sha_for_repo(repo_root: &Path) -> Option<String> {
@@ -4348,8 +4410,22 @@ fn resolve_code_intel_repo(
     repo: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let Some(repo) = repo.and_then(non_empty) else {
-        return repo_existing_path(config, ".");
+        return config
+            .default_repository_id
+            .as_deref()
+            .and_then(|id| config.repository_sources.get(id))
+            .map(|source| source.root.clone())
+            .map(Ok)
+            .unwrap_or_else(|| repo_existing_path(config, "."));
     };
+    if let Some(source) = config.repository_sources.get(&repo) {
+        return Ok(source.root.clone());
+    }
+    if !config.repository_sources.is_empty() {
+        return Err(MemoryError::InvalidInput(format!(
+            "unknown canonical repository id `{repo}`"
+        )));
+    }
     let resolved = repo_existing_path(config, &repo)?;
     if !resolved.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
@@ -9026,6 +9102,31 @@ Public memory concept.
         )
         .expect_err("outside repo must be rejected");
         assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn code_intel_repo_resolution_uses_registered_canonical_identity() {
+        let instance = TempDir::new().expect("instance");
+        let repository = TempDir::new().expect("repository");
+        let config = MemoryConfig::load(instance.path(), None)
+            .expect("config")
+            .with_repository_source(crate::opensymphony_memory::MemoryRepositorySource {
+                repository_id: "github:repository:123".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: Some("abc123".to_string()),
+            })
+            .with_default_repository_id("github:repository:123");
+
+        assert_eq!(
+            resolve_code_intel_repo(&config, Some("github:repository:123"))
+                .expect("canonical source should resolve"),
+            repository.path()
+        );
+        let error = resolve_code_intel_repo(&config, Some("/tmp/not-a-repository"))
+            .expect_err("local paths must not select a central source");
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("canonical repository"))
+        );
     }
 
     #[test]

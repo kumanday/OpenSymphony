@@ -17,6 +17,10 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let body = read_to_string(&issue_plan.capsule_path)?;
         let labels_json = serde_json::to_string(&issue_plan.issue.labels)?;
         let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
+        let scope_refs = capture_scope_refs(issue_plan);
+        let scope_refs_json = serde_json::to_string(&scope_refs)?;
+        let source_refs = capture_source_refs(issue_plan);
+        let source_refs_json = serde_json::to_string(&source_refs)?;
         let empty_json = serde_json::to_string(&Vec::<String>::new())?;
         let freshness = MemoryFreshness::Current;
         transaction
@@ -51,8 +55,8 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     "issue-capsule",
                     issue_plan.issue.description.clone(),
                     labels_json.clone(),
-                    empty_json.clone(),
-                    empty_json.clone(),
+                    scope_refs_json,
+                    source_refs_json,
                     empty_json.clone(),
                     empty_json.clone(),
                     freshness.as_str(),
@@ -63,6 +67,29 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 path: config.index_path.clone(),
                 source,
             })?;
+
+        transaction
+            .execute("DELETE FROM scope_refs WHERE concept_id = ?", params![format!("issues/{issue_key}")])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        for scope_ref in &scope_refs {
+            transaction
+                .execute(
+                    "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    params![
+                        format!("issues/{issue_key}"),
+                        scope_kind_name(&scope_ref.kind),
+                        scope_ref.id,
+                        scope_ref.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
         transaction
             .execute(
                 "DELETE FROM issue_areas WHERE issue_key = ?",
@@ -220,6 +247,45 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             source,
         })?;
     Ok(())
+}
+
+fn capture_scope_refs(plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
+    let mut refs = vec![KnowledgeScope {
+        kind: KnowledgeScopeKind::WorkItem,
+        id: normalize_issue_key(&plan.issue.identifier),
+        label: Some(issue_title(&plan.issue)),
+    }];
+    if let Some(milestone) = plan.issue.milestone_id.as_ref().or(plan.issue.milestone.as_ref()) {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Milestone,
+            id: milestone.clone(),
+            label: plan.issue.milestone.clone(),
+        });
+    }
+    refs.extend(plan.areas.iter().map(|area| KnowledgeScope {
+        kind: KnowledgeScopeKind::Area,
+        id: area.clone(),
+        label: None,
+    }));
+    refs
+}
+
+fn capture_source_refs(plan: &CaptureIssuePlan) -> Vec<MemorySourceRef> {
+    let mut refs = vec![MemorySourceRef {
+        kind: "linear_issue".to_string(),
+        id: normalize_issue_key(&plan.issue.identifier),
+        url: plan.issue.url.clone(),
+        repo_id: None,
+        symbol_key: None,
+    }];
+    refs.extend(plan.prs.iter().map(|pr| MemorySourceRef {
+        kind: "github_pr".to_string(),
+        id: pr.number.to_string(),
+        url: pr.url.clone(),
+        repo_id: None,
+        symbol_key: None,
+    }));
+    refs
 }
 
 fn open_index(config: &MemoryConfig) -> Result<Connection, MemoryError> {
@@ -440,6 +506,27 @@ CREATE TABLE IF NOT EXISTS issue_areas (
   issue_key TEXT NOT NULL,
   area TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scope_refs (
+  concept_id TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  label TEXT,
+  PRIMARY KEY (concept_id, scope_kind, scope_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scope_refs_lookup ON scope_refs(scope_kind, scope_id);
+CREATE TABLE IF NOT EXISTS registered_memory_sources (
+  source_id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  source_root TEXT NOT NULL,
+  status TEXT NOT NULL,
+  generation TEXT NOT NULL,
+  registered_at TEXT NOT NULL,
+  UNIQUE(repository_id, commit_sha, source_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_registered_memory_sources_repository
+  ON registered_memory_sources(repository_id, commit_sha);
 CREATE TABLE IF NOT EXISTS doc_sync_runs (
   run_id TEXT PRIMARY KEY,
   selected_issues_json TEXT NOT NULL,
@@ -760,6 +847,14 @@ pub fn persist_code_intel_documents(
     config: &MemoryConfig,
     batch: CodeIntelPersistBatch,
 ) -> Result<CodeIntelPersistReport, MemoryError> {
+    if !config.repository_sources.is_empty()
+        && !config.repository_sources.contains_key(&batch.repo_id)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "code-intelligence repository `{}` is not a registered canonical repository",
+            batch.repo_id
+        )));
+    }
     persist_code_intel_documents_with_freshness(config, batch, "current", true)
 }
 
@@ -1180,6 +1275,11 @@ pub fn persist_code_intel_skipped_files(
     worktree_dirty: bool,
     skipped_files: &[CodeIntelSkippedFileInput],
 ) -> Result<usize, MemoryError> {
+    if !config.repository_sources.is_empty() && !config.repository_sources.contains_key(repo_id) {
+        return Err(MemoryError::InvalidInput(format!(
+            "code-intelligence repository `{repo_id}` is not a registered canonical repository"
+        )));
+    }
     persist_code_intel_skipped_files_with_freshness(
         config,
         repo_id,
@@ -2510,6 +2610,7 @@ pub fn refresh_memory_index_from_okf(
         })?;
     for table in [
         "issues",
+        "scope_refs",
         "issue_areas",
         "pull_requests",
         "changed_files",
@@ -2560,6 +2661,24 @@ pub fn refresh_memory_index_from_okf(
                 path: config.index_path.clone(),
                 source,
             })?;
+        for scope_ref in serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+            .unwrap_or_default()
+        {
+            transaction
+                .execute(
+                    "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    params![
+                        row.concept_id,
+                        scope_kind_name(&scope_ref.kind),
+                        scope_ref.id,
+                        scope_ref.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
         for area in &row.areas {
             let area_config = config.area_or_default(area);
             transaction

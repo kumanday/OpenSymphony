@@ -1490,6 +1490,19 @@ fn load_runtime_memory_config(
         config.index_path = memory_root.join(crate::opensymphony_memory::DEFAULT_INDEX_FILE_NAME);
         config.containment_root = runtime.state_root.clone();
     }
+    for source in runtime.memory_sources.values() {
+        config =
+            config.with_repository_source(crate::opensymphony_memory::MemoryRepositorySource {
+                repository_id: source.repository_id.clone(),
+                root: source.checkout_path.clone(),
+                commit_sha: None,
+            });
+    }
+    if runtime.memory_sources.len() == 1
+        && let Some(repository_id) = runtime.memory_sources.keys().next()
+    {
+        config = config.with_default_repository_id(repository_id.clone());
+    }
     Ok(config)
 }
 
@@ -1776,6 +1789,7 @@ mod tests {
             repository_routing: None,
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
+            memory_sources: BTreeMap::new(),
             retain_failed: true,
             preserve_terminal_workspaces: true,
             memory: config::RunMemoryConfig {

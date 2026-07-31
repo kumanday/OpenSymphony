@@ -7235,6 +7235,7 @@ Run the scheduler.
             repository_routing: None,
             state_root: None,
             memory_catalog_root: None,
+            memory_sources: std::collections::BTreeMap::new(),
             retain_failed: true,
             preserve_terminal_workspaces: true,
             memory: super::super::config::RunMemoryConfig {

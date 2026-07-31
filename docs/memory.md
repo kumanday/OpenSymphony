@@ -435,6 +435,17 @@ server is disabled, the runner falls back to direct local memory reads.
 Read commands open the DuckDB index in read-only mode and do not run migrations.
 Startup and write paths own schema creation or migration.
 
+When central configuration is active, one supervised memory server owns one
+instance-wide catalog. Repository inventory entries are registered in that
+catalog by canonical repository ID and exact checkout commit. Policy files,
+public documentation, portable OKF bundles, and legacy stores remain
+repository-owned sources; private issue, project, milestone, and cross-
+repository records remain in the instance catalog. Source registration is a
+startup/write operation and records its status and generation in DuckDB, while
+ordinary MCP reads only inspect the existing schema. Code-intelligence lookups
+use the registered canonical repository ID rather than a caller-supplied local
+path.
+
 `memory serve` exposes the memory command set through a local MCP-style
 Streamable HTTP JSON-RPC endpoint at `/mcp`. CLI commands call that endpoint
 when `OPENSYMPHONY_MEMORY_ENDPOINT` is set; otherwise they use offline direct
