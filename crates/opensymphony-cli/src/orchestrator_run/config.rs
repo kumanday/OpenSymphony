@@ -378,6 +378,10 @@ pub enum CentralConfigError {
     InvalidReference { field: String },
     #[error("central config aliases must be unique: `{alias}`")]
     DuplicateAlias { alias: String },
+    #[error(
+        "central config repository policies must be unique for canonical identity `{identity}`"
+    )]
+    DuplicateRepositoryIdentity { identity: String },
     #[error("central config project routing key is ambiguous: `{key}`")]
     AmbiguousProjectRoutingKey { key: String },
     #[error("central config roots overlap: `{left}` and `{right}`")]
@@ -1313,18 +1317,23 @@ fn build_repository_checkouts(
             .credentials
             .get(&repository.credential)
             .and_then(|credential| credential.variable.clone());
-        checkouts.insert(
-            identity.to_string(),
-            CheckoutRepository {
-                provider: repository.remote.provider.clone(),
-                provider_id: repository.remote.provider_id.clone(),
-                remote: repository.remote.clone.clone(),
-                target_branch: repository.target_branch.clone(),
-                credential_env,
-                instructions_path: PathBuf::from(&repository.instructions.path),
-                review_profile: repository.review_profile.clone(),
-            },
-        );
+        let checkout = CheckoutRepository {
+            provider: repository.remote.provider.clone(),
+            provider_id: repository.remote.provider_id.clone(),
+            remote: repository.remote.clone.clone(),
+            target_branch: repository.target_branch.clone(),
+            credential_env,
+            instructions_path: PathBuf::from(&repository.instructions.path),
+            review_profile: repository.review_profile.clone(),
+        };
+        if checkouts
+            .insert(identity.to_string(), checkout.clone())
+            .is_some_and(|existing| existing != checkout)
+        {
+            return Err(CentralConfigError::DuplicateRepositoryIdentity {
+                identity: identity.to_string(),
+            });
+        }
     }
     Ok(checkouts)
 }

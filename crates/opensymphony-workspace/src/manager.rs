@@ -548,13 +548,33 @@ impl WorkspaceManager {
             else {
                 continue;
             };
-            let Some(checkout) = self
+            let checkout = match self
                 .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
-                .await?
-            else {
-                continue;
+                .await
+            {
+                Ok(Some(checkout)) => checkout,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.quarantine_checkout(&handle, error.to_string()).await?;
+                    continue;
+                }
             };
             if manifest.issue_id != issue.issue_id {
+                continue;
+            }
+            let entry_name = entry.file_name();
+            let expected_generation = entry_name
+                .to_str()
+                .and_then(|name| {
+                    name.strip_prefix(&format!("{}--", manifest.sanitized_workspace_key))
+                })
+                .filter(|generation| !generation.is_empty());
+            if expected_generation != Some(checkout.generation.as_str()) {
+                self.quarantine_checkout(
+                    &handle,
+                    "published checkout path does not match generation manifest".to_owned(),
+                )
+                .await?;
                 continue;
             }
             if checkout.repository_binding != *binding {
@@ -568,7 +588,7 @@ impl WorkspaceManager {
             let allow_worker_changes = self
                 .load_run_manifest(&handle)
                 .await?
-                .is_some_and(|run| run.pending_retry);
+                .is_some_and(|run| run.pending_retry || run.status == RunStatus::Running);
             match self
                 .verify_checkout_with_worker_changes(&handle, allow_worker_changes)
                 .await
@@ -805,6 +825,7 @@ impl WorkspaceManager {
             .arg("-C")
             .arg(checkout)
             .args(args)
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|source| WorkspaceError::CheckoutOperation {
