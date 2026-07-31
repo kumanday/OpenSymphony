@@ -248,6 +248,7 @@ pub struct MemoryContextOptions {
     pub explicit_includes: Vec<String>,
     pub paths: Vec<PathBuf>,
     pub limit: usize,
+    pub scope: MemoryScopeFilter,
 }
 
 impl MemoryContextOptions {
@@ -257,6 +258,7 @@ impl MemoryContextOptions {
             explicit_includes: Vec::new(),
             paths: Vec::new(),
             limit,
+            scope: MemoryScopeFilter::default(),
         }
     }
 }
@@ -482,6 +484,9 @@ pub fn context_for_issue_with_options(
             let Some(indexed) = indexed_by_key.get(&candidate.issue_key) else {
                 continue;
             };
+            if !indexed_issue_matches_scope(config, indexed, &options.scope) {
+                continue;
+            }
             let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(config, indexed));
             documentation_paths.extend(docs);
             selected.push(SelectedContextBrief {

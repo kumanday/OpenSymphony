@@ -3925,7 +3925,7 @@ pub fn migrate_code_repository_identity(
                 &format!(
                     "DELETE FROM {table} WHERE repo_id = ? AND ({key_columns}) IN (SELECT {key_columns} FROM {table} WHERE repo_id = ?)"
                 ),
-                params![canonical_repo_id, legacy_repo_id],
+                params![legacy_repo_id, canonical_repo_id],
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),

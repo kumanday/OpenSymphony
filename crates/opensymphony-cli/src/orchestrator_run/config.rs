@@ -1317,7 +1317,7 @@ fn resolve_memory_sources(
     repository_routing: &RepositoryRouting,
 ) -> Result<BTreeMap<String, ResolvedMemorySource>, CentralConfigError> {
     let mut sources = BTreeMap::new();
-    for repository in config.repositories.values() {
+    for (repository_key, repository) in &config.repositories {
         let Some(checkout_path) = repository.checkout_path.as_deref() else {
             continue;
         };
@@ -1337,15 +1337,42 @@ fn resolve_memory_sources(
                 checkout_path,
                 "repositories.checkout_path",
             )?,
-            project_scope_ids: repository_routing
-                .project_repositories
+            project_scope_ids: config
+                .linear_projects
                 .iter()
-                .filter(|(_, repositories)| {
-                    repositories
+                .filter(|(_, project)| project.repositories.contains(repository_key))
+                .flat_map(|(project_id, project)| {
+                    let project_keys = [
+                        project_id.clone(),
+                        project.provider_project_id.clone(),
+                        project.provider_project_slug.clone().unwrap_or_default(),
+                    ];
+                    let source_project_keys = repository_routing
+                        .project_repositories
                         .iter()
-                        .any(|candidate| candidate.to_string() == repository_id)
+                        .filter_map(|(scope_id, repositories)| {
+                            repositories
+                                .iter()
+                                .any(|candidate| candidate.to_string() == repository_id)
+                                .then_some(scope_id)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    if !repository_routing.project_repositories.is_empty()
+                        && !project_keys
+                            .iter()
+                            .any(|key| source_project_keys.contains(key))
+                    {
+                        return Vec::new();
+                    }
+                    [
+                        project_id.clone(),
+                        project.provider_project_id.clone(),
+                        project.provider_project_slug.clone().unwrap_or_default(),
+                    ]
+                    .into_iter()
+                    .filter(|scope_id| !scope_id.is_empty())
+                    .collect::<Vec<_>>()
                 })
-                .map(|(project_id, _)| project_id.clone())
                 .collect(),
             target_branch: repository.target_branch.clone(),
         };

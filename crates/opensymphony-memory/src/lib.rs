@@ -3264,6 +3264,7 @@ Reviews are triggered when you open a pull request for review.
             explicit_includes: Vec::new(),
             paths: Vec::new(),
             limit: 20,
+            scope: MemoryScopeFilter::default(),
         };
 
         let context =

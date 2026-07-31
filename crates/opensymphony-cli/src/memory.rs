@@ -45,9 +45,10 @@ use crate::{
         brief, code_graph_context, code_graph_workspace_context_overlay, code_index_branch,
         context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
         export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, merge_memory_index_from_okf, migrate_code_repository_identity,
-        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
+        migrate_code_repository_identity, persist_code_intel_documents,
+        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
@@ -1265,11 +1266,12 @@ async fn run_context(
                 SourceFile::default()
             }
         };
-    let options = MemoryContextOptions {
+    let mut options = MemoryContextOptions {
         issue: args.issue,
         explicit_includes: args.include,
         paths: args.paths,
         limit: args.limit,
+        scope: MemoryScopeFilter::default(),
     };
     let scope = scope_filter(
         &args.scope,
@@ -1277,6 +1279,9 @@ async fn run_context(
         args.milestone.as_deref(),
         args.area.as_deref(),
     );
+    let mut context_scope = scope.clone();
+    context_scope.issue = None;
+    options.scope = context_scope;
     for warning in warnings {
         println!("> Warning: {warning}\n");
     }
@@ -2035,7 +2040,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             });
             if !already_imported {
                 register_memory_source(config, &registration)?;
-                if matches!(
+                let import_result: Result<(), MemoryError> = if matches!(
                     kind,
                     MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
                 ) {
@@ -2046,7 +2051,31 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                         &root,
                         &source.repository_id,
                         &registration.source_id,
-                    )?;
+                    )
+                    .and_then(|_| {
+                        if kind == MemorySourceKind::LegacyStore {
+                            merge_legacy_memory_index(
+                                config,
+                                &local_config,
+                                &registration.source_id,
+                            )
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .map(|_| ())
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = import_result {
+                    let _ = register_memory_source(
+                        config,
+                        &RegisteredMemorySource {
+                            status: MemorySourceRegistrationStatus::Failed,
+                            ..registration.clone()
+                        },
+                    );
+                    return Err(error);
                 }
                 register_memory_source(
                     config,
@@ -2663,6 +2692,11 @@ async fn call_memory_tool_with_workspace(
                     .map(PathBuf::from)
                     .collect(),
                 limit: usize_arg(&arguments, "limit", 20),
+                scope: {
+                    let mut scope = scope_filter_from_mcp(&arguments, true);
+                    scope.issue = None;
+                    scope
+                },
             };
             let source = context_source_from_mcp(&arguments);
             let mut text = context_for_issue_with_options(config, &source, &options)?;

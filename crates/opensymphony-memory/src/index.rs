@@ -2643,6 +2643,220 @@ pub fn merge_memory_index_from_okf(
     )
 }
 
+pub fn merge_legacy_memory_index(
+    config: &MemoryConfig,
+    source_config: &MemoryConfig,
+    source_id: &str,
+) -> Result<(), MemoryError> {
+    let source_connection = open_index(source_config)?;
+    migrate_index(&source_connection).map_err(|source| MemoryError::DuckDb {
+        path: source_config.index_path.clone(),
+        source,
+    })?;
+    let areas = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, area FROM issue_areas")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let pull_requests = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let changed_files = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, pr_number, file_path, change_kind FROM changed_files")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let checks = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, pr_number, name, conclusion, completed_at FROM checks")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let reviews = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, pr_number, reviewer, state, submitted_at, disposition FROM reviews")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let owned = {
+        let mut statement = transaction
+            .prepare("SELECT issue_key, source_ids_json FROM issues")
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .into_iter()
+            .filter_map(|(issue_key, encoded)| {
+                serde_json::from_str::<Vec<String>>(&encoded)
+                    .ok()
+                    .filter(|ids| ids.iter().any(|id| id == source_id))
+                    .map(|_| issue_key)
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    for (issue_key, area) in areas.into_iter().filter(|(key, _)| owned.contains(key)) {
+        transaction.execute(
+            "INSERT INTO issue_areas (issue_key, area) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ?)",
+            params![issue_key, area, issue_key, area],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, title, url, branch, merge_sha, merged_at) in pull_requests.into_iter().filter(|row| owned.contains(&row.0)) {
+        transaction.execute(
+            "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ?)",
+            params![issue_key, number, title, url, branch, merge_sha, merged_at, issue_key, number],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, path, kind) in changed_files.into_iter().filter(|row| owned.contains(&row.0)) {
+        transaction.execute(
+            "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM changed_files WHERE issue_key = ? AND pr_number = ? AND file_path = ?)",
+            params![issue_key, number, path, kind, issue_key, number, path],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, name, conclusion, completed_at) in checks.into_iter().filter(|row| owned.contains(&row.0)) {
+        transaction.execute(
+            "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM checks WHERE issue_key = ? AND pr_number = ? AND name = ?)",
+            params![issue_key, number, name, conclusion, completed_at, issue_key, number, name],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, reviewer, state, submitted_at, disposition) in reviews.into_iter().filter(|row| owned.contains(&row.0)) {
+        transaction.execute(
+            "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition) SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM reviews WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ?)",
+            params![issue_key, number, reviewer, state, submitted_at, disposition, issue_key, number, reviewer, submitted_at],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
 fn refresh_memory_index_from_okf_inner(
     config: &MemoryConfig,
     bundle_root: &Path,

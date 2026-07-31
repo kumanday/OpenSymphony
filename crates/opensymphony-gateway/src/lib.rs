@@ -2413,6 +2413,21 @@ fn code_repo_id_for_workspace(
         if config.repository_sources.len() == 1 {
             return config.repository_sources.keys().next().cloned();
         }
+        let workspace_remote =
+            command_single_line(workspace_path, "git", &["remote", "get-url", "origin"])
+                .ok()
+                .map(|remote| normalize_git_remote(&remote));
+        for (repository_id, source) in &config.repository_sources {
+            let same_workspace = std::fs::canonicalize(&source.root).ok()
+                == std::fs::canonicalize(workspace_path).ok();
+            let same_remote = workspace_remote.as_deref().is_some_and(|remote| {
+                command_single_line(&source.root, "git", &["remote", "get-url", "origin"])
+                    .is_ok_and(|source_remote| normalize_git_remote(&source_remote) == remote)
+            });
+            if same_workspace || same_remote {
+                return Some(repository_id.clone());
+            }
+        }
     }
     command_single_line(workspace_path, "git", &["remote", "get-url", "origin"])
         .ok()
@@ -2425,6 +2440,14 @@ fn code_repo_id_for_workspace(
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
         })
+}
+
+fn normalize_git_remote(remote: &str) -> String {
+    remote
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase()
 }
 
 fn repo_id_from_remote_url(url: &str) -> Option<String> {
