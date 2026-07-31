@@ -286,6 +286,10 @@ Current repository note:
 - if worker launch fails before `start_run` can create `run.json`, the runtime
   backend writes a non-in-flight preparation-failure manifest carrying the
   pending retry, so the next startup follows the same recovery path
+- if a repository supersession removes the old workspace before the replacement
+  binding can be materialized, the retry is written under the instance retry
+  state root and rehydrated before normal dispatch; the external marker is
+  cleared once replacement workspace metadata is durable
 
 ## 8. Conversation metadata manifest
 

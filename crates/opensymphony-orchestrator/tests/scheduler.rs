@@ -11,13 +11,13 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
-    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryEntry,
-    RetryExhaustionRecord, RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig,
-    SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue, TrackerIssueState,
-    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason,
-    WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey,
-    WorkspaceRecord, decide_issue_route,
+    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryAttempt,
+    RetryEntry, RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState,
+    Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
+    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
+    WorkerAbortReason, WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    WorkspaceKey, WorkspaceRecord, decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -425,6 +425,7 @@ impl TrackerBackend for FakeTracker {
 struct FakeWorkspace {
     recoveries: Vec<RecoveryRecord>,
     retry_exhaustion: Vec<RetryExhaustionRecord>,
+    retry_pending_recoveries: Vec<RetryPendingRecord>,
     cleared_retry_exhaustion: Vec<String>,
     ensured: Vec<String>,
     cleaned: Vec<(String, bool)>,
@@ -436,6 +437,9 @@ struct FakeWorkspace {
     persisted_retry_exhaustions: Vec<u32>,
     persist_retry_exhaustion_results: VecDeque<Result<(), FakeError>>,
     persisted_retry_pending: usize,
+    persisted_retry_pending_without_workspace: usize,
+    cleared_retry_pending: Vec<String>,
+    ensure_results: VecDeque<Result<(), FakeError>>,
     persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
     persisted_interrupt_reasons: Vec<HarnessInterruptReason>,
     persist_interrupt_results: VecDeque<Result<(), FakeError>>,
@@ -451,6 +455,9 @@ impl WorkspaceBackend for FakeWorkspace {
         _observed_at: TimestampMs,
     ) -> Result<WorkspaceRecord, Self::Error> {
         self.ensured.push(issue.identifier.to_string());
+        if let Some(result) = self.ensure_results.pop_front() {
+            result?;
+        }
         let record = self
             .records
             .entry(issue.id.to_string())
@@ -472,6 +479,10 @@ impl WorkspaceBackend for FakeWorkspace {
         &mut self,
     ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
         Ok(self.retry_exhaustion.clone())
+    }
+
+    async fn recover_retry_pending(&mut self) -> Result<Vec<RetryPendingRecord>, Self::Error> {
+        Ok(self.retry_pending_recoveries.clone())
     }
 
     async fn cleanup_workspace(
@@ -528,6 +539,20 @@ impl WorkspaceBackend for FakeWorkspace {
             result?;
         }
         self.persisted_retry_pending += 1;
+        Ok(())
+    }
+
+    async fn persist_retry_pending_without_workspace(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        self.persisted_retry_pending_without_workspace += 1;
+        Ok(())
+    }
+
+    async fn clear_retry_pending(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
+        self.cleared_retry_pending.push(issue_id.to_string());
         Ok(())
     }
 
@@ -2417,6 +2442,12 @@ async fn blocked_binding_preserves_a_due_retry_execution() {
         .expect("execution should remain tracked");
     assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
     assert_eq!(execution.retry(), Some(&retry_before_block));
+    assert_eq!(
+        scheduler
+            .workspace()
+            .persisted_retry_pending_without_workspace,
+        1
+    );
     assert_eq!(scheduler.worker().launches.len(), 1);
 }
 
@@ -2496,6 +2527,95 @@ async fn queued_repository_binding_change_rematerializes_before_retry() {
             .map(|binding| binding.alias.as_str()),
         Some("two")
     );
+    assert_eq!(scheduler.workspace().persisted_retry_pending, 2);
+    assert_eq!(
+        scheduler.workspace().cleared_retry_pending,
+        vec![
+            "lin-repo-retry-rebind".to_string(),
+            "lin-repo-retry-rebind".to_string(),
+            "lin-repo-retry-rebind".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn queued_rebind_keeps_retry_when_replacement_workspace_materialization_fails() {
+    let mut issue = tracker_issue(
+        "lin-repo-retry-ensure-failure",
+        "COE-548-RETRY-ENSURE-FAILURE",
+        "In Progress",
+        0,
+    );
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial repository-bound run should launch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("worker failed".to_string()),
+                Some("retry".to_string()),
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("failure should queue retry");
+    let retry_before_rebind = scheduler
+        .execution(&IssueId::new("lin-repo-retry-ensure-failure").expect("valid issue id"))
+        .expect("execution should remain tracked")
+        .retry()
+        .expect("retry should exist")
+        .clone();
+
+    scheduler
+        .workspace_mut()
+        .ensure_results
+        .push_back(Err(FakeError {
+            message: "replacement workspace unavailable".to_string(),
+            category: None,
+            retry_after: None,
+        }));
+    scheduler.tracker_mut().active[0].labels = vec!["repo:two".to_string()];
+    assert!(scheduler.tick(ts(3_600_100)).await.is_err());
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-retry-ensure-failure").expect("valid issue id"))
+        .expect("replacement execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+    assert_eq!(execution.retry(), Some(&retry_before_rebind));
+    assert!(execution.workspace().is_none());
+    assert_eq!(
+        scheduler.workspace().removed,
+        vec!["COE-548-RETRY-ENSURE-FAILURE"]
+    );
+    assert_eq!(
+        scheduler
+            .workspace()
+            .persisted_retry_pending_without_workspace,
+        1
+    );
+    assert_eq!(scheduler.worker().launches.len(), 1);
 }
 
 #[tokio::test]
@@ -5002,6 +5122,72 @@ async fn legacy_recovery_backfills_binding_before_drift_comparison() {
 }
 
 #[tokio::test]
+async fn externally_persisted_retry_rehydrates_without_a_workspace() {
+    let mut tracker_issue = tracker_issue(
+        "lin-retry-external",
+        "COE-548-RETRY-EXTERNAL",
+        "In Progress",
+        0,
+    );
+    tracker_issue.project_id = Some("project-id".to_string());
+    tracker_issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![tracker_issue],
+        ..Default::default()
+    };
+    let routing = repository_routing();
+    let binding = match routing.resolve(&["repo:one".to_string()], Some("project-id"), None, false)
+    {
+        RepositoryBindingOutcome::Resolved(binding) => binding,
+        outcome => panic!("expected retry binding, got {outcome:?}"),
+    };
+    let mut pending_issue = normalized_issue(
+        "lin-retry-external",
+        "COE-548-RETRY-EXTERNAL",
+        "In Progress",
+    );
+    pending_issue.project_id = Some("project-id".to_string());
+    pending_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding));
+    let workspace = FakeWorkspace {
+        retry_pending_recoveries: vec![RetryPendingRecord {
+            issue: pending_issue.clone(),
+            retry: RetryEntry {
+                issue_id: pending_issue.id.clone(),
+                identifier: pending_issue.identifier.clone(),
+                attempt: RetryAttempt::new(1).expect("retry attempt should be valid"),
+                normal_retry_count: 1,
+                scheduled_at: ts(50),
+                due_at: ts(100),
+                reason: RetryReason::Failure,
+                error: Some("persisted outside the old workspace".to_string()),
+            },
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(routing);
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("external retry state should rehydrate and dispatch");
+
+    assert_eq!(
+        scheduler.workspace().ensured,
+        vec!["COE-548-RETRY-EXTERNAL"]
+    );
+    assert_eq!(
+        scheduler.workspace().cleared_retry_pending,
+        vec!["lin-retry-external".to_string()]
+    );
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.worker().launches[0].run.normal_retry_count, 1);
+}
+
+#[tokio::test]
 async fn legacy_recovery_rematerializes_without_persisted_binding_proof() {
     let recovered_worker_id =
         WorkerId::new("worker-unproven-legacy-recovery").expect("worker id should be valid");
@@ -5072,10 +5258,156 @@ async fn legacy_recovery_rematerializes_without_persisted_binding_proof() {
         scheduler.workspace().removed,
         vec!["COE-548-LEGACY-UNPROVEN"]
     );
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::BindingSuperseded
+    );
     assert_eq!(scheduler.worker().launches.len(), 1);
     assert_ne!(
         scheduler.worker().launches[0].run.worker_id,
         recovered_worker_id
+    );
+}
+
+#[tokio::test]
+async fn unproven_recovery_keeps_workspace_and_worker_until_stop_acknowledges() {
+    let recovered_worker_id =
+        WorkerId::new("worker-unproven-stop-pending").expect("worker id should be valid");
+    let recovered_workspace = workspace_record(
+        "COE-548-LEGACY-STOP-PENDING",
+        "/tmp/recovered/COE-548-LEGACY-STOP-PENDING",
+    );
+    let tracker = FakeTracker {
+        active: vec![{
+            let mut issue = tracker_issue(
+                "lin-legacy-stop-pending",
+                "COE-548-LEGACY-STOP-PENDING",
+                "In Progress",
+                0,
+            );
+            issue.project_id = Some("project-id".to_string());
+            issue
+        }],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue(
+                "lin-legacy-stop-pending",
+                "COE-548-LEGACY-STOP-PENDING",
+                "In Progress",
+            ),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: None,
+            }),
+        }],
+        ..Default::default()
+    };
+    let mut worker = FakeWorker::default();
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("stop still pending".to_string()),
+            timed_out: false,
+        }));
+    worker
+        .interrupt_results
+        .push_back(Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some("stop still pending".to_string()),
+            timed_out: false,
+        }));
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("failed stop should retain the old generation");
+
+    assert!(scheduler.workspace().removed.is_empty());
+    assert!(scheduler.worker().launches.is_empty());
+    assert_eq!(scheduler.worker().interrupts.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 0);
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-legacy-stop-pending").expect("issue id"))
+            .expect("old generation should remain tracked")
+            .status(),
+        SchedulerStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn alias_only_binding_mutation_keeps_running_generation() {
+    let mut issue = tracker_issue("lin-repo-alias", "COE-548-ALIAS", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut routing = repository_routing();
+    let identity = routing
+        .inventory
+        .get("one")
+        .expect("repository one should exist")
+        .identity
+        .clone();
+    routing.inventory.insert(
+        "alias".to_string(),
+        RepositoryInventoryEntry {
+            alias: "alias".to_string(),
+            identity: identity.clone(),
+        },
+    );
+    let mut config = scheduler_config();
+    config.repository_routing = Some(routing);
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler.tick(ts(100)).await.expect("initial dispatch");
+    scheduler.tracker_mut().active[0].labels = vec!["repo:alias".to_string()];
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("alias-only binding refresh should not supersede the run");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.worker().aborted.is_empty());
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-repo-alias").expect("issue id should be valid"))
+            .expect("execution should remain tracked")
+            .issue()
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::resolved_binding)
+            .map(|binding| binding.alias.as_str()),
+        Some("alias")
     );
 }
 

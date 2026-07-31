@@ -134,6 +134,12 @@ pub struct RetryExhaustionRecord {
     pub normal_retry_count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPendingRecord {
+    pub issue: NormalizedIssue,
+    pub retry: RetryEntry,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredRun {
     pub worker_id: WorkerId,
@@ -298,6 +304,10 @@ pub trait WorkspaceBackend {
         Ok(Vec::new())
     }
 
+    async fn recover_retry_pending(&mut self) -> Result<Vec<RetryPendingRecord>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     async fn cleanup_workspace(
         &mut self,
         workspace: &WorkspaceRecord,
@@ -332,6 +342,18 @@ pub trait WorkspaceBackend {
     }
 
     async fn clear_retry_exhaustion(&mut self, _identifier: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn persist_retry_pending_without_workspace(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn clear_retry_pending(&mut self, _issue_id: &IssueId) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -436,6 +458,7 @@ pub struct Scheduler<T, W, M> {
     pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
+    pending_retry_recovery: Option<Vec<RetryPendingRecord>>,
     recovered: bool,
     next_worker_ordinal: u64,
     last_poll_at: Option<TimestampMs>,
@@ -471,6 +494,7 @@ where
             pending_retry_exhaustion_persistence: BTreeMap::new(),
             pending_recovery: None,
             pending_retry_exhaustion: None,
+            pending_retry_recovery: None,
             recovered: false,
             next_worker_ordinal: 0,
             last_poll_at: None,
@@ -791,6 +815,13 @@ where
                     .map(|record| record.issue.id.as_str().to_string()),
             );
         }
+        if let Some(records) = &self.pending_retry_recovery {
+            lookup_ids.extend(
+                records
+                    .iter()
+                    .map(|record| record.issue.id.as_str().to_string()),
+            );
+        }
         lookup_ids
             .retain(|id| !active_ids.contains(id.as_str()) && !terminal_ids.contains(id.as_str()));
 
@@ -1002,6 +1033,56 @@ where
             return Ok(());
         };
 
+        let recovered_issue_ids = records
+            .iter()
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        for pending in self.pending_retry_recovery.take().unwrap_or_default() {
+            if recovered_issue_ids.contains(&pending.issue.id) {
+                self.workspace
+                    .clear_retry_pending(&pending.issue.id)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+                continue;
+            }
+            if tracker_snapshot.contains_terminal(pending.issue.id.as_str()) {
+                self.workspace
+                    .clear_retry_pending(&pending.issue.id)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+                continue;
+            }
+
+            let mut issue = pending.issue.clone();
+            if let Some(active_issue) = tracker_snapshot.active_issue(&pending.issue.id) {
+                issue = normalize_tracker_issue(active_issue, &self.config)?;
+            } else if let Some(snapshot) =
+                tracker_snapshot.state_by_id.get(pending.issue.id.as_str())
+            {
+                issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
+            }
+            let execution = IssueExecution::new(issue.clone(), observed_at);
+            if self.retry_count_exceeds_limit(pending.retry.normal_retry_count) {
+                self.insert_execution(issue.id.clone(), execution);
+                self.persist_retry_exhaustion(
+                    &issue,
+                    pending.retry.normal_retry_count.saturating_sub(1),
+                )
+                .await?;
+                self.mark_recovered_retry_exhausted(
+                    &issue.id,
+                    pending.retry.normal_retry_count.saturating_sub(1),
+                    observed_at,
+                )?;
+            } else {
+                self.insert_execution(issue.id.clone(), execution.restore_retry(pending.retry)?);
+            }
+        }
+
         for record in self.pending_retry_exhaustion.take().unwrap_or_default() {
             if let Some(active_issue) = tracker_snapshot.active_issue(&record.issue.id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
@@ -1074,6 +1155,20 @@ where
                     && recovered_binding.is_none()
                     && normalized.repository_binding.is_some()
                 {
+                    let recovered_run_ref = recovered_run
+                        .as_ref()
+                        .expect("unproven recovery should retain its recovered run");
+                    if !self
+                        .stop_recovered_run_before_workspace_removal(
+                            &record,
+                            recovered_run_ref,
+                            recovered_harness_kind.as_deref(),
+                            observed_at,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
                     self.workspace
                         .remove_workspace(&record.workspace)
                         .await
@@ -1083,14 +1178,20 @@ where
                     recovered_workspace = None;
                     recovered_run = None;
                 }
-                let binding_changed =
-                    recovered_run.is_some() && normalized.repository_binding != recovered_binding;
+                let binding_changed = recovered_run.is_some()
+                    && RepositoryBindingOutcome::canonical_identity_changed_opt(
+                        normalized.repository_binding.as_ref(),
+                        recovered_binding.as_ref(),
+                    );
                 if let Some(run) = recovered_run.as_mut()
-                    && run.repository_binding.is_none()
+                    && !binding_changed
                 {
-                    run.repository_binding = recovered_binding
+                    run.repository_binding = normalized
+                        .repository_binding
                         .as_ref()
-                        .and_then(|outcome| outcome.resolved_binding().cloned());
+                        .and_then(RepositoryBindingOutcome::resolved_binding)
+                        .cloned()
+                        .or_else(|| run.repository_binding.clone());
                 }
                 self.upsert_active_execution(normalized.clone(), observed_at, recovered_workspace)?;
                 if record.had_in_flight_run {
@@ -1423,7 +1524,10 @@ where
                         SchedulerStatus::Claimed
                             | SchedulerStatus::Running
                             | SchedulerStatus::RetryQueued
-                    ) && execution.issue().repository_binding != normalized.repository_binding
+                    ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
+                        execution.issue().repository_binding.as_ref(),
+                        normalized.repository_binding.as_ref(),
+                    )
                 })
             {
                 self.supersede_binding(normalized.id.clone(), normalized, observed_at)
@@ -1484,8 +1588,10 @@ where
                             SchedulerStatus::Claimed
                                 | SchedulerStatus::Running
                                 | SchedulerStatus::RetryQueued
-                        ) && existing.issue().repository_binding != issue.repository_binding
-                        {
+                        ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
+                            existing.issue().repository_binding.as_ref(),
+                            issue.repository_binding.as_ref(),
+                        ) {
                             self.supersede_binding(issue_id.clone(), issue, observed_at)
                                 .await?;
                             continue;
@@ -1628,6 +1734,56 @@ where
         Ok(true)
     }
 
+    async fn stop_recovered_run_before_workspace_removal(
+        &mut self,
+        record: &RecoveryRecord,
+        recovered_run: &RecoveredRun,
+        harness_kind: Option<&str>,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let run = RunAttempt::new(
+            recovered_run.worker_id.clone(),
+            record.issue.id.clone(),
+            record.issue.identifier.clone(),
+            record.workspace.path.clone(),
+            observed_at,
+            (recovered_run.normal_retry_count > 0)
+                .then(|| RetryAttempt::new(recovered_run.normal_retry_count))
+                .transpose()?,
+            self.config.max_turns,
+        )
+        .with_normal_retry_count(recovered_run.normal_retry_count)
+        .with_repository_binding(recovered_run.repository_binding.clone());
+        let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
+        execution.attach_workspace(record.workspace.clone())?;
+        execution = execution.claim(run.clone())?.start_running(
+            observed_at,
+            effective_stall_timeout(self.config.stall_timeout_ms),
+            Some(recovered_run.conversation.clone()),
+        )?;
+        self.worker_metadata.insert(
+            recovered_run.worker_id.clone(),
+            WorkerMetadata::new(
+                record.issue.id.clone(),
+                harness_kind
+                    .filter(|kind| !kind.trim().is_empty())
+                    .map(str::to_owned),
+            ),
+        );
+        let remote_stopped = self
+            .abort_worker(
+                &mut execution,
+                &run,
+                WorkerAbortReason::BindingSuperseded,
+                observed_at,
+            )
+            .await?;
+        if !remote_stopped {
+            self.insert_execution(record.issue.id.clone(), execution);
+        }
+        Ok(remote_stopped)
+    }
+
     async fn supersede_binding(
         &mut self,
         issue_id: IssueId,
@@ -1678,13 +1834,83 @@ where
             });
         }
 
-        let replacement = IssueExecution::new(replacement, observed_at);
-        let replacement = if let Some(retry) = retry {
-            replacement.restore_retry(retry)?
+        let has_resolved_replacement = replacement
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::resolved_binding)
+            .is_some();
+        let mut replacement_execution = IssueExecution::new(replacement.clone(), observed_at);
+        if let Some(retry) = retry.as_ref() {
+            replacement_execution = replacement_execution.restore_retry(retry.clone())?;
+        }
+        let replacement_workspace = if retry.is_some() && has_resolved_replacement {
+            match self
+                .workspace
+                .ensure_workspace(&replacement, observed_at)
+                .await
+            {
+                Ok(workspace) => Some(workspace),
+                Err(error) => {
+                    if let Some(retry) = retry.as_ref()
+                        && let Err(persist_error) = self
+                            .workspace
+                            .persist_retry_pending_without_workspace(&replacement, retry)
+                            .await
+                    {
+                        self.insert_execution(issue_id.clone(), replacement_execution);
+                        return Err(SchedulerError::Workspace {
+                            detail: format!(
+                                "{}; retry persistence also failed: {}",
+                                error, persist_error
+                            ),
+                        });
+                    }
+                    self.insert_execution(issue_id, replacement_execution);
+                    return Err(SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    });
+                }
+            }
         } else {
-            replacement
+            None
         };
-        self.insert_execution(issue_id, replacement);
+        if let Some(workspace) = replacement_workspace.as_ref() {
+            replacement_execution.attach_workspace(workspace.clone())?;
+        }
+        if let Some(retry) = retry {
+            if let Some(workspace) = replacement_workspace.as_ref() {
+                if let Err(error) = self
+                    .workspace
+                    .persist_retry_pending(workspace, &retry)
+                    .await
+                {
+                    self.pending_retry_persistence
+                        .insert(issue_id.clone(), retry.clone());
+                    self.insert_execution(issue_id.clone(), replacement_execution);
+                    return Err(SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    });
+                }
+                if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
+                    self.insert_execution(issue_id.clone(), replacement_execution);
+                    return Err(SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    });
+                }
+            } else {
+                if let Err(error) = self
+                    .workspace
+                    .persist_retry_pending_without_workspace(&replacement, &retry)
+                    .await
+                {
+                    self.insert_execution(issue_id.clone(), replacement_execution);
+                    return Err(SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+        self.insert_execution(issue_id, replacement_execution);
         Ok(())
     }
 
@@ -1898,8 +2124,12 @@ where
             .repository_binding
             .clone()
             .map(RepositoryBindingOutcome::Resolved);
+        let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+            current_execution.issue().repository_binding.as_ref(),
+            recovered_binding.as_ref(),
+        );
         let mut recovery_issue = current_execution.issue().clone();
-        if recovery_issue.repository_binding != recovered_binding {
+        if binding_changed {
             // The persisted run owns the old generation. Attach that binding
             // before claim so config/inventory drift cannot reject recovery;
             // bootstrap reconciliation supersedes it against the fresh issue
@@ -1925,7 +2155,16 @@ where
             self.config.max_turns,
         )
         .with_normal_retry_count(recovered_run.normal_retry_count)
-        .with_repository_binding(recovered_run.repository_binding.clone());
+        .with_repository_binding(if binding_changed {
+            recovered_run.repository_binding.clone()
+        } else {
+            recovery_issue
+                .repository_binding
+                .as_ref()
+                .and_then(RepositoryBindingOutcome::resolved_binding)
+                .cloned()
+                .or_else(|| recovered_run.repository_binding.clone())
+        });
         let route = recovered_route(
             decide_issue_route(&recovery_issue, &self.config)?,
             harness_kind.as_deref(),
@@ -2285,6 +2524,12 @@ where
                 // queued retry rather than an advanced, unqueued count.
                 self.workspace
                     .persist_retry_count(&workspace, normal_retry_count)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+                self.workspace
+                    .clear_retry_pending(&issue_id)
                     .await
                     .map_err(|error| SchedulerError::Workspace {
                         detail: error.to_string(),
@@ -3048,6 +3293,11 @@ where
                 if first_error.is_none() {
                     first_error = Some(error.to_string());
                 }
+            } else if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
+                self.pending_retry_persistence.insert(issue_id, retry);
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
             }
         }
         first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
@@ -3073,11 +3323,20 @@ where
                 detail: error.to_string(),
             });
         }
+        self.workspace
+            .clear_retry_pending(issue_id)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
         Ok(())
     }
 
     async fn load_recovery_state(&mut self) -> Result<(), SchedulerError> {
-        if self.pending_recovery.is_some() {
+        if self.pending_recovery.is_some()
+            && self.pending_retry_exhaustion.is_some()
+            && self.pending_retry_recovery.is_some()
+        {
             return Ok(());
         }
 
@@ -3093,8 +3352,16 @@ where
                 .map_err(|error| SchedulerError::Workspace {
                     detail: error.to_string(),
                 })?;
+        let retry_pending = self
+            .workspace
+            .recover_retry_pending()
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
         self.pending_recovery = Some(recoveries);
         self.pending_retry_exhaustion = Some(retry_exhaustion);
+        self.pending_retry_recovery = Some(retry_pending);
         Ok(())
     }
 

@@ -24,7 +24,7 @@ impl CanonicalRepositoryId {
         provider_id: Option<&str>,
         locator: impl AsRef<str>,
     ) -> Result<Self, RepositoryIdentityError> {
-        let provider = normalize_component(provider.as_ref());
+        let provider = provider_identity(provider.as_ref(), locator.as_ref());
         let durable_key = provider_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -57,7 +57,7 @@ impl SafeRemoteFingerprint {
         provider_id: Option<&str>,
         locator: impl AsRef<str>,
     ) -> Result<Self, RepositoryIdentityError> {
-        let provider = normalize_component(provider.as_ref());
+        let provider = provider_identity(provider.as_ref(), locator.as_ref());
         let provider_id = provider_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -220,6 +220,21 @@ impl RepositoryBindingOutcome {
         self.resolved_binding()
             .map(RepositoryBinding::repository_id)
     }
+
+    pub fn canonical_identity_changed(&self, other: &Self) -> bool {
+        match (self.repository_id(), other.repository_id()) {
+            (Some(left), Some(right)) => left != right,
+            _ => self != other,
+        }
+    }
+
+    pub fn canonical_identity_changed_opt(left: Option<&Self>, right: Option<&Self>) -> bool {
+        match (left, right) {
+            (Some(left), Some(right)) => left.canonical_identity_changed(right),
+            (None, None) => false,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -247,6 +262,48 @@ pub fn managed_repository_aliases(labels: &[String]) -> Vec<String> {
 
 fn normalize_component(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn provider_identity(provider: &str, locator: &str) -> String {
+    let provider = normalize_component(provider);
+    let Some(authority) = remote_authority(locator) else {
+        return provider;
+    };
+    format!("{provider}:{authority}")
+}
+
+fn remote_authority(locator: &str) -> Option<String> {
+    let raw = locator.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let (has_scheme, without_scheme) = raw
+        .split_once("://")
+        .map_or((false, raw), |(_, remainder)| (true, remainder));
+    let authority = if has_scheme {
+        without_scheme.split('/').next().unwrap_or_default()
+    } else if let Some(remainder) = raw
+        .strip_prefix("git@")
+        .or_else(|| raw.strip_prefix("ssh@"))
+    {
+        remainder.split(':').next().unwrap_or_default()
+    } else {
+        without_scheme.split('/').next().unwrap_or_default()
+    };
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, authority)| authority)
+        .trim_matches(['[', ']']);
+    if authority.is_empty()
+        || (!has_scheme
+            && !authority.contains('.')
+            && !authority.contains(':')
+            && authority != "localhost")
+    {
+        return None;
+    }
+    Some(normalize_component(authority))
 }
 
 fn normalize_locator(value: &str) -> String {
@@ -343,6 +400,61 @@ mod tests {
 
         assert_ne!(upper, lower);
         assert_ne!(upper_fingerprint, lower_fingerprint);
+    }
+
+    #[test]
+    fn provider_native_identity_is_qualified_by_remote_authority() {
+        let github = CanonicalRepositoryId::from_remote(
+            "github",
+            Some("42"),
+            "https://github.com/owner/repository",
+        )
+        .expect("github identity should be valid");
+        let enterprise = CanonicalRepositoryId::from_remote(
+            "github",
+            Some("42"),
+            "https://git.example.test/owner/repository",
+        )
+        .expect("enterprise identity should be valid");
+        let github_fingerprint = SafeRemoteFingerprint::from_remote(
+            "github",
+            Some("42"),
+            "https://github.com/owner/repository",
+        )
+        .expect("github fingerprint should be valid");
+        let enterprise_fingerprint = SafeRemoteFingerprint::from_remote(
+            "github",
+            Some("42"),
+            "https://git.example.test/owner/repository",
+        )
+        .expect("enterprise fingerprint should be valid");
+
+        assert_ne!(github, enterprise);
+        assert_ne!(github_fingerprint, enterprise_fingerprint);
+        assert_eq!(github.as_str(), "github:github.com:repository:42");
+    }
+
+    #[test]
+    fn binding_alias_changes_do_not_change_canonical_identity() {
+        let identity = RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:42").expect("identity"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("42"),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        };
+        let binding = |alias: &str| {
+            RepositoryBindingOutcome::Resolved(RepositoryBinding {
+                alias: alias.to_owned(),
+                repository: identity.clone(),
+                config_generation: format!("config-{alias}"),
+                inventory_generation: format!("inventory-{alias}"),
+            })
+        };
+
+        assert!(!binding("one").canonical_identity_changed(&binding("two")));
     }
 
     #[test]

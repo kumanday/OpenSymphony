@@ -205,8 +205,10 @@ impl IssueExecution {
         if matches!(
             self.status(),
             SchedulerStatus::Claimed | SchedulerStatus::Running
-        ) && self.issue.repository_binding != issue.repository_binding
-        {
+        ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
+            self.issue.repository_binding.as_ref(),
+            issue.repository_binding.as_ref(),
+        ) {
             return Err(StateTransitionError::RepositoryBindingChanged {
                 expected: self
                     .issue

@@ -112,6 +112,10 @@ remote fingerprint. A project's `repositories` list constrains the aliases
 that are valid for its tasks; it never selects a default. Parent tasks remain
 repository-neutral and must not carry a managed repository label.
 
+When a remote exposes an authority such as `github.com` or a GitHub Enterprise
+host, that authority is included with the provider-native ID in both the
+canonical repository ID and safe fingerprint; this prevents two provider
+installations from colliding while remaining stable across rename or transfer.
 Missing, unknown, duplicate, parent, out-of-scope, and disallowed bindings are
 retained as distinct scheduler routing outcomes and do not create workspaces.
 An empty managed label such as `repo:` remains visible to strict validation and
@@ -120,7 +124,10 @@ The resolved binding records the central config and inventory generations
 before a worker is claimed. A binding change on a claimed task stops and
 removes the old generation's workspace before materializing the replacement,
 and fences late worker events from the old generation. A binding change on a
-queued retry removes its stale workspace while preserving the retry entry. A
+queued retry removes its stale workspace while preserving the retry entry in
+the replacement workspace or in the instance retry-state root when the new
+binding is blocked. A recovered worker is stopped and acknowledged before an
+unproven workspace is removed. A
 legacy workspace with no issue binding may be backfilled only when its
 persisted issue, run, or after-create receipt metadata proves the requested
 repository; the current legacy configuration alone is not historical proof.

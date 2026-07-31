@@ -31,9 +31,9 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, TrackerBackend, WorkerAbortReason,
-    WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
-    WorkspaceBackend,
+    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
+    WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -894,6 +894,44 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(records)
     }
 
+    async fn recover_retry_pending(&mut self) -> Result<Vec<RetryPendingRecord>, Self::Error> {
+        let directory = self.retry_state_root.join("retry-pending");
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(CliWorkspaceError::RetryState(format!(
+                    "failed to list {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        let mut records = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path).await.map_err(|error| {
+                CliWorkspaceError::RetryState(format!("failed to read {}: {error}", path.display()))
+            })?;
+            let record = serde_json::from_str::<RetryPendingRecord>(&raw).map_err(|error| {
+                CliWorkspaceError::RetryState(format!(
+                    "failed to parse {}: {error}",
+                    path.display()
+                ))
+            })?;
+            records.push(record);
+        }
+        records.sort_by(|left, right| left.issue.identifier.cmp(&right.issue.identifier));
+        Ok(records)
+    }
+
     async fn cleanup_workspace(
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
@@ -1058,6 +1096,58 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         let path = self
             .retry_state_root
             .join("retry-exhaustion")
+            .join(format!("{key}.json"));
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(CliWorkspaceError::RetryState(format!(
+                "failed to clear {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    async fn persist_retry_pending_without_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue.identifier.as_str())?;
+        let directory = self.retry_state_root.join("retry-pending");
+        fs::create_dir_all(&directory).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to create {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = directory.join(format!("{key}.json"));
+        let temporary = directory.join(format!(".{key}.json.tmp"));
+        let contents = serde_json::to_vec_pretty(&RetryPendingRecord {
+            issue: issue.clone(),
+            retry: retry.clone(),
+        })
+        .map_err(|error| CliWorkspaceError::RetryState(error.to_string()))?;
+        fs::write(&temporary, contents).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to write {}: {error}",
+                temporary.display()
+            ))
+        })?;
+        if let Err(error) = replace_retry_exhaustion_marker(&temporary, &path).await {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(CliWorkspaceError::RetryState(format!(
+                "failed to activate {}: {error}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn clear_retry_pending(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue_id.as_str())?;
+        let path = self
+            .retry_state_root
+            .join("retry-pending")
             .join(format!("{key}.json"));
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
