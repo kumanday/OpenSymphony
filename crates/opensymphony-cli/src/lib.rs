@@ -2217,6 +2217,10 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
     let runtime = resolve_rehydrate_runtime(&current_dir, args.config.as_deref()).await?;
+    let strict_recovery = runtime
+        .repository_checkouts
+        .as_ref()
+        .is_some_and(|checkouts| !checkouts.is_empty());
     let workflow = runtime.workflow;
 
     // Setup workspace manager
@@ -2226,11 +2230,17 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
 
     // Find workspace by issue reference
-    let workspace = workspace_manager
-        .find_workspace_by_issue_reference(&args.issue)
-        .await
-        .map_err(|e| format!("failed to find workspace: {}", e))?
-        .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
+    let workspace = if strict_recovery {
+        workspace_manager
+            .find_verified_workspace_by_issue_reference(&args.issue)
+            .await
+    } else {
+        workspace_manager
+            .find_workspace_by_issue_reference(&args.issue)
+            .await
+    }
+    .map_err(|e| format!("failed to find workspace: {}", e))?
+    .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
 
     // Load existing conversation manifest
     let manifest_path = workspace.conversation_manifest_path();
@@ -2261,7 +2271,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
             )
         })?;
         workspace_manager
-            .verify_runtime_envelope(&workspace, envelope)
+            .verify_runtime_envelope_for_retry(&workspace, envelope)
             .await
             .map_err(|error| format!("strict recovery verification failed: {error}"))?;
     }
@@ -2277,8 +2287,19 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
         .map_err(|e| format!("failed to create transport config: {}", e))?;
 
-    let (client, _supervisor, server_message) =
-        build_rehydrate_client(&workflow, &transport, runtime.tool_dir.as_deref())?;
+    let checkout_credential_envs = runtime
+        .repository_checkouts
+        .as_ref()
+        .into_iter()
+        .flat_map(|checkouts| checkouts.values())
+        .filter_map(|checkout| checkout.credential_env.clone())
+        .collect();
+    let (client, _supervisor, server_message) = build_rehydrate_client(
+        &workflow,
+        &transport,
+        runtime.tool_dir.as_deref(),
+        &checkout_credential_envs,
+    )?;
     println!("{}", server_message);
 
     // Create session runner
@@ -2523,6 +2544,7 @@ fn build_rehydrate_client(
     workflow: &ResolvedWorkflow,
     transport: &TransportConfig,
     configured_tool_dir: Option<&Path>,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), String> {
     let supervisor_base_url = transport
         .managed_local_server_base_url()
@@ -2553,6 +2575,7 @@ fn build_rehydrate_client(
         Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
     config.extra_env = workflow.extensions.openhands.local_server.env.clone();
+    config.env_remove = checkout_credential_envs.clone();
     config.startup_timeout = Duration::from_millis(
         workflow
             .extensions
@@ -2949,7 +2972,12 @@ openhands:
         )
         .expect("transport should resolve");
 
-        let error = match super::build_rehydrate_client(&runtime.workflow, &transport, None) {
+        let error = match super::build_rehydrate_client(
+            &runtime.workflow,
+            &transport,
+            None,
+            &std::collections::BTreeSet::new(),
+        ) {
             Err(error) => error,
             Ok(_) => panic!("managed-local rehydration should require tool_dir"),
         };
@@ -2973,11 +3001,15 @@ openhands:
         let temp_dir = TempDir::new().expect("temp dir");
         let tool_dir = temp_dir.path().join("missing/openhands-server");
 
-        let error =
-            match super::build_rehydrate_client(&runtime.workflow, &transport, Some(&tool_dir)) {
-                Err(error) => error,
-                Ok(_) => panic!("invalid managed-local tooling should be reported"),
-            };
+        let error = match super::build_rehydrate_client(
+            &runtime.workflow,
+            &transport,
+            Some(&tool_dir),
+            &std::collections::BTreeSet::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid managed-local tooling should be reported"),
+        };
 
         assert!(
             error.contains("opensymphony install openhands")

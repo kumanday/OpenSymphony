@@ -520,7 +520,28 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         expected: &TerminalRuntimeEnvelope,
     ) -> Result<CheckoutManifest, WorkspaceError> {
-        let manifest = self.verify_checkout(workspace).await?;
+        self.verify_runtime_envelope_with_worker_changes(workspace, expected, false)
+            .await
+    }
+
+    pub async fn verify_runtime_envelope_for_retry(
+        &self,
+        workspace: &WorkspaceHandle,
+        expected: &TerminalRuntimeEnvelope,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
+        self.verify_runtime_envelope_with_worker_changes(workspace, expected, true)
+            .await
+    }
+
+    async fn verify_runtime_envelope_with_worker_changes(
+        &self,
+        workspace: &WorkspaceHandle,
+        expected: &TerminalRuntimeEnvelope,
+        allow_worker_changes: bool,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
+        let manifest = self
+            .verify_checkout_with_worker_changes(workspace, allow_worker_changes)
+            .await?;
         if manifest.repository_binding != expected.repository_binding
             || manifest.generation != expected.checkout_generation
             || workspace.workspace_path() != expected.checkout_path
@@ -1465,6 +1486,23 @@ impl WorkspaceManager {
             }
         }
 
+        Ok(None)
+    }
+
+    pub async fn find_verified_workspace_by_issue_reference(
+        &self,
+        issue_reference: &str,
+    ) -> Result<Option<WorkspaceHandle>, WorkspaceError> {
+        for (handle, manifest) in self.list_all_workspaces().await? {
+            if !workspace_matches_issue_reference(&manifest, issue_reference)
+                || handle.checkout_generation().is_none()
+            {
+                continue;
+            }
+            if self.verify_checkout_for_retry(&handle).await.is_ok() {
+                return Ok(Some(handle));
+            }
+        }
         Ok(None)
     }
 

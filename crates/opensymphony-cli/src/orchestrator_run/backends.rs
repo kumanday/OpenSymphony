@@ -765,7 +765,21 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         issue: &NormalizedIssue,
         _observed_at: TimestampMs,
     ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
-        let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
+        let ensured = timeout(
+            DEFAULT_WORKER_LAUNCH_TIMEOUT,
+            self.manager.ensure(&issue_descriptor(issue)),
+        )
+        .await
+        .map_err(|_| {
+            CliWorkspaceError::Workspace(WorkspaceError::CheckoutOperation {
+                operation: "acquire verified checkout".to_owned(),
+                path: self.manager.config().root.clone(),
+                detail: format!(
+                    "checkout acquisition timed out after {:?}",
+                    DEFAULT_WORKER_LAUNCH_TIMEOUT
+                ),
+            })
+        })??;
         self.terminal_cleanup_paths
             .remove(ensured.handle.workspace_path());
         Ok(crate::opensymphony_domain::WorkspaceRecord {

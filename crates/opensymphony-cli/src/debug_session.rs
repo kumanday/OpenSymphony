@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     env, io,
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
@@ -367,15 +367,25 @@ pub async fn run_command(args: DebugArgs) -> ExitCode {
 
 async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     let runtime = resolve_runtime_config(&args).await?;
+    let strict_recovery = runtime
+        .repository_checkouts
+        .as_ref()
+        .is_some_and(|checkouts| !checkouts.is_empty());
     let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
-    let workspace = manager
-        .find_workspace_by_issue_reference(&args.issue_id)
-        .await?
-        .ok_or_else(|| DebugCommandError::WorkspaceNotFound {
-            issue_reference: args.issue_id.clone(),
-            workspace_root: runtime.workflow.config.workspace.root.clone(),
-        })?;
+    let workspace = if strict_recovery {
+        manager
+            .find_verified_workspace_by_issue_reference(&args.issue_id)
+            .await?
+    } else {
+        manager
+            .find_workspace_by_issue_reference(&args.issue_id)
+            .await?
+    }
+    .ok_or_else(|| DebugCommandError::WorkspaceNotFound {
+        issue_reference: args.issue_id.clone(),
+        workspace_root: runtime.workflow.config.workspace.root.clone(),
+    })?;
     let manifest_path = workspace.conversation_manifest_path();
     let raw_manifest = load_conversation_manifest_raw(&manager, &workspace).await?;
     verify_strict_recovery_envelope(&runtime, &manager, &workspace, &raw_manifest).await?;
@@ -384,12 +394,24 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         &manifest_path,
         args.issue_id.as_str(),
     )? {
-        ensure_codex_debug_thread_active(&manager, &workspace, &mut codex).await?;
+        let checkout_credential_envs = runtime_checkout_credential_envs(&runtime);
+        ensure_codex_debug_thread_active(
+            &manager,
+            &workspace,
+            &mut codex,
+            &checkout_credential_envs,
+        )
+        .await?;
         if args.app {
             println!("{}", codex.deep_link());
             return Ok(());
         }
-        return run_codex_resume(&workspace, &codex).await;
+        return run_codex_resume(
+            &workspace,
+            &codex,
+            &runtime_checkout_credential_envs(&runtime),
+        )
+        .await;
     }
     if args.app {
         return Err(DebugCommandError::NotCodexRun {
@@ -501,15 +523,21 @@ impl CodexDebugMetadata {
 async fn run_codex_resume(
     workspace: &WorkspaceHandle,
     metadata: &CodexDebugMetadata,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), DebugCommandError> {
     let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    let status = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .arg("resume")
         .arg(&metadata.thread_id)
         .current_dir(workspace.workspace_path())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for variable in checkout_credential_envs {
+        command.env_remove(variable);
+    }
+    let status = command
         .status()
         .await
         .map_err(|source| DebugCommandError::CodexLaunch {
@@ -527,18 +555,24 @@ async fn ensure_codex_debug_thread_active(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     metadata: &mut CodexDebugMetadata,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), DebugCommandError> {
     let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
     let adapter =
         CodexAppServerAdapter::local_stdio(&program, "opensymphony", env!("CARGO_PKG_VERSION"));
     let (binary, args) = adapter.launch().to_command();
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .current_dir(workspace.workspace_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    for variable in checkout_credential_envs {
+        command.env_remove(variable);
+    }
+    let mut child = command
         .spawn()
         .map_err(|source| DebugCommandError::CodexUnarchiveFailed {
             thread_id: metadata.thread_id.clone(),
@@ -659,6 +693,16 @@ async fn ensure_codex_debug_thread_active(
         .map_err(DebugCommandError::WorkspaceManager)?;
     metadata.archive_state = "active".into();
     Ok(())
+}
+
+fn runtime_checkout_credential_envs(runtime: &DebugRuntimeConfig) -> BTreeSet<String> {
+    runtime
+        .repository_checkouts
+        .as_ref()
+        .into_iter()
+        .flat_map(|checkouts| checkouts.values())
+        .filter_map(|checkout| checkout.credential_env.clone())
+        .collect()
 }
 
 async fn write_debug_codex_request(
@@ -949,7 +993,7 @@ async fn verify_strict_recovery_envelope(
         }
     })?;
     manager
-        .verify_runtime_envelope(workspace, &expected)
+        .verify_runtime_envelope_for_retry(workspace, &expected)
         .await
         .map(|_| ())
         .map_err(|error| DebugCommandError::StrictRecovery {
@@ -1073,6 +1117,13 @@ fn build_debug_client(
         .local_server
         .env
         .clone();
+    config.env_remove = runtime
+        .repository_checkouts
+        .as_ref()
+        .into_iter()
+        .flat_map(|checkouts| checkouts.values())
+        .filter_map(|checkout| checkout.credential_env.clone())
+        .collect();
     let conversation_store_path = conversation_store_kind.and_then(|kind| {
         runtime
             .conversation_store
