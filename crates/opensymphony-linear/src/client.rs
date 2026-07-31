@@ -69,6 +69,7 @@ pub struct LinearConfig {
     pub api_key: String,
     pub base_url: String,
     pub project_slug: String,
+    pub project_slugs: Vec<String>,
     pub project_id: Option<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -83,6 +84,7 @@ impl LinearConfig {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             project_slug: project_slug.into(),
+            project_slugs: Vec::new(),
             project_id: None,
             active_states: Vec::new(),
             terminal_states: Vec::new(),
@@ -274,6 +276,15 @@ impl LinearClient {
         config.api_key = normalize_required_string("LINEAR_API_KEY", &config.api_key)?;
         config.project_slug =
             normalize_required_string("tracker.project_slug", &config.project_slug)?;
+        config.project_slugs = if config.project_slugs.is_empty() {
+            vec![config.project_slug.clone()]
+        } else {
+            config
+                .project_slugs
+                .iter()
+                .map(|slug| normalize_required_string("tracker.project_slugs", slug))
+                .collect::<Result<Vec<_>, _>>()?
+        };
         config.project_id = config
             .project_id
             .as_deref()
@@ -513,39 +524,41 @@ impl LinearClient {
         &self,
         include_archived: bool,
     ) -> Result<Vec<TrackerIssue>, LinearError> {
-        let project_slug = self.project_slug_for_queries().await?;
-        let mut after = None;
         let mut issues = Vec::new();
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = ProjectIssuesVariables {
+                    project_slug: project_slug.clone(),
+                    include_archived,
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                    label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+                };
+                let response: ProjectIssuesData = self
+                    .execute_graphql(PROJECT_ISSUES_QUERY, json!(variables))
+                    .await?;
 
-        loop {
-            let variables = ProjectIssuesVariables {
-                project_slug: project_slug.clone(),
-                include_archived,
-                first: self.config.page_size,
-                after: after.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
-            };
-            let response: ProjectIssuesData = self
-                .execute_graphql(PROJECT_ISSUES_QUERY, json!(variables))
-                .await?;
+                let page_info = response.issues.page_info;
+                for node in response.issues.nodes {
+                    issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                }
 
-            let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
-                issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                if !page_info.has_next_page {
+                    break;
+                }
+
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear project issues page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
             }
-
-            if !page_info.has_next_page {
-                return Ok(issues);
-            }
-
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear project issues page indicated a next page without an end cursor"
-                        .to_string(),
-                )
-            })?);
         }
+        Ok(issues)
     }
 
     async fn issues_by_state_names_with_archived<S>(
@@ -561,40 +574,42 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let project_slug = self.project_slug_for_queries().await?;
-
-        let mut after = None;
         let mut issues = Vec::new();
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = IssuesByStateVariables {
+                    project_slug: project_slug.clone(),
+                    state_names: state_names.clone(),
+                    include_archived,
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                    label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+                };
+                let response: IssuesByStateData = self
+                    .execute_graphql(ISSUES_BY_STATE_QUERY, json!(variables))
+                    .await?;
 
-        loop {
-            let variables = IssuesByStateVariables {
-                project_slug: project_slug.clone(),
-                state_names: state_names.clone(),
-                include_archived,
-                first: self.config.page_size,
-                after: after.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
-            };
-            let response: IssuesByStateData = self
-                .execute_graphql(ISSUES_BY_STATE_QUERY, json!(variables))
-                .await?;
+                let page_info = response.issues.page_info;
+                for node in response.issues.nodes {
+                    issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                }
 
-            let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
-                issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                if !page_info.has_next_page {
+                    break;
+                }
+
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear issues page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
             }
-
-            if !page_info.has_next_page {
-                return Ok(issues);
-            }
-
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear issues page indicated a next page without an end cursor".to_string(),
-                )
-            })?);
         }
+        Ok(issues)
     }
 
     async fn issue_summaries_by_state_names<S>(
@@ -609,40 +624,41 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let project_slug = self.project_slug_for_queries().await?;
-
-        let mut after = None;
         let mut issues = Vec::new();
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = IssueSummariesByStateVariables {
+                    project_slug: project_slug.clone(),
+                    state_names: state_names.clone(),
+                    include_archived: false,
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                };
+                let response: IssueSummariesByStateData = self
+                    .execute_graphql(ISSUE_SUMMARIES_BY_STATE_QUERY, json!(variables))
+                    .await?;
 
-        loop {
-            let variables = IssueSummariesByStateVariables {
-                project_slug: project_slug.clone(),
-                state_names: state_names.clone(),
-                include_archived: false,
-                first: self.config.page_size,
-                after: after.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-            };
-            let response: IssueSummariesByStateData = self
-                .execute_graphql(ISSUE_SUMMARIES_BY_STATE_QUERY, json!(variables))
-                .await?;
+                let page_info = response.issues.page_info;
+                for node in response.issues.nodes {
+                    issues.push(normalize_issue_summary(node)?);
+                }
 
-            let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
-                issues.push(normalize_issue_summary(node)?);
+                if !page_info.has_next_page {
+                    break;
+                }
+
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear issue summaries page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
             }
-
-            if !page_info.has_next_page {
-                return Ok(issues);
-            }
-
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear issue summaries page indicated a next page without an end cursor"
-                        .to_string(),
-                )
-            })?);
         }
+        Ok(issues)
     }
 
     pub async fn issue_states_by_ids<S>(
@@ -657,80 +673,82 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let project_slug = self.project_slug_for_queries().await?;
-
-        let mut after = None;
         let mut snapshots = Vec::new();
 
-        loop {
-            let variables = IssueStatesByIdsVariables {
-                project_slug: project_slug.clone(),
-                issue_ids: issue_ids.clone(),
-                first: self.config.page_size,
-                after: after.clone(),
-                label_first: self.config.page_size,
-                label_after: None,
-            };
-            let response: IssueStatesByIdsData = self
-                .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(variables))
-                .await?;
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = IssueStatesByIdsVariables {
+                    project_slug: project_slug.clone(),
+                    issue_ids: issue_ids.clone(),
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    label_first: self.config.page_size,
+                    label_after: None,
+                };
+                let response: IssueStatesByIdsData = self
+                    .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(variables))
+                    .await?;
 
-            let page_info = response.issues.page_info;
-            for mut node in response.issues.nodes {
-                let mut labels = std::mem::take(&mut node.labels.nodes);
-                let label_page_info = std::mem::take(&mut node.labels.page_info);
-                let mut label_after = next_page_cursor(
-                    label_page_info.has_next_page,
-                    label_page_info.end_cursor,
-                    "Linear issue-state label page",
-                )?;
-                while let Some(label_after_cursor) = label_after {
-                    let label_variables = IssueStatesByIdsVariables {
-                        project_slug: project_slug.clone(),
-                        issue_ids: vec![node.id.clone()],
-                        first: 1,
-                        after: None,
-                        label_first: self.config.page_size,
-                        label_after: Some(label_after_cursor),
-                    };
-                    let label_response: IssueStatesByIdsData = self
-                        .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(label_variables))
-                        .await?;
-                    let mut label_nodes = label_response.issues.nodes;
-                    let label_node = label_nodes.pop().ok_or_else(|| {
-                        LinearError::InvalidResponse(format!(
-                            "Linear issue-state label page returned no issue for {}",
-                            node.id
-                        ))
-                    })?;
-                    if !label_nodes.is_empty() || label_node.id != node.id {
-                        return Err(LinearError::InvalidResponse(format!(
-                            "Linear issue-state label page returned an unexpected issue for {}",
-                            node.id
-                        )));
-                    }
-                    labels.extend(label_node.labels.nodes);
-                    label_after = next_page_cursor(
-                        label_node.labels.page_info.has_next_page,
-                        label_node.labels.page_info.end_cursor,
+                let page_info = response.issues.page_info;
+                for mut node in response.issues.nodes {
+                    let mut labels = std::mem::take(&mut node.labels.nodes);
+                    let label_page_info = std::mem::take(&mut node.labels.page_info);
+                    let mut label_after = next_page_cursor(
+                        label_page_info.has_next_page,
+                        label_page_info.end_cursor,
                         "Linear issue-state label page",
                     )?;
+                    while let Some(label_after_cursor) = label_after {
+                        let label_variables = IssueStatesByIdsVariables {
+                            project_slug: project_slug.clone(),
+                            issue_ids: vec![node.id.clone()],
+                            first: 1,
+                            after: None,
+                            label_first: self.config.page_size,
+                            label_after: Some(label_after_cursor),
+                        };
+                        let label_response: IssueStatesByIdsData = self
+                            .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(label_variables))
+                            .await?;
+                        let mut label_nodes = label_response.issues.nodes;
+                        let label_node = label_nodes.pop().ok_or_else(|| {
+                            LinearError::InvalidResponse(format!(
+                                "Linear issue-state label page returned no issue for {}",
+                                node.id
+                            ))
+                        })?;
+                        if !label_nodes.is_empty() || label_node.id != node.id {
+                            return Err(LinearError::InvalidResponse(format!(
+                                "Linear issue-state label page returned an unexpected issue for {}",
+                                node.id
+                            )));
+                        }
+                        labels.extend(label_node.labels.nodes);
+                        label_after = next_page_cursor(
+                            label_node.labels.page_info.has_next_page,
+                            label_node.labels.page_info.end_cursor,
+                            "Linear issue-state label page",
+                        )?;
+                    }
+                    node.labels.nodes = labels;
+                    snapshots.push(normalize_issue_state(node));
                 }
-                node.labels.nodes = labels;
-                snapshots.push(normalize_issue_state(node));
-            }
 
-            if !page_info.has_next_page {
-                return Ok(snapshots);
-            }
+                if !page_info.has_next_page {
+                    break;
+                }
 
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear issue-state page indicated a next page without an end cursor"
-                        .to_string(),
-                )
-            })?);
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear issue-state page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
+            }
         }
+        Ok(snapshots)
     }
 
     pub async fn fetch_workpad_comment(
@@ -857,6 +875,14 @@ impl LinearClient {
             })
             .await?;
         Ok(slug.clone())
+    }
+
+    async fn project_slugs_for_queries(&self) -> Result<Vec<String>, LinearError> {
+        let mut project_slugs = self.config.project_slugs.clone();
+        if self.config.project_id.is_some() {
+            project_slugs[0] = self.project_slug_for_queries().await?;
+        }
+        Ok(project_slugs)
     }
 
     pub async fn update_project_content(

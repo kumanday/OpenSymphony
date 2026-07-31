@@ -17,9 +17,9 @@ use crate::opensymphony_codex::{
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
-    IssueState, IssueStateCategory, NormalizedIssue, RetryEntry, RetryReason, RuntimeStreamState,
-    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceKey,
+    IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
+    RetryReason, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -271,6 +271,7 @@ pub(super) fn build_linear_client(
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
+    config.project_slugs = tracker.project_slugs.clone();
     config.project_id = tracker.project_id.clone();
     config.active_states = tracker.active_states.clone();
     config.terminal_states = tracker.terminal_states.clone();
@@ -1492,8 +1493,13 @@ impl RuntimeWorkerBackend {
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
             let run_id = format!("run-{launch_worker_id}");
+            let mut workspace_issue = issue_descriptor(&issue);
+            if recovered && let Some(binding) = run.repository_binding.clone() {
+                workspace_issue.repository_binding =
+                    Some(RepositoryBindingOutcome::Resolved(binding));
+            }
             let ensured = match workspace_manager
-                .ensure_with_run_id(&issue_descriptor(&issue), Some(&run_id))
+                .ensure_with_run_id(&workspace_issue, Some(&run_id))
                 .await
             {
                 Ok(ensured) => ensured,
@@ -3950,12 +3956,12 @@ async fn load_codex_conversation_manifest(
         .map_err(|error| format!("invalid conversation manifest {}: {error}", path.display()))?;
     let thread_id = manifest.conversation_id.as_str();
     if !conversation_manifest_is_codex(&manifest) {
-        return Err(codex_lifecycle_error(
-            issue,
-            Some(thread_id),
-            "manifest validation",
-            "manifest belongs to a different harness",
-        ));
+        tracing::info!(
+            issue = %issue.identifier,
+            conversation_id = %thread_id,
+            "superseding conversation manifest from a different harness"
+        );
+        return Ok(None);
     }
     if manifest.issue_id != issue.id
         || manifest.identifier != issue.identifier

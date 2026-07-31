@@ -1391,7 +1391,7 @@ fn central_workflow_front_matter(
             field: "openhands.transport_session_api_key_env".to_owned(),
         });
     }
-    let (tracker, project_id, project_slug) = match config.routing.mode.trim() {
+    let (tracker, project_id, project_slug, project_slugs) = match config.routing.mode.trim() {
         "legacy_single" => {
             if config.tracker_profiles.len() != 1 {
                 return Err(CentralConfigError::InvalidReference {
@@ -1416,7 +1416,8 @@ fn central_workflow_front_matter(
                     .next()
                     .expect("length checked"),
                 project_id,
-                project_slug,
+                project_slug.clone(),
+                vec![project_slug],
             )
         }
         "project_set" => {
@@ -1438,18 +1439,31 @@ fn central_workflow_front_matter(
                 .ok_or_else(|| CentralConfigError::InvalidReference {
                     field: format!("project_sets.{project_set_id}.tracker_profile"),
                 })?;
-            let project_id = project_set.projects.first().ok_or_else(|| {
+            let first_project_id = project_set.projects.first().ok_or_else(|| {
                 CentralConfigError::InvalidReference {
                     field: format!("project_sets.{project_set_id}.projects"),
                 }
             })?;
-            let project = config.linear_projects.get(project_id).ok_or_else(|| {
-                CentralConfigError::InvalidReference {
-                    field: format!("project_sets.{project_set_id}.projects"),
+            let mut project_id = None;
+            let mut project_slugs = Vec::with_capacity(project_set.projects.len());
+            for project_key in &project_set.projects {
+                let project = config.linear_projects.get(project_key).ok_or_else(|| {
+                    CentralConfigError::InvalidReference {
+                        field: format!("project_sets.{project_set_id}.projects"),
+                    }
+                })?;
+                let (candidate_id, project_slug) = project_front_matter_identity(project);
+                if project_key == first_project_id {
+                    project_id = candidate_id;
                 }
-            })?;
-            let (project_id, project_slug) = project_front_matter_identity(project);
-            (tracker, project_id, project_slug)
+                project_slugs.push(project_slug);
+            }
+            let first_project = config
+                .linear_projects
+                .get(first_project_id)
+                .expect("first project was resolved above");
+            let (_, project_slug) = project_front_matter_identity(first_project);
+            (tracker, project_id, project_slug, project_slugs)
         }
         _ => {
             return Err(CentralConfigError::InvalidReference {
@@ -1469,6 +1483,7 @@ fn central_workflow_front_matter(
             api_key,
             project_id,
             project_slug: Some(project_slug),
+            project_slugs: Some(project_slugs),
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
             terminal_states: (!tracker.terminal_states.is_empty())
@@ -2602,6 +2617,30 @@ scheduler:
                 .canonicalize()
                 .expect("central root should canonicalize")
                 .join("integration.md")
+        );
+    }
+
+    #[test]
+    fn central_config_preserves_all_project_set_tracker_identities() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("projects: [core]", "projects: [core, other]")
+            .replace(
+                "linear_projects:\n  core:",
+                "linear_projects:\n  other:\n    provider_project_id: other-project\n    repositories: [other-repo]\n  core:",
+            )
+            .replace(
+                "repositories:\n  core-repo:",
+                "repositories:\n  other-repo:\n    aliases: [other]\n    remote:\n      provider: github\n      locator: example/other\n      clone: git@github.com:example/other.git\n    target_branch: develop\n    credential: github-ssh\n    review_profile: github-standard\n    instructions:\n      path: AGENTS.md\n  core-repo:",
+            );
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("multi-project central fixture should resolve");
+        assert_eq!(
+            resolved.workflow_front_matter.tracker.project_slugs,
+            Some(vec!["core-project".to_owned(), "other-project".to_owned()])
         );
     }
 

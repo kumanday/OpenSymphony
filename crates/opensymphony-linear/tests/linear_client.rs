@@ -154,6 +154,36 @@ async fn candidate_issues_normalize_fixture_payloads() {
 }
 
 #[tokio::test]
+async fn candidate_issues_scan_every_configured_project() {
+    let fixture = include_str!("fixtures/candidate_issues_page.json");
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(fixture),
+        QueuedResponse::json(fixture),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_slugs = vec!["first-project".to_owned(), "second-project".to_owned()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("candidate query should scan every project");
+
+    assert_eq!(issues.len(), 4);
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].body["variables"]["projectSlug"],
+        "first-project"
+    );
+    assert_eq!(
+        requests[1].body["variables"]["projectSlug"],
+        "second-project"
+    );
+}
+
+#[tokio::test]
 async fn configured_project_id_resolves_to_the_linear_project_slug_for_issue_queries() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(
@@ -1341,6 +1371,7 @@ async fn archive_issue_uses_issue_archive_mutation() {
 fn test_config(base_url: &str) -> LinearConfig {
     let mut config = LinearConfig::new("test-token", "e7b957855cb7");
     config.base_url = base_url.to_string();
+    config.project_slugs = vec!["e7b957855cb7".to_string()];
     config.active_states = vec!["In Progress".to_string()];
     config.terminal_states = vec!["Done".to_string(), "Canceled".to_string()];
     config.request_timeout = Duration::from_secs(2);

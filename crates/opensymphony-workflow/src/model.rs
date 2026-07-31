@@ -76,6 +76,7 @@ pub struct TrackerFrontMatter {
     pub api_key: Option<String>,
     pub project_id: Option<String>,
     pub project_slug: Option<String>,
+    pub project_slugs: Option<Vec<String>>,
     pub active_states: Option<Vec<String>>,
     pub terminal_states: Option<Vec<String>>,
 }
@@ -282,6 +283,7 @@ pub struct TrackerConfig {
     pub api_key: String,
     pub project_id: Option<String>,
     pub project_slug: String,
+    pub project_slugs: Vec<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
 }

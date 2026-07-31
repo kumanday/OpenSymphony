@@ -81,6 +81,37 @@ enum HookCommandOutput {
     TimedOut { stdout: String, stderr: String },
 }
 
+struct StagingCleanupGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl StagingCleanupGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { paths: vec![path] }
+    }
+
+    fn register(&mut self, path: PathBuf) {
+        self.paths.push(path);
+    }
+
+    fn disarm(&mut self) {
+        self.paths.clear();
+    }
+}
+
+impl Drop for StagingCleanupGuard {
+    fn drop(&mut self) {
+        let paths = std::mem::take(&mut self.paths);
+        if paths.is_empty() {
+            return;
+        }
+        for path in paths {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 impl WorkspaceManager {
     pub fn new(mut config: WorkspaceManagerConfig) -> Result<Self, WorkspaceError> {
         config.root = normalize_absolute_path(&config.root)?;
@@ -295,7 +326,10 @@ impl WorkspaceManager {
         )?;
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
         self.reject_symlinked_workspace_root(&staging_path).await?;
-        let clone_result = self.run_git_clone(repository, &staging_path).await;
+        let mut staging_cleanup = StagingCleanupGuard::new(staging_path.clone());
+        let clone_result = self
+            .run_git_clone(repository, &staging_path, &mut staging_cleanup)
+            .await;
         if clone_result.is_err() {
             let _ = fs::remove_dir_all(&staging_path).await;
         }
@@ -431,6 +465,7 @@ impl WorkspaceManager {
                 detail: source.to_string(),
             });
         }
+        staging_cleanup.disarm();
         let workspace = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
@@ -790,6 +825,7 @@ impl WorkspaceManager {
         &self,
         repository: &CheckoutRepository,
         destination: &Path,
+        staging_cleanup: &mut StagingCleanupGuard,
     ) -> Result<(), WorkspaceError> {
         let environment_credential = repository.credential_kind == "environment";
         let ssh_agent_credential = repository.credential_kind == "ssh-agent";
@@ -813,6 +849,7 @@ impl WorkspaceManager {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!(".opensymphony-askpass-{}", Uuid::new_v4().simple()));
+            staging_cleanup.register(path.clone());
             fs::write(
                 &path,
                 b"#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ;;\nesac\n",
@@ -1125,8 +1162,12 @@ impl WorkspaceManager {
         };
         if manifest.run_id != run_id {
             manifest.run_id = run_id.to_owned();
-            self.write_manifest(workspace, &workspace.checkout_manifest_path(), &manifest)
-                .await?;
+            self.write_manifest_atomically(
+                workspace,
+                &workspace.checkout_manifest_path(),
+                &manifest,
+            )
+            .await?;
         }
         Ok(())
     }
