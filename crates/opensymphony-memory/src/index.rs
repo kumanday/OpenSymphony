@@ -2817,17 +2817,40 @@ pub fn merge_legacy_memory_index(
                 serde_json::from_str::<Vec<String>>(&encoded)
                     .ok()
                     .filter(|ids| ids.iter().any(|id| id == source_id))
-                    .map(|_| issue_key)
+                    .map(|ids| {
+                        (
+                            issue_key,
+                            ids.iter().all(|id| id == source_id),
+                        )
+                    })
             })
-            .collect::<BTreeSet<_>>()
+            .collect::<BTreeMap<_, _>>()
     };
-    for (issue_key, area) in areas.into_iter().filter(|(key, _)| owned.contains(key)) {
+    for (issue_key, source_only) in &owned {
+        if *source_only {
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [issue_key])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+    }
+    for (issue_key, area) in areas.into_iter().filter(|(key, _)| owned.contains_key(key)) {
         transaction.execute(
             "INSERT INTO issue_areas (issue_key, area) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ?)",
             params![issue_key, area, issue_key, area],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
-    for (issue_key, number, title, url, branch, merge_sha, merged_at) in pull_requests.into_iter().filter(|row| owned.contains(&row.0)) {
+    for (issue_key, number, title, url, branch, merge_sha, merged_at) in pull_requests.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
             "UPDATE pull_requests SET title = ?, url = ?, branch = ?, merge_sha = ?, merged_at = ? WHERE issue_key = ? AND number = ?",
             params![title, url, branch, merge_sha, merged_at, issue_key, number],
@@ -2837,7 +2860,7 @@ pub fn merge_legacy_memory_index(
             params![issue_key, number, title, url, branch, merge_sha, merged_at, issue_key, number],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
-    for (issue_key, number, path, kind) in changed_files.into_iter().filter(|row| owned.contains(&row.0)) {
+    for (issue_key, number, path, kind) in changed_files.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
             "UPDATE changed_files SET change_kind = ? WHERE issue_key = ? AND pr_number = ? AND file_path = ?",
             params![kind, issue_key, number, path],
@@ -2847,7 +2870,7 @@ pub fn merge_legacy_memory_index(
             params![issue_key, number, path, kind, issue_key, number, path],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
-    for (issue_key, number, name, conclusion, completed_at) in checks.into_iter().filter(|row| owned.contains(&row.0)) {
+    for (issue_key, number, name, conclusion, completed_at) in checks.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
             "UPDATE checks SET conclusion = ?, completed_at = ? WHERE issue_key = ? AND pr_number = ? AND name = ?",
             params![conclusion, completed_at, issue_key, number, name],
@@ -2857,7 +2880,7 @@ pub fn merge_legacy_memory_index(
             params![issue_key, number, name, conclusion, completed_at, issue_key, number, name],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
-    for (issue_key, number, reviewer, state, submitted_at, disposition) in reviews.into_iter().filter(|row| owned.contains(&row.0)) {
+    for (issue_key, number, reviewer, state, submitted_at, disposition) in reviews.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
             "UPDATE reviews SET state = ?, disposition = ? WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ?",
             params![state, disposition, issue_key, number, reviewer, submitted_at],

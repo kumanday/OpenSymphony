@@ -3878,9 +3878,9 @@ pub fn code_index_repository_is_git(config: &MemoryConfig) -> bool {
 pub fn migrate_code_repository_identity(
     config: &MemoryConfig,
     legacy_repo_id: &str,
-    canonical_repo_id: &str,
+    _canonical_repo_id: &str,
 ) -> Result<(), MemoryError> {
-    if legacy_repo_id.is_empty() || legacy_repo_id == canonical_repo_id {
+    if legacy_repo_id.is_empty() || legacy_repo_id == _canonical_repo_id {
         return Ok(());
     }
     let mut connection = open_index(config)?;
@@ -3919,23 +3919,55 @@ pub fn migrate_code_repository_identity(
             "run_id, commit_sha, path",
         ),
     ];
-    for (table, key_columns) in tables {
+    for (table, _) in tables {
+        // Derived IDs include the repository identity. Drop the legacy rows so
+        // canonical ingestion rebuilds IDs and references under the new key.
         transaction
             .execute(
-                &format!(
-                    "DELETE FROM {table} WHERE repo_id = ? AND ({key_columns}) IN (SELECT {key_columns} FROM {table} WHERE repo_id = ?)"
-                ),
-                params![legacy_repo_id, canonical_repo_id],
+                &format!("DELETE FROM {table} WHERE repo_id = ?"),
+                params![legacy_repo_id],
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
+pub fn withdraw_code_repository(
+    config: &MemoryConfig,
+    repository_id: &str,
+) -> Result<(), MemoryError> {
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
         transaction
-            .execute(
-                &format!("UPDATE {table} SET repo_id = ? WHERE repo_id = ?"),
-                params![canonical_repo_id, legacy_repo_id],
-            )
+            .execute(&format!("DELETE FROM {table} WHERE repo_id = ?"), [repository_id])
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -9623,7 +9655,7 @@ mod code_graph_tests {
     }
 
     #[test]
-    fn repository_identity_migration_drops_only_colliding_legacy_snapshot_rows() {
+    fn repository_identity_migration_drops_legacy_snapshot_rows_for_reindex() {
         let repository = TempDir::new().expect("repository");
         let config = MemoryConfig::load(repository.path(), None).expect("config");
         let connection = open_index(&config).expect("index");

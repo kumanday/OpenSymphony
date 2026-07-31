@@ -40,15 +40,16 @@ use crate::{
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput,
         CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
-        MemoryReindexReport, MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
-        MemoryVisibility, RegisteredMemorySource, SourceFile, archive_blocking_warning_count,
-        backfill_legacy_memory_source_scopes, brief, code_graph_context,
-        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_source_file, mark_archived, merge_legacy_memory_index,
-        merge_memory_index_from_okf, migrate_code_repository_identity,
-        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        MemoryReindexReport, MemoryRepositorySource, MemoryScopeFilter, MemorySourceKind,
+        MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource, SourceFile,
+        archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief,
+        code_graph_context, code_graph_workspace_context_overlay, code_index_branch,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
+        migrate_code_repository_identity, persist_code_intel_documents,
+        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
@@ -938,15 +939,15 @@ fn apply_central_memory_root(
         config.index_path = memory_root.join("memory.duckdb");
     }
     for source in central.memory_sources.values() {
-        *config = config.clone().with_repository_source(
-            crate::opensymphony_memory::MemoryRepositorySource {
+        *config = config
+            .clone()
+            .with_repository_source(MemoryRepositorySource {
                 repository_id: source.repository_id.clone(),
                 root: source.checkout_path.clone(),
                 commit_sha: None,
                 project_scope_ids: source.project_scope_ids.clone(),
                 target_branch: Some(source.target_branch.clone()),
-            },
-        );
+            });
     }
     if let Some(project_set_id) = central.project_set_id.clone() {
         *config = config.clone().with_default_project_set_id(project_set_id);
@@ -1979,6 +1980,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
         let mut roots = vec![
+            (MemorySourceKind::Repository, source.root.clone()),
             (MemorySourceKind::Policy, local_config.config_path.clone()),
             (
                 MemorySourceKind::PublicDocs,
@@ -2030,7 +2032,13 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 kind,
                 root: root.clone(),
                 status: MemorySourceRegistrationStatus::Pending,
-                generation: memory_source_generation(&root)?,
+                generation: memory_source_registration_generation(
+                    &root,
+                    source,
+                    kind,
+                    &commit_sha,
+                    config,
+                )?,
             };
             let already_imported = registered_memory_sources(config)?.iter().any(|existing| {
                 existing.source_id == registration.source_id
@@ -2188,6 +2196,30 @@ fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
         digest.update([0]);
     }
     Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn memory_source_registration_generation(
+    root: &Path,
+    source: &MemoryRepositorySource,
+    kind: MemorySourceKind,
+    commit_sha: &str,
+    config: &MemoryConfig,
+) -> Result<String, MemoryError> {
+    let content_generation = if kind == MemorySourceKind::Repository {
+        format!("commit:{commit_sha}")
+    } else {
+        memory_source_generation(root)?
+    };
+    let routing_scopes = serde_json::to_string(&(
+        config.default_project_set_id.as_deref(),
+        source.project_scope_ids.iter().collect::<Vec<_>>(),
+    ))?;
+    Ok(sha256_hex(&format!(
+        "source-registration-v2\0{}\0{}\0{}",
+        kind.as_str(),
+        content_generation,
+        routing_scopes
+    )))
 }
 
 fn collect_memory_source_entries(

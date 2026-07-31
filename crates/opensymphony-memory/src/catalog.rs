@@ -144,10 +144,24 @@ pub fn reconcile_memory_sources(
         .iter()
         .filter(|(source_id, _, source_kind)| {
             !source_ids.contains(source_id)
-                && matches!(source_kind.as_str(), "legacy_store" | "okf_bundle")
+                && matches!(
+                    source_kind.as_str(),
+                    "repository" | "legacy_store" | "okf_bundle"
+                )
         })
         .map(|(source_id, repository_id, _)| (source_id.clone(), repository_id.clone()))
         .collect::<Vec<_>>();
+    let current_repository_ids = existing
+        .iter()
+        .filter(|(source_id, _, _)| source_ids.contains(source_id))
+        .map(|(_, repository_id, _)| repository_id.clone())
+        .collect::<BTreeSet<_>>();
+    let withdrawn_repository_ids = withdrawn_source_ids
+        .iter()
+        .map(|(_, repository_id)| repository_id)
+        .filter(|repository_id| !current_repository_ids.contains(*repository_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     drop(connection);
     for (source_id, repository_id) in withdrawn_source_ids {
         withdraw_memory_source_records(config, &source_id, &repository_id)?;
@@ -161,6 +175,9 @@ pub fn reconcile_memory_sources(
                 path: config.index_path.clone(),
                 source: error,
             })?;
+    }
+    for repository_id in withdrawn_repository_ids {
+        withdraw_code_repository(config, &repository_id)?;
     }
     let placeholders = std::iter::repeat_n("?", source_ids.len())
         .collect::<Vec<_>>()
@@ -510,6 +527,7 @@ fn validate_memory_source(source: &RegisteredMemorySource) -> Result<(), MemoryE
 
 fn parse_memory_source_kind(value: &str) -> MemorySourceKind {
     match value {
+        "repository" => MemorySourceKind::Repository,
         "public_docs" => MemorySourceKind::PublicDocs,
         "okf_bundle" => MemorySourceKind::OkfBundle,
         "legacy_store" => MemorySourceKind::LegacyStore,

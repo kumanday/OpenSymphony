@@ -207,6 +207,7 @@ pub struct MemoryRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemorySourceKind {
+    Repository,
     Policy,
     PublicDocs,
     OkfBundle,
@@ -216,6 +217,7 @@ pub enum MemorySourceKind {
 impl MemorySourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Repository => "repository",
             Self::Policy => "policy",
             Self::PublicDocs => "public_docs",
             Self::OkfBundle => "okf_bundle",
