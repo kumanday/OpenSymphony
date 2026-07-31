@@ -2486,14 +2486,22 @@ impl IssueSessionRunner {
             .await
         {
             Ok(stream) => stream,
-            Err(error) => {
+            Err(OpenHandsError::HttpStatus {
+                status_code: 404, ..
+            }) => {
                 return Ok(ReuseSession::Reset {
                     reason: format!(
-                        "failed to attach existing conversation {}: {error}",
+                        "existing conversation {} is no longer available",
                         manifest_conversation_id
                     ),
                     manifest: Box::new(manifest),
                 });
+            }
+            Err(error) => {
+                return Err(IssueSessionError::RehydrationFailed(format!(
+                    "failed to attach existing conversation {}: {error}",
+                    manifest_conversation_id
+                )));
             }
         };
 

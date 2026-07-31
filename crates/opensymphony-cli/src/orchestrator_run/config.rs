@@ -1120,6 +1120,24 @@ fn resolve_central_config(
                 });
             }
         }
+        let mut project_ids = BTreeSet::new();
+        let mut project_slugs = BTreeSet::new();
+        for project_key in &project_set.projects {
+            let project = config
+                .linear_projects
+                .get(project_key)
+                .expect("project references were resolved above");
+            let (project_id, project_slug) = project_front_matter_identity(project);
+            let duplicate_id = project_id
+                .as_deref()
+                .is_some_and(|id| !project_ids.insert(id.trim().to_owned()));
+            let duplicate_slug = !project_slugs.insert(project_slug.trim().to_ascii_lowercase());
+            if duplicate_id || duplicate_slug {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("project_sets.{project_set_id}.projects"),
+                });
+            }
+        }
     }
     let retry_max_attempts = if let Some(scheduler) = config.scheduler.as_ref() {
         if scheduler.max_concurrent_tasks == 0 {
