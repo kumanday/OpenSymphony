@@ -1959,8 +1959,14 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 MemorySourceKind::Policy,
                 source.root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE),
             ),
-            (MemorySourceKind::PublicDocs, local_config.docs.public_root),
-            (MemorySourceKind::LegacyStore, local_config.memory_root),
+            (
+                MemorySourceKind::PublicDocs,
+                local_config.docs.public_root.clone(),
+            ),
+            (
+                MemorySourceKind::LegacyStore,
+                local_config.memory_root.clone(),
+            ),
         ];
         for export_name in ["okf-export-public", "okf-export-private"] {
             roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
@@ -1969,6 +1975,11 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             if !root.exists() {
                 continue;
             }
+            let _source_memory_lock = if kind == MemorySourceKind::LegacyStore {
+                Some(acquire_source_memory_writer_lock(&local_config)?)
+            } else {
+                None
+            };
             let source_id = if kind == MemorySourceKind::OkfBundle {
                 format!(
                     "{}:{}:{}",
@@ -2016,6 +2027,36 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
     }
     reconcile_memory_sources(config, &source_ids)?;
     Ok(())
+}
+
+fn acquire_source_memory_writer_lock(
+    config: &MemoryConfig,
+) -> Result<MemoryCoordinationLock, MemoryError> {
+    let lock = acquire_memory_writer_lock(config)?;
+    let marker = memory_activity_marker_path(&config.memory_root);
+    match memory_activity_status(&config.memory_root).map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "failed to inspect repository memory activity marker {}: {source}",
+            marker.display()
+        ))
+    })? {
+        MemoryActivityStatus::Absent => {}
+        MemoryActivityStatus::Stale => {
+            fs::remove_file(&marker).map_err(|source| {
+                MemoryError::InvalidInput(format!(
+                    "failed to remove stale repository memory activity marker {}: {source}",
+                    marker.display()
+                ))
+            })?;
+        }
+        MemoryActivityStatus::Live => {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository memory store is already active at {}",
+                marker.display()
+            )));
+        }
+    }
+    Ok(lock)
 }
 
 fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {

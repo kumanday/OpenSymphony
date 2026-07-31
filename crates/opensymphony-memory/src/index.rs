@@ -877,7 +877,8 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             path: config.index_path.clone(),
             source,
         })?;
-    if !batch.worktree_dirty
+    if freshness == "current"
+        && !batch.worktree_dirty
         && !config.repository_sources.is_empty()
         && let Some(commit_sha) = batch.commit_sha.as_deref()
     {
@@ -1346,7 +1347,7 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
             path: config.index_path.clone(),
             source,
         })?;
-    if !config.repository_sources.is_empty() {
+    if freshness == "current" && !config.repository_sources.is_empty() {
         let registered_commit = match transaction.query_row(
             "SELECT commit_sha FROM registered_memory_sources WHERE repository_id = ? ORDER BY registered_at DESC LIMIT 1",
             params![repo_id],
@@ -2727,6 +2728,46 @@ fn refresh_memory_index_from_okf_inner(
         "INSERT OR REPLACE INTO"
     };
     for row in &rows {
+        let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+            .unwrap_or_default();
+        let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&row.source_refs_json)
+            .unwrap_or_default();
+        if !replace_existing {
+            let existing = transaction
+                .query_row(
+                    "SELECT scope_refs_json, source_refs_json FROM issues WHERE issue_key = ?",
+                    params![row.issue_key],
+                    |query_row| {
+                        Ok((
+                            query_row.get::<_, String>(0)?,
+                            query_row.get::<_, String>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            if let Some((existing_scopes, existing_sources)) = existing {
+                for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
+                    .unwrap_or_default()
+                {
+                    if !scope_refs.contains(&scope) {
+                        scope_refs.push(scope);
+                    }
+                }
+                for source in serde_json::from_str::<Vec<MemorySourceRef>>(&existing_sources)
+                    .unwrap_or_default()
+                {
+                    if !source_refs.contains(&source) {
+                        source_refs.push(source);
+                    }
+                }
+            }
+        }
+        let scope_refs_json = serde_json::to_string(&scope_refs)?;
+        let source_refs_json = serde_json::to_string(&source_refs)?;
         if !replace_existing {
             transaction
                 .execute(
@@ -2777,8 +2818,8 @@ fn refresh_memory_index_from_okf_inner(
                     row.concept_type,
                     row.description,
                     row.tags_json,
-                    row.scope_refs_json,
-                    row.source_refs_json,
+                    scope_refs_json,
+                    source_refs_json,
                     row.links_json,
                     row.citations_json,
                     row.freshness.as_str(),
@@ -2789,9 +2830,7 @@ fn refresh_memory_index_from_okf_inner(
                 path: config.index_path.clone(),
                 source,
             })?;
-        for scope_ref in serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
-            .unwrap_or_default()
-        {
+        for scope_ref in scope_refs {
             transaction
                 .execute(
                     "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
