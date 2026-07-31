@@ -18,6 +18,9 @@ credential references, review profiles, scheduler, integration, workspace, and
 memory-catalog policy. Relative paths resolve from the central config file.
 Remote values may contain no credentials, repository aliases are unique, and
 strict unknown fields fail before tracker polling or workspace creation.
+The central loader trims surrounding repository-alias whitespace before
+building the routing inventory, so managed labels and legacy defaults resolve
+against the same canonical alias key.
 Any central-only key such as `instance`, `routing`, `tracker_profiles`, or
 `repositories` selects the strict central parser, even when its discriminator
 is malformed; those files fail closed instead of falling through to legacy

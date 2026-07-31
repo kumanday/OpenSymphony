@@ -33,7 +33,10 @@ For repository-bound tasks, reuse is also gated by the persisted canonical
 repository identity. If the requested binding differs from the manifest's
 identity, workspace ensuring fails before the manifest is rewritten; checkout
 replacement remains an explicit lifecycle operation rather than an implicit
-reuse side effect.
+reuse side effect. A legacy manifest with no stored binding may be backfilled
+from the current resolved binding once; this records the configured identity
+without treating an unknown existing checkout as belonging to a different
+repository.
 
 ## 3. Hard safety invariants
 

@@ -11,6 +11,12 @@ query IssueDetails($id: String!) {
       name
       type
     }
+    labels {
+      nodes {
+        id
+        name
+      }
+    }
     team {
       id
       key

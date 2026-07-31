@@ -99,3 +99,37 @@ class RepositoryBindingTests(unittest.TestCase):
         )
 
         self.assertEqual(label_ids, [])
+
+    def test_sparse_snapshot_fetch_preserves_unmanaged_labels_for_mapped_issue(self):
+        class FakeClient:
+            def call(self, query_name, variables):
+                self.query_name = query_name
+                self.variables = variables
+                return {
+                    "data": {
+                        "issue": {
+                            "id": variables["id"],
+                            "labels": {
+                                "nodes": [
+                                    {"id": "customer-label", "name": "customer"},
+                                    {"id": "old-repository-label", "name": "repo:old"},
+                                ]
+                            },
+                        }
+                    }
+                }
+
+        client = FakeClient()
+        issue = CONVERTER.fetch_issue_for_label_merge(client, "issue-42")
+
+        self.assertEqual(client.query_name, "issue_details.graphql")
+        self.assertEqual(client.variables, {"id": "issue-42"})
+        source = task("TASK", ["core"])
+        source.areas = []
+        labels = CONVERTER.merge_issue_label_ids(
+            source,
+            issue["labels"]["nodes"],
+            {},
+            {"core": "repository-label"},
+        )
+        self.assertEqual(labels, ["customer-label", "repository-label"])

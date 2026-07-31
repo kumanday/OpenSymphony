@@ -134,9 +134,7 @@ impl WorkspaceManager {
                 .as_ref()
                 .and_then(|binding| binding.repository_id().cloned())
                 .map(|repository| repository.to_string());
-            if existing_repository != requested_repository
-                && (existing_repository.is_some() || requested_repository.is_some())
-            {
+            if existing_repository.is_some() && existing_repository != requested_repository {
                 return Err(WorkspaceError::RepositoryBindingMismatch {
                     workspace: handle.workspace_path().to_path_buf(),
                     existing_repository,

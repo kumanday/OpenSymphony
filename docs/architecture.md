@@ -74,6 +74,9 @@ supersedes the claimed generation and fences late events from its worker. If
 stop persistence or the harness abort fails, the old execution remains owned
 and fenced for retry; restart recovery first reattaches the persisted binding
 generation and then performs the same supersession against fresh tracker state.
+Repository binding outcomes are carried into the control-plane issue snapshot;
+invalid outcomes mark the issue blocked while preserving the typed diagnostic
+for operator clients.
 
 ### 3.2 OpenHands is the execution adapter
 

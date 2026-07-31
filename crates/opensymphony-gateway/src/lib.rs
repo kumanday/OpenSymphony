@@ -5935,6 +5935,7 @@ exit 2
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: if flags.harness {
                 Some("http://localhost:3000".into())

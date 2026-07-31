@@ -1605,10 +1605,11 @@ fn build_repository_routing(
         };
         identities.insert(repository_id.clone(), identity.clone());
         for alias in &repository.aliases {
+            let alias = alias.trim().to_owned();
             inventory.insert(
                 alias.clone(),
                 RepositoryInventoryEntry {
-                    alias: alias.clone(),
+                    alias,
                     identity: identity.clone(),
                 },
             );
@@ -1659,7 +1660,7 @@ fn build_repository_routing(
         .as_ref()
         .and_then(|repository| config.repositories.get(repository))
         .and_then(|repository| repository.aliases.first())
-        .cloned();
+        .map(|alias| alias.trim().to_owned());
 
     Ok(RepositoryRouting {
         mode: match mode {
@@ -1950,9 +1951,10 @@ fn validate_active_repository_aliases(
             continue;
         };
         for alias in &repository.aliases {
-            if !aliases.insert(alias.clone()) {
+            let alias = alias.trim();
+            if !aliases.insert(alias.to_owned()) {
                 return Err(CentralConfigError::DuplicateAlias {
-                    alias: alias.clone(),
+                    alias: alias.to_owned(),
                 });
             }
         }
@@ -2512,6 +2514,27 @@ scheduler:
                 .expect("central root should canonicalize")
                 .join("integration.md")
         );
+    }
+
+    #[test]
+    fn central_config_normalizes_repository_aliases_before_indexing() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace("aliases: [core]", "aliases: [' core ']");
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("whitespace around an alias should be normalized");
+        assert!(resolved.repository_routing.inventory.contains_key("core"));
+        assert!(matches!(
+            resolved.repository_routing.resolve(
+                &["repo:core".to_string()],
+                Some("core-project"),
+                None,
+                false,
+            ),
+            crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_)
+        ));
     }
 
     #[test]

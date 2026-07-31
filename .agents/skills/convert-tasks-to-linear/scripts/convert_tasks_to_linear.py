@@ -770,6 +770,8 @@ def ensure_issues(
             existing = None
             if mapped.get("issueId"):
                 existing = project_issues_by_id.get(mapped["issueId"], {}).copy()
+                if not existing:
+                    existing = fetch_issue_for_label_merge(client, mapped["issueId"])
                 existing.setdefault("id", mapped["issueId"])
                 existing.setdefault("identifier", mapped.get("issue"))
                 existing.setdefault("url", mapped.get("url"))
@@ -814,6 +816,14 @@ def ensure_issues(
                 print(f"created issue: {issue['identifier']} {task.title}")
             issue_map[task_id] = issue
     return issue_map
+
+
+def fetch_issue_for_label_merge(client: LinearClient, issue_id: str) -> dict[str, Any]:
+    data = client.call("issue_details.graphql", {"id": issue_id})
+    issue = data.get("data", {}).get("issue")
+    if not isinstance(issue, dict):
+        raise LinearError(f"mapped Linear issue not found: {issue_id}")
+    return issue.copy()
 
 
 def ensure_area_labels(client: LinearClient, package: Package, team: dict[str, Any]) -> dict[str, str]:
