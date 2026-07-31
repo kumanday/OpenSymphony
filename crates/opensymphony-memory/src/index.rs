@@ -17,7 +17,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let body = read_to_string(&issue_plan.capsule_path)?;
         let labels_json = serde_json::to_string(&issue_plan.issue.labels)?;
         let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
-        let scope_refs = capture_scope_refs(issue_plan);
+        let scope_refs = capture_scope_refs(config, issue_plan);
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
         let source_refs = issue_plan
             .prs
@@ -259,7 +259,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
     Ok(())
 }
 
-fn capture_scope_refs(plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
+fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
     let mut refs = vec![KnowledgeScope {
         kind: KnowledgeScopeKind::WorkItem,
         id: normalize_issue_key(&plan.issue.identifier),
@@ -277,6 +277,17 @@ fn capture_scope_refs(plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
         id: area.clone(),
         label: None,
     }));
+    if let Some(repository_id) = config.default_repository_id.as_deref()
+        && !refs
+            .iter()
+            .any(|scope| scope.kind == KnowledgeScopeKind::Repository)
+    {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Repository,
+            id: repository_id.to_string(),
+            label: None,
+        });
+    }
     refs
 }
 
@@ -2732,7 +2743,7 @@ fn refresh_memory_index_from_okf_inner(
         {
             transaction
                 .execute(
-                    "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
                     params![
                         row.concept_id,
                         scope_kind_name(&scope_ref.kind),

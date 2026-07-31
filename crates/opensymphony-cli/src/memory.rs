@@ -1987,7 +1987,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 kind,
                 root: root.clone(),
                 status: MemorySourceRegistrationStatus::Pending,
-                generation: commit_sha.clone(),
+                generation: memory_source_generation(&root)?,
             };
             let already_imported = registered_memory_sources(config)?.iter().any(|existing| {
                 existing.source_id == registration.source_id
@@ -2015,6 +2015,73 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
         }
     }
     reconcile_memory_sources(config, &source_ids)?;
+    Ok(())
+}
+
+fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
+    let metadata = fs::symlink_metadata(root).map_err(|source| MemoryError::ReadFile {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut entries = Vec::new();
+    if metadata.file_type().is_file() {
+        entries.push((
+            root.file_name()
+                .map(|name| name.to_string_lossy().as_bytes().to_vec())
+                .unwrap_or_default(),
+            fs::read(root).map_err(|source| MemoryError::ReadFile {
+                path: root.to_path_buf(),
+                source,
+            })?,
+        ));
+    } else if metadata.file_type().is_dir() {
+        collect_memory_source_entries(root, root, &mut entries)?;
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut material = Vec::new();
+    for (relative, contents) in entries {
+        material.extend_from_slice(&relative);
+        material.push(0);
+        material.extend_from_slice(&contents);
+        material.push(0);
+    }
+    Ok(format!("sha256:{}", sha256_bytes_hex(&material)))
+}
+
+fn collect_memory_source_entries(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<(), MemoryError> {
+    for entry in fs::read_dir(current).map_err(|source| MemoryError::ReadFile {
+        path: current.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: current.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            collect_memory_source_entries(root, &path, entries)?;
+        } else if file_type.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec();
+            let contents = fs::read(&path).map_err(|source| MemoryError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+            entries.push((relative, contents));
+        }
+    }
     Ok(())
 }
 
@@ -3557,8 +3624,9 @@ async fn call_memory_ingest_code_intel_tool(
             arguments,
             &["queryPack", "queryPacks", "query_pack", "query_packs"],
         );
+        let resolved_config = memory_config_for_repository(config, scope.repo.as_deref())?;
         let (artifacts, report) = code_intel_persist_artifacts_blocking(CodeIntelPersistRequest {
-            config: config.clone(),
+            config: resolved_config,
             scope: scope.clone(),
             paths,
             scope_refs,
@@ -4327,6 +4395,29 @@ fn repo_existing_path_from_path(
             repo_root,
         });
     }
+    Ok(resolved)
+}
+
+fn memory_config_for_repository(
+    config: &MemoryConfig,
+    repository_id: Option<&str>,
+) -> Result<MemoryConfig, MemoryError> {
+    let repository_id = repository_id
+        .filter(|value| !value.trim().is_empty())
+        .or(config.default_repository_id.as_deref());
+    let Some(repository_id) = repository_id else {
+        return Ok(config.clone());
+    };
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        if config.repository_sources.is_empty() {
+            return Ok(config.clone());
+        }
+        return Err(MemoryError::InvalidInput(format!(
+            "unknown canonical repository id `{repository_id}`"
+        )));
+    };
+    let mut resolved = config.clone();
+    resolved.repo_root = source.root.clone();
     Ok(resolved)
 }
 
