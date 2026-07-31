@@ -1718,7 +1718,7 @@ async fn get_code_graph(
     AxumPath(repo_id): AxumPath<String>,
     Query(params): Query<CodeGraphQuery>,
 ) -> Result<Json<CodeGraphSnapshot>, (StatusCode, Json<serde_json::Value>)> {
-    let config = configured_code_memory(&state)?;
+    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id)?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -1727,7 +1727,7 @@ async fn get_code_graph(
         aggregate: parse_code_graph_aggregate(params.aggregate.as_deref())?,
         include_stale: params.include_stale.unwrap_or(false),
     };
-    code_graph_snapshot(config, &repo_id, options)
+    code_graph_snapshot(&config, &repo_id, options)
         .map(Json)
         .map_err(code_graph_error)
 }
@@ -1737,10 +1737,10 @@ async fn get_code_symbol_detail(
     AxumPath((repo_id, symbol_key)): AxumPath<(String, String)>,
     Query(params): Query<CodeSymbolQuery>,
 ) -> Result<Json<CodeSymbolDetail>, (StatusCode, Json<serde_json::Value>)> {
-    let config = configured_code_memory(&state)?;
+    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id)?;
     let access = memory_graph_access(params.visibility.as_deref())?;
     code_graph_symbol_detail(
-        config,
+        &config,
         &repo_id,
         &symbol_key,
         params.include_stale.unwrap_or(false),
@@ -1755,11 +1755,11 @@ async fn get_code_diff_overlay(
     AxumPath(repo_id): AxumPath<String>,
     Query(params): Query<CodeDiffQuery>,
 ) -> Result<Json<CodeDiffOverlay>, (StatusCode, Json<serde_json::Value>)> {
-    let config = configured_code_memory(&state)?;
+    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id)?;
     let base_revision = revision_param(params.base_revision, params.base, "base_revision")?;
     let head_revision = revision_param(params.head_revision, params.head, "head_revision")?;
     code_graph_diff_overlay(
-        config,
+        &config,
         &repo_id,
         &base_revision,
         &head_revision,
@@ -2081,9 +2081,15 @@ async fn get_run_code_outline(
         &workspace_path,
         state.memory_config.as_ref(),
         issue.repository_binding.as_ref(),
-    )?;
+    )
+    .await?;
+    let selected_config = repo_id
+        .as_deref()
+        .zip(state.memory_config.clone())
+        .map(|(repo_id, config)| code_memory_for_graph_read(&config, repo_id))
+        .transpose()?;
     let run_identifier = issue.identifier.clone();
-    if let (Some(repo_id), Some(config)) = (repo_id.clone(), state.memory_config.clone()) {
+    if let (Some(repo_id), Some(config)) = (repo_id.clone(), selected_config.clone()) {
         let comparison_bases = state.comparison_bases.clone();
         let overlay_run_identifier = run_identifier.clone();
         let overlay_relative_path = relative_path.clone();
@@ -2116,6 +2122,22 @@ async fn get_run_code_outline(
             | Err(CodeGraphProjectionError::RevisionNotFound(_))
             | Err(CodeGraphProjectionError::FileNotFound(_)) => {}
             Err(error) => return Err(code_graph_error(error)),
+        }
+    }
+    if let Some(config) = selected_config.as_ref() {
+        let metadata = tokio::fs::metadata(&file_path).await.map_err(|_| {
+            code_graph_response(
+                StatusCode::NOT_FOUND,
+                "code_file_not_found",
+                "requested run file is not available",
+            )
+        })?;
+        if metadata.len() > config.code_intel.ast.max_file_bytes {
+            return Err(code_graph_response(
+                StatusCode::BAD_REQUEST,
+                "code_file_too_large",
+                "requested run file exceeds the repository code-intelligence limit",
+            ));
         }
     }
     let source = tokio::fs::read_to_string(&file_path).await.map_err(|_| {
@@ -2160,7 +2182,8 @@ async fn get_run_code_diff_overlay(
         &workspace_path,
         state.memory_config.as_ref(),
         issue.repository_binding.as_ref(),
-    )?
+    )
+    .await?
     .ok_or_else(|| {
         code_graph_response(
             StatusCode::BAD_REQUEST,
@@ -2168,7 +2191,7 @@ async fn get_run_code_diff_overlay(
             "run code diff overlay requires a repo id",
         )
     })?;
-    let config = code_memory_for_repository(config, &repo_id)?;
+    let config = code_memory_for_graph_read(&config, &repo_id)?;
     let comparison_bases = state.comparison_bases.clone();
     let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
     let overlay = tokio::task::spawn_blocking({
@@ -2221,7 +2244,8 @@ async fn get_run_code_graph(
         &workspace_path,
         state.memory_config.as_ref(),
         issue.repository_binding.as_ref(),
-    )?
+    )
+    .await?
     .ok_or_else(|| {
         code_graph_response(
             StatusCode::BAD_REQUEST,
@@ -2229,7 +2253,7 @@ async fn get_run_code_graph(
             "run code graph requires a repo id",
         )
     })?;
-    let config = code_memory_for_repository(config, &repo_id)?;
+    let config = code_memory_for_graph_read(&config, &repo_id)?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -2455,7 +2479,7 @@ fn code_repo_id_for_workspace(
         })
 }
 
-fn run_repository_id(
+async fn run_repository_id(
     requested: Option<String>,
     workspace_path: &StdPath,
     config: Option<&MemoryConfig>,
@@ -2463,8 +2487,27 @@ fn run_repository_id(
 ) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
     let bound = binding
         .and_then(|binding| binding.repository_id())
-        .map(|repository_id| repository_id.as_str().to_owned())
-        .or_else(|| code_repo_id_for_workspace(workspace_path, config));
+        .map(|repository_id| repository_id.as_str().to_owned());
+    let fallback = if bound.is_none() && requested.is_none() {
+        let workspace_path = workspace_path.to_path_buf();
+        let config = config.cloned();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                code_repo_id_for_workspace(&workspace_path, config.as_ref())
+            })
+            .await
+            .map_err(|error| {
+                code_graph_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "repo_resolution_failed",
+                    &format!("repository resolution task failed: {error}"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let bound = bound.or(fallback.flatten());
     if config.is_some_and(|config| !config.repository_sources.is_empty())
         && let (Some(requested), Some(bound)) = (requested.as_deref(), bound.as_deref())
         && requested != bound
@@ -2526,6 +2569,21 @@ fn code_memory_for_repository(
             StatusCode::BAD_REQUEST,
             "unknown_repository",
             &format!("unknown canonical repository id `{repo_id}`"),
+        ));
+    }
+    Ok(config)
+}
+
+fn code_memory_for_graph_read(
+    config: &MemoryConfig,
+    repo_id: &str,
+) -> Result<MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
+    let config = code_memory_for_repository(config.clone(), repo_id)?;
+    if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
+        return Err(code_graph_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "code_graph_unavailable",
+            "code intelligence is disabled for the selected repository",
         ));
     }
     Ok(config)

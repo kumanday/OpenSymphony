@@ -3362,6 +3362,7 @@ Reviews are triggered when you open a pull request for review.
                 .expect("scoped related")
                 .is_empty()
         );
+        assert!(related_by_issue_with_scope(&config, "COE-123", 10, &scoped).is_err());
         assert_eq!(
             status_with_scope(&config, &IssueSelection::default(), &scoped)
                 .expect("scoped status")

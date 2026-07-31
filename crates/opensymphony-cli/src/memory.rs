@@ -2689,7 +2689,7 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
         json!({ "name": "memory.import_okf", "description": "Import an OKF memory bundle", "access": "admin" }),
         json!({ "name": "memory.ingest_code_intel", "description": "Generate code-intelligence artifacts for future ingestion", "access": "admin" }),
     ];
-    if config.code_intel.enabled {
+    if code_graph_tools_enabled(config) {
         tools.push(json!({
             "name": "code.graph.context",
             "description": "Bounded read-only indexed code discovery with optional workspace overlay",
@@ -2699,6 +2699,8 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
                 "additionalProperties": false,
                 "properties": {
                     "repository": { "type": "string", "description": "Indexed repository id" },
+                    "project": { "type": "string", "description": "Project scope used to select one repository" },
+                    "projectSet": { "type": "string", "description": "Project-set scope used to select one repository" },
                     "query": { "type": "string", "description": "Case-insensitive symbol/path search" },
                     "path": { "type": "string", "description": "Repository-relative path or directory" },
                     "symbol": { "type": "string", "description": "Symbol name or stable symbol key" },
@@ -2709,7 +2711,7 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
             }
         }));
     }
-    if ast_tools_enabled(config) {
+    if ast_tools_available(config) {
         tools.extend(AST_MCP_TOOL_NAMES.iter().map(|name| {
             json!({
                 "name": name,
@@ -2722,6 +2724,22 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
         }));
     }
     tools
+}
+
+fn code_graph_tools_enabled(config: &MemoryConfig) -> bool {
+    config.code_intel.enabled
+        || config.repository_sources.values().any(|source| {
+            MemoryConfig::load(&source.root, None)
+                .is_ok_and(|local| local.enabled && local.code_intel.enabled)
+        })
+}
+
+fn ast_tools_available(config: &MemoryConfig) -> bool {
+    ast_tools_enabled(config)
+        || config.repository_sources.values().any(|source| {
+            MemoryConfig::load(&source.root, None)
+                .is_ok_and(|local| local.enabled && ast_tools_enabled(&local))
+        })
 }
 
 fn is_admin_memory_tool(name: &str) -> bool {
@@ -3217,6 +3235,16 @@ fn resolve_code_graph_overlay(
             "invalid run workspace ownership manifest: {source}"
         ))
     })?;
+    if let Some(bound_repository_id) = manifest
+        .repository_binding
+        .as_ref()
+        .and_then(|binding| binding.repository_id())
+        && bound_repository_id.to_string() != repo_id
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace repository binding does not match the requested repository".to_string(),
+        ));
+    }
     let workspace_key = workspace_candidate
         .file_name()
         .and_then(|name| name.to_str())
@@ -5352,6 +5380,7 @@ fn memory_config_for_docs_scope(
     };
     let local_config = MemoryConfig::load(&source.root, None)?;
     let mut resolved = config.clone();
+    resolved.repo_root = source.root.clone();
     resolved.docs = local_config.docs;
     resolved.areas = local_config.areas;
     Ok(resolved)
@@ -6710,6 +6739,7 @@ mod tests {
                 .docs_target,
             repository.path().join("docs/ops.md")
         );
+        assert_eq!(resolved.repo_root, repository.path());
     }
 
     #[test]
@@ -6866,6 +6896,16 @@ mod tests {
                 .get("repoRoot")
                 .is_none()
         );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("project")
+                .is_some()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("projectSet")
+                .is_some()
+        );
         assert!(names.contains(&"code.ast.status".to_string()));
         assert!(names.contains(&"code.ast.outline".to_string()));
         assert!(names.contains(&"code.ast.symbols".to_string()));
@@ -7018,6 +7058,36 @@ mod tests {
 
         assert!(names.contains(&"memory.context".to_string()));
         assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
+    }
+
+    #[test]
+    fn mcp_tool_list_advertises_secondary_repository_code_tools() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let repository = TempDir::new().expect("secondary repository");
+        std::fs::write(
+            catalog.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n  ast:\n    enabled: false\n",
+        )
+        .expect("catalog config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-secondary".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-secondary".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let tools = memory_tool_descriptors(&config, &MemoryServerAuth::default());
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "code.graph.context")
+        );
+        assert!(tools.iter().any(|tool| tool["name"] == "code.ast.status"));
     }
 
     #[tokio::test]

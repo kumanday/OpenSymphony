@@ -172,6 +172,11 @@ pub fn related_by_issue_with_scope(
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    if !indexed_issue_visible_in_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested scope"
+        )));
+    }
     let mut related = Vec::new();
     let indexed_areas = indexed.areas();
     for candidate in load_indexed_issues(config)?
