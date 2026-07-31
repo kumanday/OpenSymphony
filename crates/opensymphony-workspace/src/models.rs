@@ -587,6 +587,8 @@ pub(crate) struct AfterCreateBootstrapReceipt {
     pub sanitized_workspace_key: String,
     pub workspace_path: PathBuf,
     pub completed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding: Option<RepositoryBinding>,
 }
 
 impl AfterCreateBootstrapReceipt {
@@ -597,6 +599,11 @@ impl AfterCreateBootstrapReceipt {
             sanitized_workspace_key: workspace.workspace_key().to_string(),
             workspace_path: workspace.workspace_path().to_path_buf(),
             completed_at: Utc::now(),
+            repository_binding: issue
+                .repository_binding
+                .as_ref()
+                .and_then(RepositoryBindingOutcome::resolved_binding)
+                .cloned(),
         }
     }
 }

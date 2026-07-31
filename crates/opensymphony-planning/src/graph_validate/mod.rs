@@ -31,7 +31,8 @@ pub use domain::{
     PlanCheckSeverity, PlanValidationReport, SelfBlock, UnknownDependency, UnknownMilestone,
 };
 pub use frontmatter::{
-    ParsedTaskFile, TaskFrontmatter, TaskFrontmatterError, parse_task_file, parse_task_text,
+    ParsedTaskFile, RepositoryFrontmatter, TaskFrontmatter, TaskFrontmatterError, parse_task_file,
+    parse_task_text,
 };
 pub use graph::DependencyGraphBuilder;
 pub use manifest::{

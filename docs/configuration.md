@@ -119,10 +119,12 @@ is rejected as an invalid binding rather than being treated as an absent label.
 The resolved binding records the central config and inventory generations
 before a worker is claimed. A binding change on a claimed task stops and
 removes the old generation's workspace before materializing the replacement,
-and fences late worker events from the old generation. A legacy workspace with
-no issue binding may be backfilled only when its persisted run manifest proves
-the requested repository; the current legacy configuration alone is not
-historical proof. In `legacy_single` mode only, an unlabelled task resolves to
+and fences late worker events from the old generation. A binding change on a
+queued retry removes its stale workspace while preserving the retry entry. A
+legacy workspace with no issue binding may be backfilled only when its
+persisted issue, run, or after-create receipt metadata proves the requested
+repository; the current legacy configuration alone is not historical proof.
+Unproven in-flight recovery is rematerialized through the normal retry path. In `legacy_single` mode only, an unlabelled task resolves to
 the configured repository for compatibility.
 Generated planning front matter quotes repository aliases as YAML strings, and
 sub-issue regeneration moves a parent's binding to the generated terminal

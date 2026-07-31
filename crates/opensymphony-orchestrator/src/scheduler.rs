@@ -9,13 +9,12 @@ use crate::opensymphony_domain::{
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptStatus, HealthStatus, IdentifierError, IssueExecution, IssueId,
     IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
-    OrchestratorSnapshot, ReleaseReason, RepositoryBindingOutcome, RepositoryRouting,
-    RepositoryRoutingMode, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy,
-    RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
-    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef,
-    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
-    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
-    managed_repository_aliases,
+    OrchestratorSnapshot, ReleaseReason, RepositoryBindingOutcome, RepositoryRouting, RetryAttempt,
+    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals,
+    SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceRecord, managed_repository_aliases,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -1042,6 +1041,7 @@ where
         let mut retry_records = Vec::new();
         for record in records {
             let mut recovered_run = record.recovered_run.clone();
+            let mut recovered_workspace = Some(record.workspace.clone());
             if let Some(recovered_run) = recovered_run.as_ref() {
                 self.reserve_recovered_worker_id(&recovered_run.worker_id);
             }
@@ -1056,7 +1056,33 @@ where
                             .clone()
                             .map(RepositoryBindingOutcome::Resolved)
                     })
-                    .or_else(|| self.legacy_recovered_binding(&normalized));
+                    .or_else(|| {
+                        record
+                            .issue
+                            .repository_binding
+                            .as_ref()
+                            .and_then(RepositoryBindingOutcome::resolved_binding)
+                            .cloned()
+                            .map(RepositoryBindingOutcome::Resolved)
+                    });
+                // A legacy configuration is a locator, not proof of the
+                // repository currently on disk. Do not attach an in-flight
+                // worker to the current binding when neither the run nor the
+                // recovered issue manifest proves its old identity. Park it
+                // for the normal retry path instead.
+                if recovered_run.is_some()
+                    && recovered_binding.is_none()
+                    && normalized.repository_binding.is_some()
+                {
+                    self.workspace
+                        .remove_workspace(&record.workspace)
+                        .await
+                        .map_err(|error| SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        })?;
+                    recovered_workspace = None;
+                    recovered_run = None;
+                }
                 let binding_changed =
                     recovered_run.is_some() && normalized.repository_binding != recovered_binding;
                 if let Some(run) = recovered_run.as_mut()
@@ -1066,11 +1092,7 @@ where
                         .as_ref()
                         .and_then(|outcome| outcome.resolved_binding().cloned());
                 }
-                self.upsert_active_execution(
-                    normalized.clone(),
-                    observed_at,
-                    Some(record.workspace),
-                )?;
+                self.upsert_active_execution(normalized.clone(), observed_at, recovered_workspace)?;
                 if record.had_in_flight_run {
                     if recovered_run.is_some() {
                         self.restore_recovered_run(
@@ -1362,25 +1384,6 @@ where
         Ok(())
     }
 
-    fn legacy_recovered_binding(
-        &self,
-        issue: &NormalizedIssue,
-    ) -> Option<RepositoryBindingOutcome> {
-        if self
-            .config
-            .repository_routing
-            .as_ref()
-            .is_none_or(|routing| routing.mode != RepositoryRoutingMode::LegacySingle)
-        {
-            return None;
-        }
-        issue
-            .repository_binding
-            .as_ref()
-            .and_then(|outcome| outcome.resolved_binding().cloned())
-            .map(RepositoryBindingOutcome::Resolved)
-    }
-
     async fn reconcile_tracker_state(
         &mut self,
         tracker_snapshot: &TrackerSnapshot,
@@ -1417,7 +1420,9 @@ where
                 .is_some_and(|execution| {
                     matches!(
                         execution.status(),
-                        SchedulerStatus::Claimed | SchedulerStatus::Running
+                        SchedulerStatus::Claimed
+                            | SchedulerStatus::Running
+                            | SchedulerStatus::RetryQueued
                     ) && execution.issue().repository_binding != normalized.repository_binding
                 })
             {
@@ -1476,7 +1481,9 @@ where
                         );
                         if matches!(
                             existing.status(),
-                            SchedulerStatus::Claimed | SchedulerStatus::Running
+                            SchedulerStatus::Claimed
+                                | SchedulerStatus::Running
+                                | SchedulerStatus::RetryQueued
                         ) && existing.issue().repository_binding != issue.repository_binding
                         {
                             self.supersede_binding(issue_id.clone(), issue, observed_at)
@@ -1661,6 +1668,7 @@ where
             }
         }
 
+        let retry = execution.retry().cloned();
         if let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.remove_workspace(&workspace).await
         {
@@ -1670,7 +1678,13 @@ where
             });
         }
 
-        self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));
+        let replacement = IssueExecution::new(replacement, observed_at);
+        let replacement = if let Some(retry) = retry {
+            replacement.restore_retry(retry)?
+        } else {
+            replacement
+        };
+        self.insert_execution(issue_id, replacement);
         Ok(())
     }
 

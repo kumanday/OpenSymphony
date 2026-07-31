@@ -94,7 +94,7 @@ Recommended layout inside each issue workspace:
 Notes:
 
 - `.opensymphony/` is OpenSymphony-owned metadata.
-- `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
+- `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap. When a repository binding is known, the receipt carries that resolved identity as historical proof for a later metadata-bootstrap resume.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
 - `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, active reuse policy, timestamps, transport diagnostics, the launch profile needed to resume the same OpenHands thread later through `opensymphony debug`, and an `llm_config_fingerprint` that tracks the model name for observability (no longer used for drift detection).
@@ -139,6 +139,11 @@ Do not rerun it on every worker attempt.
 If the first `after_create` attempt fails before bootstrap completes, the next `ensure` attempt should retry `after_create` instead of treating the partially initialized workspace directory as fully reusable.
 
 After a successful first-time `after_create`, OpenSymphony must persist a root-scoped bootstrap receipt before it starts creating `.opensymphony/` metadata. If later bootstrap steps fail, the next `ensure` should resume metadata bootstrap without rerunning `after_create`.
+
+Recovery must not infer an old checkout's repository from the current legacy
+configuration alone. If an in-flight run has no persisted repository proof in
+its issue, run, or bootstrap receipt metadata, the workspace is removed and the
+issue is rematerialized through the normal retry path.
 
 Steady-state workspace ownership is still determined by a decodable OpenSymphony-owned `issue.json` whose workspace path and sanitized key match the current workspace, not by raw file existence. Repository-provided, copied, or undecodable `.opensymphony/issue.json` or `.opensymphony.after_create.json` artifacts must not suppress a required first-bootstrap retry.
 

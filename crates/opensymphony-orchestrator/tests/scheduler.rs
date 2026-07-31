@@ -2421,6 +2421,84 @@ async fn blocked_binding_preserves_a_due_retry_execution() {
 }
 
 #[tokio::test]
+async fn queued_repository_binding_change_rematerializes_before_retry() {
+    let mut issue = tracker_issue(
+        "lin-repo-retry-rebind",
+        "COE-548-RETRY-REBIND",
+        "In Progress",
+        0,
+    );
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial repository-bound run should launch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("worker failed".to_string()),
+                Some("retry".to_string()),
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("failure should queue retry");
+    let retry_before_rebind = scheduler
+        .execution(&IssueId::new("lin-repo-retry-rebind").expect("issue id should be valid"))
+        .expect("execution should remain tracked")
+        .retry()
+        .expect("retry should exist")
+        .clone();
+
+    scheduler.tracker_mut().active[0].labels = vec!["repo:two".to_string()];
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("binding change should rematerialize the queued retry");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-retry-rebind").expect("issue id should be valid"))
+        .expect("replacement execution should remain tracked");
+    assert_eq!(scheduler.workspace().removed, vec!["COE-548-RETRY-REBIND"]);
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(execution.status(), SchedulerStatus::Running);
+    assert_eq!(
+        execution
+            .current_run()
+            .expect("replacement run should exist")
+            .normal_retry_count,
+        retry_before_rebind.normal_retry_count
+    );
+    assert_eq!(
+        execution
+            .current_run()
+            .and_then(|run| run.repository_binding.as_ref())
+            .map(|binding| binding.alias.as_str()),
+        Some("two")
+    );
+}
+
+#[tokio::test]
 async fn tracker_inactive_failed_execution_reopens_after_reactivation() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-271", "COE-271", "In Progress", 0)],
@@ -4836,6 +4914,28 @@ async fn legacy_recovery_backfills_binding_before_drift_comparison() {
         "COE-548-LEGACY-RECOVERY",
         "/tmp/recovered/COE-548-LEGACY-RECOVERY",
     );
+    let historical_binding = RepositoryBinding {
+        alias: "one".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:one").expect("repository id should be valid"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("one"),
+                "https://github.com/example/repository",
+            )
+            .expect("fingerprint should be valid"),
+        },
+        config_generation: "config-test".to_string(),
+        inventory_generation: "inventory-test".to_string(),
+    };
+    let mut recovered_issue = normalized_issue(
+        "lin-legacy-recovery",
+        "COE-548-LEGACY-RECOVERY",
+        "In Progress",
+    );
+    recovered_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(
+        historical_binding.clone(),
+    ));
     let tracker = FakeTracker {
         active: vec![tracker_issue(
             "lin-legacy-recovery",
@@ -4847,11 +4947,7 @@ async fn legacy_recovery_backfills_binding_before_drift_comparison() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
-            issue: normalized_issue(
-                "lin-legacy-recovery",
-                "COE-548-LEGACY-RECOVERY",
-                "In Progress",
-            ),
+            issue: recovered_issue,
             workspace: recovered_workspace.clone(),
             successful_run: false,
             cancelled_run: false,
@@ -4869,7 +4965,7 @@ async fn legacy_recovery_backfills_binding_before_drift_comparison() {
                 worker_id: recovered_worker_id.clone(),
                 conversation: conversation(&recovered_worker_id),
                 normal_retry_count: 0,
-                repository_binding: None,
+                repository_binding: Some(historical_binding),
             }),
         }],
         records: HashMap::from([("lin-legacy-recovery".to_string(), recovered_workspace)]),
@@ -4902,6 +4998,84 @@ async fn legacy_recovery_backfills_binding_before_drift_comparison() {
             .and_then(|run| run.repository_binding.as_ref())
             .map(|binding| binding.alias.as_str()),
         Some("one")
+    );
+}
+
+#[tokio::test]
+async fn legacy_recovery_rematerializes_without_persisted_binding_proof() {
+    let recovered_worker_id =
+        WorkerId::new("worker-unproven-legacy-recovery").expect("worker id should be valid");
+    let recovered_workspace = workspace_record(
+        "COE-548-LEGACY-UNPROVEN",
+        "/tmp/recovered/COE-548-LEGACY-UNPROVEN",
+    );
+    let tracker = FakeTracker {
+        active: vec![{
+            let mut issue = tracker_issue(
+                "lin-legacy-unproven",
+                "COE-548-LEGACY-UNPROVEN",
+                "In Progress",
+                0,
+            );
+            issue.project_id = Some("project-id".to_string());
+            issue
+        }],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue(
+                "lin-legacy-unproven",
+                "COE-548-LEGACY-UNPROVEN",
+                "In Progress",
+            ),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: None,
+            }),
+        }],
+        records: HashMap::from([("lin-legacy-unproven".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    let routing = repository_routing();
+    config.repository_routing = Some(RepositoryRouting {
+        mode: RepositoryRoutingMode::LegacySingle,
+        legacy_repository: Some("one".to_string()),
+        ..routing
+    });
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("unproven legacy recovery should rematerialize safely");
+
+    assert_eq!(
+        scheduler.workspace().removed,
+        vec!["COE-548-LEGACY-UNPROVEN"]
+    );
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_ne!(
+        scheduler.worker().launches[0].run.worker_id,
+        recovered_worker_id
     );
 }
 

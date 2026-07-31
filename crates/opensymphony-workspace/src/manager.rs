@@ -45,7 +45,7 @@ enum ExistingReceiptState {
     Missing,
     Owned,
     ForeignArtifact,
-    Conflict(AfterCreateBootstrapReceipt),
+    Conflict(Box<AfterCreateBootstrapReceipt>),
 }
 
 enum ExistingWorkspaceState {
@@ -146,6 +146,15 @@ impl WorkspaceManager {
                 .await?
                 .and_then(|manifest| manifest.repository_binding)
                 .map(|binding| binding.repository_id().to_string());
+            let receipt_repository = self
+                .load_manifest::<AfterCreateBootstrapReceipt>(
+                    &handle,
+                    &handle.after_create_receipt_path(),
+                )
+                .await?
+                .and_then(|receipt| receipt.repository_binding)
+                .map(|binding| binding.repository_id().to_string());
+            let historical_repository = historical_repository.or(receipt_repository);
             let requested_repository = issue
                 .repository_binding
                 .as_ref()
@@ -153,13 +162,14 @@ impl WorkspaceManager {
                 .map(|repository| repository.to_string());
             let configured_legacy_repository =
                 self.legacy_repository.as_ref().map(ToString::to_string);
+            let legacy_repository_mismatch = configured_legacy_repository
+                .as_ref()
+                .is_some_and(|configured| Some(configured) != requested_repository.as_ref());
             if existing_repository != requested_repository
+                && requested_repository.is_some()
                 && (existing_repository.is_some()
-                    || (requested_repository.is_some()
-                        && (historical_repository != requested_repository
-                            || configured_legacy_repository.is_some_and(|configured| {
-                                Some(configured) != requested_repository
-                            }))))
+                    || historical_repository != requested_repository
+                    || legacy_repository_mismatch)
             {
                 return Err(WorkspaceError::RepositoryBindingMismatch {
                     workspace: handle.workspace_path().to_path_buf(),
@@ -768,7 +778,7 @@ impl WorkspaceManager {
         match receipt_state {
             ExistingReceiptState::Owned => Ok(ExistingWorkspaceState::AfterCreateCompleted),
             ExistingReceiptState::Conflict(receipt) => Ok(ExistingWorkspaceState::Conflict(
-                ownership_claim_from_after_create_receipt(receipt),
+                ownership_claim_from_after_create_receipt(*receipt),
             )),
             ExistingReceiptState::ForeignArtifact => Ok(ExistingWorkspaceState::ForeignArtifact),
             ExistingReceiptState::Missing => {
@@ -1362,7 +1372,7 @@ fn classify_after_create_receipt_ownership(
     if receipt.issue_id == issue.issue_id && receipt.identifier == issue.identifier {
         ExistingReceiptState::Owned
     } else {
-        ExistingReceiptState::Conflict(receipt)
+        ExistingReceiptState::Conflict(Box::new(receipt))
     }
 }
 

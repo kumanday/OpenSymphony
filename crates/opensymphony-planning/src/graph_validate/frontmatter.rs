@@ -48,11 +48,18 @@ pub struct TaskFrontmatter {
     #[serde(default)]
     pub areas: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
+    pub repository: Option<RepositoryFrontmatter>,
     /// Any additional fields the task file carries. Preserved so the
     /// validator can re-emit the original block after normalisation.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RepositoryFrontmatter {
+    String(String),
+    List(Vec<String>),
 }
 
 /// Parsed representation of a task file with frontmatter and body.
@@ -192,7 +199,20 @@ mod tests {
         let text =
             "---\nid: OSYM-885\ntitle: Canonical Repository Binding\nrepository: core\n---\nbody\n";
         let parsed = parse_task_text(text, "test.md").expect("parse should succeed");
-        assert_eq!(parsed.frontmatter.repository.as_deref(), Some("core"));
+        assert_eq!(
+            parsed.frontmatter.repository,
+            Some(RepositoryFrontmatter::String("core".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_singleton_repository_list_in_frontmatter() {
+        let text = "---\nid: OSYM-885\ntitle: Canonical Repository Binding\nrepository: [core]\n---\nbody\n";
+        let parsed = parse_task_text(text, "test.md").expect("singleton list should parse");
+        assert_eq!(
+            parsed.frontmatter.repository,
+            Some(RepositoryFrontmatter::List(vec!["core".to_string()]))
+        );
     }
 
     #[test]

@@ -450,7 +450,22 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
         CleanupConfig::default(),
     ))
     .expect("manager should build");
-    let issue = sample_issue("COE-263-after-create-receipt");
+    let mut issue = sample_issue("COE-263-after-create-receipt");
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:core")
+                .expect("repository id should be valid"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("core"),
+                "owner/repository",
+            )
+            .expect("fingerprint should be valid"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    }));
 
     let first_error = manager
         .ensure(&issue)
@@ -468,6 +483,14 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
         tokio::fs::try_exists(workspace_path.join(".opensymphony.after_create.json"))
             .await
             .expect("after_create receipt lookup should succeed")
+    );
+    let receipt = tokio::fs::read_to_string(workspace_path.join(".opensymphony.after_create.json"))
+        .await
+        .expect("after_create receipt should be readable");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&receipt).expect("receipt should be valid JSON")
+            ["repository_binding"]["repository"]["id"],
+        "github:repository:core"
     );
 
     tokio::fs::remove_file(workspace_path.join(".opensymphony"))
