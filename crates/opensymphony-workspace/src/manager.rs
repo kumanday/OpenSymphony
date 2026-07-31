@@ -1,9 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     io,
     path::{Path, PathBuf},
     process::Stdio,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::Utc;
@@ -75,6 +76,28 @@ enum ExistingWorkspaceState {
 struct WorkspaceOwnershipClaim {
     issue_id: String,
     identifier: String,
+}
+
+async fn checkout_operation_with_timeout<T, F>(
+    checkout_timeout: Option<Duration>,
+    path: &Path,
+    operation: &str,
+    future: F,
+) -> Result<T, WorkspaceError>
+where
+    F: Future<Output = Result<T, WorkspaceError>>,
+{
+    match checkout_timeout {
+        Some(timeout_duration) => match timeout(timeout_duration, future).await {
+            Ok(result) => result,
+            Err(_) => Err(WorkspaceError::CheckoutOperation {
+                operation: operation.to_owned(),
+                path: path.to_path_buf(),
+                detail: format!("checkout acquisition timed out after {timeout_duration:?}"),
+            }),
+        },
+        None => future.await,
+    }
 }
 
 enum HookCommandOutput {
@@ -171,7 +194,7 @@ impl WorkspaceManager {
     pub async fn ensure_with_checkout_timeout(
         &self,
         issue: &IssueDescriptor,
-        checkout_timeout: std::time::Duration,
+        checkout_timeout: Duration,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         if let Some(binding) = issue
             .repository_binding
@@ -339,7 +362,7 @@ impl WorkspaceManager {
         binding: &RepositoryBinding,
         repository: &CheckoutRepository,
         run_id: Option<&str>,
-        checkout_timeout: Option<std::time::Duration>,
+        checkout_timeout: Option<Duration>,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
         let workspace_key = checkout_workspace_key(
@@ -348,7 +371,10 @@ impl WorkspaceManager {
             binding.repository_id().as_str(),
         )?;
 
-        if let Some(existing) = self.find_compatible_checkout(issue, binding).await? {
+        if let Some(existing) = self
+            .find_compatible_checkout(issue, binding, checkout_timeout)
+            .await?
+        {
             if let Some(run_id) = run_id {
                 self.update_checkout_run_id(&existing.handle, run_id)
                     .await?;
@@ -394,9 +420,13 @@ impl WorkspaceManager {
         }
         clone_result?;
 
-        let facts = match self
-            .verify_git_checkout(&staging_path, binding, repository, true)
-            .await
+        let facts = match checkout_operation_with_timeout(
+            checkout_timeout,
+            &staging_path,
+            "verify acquired checkout",
+            self.verify_git_checkout(&staging_path, binding, repository, true),
+        )
+        .await
         {
             Ok(facts) => facts,
             Err(error) => {
@@ -404,9 +434,13 @@ impl WorkspaceManager {
                 return Err(error);
             }
         };
-        let instruction = match self
-            .load_instruction_provenance(&staging_path, repository, &facts.head)
-            .await
+        let instruction = match checkout_operation_with_timeout(
+            checkout_timeout,
+            &staging_path,
+            "discover checkout instructions",
+            self.load_instruction_provenance(&staging_path, repository, &facts.head),
+        )
+        .await
         {
             Ok(instruction) => instruction,
             Err(error) => {
@@ -414,7 +448,14 @@ impl WorkspaceManager {
                 return Err(error);
             }
         };
-        if let Err(error) = self.exclude_metadata_from_git(&staging_path).await {
+        if let Err(error) = checkout_operation_with_timeout(
+            checkout_timeout,
+            &staging_path,
+            "prepare checkout metadata",
+            self.exclude_metadata_from_git(&staging_path),
+        )
+        .await
+        {
             let _ = fs::remove_dir_all(&staging_path).await;
             return Err(error);
         }
@@ -443,14 +484,18 @@ impl WorkspaceManager {
                 return Err(failure.error);
             }
         };
-        if let Err(error) = self
-            .verify_git_checkout(
+        if let Err(error) = checkout_operation_with_timeout(
+            checkout_timeout,
+            staging_workspace.workspace_path(),
+            "verify checkout after creation hook",
+            self.verify_git_checkout(
                 staging_workspace.workspace_path(),
                 binding,
                 repository,
                 true,
-            )
-            .await
+            ),
+        )
+        .await
         {
             let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
             return Err(error);
@@ -538,7 +583,14 @@ impl WorkspaceManager {
             }
             record
         });
-        if let Err(error) = self.verify_checkout(&workspace).await {
+        if let Err(error) = checkout_operation_with_timeout(
+            checkout_timeout,
+            workspace.workspace_path(),
+            "verify published checkout",
+            self.verify_checkout(&workspace),
+        )
+        .await
+        {
             self.remove_published_checkout(&workspace).await;
             return Err(error);
         }
@@ -607,6 +659,16 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         allow_worker_changes: bool,
     ) -> Result<CheckoutManifest, WorkspaceError> {
+        self.verify_checkout_with_worker_changes_timeout(workspace, allow_worker_changes, None)
+            .await
+    }
+
+    async fn verify_checkout_with_worker_changes_timeout(
+        &self,
+        workspace: &WorkspaceHandle,
+        allow_worker_changes: bool,
+        checkout_timeout: Option<Duration>,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
         let manifest = self
             .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
@@ -637,14 +699,18 @@ impl WorkspaceManager {
                 generation: manifest.generation.clone(),
                 reason: "repository policy is unavailable".to_owned(),
             })?;
-        let facts = self
-            .verify_git_checkout(
+        let facts = checkout_operation_with_timeout(
+            checkout_timeout,
+            workspace.workspace_path(),
+            "verify retained checkout",
+            self.verify_git_checkout(
                 workspace.workspace_path(),
                 &manifest.repository_binding,
                 repository,
                 !allow_worker_changes,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         if manifest.schema_version != 1
             || manifest.remote_fingerprint
                 != manifest
@@ -673,9 +739,42 @@ impl WorkspaceManager {
                 reason: "Git state does not match the recorded generation".to_owned(),
             });
         }
-        let instruction = self
-            .load_instruction_provenance(workspace.workspace_path(), repository, &manifest.head)
-            .await?;
+        if allow_worker_changes {
+            let ancestry = checkout_operation_with_timeout(
+                checkout_timeout,
+                workspace.workspace_path(),
+                "verify retained checkout ancestry",
+                self.git(
+                    workspace.workspace_path(),
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        &manifest.target_commit,
+                        &facts.head,
+                    ],
+                ),
+            )
+            .await;
+            if ancestry.is_err() {
+                return Err(WorkspaceError::CheckoutVerification {
+                    path: workspace.workspace_path().to_path_buf(),
+                    generation: manifest.generation,
+                    reason: "retained checkout HEAD no longer descends from the verified target"
+                        .to_owned(),
+                });
+            }
+        }
+        let instruction = checkout_operation_with_timeout(
+            checkout_timeout,
+            workspace.workspace_path(),
+            "verify checkout instructions",
+            self.load_instruction_provenance(
+                workspace.workspace_path(),
+                repository,
+                &manifest.head,
+            ),
+        )
+        .await?;
         if instruction != manifest.instruction {
             return Err(WorkspaceError::CheckoutVerification {
                 path: workspace.workspace_path().to_path_buf(),
@@ -742,6 +841,7 @@ impl WorkspaceManager {
         &self,
         issue: &IssueDescriptor,
         binding: &RepositoryBinding,
+        checkout_timeout: Option<Duration>,
     ) -> Result<Option<EnsureWorkspaceResult>, WorkspaceError> {
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
             WorkspaceError::ReadDirectory {
@@ -846,7 +946,11 @@ impl WorkspaceManager {
                     )
             });
             match self
-                .verify_checkout_with_worker_changes(&handle, allow_worker_changes)
+                .verify_checkout_with_worker_changes_timeout(
+                    &handle,
+                    allow_worker_changes,
+                    checkout_timeout,
+                )
                 .await
             {
                 Ok(_) => {
@@ -1537,17 +1641,21 @@ impl WorkspaceManager {
         &self,
         issue_reference: &str,
     ) -> Result<Option<WorkspaceHandle>, WorkspaceError> {
+        let mut verification_error = None;
         for (handle, manifest) in self.list_all_workspaces().await? {
             if !workspace_matches_issue_reference(&manifest, issue_reference)
                 || handle.checkout_generation().is_none()
             {
                 continue;
             }
-            if self.verify_checkout_for_retry(&handle).await.is_ok() {
-                return Ok(Some(handle));
+            match self.verify_checkout_for_retry(&handle).await {
+                Ok(_) => return Ok(Some(handle)),
+                Err(error) => {
+                    verification_error.get_or_insert(error);
+                }
             }
         }
-        Ok(None)
+        verification_error.map_or(Ok(None), Err)
     }
 
     /// List all valid workspaces in the workspace root.
@@ -2481,7 +2589,7 @@ fn is_workflow_instruction_path(path: &Path) -> bool {
 
 async fn run_hook_command(
     mut command: Command,
-    timeout_duration: std::time::Duration,
+    timeout_duration: Duration,
 ) -> io::Result<HookCommandOutput> {
     let mut child = command.spawn()?;
     let process_id = child.id();

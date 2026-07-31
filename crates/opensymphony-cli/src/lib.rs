@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use crate::opensymphony_codex::CODEX_APP_SERVER_KIND;
 use crate::opensymphony_control::{
     AgentServerStatus, ControlPlaneServer, DaemonSnapshot, DaemonState, DaemonStatus,
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
@@ -2263,6 +2264,18 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         serde_json::from_str(&manifest_content)
             .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
 
+    if old_manifest.transport_target.as_deref() == Some(CODEX_APP_SERVER_KIND)
+        || old_manifest
+            .runtime_envelope
+            .as_ref()
+            .is_some_and(|envelope| envelope.harness == CODEX_APP_SERVER_KIND)
+    {
+        return Err(format!(
+            "Codex conversation {} cannot be rehydrated by the OpenHands rehydrate command; use the Codex adapter recovery path",
+            old_manifest.conversation_id
+        ));
+    }
+
     if strict_recovery_enabled(runtime.repository_routing.as_ref()) {
         let envelope = old_manifest.runtime_envelope.as_ref().ok_or_else(|| {
             format!(
@@ -2270,6 +2283,12 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
                 workspace.identifier()
             )
         })?;
+        if envelope.conversation_binding.as_deref() != Some(old_manifest.conversation_id.as_str()) {
+            return Err(format!(
+                "strict conversation {} has a runtime envelope bound to a different conversation",
+                old_manifest.conversation_id
+            ));
+        }
         workspace_manager
             .verify_runtime_envelope_for_retry(&workspace, envelope)
             .await

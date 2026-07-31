@@ -987,7 +987,6 @@ fn resolve_central_config(
         };
         if !matches!(credential.kind.as_str(), "ssh-agent")
             && !(credential.kind == "environment" && credential.variable.is_some())
-            && credential.reference.is_none()
         {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("repositories.{repository_id}.credential"),
@@ -3088,10 +3087,24 @@ scheduler:
             .expect("integration instructions should be written");
         let source = central_fixture(root.path()).replace(
             "  github-ssh:\n    kind: ssh-agent\n",
-            "  github-ssh:\n    kind: codex_cli_login\n    reference: codex-cli:chatgpt-login\n",
+            "  github-ssh:\n    kind: ssh-agent\n  typed-test:\n    kind: codex_cli_login\n    reference: codex-cli:chatgpt-login\n",
         );
         resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect("typed credential references should resolve");
+    }
+
+    #[test]
+    fn central_config_rejects_typed_credential_references_for_repositories() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent\n",
+            "  github-ssh:\n    kind: codex_cli_login\n    reference: codex-cli:chatgpt-login\n",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("unsupported repository credential should fail closed");
+        assert!(
+            matches!(error, CentralConfigError::InvalidReference { field } if field == "repositories.core-repo.credential")
+        );
     }
 
     #[test]

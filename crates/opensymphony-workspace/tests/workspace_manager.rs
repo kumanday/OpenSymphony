@@ -402,6 +402,35 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         repaired.handle.workspace_path()
     );
 
+    git(
+        clean_retry.handle.workspace_path(),
+        &["checkout", "--orphan", "rewritten"],
+    );
+    git(clean_retry.handle.workspace_path(), &["rm", "-rf", "."]);
+    std::fs::write(
+        clean_retry.handle.workspace_path().join("AGENTS.md"),
+        "rewritten instructions\n",
+    )
+    .expect("rewritten instructions should be written");
+    git(clean_retry.handle.workspace_path(), &["add", "AGENTS.md"]);
+    git(
+        clean_retry.handle.workspace_path(),
+        &["commit", "-m", "unrelated rewrite"],
+    );
+    git(
+        clean_retry.handle.workspace_path(),
+        &["branch", "-M", "main"],
+    );
+    let ancestry_error = manager
+        .verify_checkout_for_retry(&clean_retry.handle)
+        .await
+        .expect_err("unrelated retained HEAD should be rejected");
+    assert!(matches!(
+        ancestry_error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason.contains("no longer descends")
+    ));
+
     let checkout_manifest_path = clean_retry.handle.checkout_manifest_path();
     let mut tampered_manifest: serde_json::Value = serde_json::from_str(
         &tokio::fs::read_to_string(&checkout_manifest_path)
@@ -418,6 +447,12 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     .expect("tampered manifest should be writable");
     assert!(matches!(
         manager.verify_checkout(&clean_retry.handle).await,
+        Err(WorkspaceError::CheckoutVerification { .. })
+    ));
+    assert!(matches!(
+        manager
+            .find_verified_workspace_by_issue_reference(&issue.identifier)
+            .await,
         Err(WorkspaceError::CheckoutVerification { .. })
     ));
 }

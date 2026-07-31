@@ -966,20 +966,28 @@ async fn verify_strict_recovery_envelope(
     workspace: &WorkspaceHandle,
     raw_manifest: &str,
 ) -> Result<(), DebugCommandError> {
-    if runtime
-        .repository_checkouts
-        .as_ref()
-        .is_none_or(BTreeMap::is_empty)
-    {
+    if !super::strict_recovery_enabled(runtime.repository_routing.as_ref()) {
         return Ok(());
     }
     let run_envelope = manager
         .load_run_manifest(workspace)
         .await?
         .and_then(|manifest| manifest.runtime_envelope);
-    let conversation_envelope = serde_json::from_str::<serde_json::Value>(raw_manifest)
-        .ok()
-        .and_then(|manifest| manifest.get("runtime_envelope").cloned())
+    let raw_manifest_value =
+        serde_json::from_str::<serde_json::Value>(raw_manifest).map_err(|error| {
+            DebugCommandError::StrictRecovery {
+                detail: format!("conversation manifest is not valid JSON: {error}"),
+            }
+        })?;
+    let conversation_id = raw_manifest_value
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| DebugCommandError::StrictRecovery {
+            detail: "conversation manifest has no conversation_id".to_owned(),
+        })?;
+    let conversation_envelope = raw_manifest_value
+        .get("runtime_envelope")
+        .cloned()
         .and_then(|envelope| serde_json::from_value::<TerminalRuntimeEnvelope>(envelope).ok());
     if let (Some(run), Some(conversation)) = (&run_envelope, &conversation_envelope)
         && run != conversation
@@ -993,6 +1001,12 @@ async fn verify_strict_recovery_envelope(
             detail: "strict checkout has no persisted runtime envelope".to_owned(),
         }
     })?;
+    if expected.conversation_binding.as_deref() != Some(conversation_id) {
+        return Err(DebugCommandError::StrictRecovery {
+            detail: "runtime envelope conversation binding does not match the containing manifest"
+                .to_owned(),
+        });
+    }
     manager
         .verify_runtime_envelope_for_retry(workspace, &expected)
         .await
