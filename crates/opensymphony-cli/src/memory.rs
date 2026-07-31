@@ -5094,7 +5094,35 @@ fn memory_config_for_docs_scope(
     config: &MemoryConfig,
     scope: &MemoryScopeFilter,
 ) -> Result<MemoryConfig, MemoryError> {
-    let Some(repository_id) = scope.repo.as_deref() else {
+    let repository_id = match scope.repo.as_deref() {
+        Some(repository_id) => Some(repository_id),
+        None => {
+            let Some(project_id) = scope.project.as_deref().and_then(non_empty) else {
+                return Ok(config.clone());
+            };
+            let candidates = config
+                .repository_sources
+                .values()
+                .filter(|source| source.project_scope_ids.contains(&project_id))
+                .map(|source| source.repository_id.as_str())
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [repository_id] => Some(*repository_id),
+                [] if config.repository_sources.is_empty() => return Ok(config.clone()),
+                [] => {
+                    return Err(MemoryError::InvalidInput(format!(
+                        "no repository source is associated with project `{project_id}`"
+                    )));
+                }
+                _ => {
+                    return Err(MemoryError::InvalidInput(format!(
+                        "a canonical repository id is required when project `{project_id}` matches multiple repository sources"
+                    )));
+                }
+            }
+        }
+    };
+    let Some(repository_id) = repository_id else {
         return Ok(config.clone());
     };
     let Some(source) = config.repository_sources.get(repository_id) else {
@@ -6396,6 +6424,8 @@ fn print_search_results(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
@@ -6409,8 +6439,9 @@ mod tests {
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
-        MemoryConfig, MemoryError, code_symbol_detail, code_symbol_neighborhood,
-        code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
+        MemoryConfig, MemoryError, MemoryRepositorySource, MemoryScopeFilter, code_symbol_detail,
+        code_symbol_neighborhood, code_symbols_containing_span, compare_code_symbols,
+        persist_code_intel_documents,
     };
     use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -6418,6 +6449,81 @@ mod tests {
     use duckdb::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn project_scoped_docs_resolve_the_unique_repository_source() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join(".opensymphony/memory"))
+            .expect("repository memory directory");
+        std::fs::write(
+            repository.path().join(".opensymphony/memory/memory.yaml"),
+            "areas:\n  ops:\n    docs_target: docs/ops.md\n",
+        )
+        .expect("repository memory config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let resolved = super::memory_config_for_docs_scope(
+            &config,
+            &MemoryScopeFilter {
+                project: Some("project-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("project should resolve to its unique repository");
+        assert_eq!(
+            resolved
+                .areas
+                .get("ops")
+                .expect("repository area")
+                .docs_target,
+            repository.path().join("docs/ops.md")
+        );
+    }
+
+    #[test]
+    fn project_scoped_docs_reject_ambiguous_repository_sources() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        for (repository_id, root) in [("repo-a", first.path()), ("repo-b", second.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["shared-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+
+        let error = super::memory_config_for_docs_scope(
+            &config,
+            &MemoryScopeFilter {
+                project: Some("shared-project".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect_err("ambiguous project docs should require a repository");
+        assert!(
+            error
+                .to_string()
+                .contains("matches multiple repository sources")
+        );
+    }
 
     #[test]
     fn mcp_brief_requires_or_derives_a_catalog_scope() {
@@ -9707,11 +9813,11 @@ Public memory concept.
         let repository = TempDir::new().expect("repository");
         let config = MemoryConfig::load(instance.path(), None)
             .expect("config")
-            .with_repository_source(crate::opensymphony_memory::MemoryRepositorySource {
+            .with_repository_source(MemoryRepositorySource {
                 repository_id: "github:repository:123".to_string(),
                 root: repository.path().to_path_buf(),
                 commit_sha: Some("abc123".to_string()),
-                project_scope_ids: std::collections::BTreeSet::new(),
+                project_scope_ids: BTreeSet::new(),
                 target_branch: None,
             })
             .with_default_repository_id("github:repository:123");

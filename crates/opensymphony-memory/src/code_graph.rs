@@ -3989,6 +3989,10 @@ pub fn migrate_code_repository_identity(
             "UPDATE code_symbols SET symbol_id = ? WHERE symbol_id = ? AND repo_id = ?",
             params![temporary_id, old_id, legacy_repo_id],
         )?;
+        transaction.execute(
+            "UPDATE code_symbols SET container_symbol_id = ? WHERE container_symbol_id = ? AND repo_id = ?",
+            params![temporary_id, old_id, legacy_repo_id],
+        )?;
         for table in ["code_edges", "code_edge_revisions"] {
             for column in ["source_symbol_id", "target_symbol_id"] {
                 transaction.execute(
@@ -3999,6 +4003,10 @@ pub fn migrate_code_repository_identity(
         }
         transaction.execute(
             "UPDATE code_symbols SET symbol_id = ? WHERE symbol_id = ? AND repo_id = ?",
+            params![canonical_id, temporary_id, legacy_repo_id],
+        )?;
+        transaction.execute(
+            "UPDATE code_symbols SET container_symbol_id = ? WHERE container_symbol_id = ? AND repo_id = ?",
             params![canonical_id, temporary_id, legacy_repo_id],
         )?;
         for table in ["code_edges", "code_edge_revisions"] {
@@ -9853,6 +9861,39 @@ mod code_graph_tests {
             .expect("symbol");
         connection
             .execute(
+                "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-child",
+                    "legacy-child-key",
+                    "legacy-repo",
+                    "abc",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "function",
+                    "child",
+                    Some("legacy-symbol".to_string()),
+                    "legacy-symbol",
+                    Option::<String>::None,
+                    2_i64,
+                    0_i64,
+                    2_i64,
+                    10_i64,
+                    11_i64,
+                    21_i64,
+                    2_i64,
+                    2_i64,
+                    "content",
+                    "snippet",
+                    "parser",
+                    "query-pack",
+                    "now",
+                    "current",
+                ],
+            )
+            .expect("child symbol");
+        connection
+            .execute(
                 "INSERT INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 duckdb::params![
                     "legacy-edge",
@@ -9904,6 +9945,14 @@ mod code_graph_tests {
             .expect("migrated symbol");
         assert_eq!(symbol.0, "canonical-repo");
         assert_ne!(symbol.1, "legacy-symbol");
+        let container_symbol_id: Option<String> = connection
+            .query_row(
+                "SELECT container_symbol_id FROM code_symbols WHERE symbol_key = ?",
+                ["legacy-child-key"],
+                |row| row.get(0),
+            )
+            .expect("migrated child symbol");
+        assert_eq!(container_symbol_id.as_deref(), Some(symbol.1.as_str()));
         let edge = connection
             .query_row(
                 "SELECT repo_id, edge_id, source_symbol_id FROM code_edges",
