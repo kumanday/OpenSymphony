@@ -297,12 +297,10 @@ impl WorkspaceManager {
         )?;
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
         self.reject_symlinked_workspace_root(&staging_path).await?;
-        let clone_result = self
-            .run_git_clone(repository, &staging_path)
-            .await
-            .inspect_err(|_| {
-                let _ = std::fs::remove_dir_all(&staging_path);
-            });
+        let clone_result = self.run_git_clone(repository, &staging_path).await;
+        if clone_result.is_err() {
+            let _ = fs::remove_dir_all(&staging_path).await;
+        }
         clone_result?;
 
         let facts = self
@@ -328,7 +326,10 @@ impl WorkspaceManager {
             published_path,
         )
         .with_checkout_generation(generation.clone());
-        self.bootstrap_workspace_layout(&workspace).await?;
+        if let Err(error) = self.bootstrap_workspace_layout(&workspace).await {
+            self.remove_published_checkout(&workspace).await;
+            return Err(error);
+        }
 
         let now = Utc::now();
         let checkout_manifest = CheckoutManifest {
@@ -356,23 +357,43 @@ impl WorkspaceManager {
             verified_at: now,
             quarantined: false,
         };
-        self.write_manifest(
-            &workspace,
-            &workspace.checkout_manifest_path(),
-            &checkout_manifest,
-        )
-        .await?;
-        let issue_manifest = self.upsert_issue_manifest(issue, &workspace).await?;
+        if let Err(error) = self
+            .write_manifest(
+                &workspace,
+                &workspace.checkout_manifest_path(),
+                &checkout_manifest,
+            )
+            .await
+        {
+            self.remove_published_checkout(&workspace).await;
+            return Err(error);
+        }
+        let issue_manifest = match self.upsert_issue_manifest(issue, &workspace).await {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.remove_published_checkout(&workspace).await;
+                return Err(error);
+            }
+        };
         let after_create = match self.execute_hook(HookKind::AfterCreate, &workspace).await {
             Ok(record) => {
-                if record.is_some() {
-                    self.write_after_create_receipt(issue, &workspace).await?;
+                if record.is_some()
+                    && let Err(error) = self.write_after_create_receipt(issue, &workspace).await
+                {
+                    self.remove_published_checkout(&workspace).await;
+                    return Err(error);
                 }
                 record
             }
-            Err(failure) => return Err(failure.error),
+            Err(failure) => {
+                self.remove_published_checkout(&workspace).await;
+                return Err(failure.error);
+            }
         };
-        self.verify_checkout(&workspace).await?;
+        if let Err(error) = self.verify_checkout(&workspace).await {
+            self.remove_published_checkout(&workspace).await;
+            return Err(error);
+        }
 
         Ok(EnsureWorkspaceResult {
             handle: workspace,
@@ -644,7 +665,11 @@ impl WorkspaceManager {
                     }));
                 }
                 Err(error) => {
-                    self.quarantine_checkout(&handle, error.to_string()).await?;
+                    if is_proven_checkout_invalid(&error) {
+                        self.quarantine_checkout(&handle, error.to_string()).await?;
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -684,6 +709,10 @@ impl WorkspaceManager {
                 path: workspace.workspace_path().to_path_buf(),
                 reason: format!("{reason}; quarantine failed: {source}"),
             })
+    }
+
+    async fn remove_published_checkout(&self, workspace: &WorkspaceHandle) {
+        let _ = fs::remove_dir_all(workspace.workspace_path()).await;
     }
 
     async fn run_git_clone(
@@ -782,9 +811,12 @@ impl WorkspaceManager {
             return Err(checkout_verification(checkout, "not a Git worktree"));
         }
         let remote = self.git(checkout, &["remote", "get-url", "origin"]).await?;
-        if Url::parse(&remote)
-            .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
-        {
+        if Url::parse(&remote).is_ok_and(|url| {
+            url.password().is_some()
+                || (!url.username().is_empty()
+                    && !(url.scheme().eq_ignore_ascii_case("ssh")
+                        && url.username().eq_ignore_ascii_case("git")))
+        }) {
             return Err(checkout_verification(
                 checkout,
                 "observed remote contains credentials",
@@ -1644,10 +1676,11 @@ impl WorkspaceManager {
 
         let handle = match self
             .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
-            .await?
+            .await
         {
-            Some(checkout) => handle.with_checkout_generation(checkout.generation),
-            None => handle,
+            Ok(Some(checkout)) => handle.with_checkout_generation(checkout.generation),
+            Ok(None) | Err(WorkspaceError::DecodeManifest { .. }) => handle,
+            Err(error) => return Err(error),
         };
 
         Ok(Some((handle, manifest)))
@@ -2136,6 +2169,16 @@ fn checkout_verification(path: &Path, reason: &str) -> WorkspaceError {
         generation: "unknown".to_owned(),
         reason: reason.to_owned(),
     }
+}
+
+fn is_proven_checkout_invalid(error: &WorkspaceError) -> bool {
+    matches!(
+        error,
+        WorkspaceError::CheckoutVerification { .. }
+            | WorkspaceError::InstructionPathEscape { .. }
+            | WorkspaceError::MissingInstruction { .. }
+            | WorkspaceError::PathEscape { .. }
+    )
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {

@@ -1516,9 +1516,16 @@ impl RuntimeWorkerBackend {
                         return;
                     }
                 };
-            let allow_worker_changes = prior_run_manifest
-                .as_ref()
-                .is_some_and(|manifest| manifest.pending_retry);
+            let allow_worker_changes = prior_run_manifest.as_ref().is_some_and(|manifest| {
+                manifest.pending_retry
+                    || matches!(
+                        manifest.status,
+                        RunStatus::Running
+                            | RunStatus::Succeeded
+                            | RunStatus::Failed
+                            | RunStatus::Cancelled
+                    )
+            });
             let persisted_conversation_binding = prior_run_manifest
                 .as_ref()
                 .and_then(|manifest| manifest.runtime_envelope.as_ref())
