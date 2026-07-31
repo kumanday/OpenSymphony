@@ -1793,26 +1793,33 @@ impl RuntimeWorkerBackend {
                         return;
                     }
                 };
+                let final_instructions = match if allow_worker_changes {
+                    workspace_manager
+                        .read_checkout_instructions_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager
+                        .read_checkout_instructions(&ensured.handle)
+                        .await
+                } {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!(
+                                "verified checkout instructions changed before harness attach: {error}"
+                            ),
+                        );
+                        return;
+                    }
+                };
                 if verified.repository_binding != expected.repository_binding
                     || verified.target_branch != expected.target_branch
                     || verified.target_commit != expected.target_commit
                     || ensured.handle.workspace_path() != expected.checkout_path
                     || verified.generation != expected.checkout_generation
                     || verified.instruction != expected.instruction
-                    || repository_instructions
-                        != if allow_worker_changes {
-                            workspace_manager
-                                .read_checkout_instructions_for_retry(&ensured.handle)
-                                .await
-                                .ok()
-                                .flatten()
-                        } else {
-                            workspace_manager
-                                .read_checkout_instructions(&ensured.handle)
-                                .await
-                                .ok()
-                                .flatten()
-                        }
+                    || repository_instructions != final_instructions
                 {
                     report_launch_failure(
                         &mut launch_tx,
@@ -2333,10 +2340,17 @@ async fn try_run_codex_stdio_issue(
         load_codex_conversation_manifest(workspace_manager, workspace, issue)
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let conversation_binding_mismatch = existing_manifest.as_ref().is_some_and(|manifest| {
+        manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
+            envelope.conversation_binding.as_deref()
+                != Some(manifest.conversation_id.to_string().as_str())
+        })
+    });
     if let Some(expected) = run_manifest.runtime_envelope.as_ref()
-        && existing_manifest
-            .as_ref()
-            .is_some_and(|manifest| manifest.runtime_envelope.as_ref() != Some(expected))
+        && (conversation_binding_mismatch
+            || existing_manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.runtime_envelope.as_ref() != Some(expected)))
         && let Some(mut incompatible) = existing_manifest.take()
     {
         ensure_codex_thread_active(workspace_manager, workspace, &mut incompatible, codex_bin)

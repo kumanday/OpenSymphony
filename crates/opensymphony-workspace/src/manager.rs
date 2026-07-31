@@ -539,6 +539,7 @@ impl WorkspaceManager {
             created_at: now,
             verified_at: now,
             quarantined: false,
+            quarantine_reason: None,
         };
         if let Err(error) = self
             .write_manifest(
@@ -887,6 +888,20 @@ impl WorkspaceManager {
             else {
                 continue;
             };
+            if manifest.issue_id != issue.issue_id {
+                continue;
+            }
+            let expected_workspace_key = checkout_workspace_key(
+                &issue.identifier,
+                &issue.issue_id,
+                binding.repository_id().as_str(),
+            )?;
+            if manifest.identifier != issue.identifier
+                || manifest.sanitized_workspace_key != expected_workspace_key
+                || manifest.workspace_path != handle.workspace_path()
+            {
+                continue;
+            }
             let checkout = match self
                 .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
                 .await
@@ -898,14 +913,6 @@ impl WorkspaceManager {
                     continue;
                 }
             };
-            if manifest.issue_id != issue.issue_id {
-                continue;
-            }
-            let expected_workspace_key = checkout_workspace_key(
-                &issue.identifier,
-                &issue.issue_id,
-                binding.repository_id().as_str(),
-            )?;
             if manifest.identifier != issue.identifier
                 || manifest.sanitized_workspace_key != expected_workspace_key
                 || manifest.workspace_path != handle.workspace_path()
@@ -1024,6 +1031,19 @@ impl WorkspaceManager {
                 .unwrap_or("checkout")
         ));
         self.reject_symlinked_workspace_root(&destination).await?;
+        match self
+            .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
+            .await
+        {
+            Ok(Some(mut manifest)) => {
+                manifest.quarantined = true;
+                manifest.quarantine_reason = Some(redact_runtime_diagnostic(&reason));
+                self.write_json_artifact(workspace, &workspace.checkout_manifest_path(), &manifest)
+                    .await?;
+            }
+            Ok(None) | Err(WorkspaceError::DecodeManifest { .. }) => {}
+            Err(error) => return Err(error),
+        }
         fs::rename(workspace.workspace_path(), &destination)
             .await
             .map_err(|source| WorkspaceError::CheckoutQuarantined {

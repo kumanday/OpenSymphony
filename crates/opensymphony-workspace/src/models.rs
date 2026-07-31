@@ -80,6 +80,8 @@ pub struct CheckoutManifest {
     pub created_at: DateTime<Utc>,
     pub verified_at: DateTime<Utc>,
     pub quarantined: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_reason: Option<String>,
 }
 
 /// Keep transient runtime diagnostics useful without allowing common

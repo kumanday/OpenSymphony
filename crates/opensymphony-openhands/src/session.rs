@@ -1846,6 +1846,27 @@ impl IssueSessionRunner {
 
                 match loaded.manifest {
                     Some(manifest)
+                        if manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
+                            envelope.conversation_binding.as_deref()
+                                != Some(manifest.conversation_id.as_str())
+                        }) => {
+                            self.retire_conversation(
+                                &manifest,
+                                "conversation runtime envelope binding changed",
+                            )
+                            .await?;
+                            self.create_fresh_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                issue,
+                                workflow,
+                                Some("conversation runtime envelope binding changed; superseding conversation".into()),
+                            )
+                            .await
+                        }
+                    Some(manifest)
                         if run_manifest.runtime_envelope.as_ref().is_some_and(|expected| {
                             manifest.runtime_envelope.as_ref() != Some(expected)
                         }) => {
