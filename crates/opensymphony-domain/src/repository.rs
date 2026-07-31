@@ -29,7 +29,7 @@ impl CanonicalRepositoryId {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| normalize_locator(locator.as_ref()));
+            .unwrap_or_else(|| normalize_locator_for_provider(provider.as_str(), locator.as_ref()));
         if provider.is_empty() || durable_key.is_empty() {
             return Err(RepositoryIdentityError::MissingRemoteIdentity);
         }
@@ -62,7 +62,7 @@ impl SafeRemoteFingerprint {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
-        let locator = normalize_locator(locator.as_ref());
+        let locator = normalize_locator_for_provider(provider.as_str(), locator.as_ref());
         if provider.is_empty() || (provider_id.is_empty() && locator.is_empty()) {
             return Err(RepositoryIdentityError::MissingRemoteIdentity);
         }
@@ -331,6 +331,45 @@ fn normalize_locator(value: &str) -> String {
     value.strip_suffix(".git").unwrap_or(&value).to_owned()
 }
 
+fn normalize_locator_for_provider(provider: &str, locator: &str) -> String {
+    let normalized = normalize_locator(locator);
+    let authority = remote_authority(locator)
+        .or_else(|| {
+            provider
+                .rsplit_once(':')
+                .map(|(_, authority)| authority.to_owned())
+        })
+        .or_else(|| default_provider_authority(&normalize_component(provider)));
+    let Some(authority) = authority else {
+        return normalized;
+    };
+
+    let slash_prefix = format!("{authority}/");
+    if normalized.len() > slash_prefix.len()
+        && normalized[..slash_prefix.len()].eq_ignore_ascii_case(&slash_prefix)
+    {
+        return normalized[slash_prefix.len()..].to_owned();
+    }
+
+    let colon_prefix = format!("{authority}:");
+    if normalized.len() > colon_prefix.len()
+        && normalized[..colon_prefix.len()].eq_ignore_ascii_case(&colon_prefix)
+    {
+        return normalized[colon_prefix.len()..].to_owned();
+    }
+
+    if let Some((user, remainder)) = normalized.split_once('@')
+        && !user.is_empty()
+        && let Some(path) = remainder
+            .strip_prefix(&slash_prefix)
+            .or_else(|| remainder.strip_prefix(&colon_prefix))
+    {
+        return path.to_owned();
+    }
+
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +435,24 @@ mod tests {
             "https://github.com/owner/repo",
         )
         .expect("URL fingerprint should be valid");
+
+        assert_eq!(shorthand, url);
+        assert_eq!(shorthand_fingerprint, url_fingerprint);
+    }
+
+    #[test]
+    fn equivalent_public_provider_locators_share_fallback_identity() {
+        let shorthand = CanonicalRepositoryId::from_remote("github", None, "owner/repo")
+            .expect("shorthand identity should be valid");
+        let url =
+            CanonicalRepositoryId::from_remote("github", None, "https://github.com/owner/repo")
+                .expect("URL identity should be valid");
+        let shorthand_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", None, "owner/repo")
+                .expect("shorthand fingerprint should be valid");
+        let url_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", None, "https://github.com/owner/repo")
+                .expect("URL fingerprint should be valid");
 
         assert_eq!(shorthand, url);
         assert_eq!(shorthand_fingerprint, url_fingerprint);

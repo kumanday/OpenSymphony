@@ -67,6 +67,12 @@ state refresh; a binding mutation is therefore reconciled before the retry's
 due time rather than dispatching the old repository generation. Bounded detail
 lookups also recheck configured project membership after hydration, protecting
 against tasks moved out of the selected Linear project between full refreshes.
+The instance-level retry marker remains until the replacement `start_run`
+metadata is durable, even when replacement workspace materialization succeeds;
+this closes the crash window between workspace preparation and run ownership.
+The same frequent refresh reads current child presence, so a running task that
+becomes a parent is made repository-neutral and its old worker generation is
+superseded before another turn can continue.
 If a crash leaves a `Preparing` or `Prepared` run without a conversation
 manifest, recovery consumes that attempt as a reconciliation retry and still
 enforces `scheduler.retry.max_attempts`.

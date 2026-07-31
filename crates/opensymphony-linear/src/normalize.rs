@@ -61,6 +61,7 @@ pub(super) fn normalize_issue_state(node: LinearIssueStateNode) -> TrackerIssueS
         identifier: node.identifier,
         state: normalize_state(node.state),
         labels: normalize_labels(node.labels.nodes),
+        is_parent: !node.children.nodes.is_empty(),
         updated_at: node.updated_at,
     }
 }

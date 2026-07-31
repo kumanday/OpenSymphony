@@ -686,9 +686,11 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
     assert_eq!(snapshots[0].identifier, "COE-260");
     assert_eq!(snapshots[0].state.kind, TrackerIssueStateKind::Completed);
     assert_eq!(snapshots[0].state.tracker_type, "completed");
+    assert!(snapshots[0].is_parent);
     assert_eq!(snapshots[1].identifier, "COE-264");
     assert_eq!(snapshots[1].state.kind, TrackerIssueStateKind::Canceled);
     assert_eq!(snapshots[1].state.tracker_type, "canceled");
+    assert!(!snapshots[1].is_parent);
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1);

@@ -458,6 +458,7 @@ pub struct Scheduler<T, W, M> {
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
+    parent_issue_ids: HashSet<IssueId>,
     pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
     pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
@@ -494,6 +495,7 @@ where
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
+            parent_issue_ids: HashSet::new(),
             pending_retry_persistence: BTreeMap::new(),
             pending_retry_exhaustion_persistence: BTreeMap::new(),
             pending_recovery: None,
@@ -1498,6 +1500,11 @@ where
     ) -> Result<(), SchedulerError> {
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+            if normalized.sub_issues.is_empty() {
+                self.parent_issue_ids.remove(&normalized.id);
+            } else {
+                self.parent_issue_ids.insert(normalized.id.clone());
+            }
             let retry_cleanup_workspace = self
                 .executions
                 .get(&normalized.id)
@@ -1582,12 +1589,17 @@ where
                         let mut issue = existing.issue().clone();
                         issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
                         issue.labels = snapshot.labels.clone();
+                        if snapshot.is_parent {
+                            self.parent_issue_ids.insert(issue_id.clone());
+                        } else {
+                            self.parent_issue_ids.remove(&issue_id);
+                        }
                         issue.repository_binding = resolve_repository_binding(
                             &self.config,
                             &issue.labels,
                             issue.project_id.as_deref(),
                             issue.project_slug.as_deref(),
-                            !issue.sub_issues.is_empty(),
+                            snapshot.is_parent,
                         );
                         if matches!(
                             existing.status(),
@@ -1666,6 +1678,9 @@ where
             .values()
             .filter(|execution| {
                 if execution.issue().state.category != IssueStateCategory::Active {
+                    return false;
+                }
+                if self.parent_issue_ids.contains(&execution.issue().id) {
                     return false;
                 }
                 match execution.status() {
@@ -2470,6 +2485,9 @@ where
             }
 
             let normalized = normalize_tracker_issue(&tracker_issue, &self.config)?;
+            if !normalized.sub_issues.is_empty() || self.parent_issue_ids.contains(&normalized.id) {
+                continue;
+            }
             let issue_id = normalized.id.clone();
             let should_dispatch = match self.executions.get(&issue_id) {
                 Some(execution) => match execution.status() {
@@ -2537,12 +2555,6 @@ where
                 // queued retry rather than an advanced, unqueued count.
                 self.workspace
                     .persist_retry_count(&workspace, normal_retry_count)
-                    .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
-                self.workspace
-                    .clear_retry_pending(&issue_id)
                     .await
                     .map_err(|error| SchedulerError::Workspace {
                         detail: error.to_string(),
@@ -2623,6 +2635,12 @@ where
                             Some(start_request.route.harness_kind),
                         ),
                     );
+                    if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
+                        self.insert_execution(issue_id.clone(), execution);
+                        return Err(SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        });
+                    }
                     debug!(issue_id = %issue_id, "dispatched scheduler worker");
                 }
                 Err(error) => {
@@ -3622,11 +3640,13 @@ fn tracker_issue_belongs_to_configured_project(
     if config.tracker_project_id.is_none() && config.tracker_project_slug.is_none() {
         return true;
     }
-    if let Some(project_id) = config.tracker_project_id.as_deref() {
-        return issue
+    if let Some(project_id) = config.tracker_project_id.as_deref()
+        && issue
             .project_id
             .as_deref()
-            .is_some_and(|issue_project_id| issue_project_id.trim() == project_id.trim());
+            .is_some_and(|issue_project_id| issue_project_id.trim() == project_id.trim())
+    {
+        return true;
     }
     config
         .tracker_project_slug
@@ -3722,7 +3742,13 @@ fn minimal_issue_from_state_snapshot(
         project_slug: None,
         project_name: None,
         parent_id: None,
-        repository_binding: resolve_repository_binding(config, &snapshot.labels, None, None, false),
+        repository_binding: resolve_repository_binding(
+            config,
+            &snapshot.labels,
+            None,
+            None,
+            snapshot.is_parent,
+        ),
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: None,

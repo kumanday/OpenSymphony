@@ -341,6 +341,11 @@ query IssueStatesByIds(
           endCursor
         }
       }
+      children(first: 1) {
+        nodes {
+          id
+        }
+      }
     }
     pageInfo {
       hasNextPage
@@ -1000,6 +1005,20 @@ pub(super) struct LinearIssueStateNode {
     pub state: LinearWorkflowState,
     #[serde(default)]
     pub labels: LinearLabelConnection,
+    #[serde(default)]
+    pub children: LinearIssueStateChildrenConnection,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct LinearIssueStateChildrenConnection {
+    #[serde(default)]
+    pub nodes: Vec<LinearIssueStateChildNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearIssueStateChildNode {
+    #[allow(dead_code)]
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize)]

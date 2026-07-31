@@ -266,6 +266,7 @@ fn tracker_state_snapshot(
             kind: TrackerIssueStateKind::from_tracker_type(tracker_type),
         },
         labels: Vec::new(),
+        is_parent: false,
         updated_at: dt(updated_at),
     }
 }
@@ -2537,6 +2538,7 @@ async fn queued_repository_binding_change_rematerializes_before_retry() {
         vec![
             "lin-repo-retry-rebind".to_string(),
             "lin-repo-retry-rebind".to_string(),
+            "lin-repo-retry-rebind".to_string(),
             "lin-repo-retry-rebind".to_string()
         ]
     );
@@ -2732,6 +2734,7 @@ async fn bounded_dispatch_detail_rejects_issues_outside_configured_project() {
     let workspace = FakeWorkspace::default();
     let worker = FakeWorker::default();
     let mut config = scheduler_config();
+    config.tracker_project_id = Some("stale-project-id".to_string());
     config.tracker_project_slug = Some("configured-project".to_string());
     config.stall_timeout_ms = None;
     let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
@@ -5022,6 +5025,63 @@ async fn unlabeled_parent_remains_repository_neutral() {
     let execution = scheduler
         .execution(&IssueId::new("lin-repo-parent").expect("issue id should be valid"))
         .expect("parent execution should remain observable");
+    assert_eq!(execution.issue().repository_binding, None);
+}
+
+#[tokio::test]
+async fn newly_parented_running_issue_is_superseded_without_relaunch() {
+    let mut issue = tracker_issue(
+        "lin-repo-parent-refresh",
+        "COE-548-PARENT-REFRESH",
+        "In Progress",
+        0,
+    );
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial repository-bound run should launch");
+
+    let mut refreshed = tracker_state_snapshot(
+        "lin-repo-parent-refresh",
+        "COE-548-PARENT-REFRESH",
+        "In Progress",
+        "started",
+        30_000,
+    );
+    refreshed.is_parent = true;
+    scheduler
+        .tracker_mut()
+        .states
+        .insert("lin-repo-parent-refresh".to_string(), refreshed);
+
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("running parenthood change should reconcile");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-parent-refresh").expect("issue id should be valid"))
+        .expect("replacement execution should remain observable");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.workspace().removed,
+        vec!["COE-548-PARENT-REFRESH"]
+    );
+    assert_eq!(execution.status(), SchedulerStatus::Unclaimed);
+    assert!(execution.workspace().is_none());
     assert_eq!(execution.issue().repository_binding, None);
 }
 

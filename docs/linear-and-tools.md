@@ -122,7 +122,9 @@ Important normalization rules:
   project-set packages must declare a non-empty alias inventory. If a publish
   mapping points to an issue outside the paged project snapshot, conversion
   fetches that issue's labels before replacing the managed subset so unrelated
-  labels are not lost.
+  labels are not lost. Lightweight running-state snapshots also include a
+  current child-presence bit, allowing the scheduler to neutralize a running
+  task immediately when it becomes a parent.
 
 ## 3. Agent-side Linear access
 

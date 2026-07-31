@@ -66,6 +66,8 @@ pub struct TrackerIssueStateSnapshot {
     pub state: TrackerIssueState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub is_parent: bool,
     pub updated_at: DateTime<Utc>,
 }
 
