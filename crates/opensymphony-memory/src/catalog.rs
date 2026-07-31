@@ -232,13 +232,27 @@ pub fn withdraw_memory_source_records(
         path: config.index_path.clone(),
         source: error,
     })?;
-    let has_other_source = transaction
-        .query_row(
-            "SELECT count(*) > 0 FROM registered_memory_sources WHERE repository_id = ? AND source_id <> ?",
-            duckdb::params![repository_id, source_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
+    let registered_source_repositories = {
+        let mut statement = transaction
+            .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?
+    };
     for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
             .unwrap_or_default();
@@ -278,6 +292,12 @@ pub fn withdraw_memory_source_records(
                 .unwrap_or_default();
             let mut sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
                 .unwrap_or_default();
+            let has_other_source = source_ids.iter().any(|candidate| {
+                candidate != source_id
+                    && registered_source_repositories
+                        .get(candidate)
+                        .is_some_and(|owner| owner == repository_id)
+            });
             if !has_other_source {
                 scopes.retain(|scope| {
                     !(scope.kind == KnowledgeScopeKind::Repository

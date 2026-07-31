@@ -2455,6 +2455,7 @@ fn code_memory_for_repository(
 ) -> Result<MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
     if let Some(source) = config.repository_sources.get(repo_id) {
         config.repo_root = source.root.clone();
+        config.code_index_target_branch = source.target_branch.clone();
         return Ok(config);
     }
     if !config.repository_sources.is_empty() {

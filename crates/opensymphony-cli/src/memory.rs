@@ -943,6 +943,7 @@ fn apply_central_memory_root(
                 root: source.checkout_path.clone(),
                 commit_sha: None,
                 project_scope_ids: source.project_scope_ids.clone(),
+                target_branch: Some(source.target_branch.clone()),
             },
         );
     }
@@ -983,6 +984,7 @@ fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryErr
     evolved.default_repository_id = config.default_repository_id.clone();
     evolved.default_project_set_id = config.default_project_set_id.clone();
     evolved.project_scope_ids = config.project_scope_ids.clone();
+    evolved.code_index_target_branch = config.code_index_target_branch.clone();
     Ok(evolved)
 }
 
@@ -1988,6 +1990,18 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
         for (kind, root) in roots {
             if !root.exists() {
                 continue;
+            }
+            if kind == MemorySourceKind::LegacyStore {
+                let same_catalog = match (
+                    fs::canonicalize(&root),
+                    fs::canonicalize(&config.memory_root),
+                ) {
+                    (Ok(root), Ok(catalog)) => root == catalog,
+                    _ => root == config.memory_root,
+                };
+                if same_catalog {
+                    continue;
+                }
             }
             let _source_memory_lock = if kind == MemorySourceKind::LegacyStore {
                 Some(acquire_source_memory_writer_lock(&local_config)?)
@@ -9375,6 +9389,7 @@ Public memory concept.
                 root: repository.path().to_path_buf(),
                 commit_sha: Some("abc123".to_string()),
                 project_scope_ids: std::collections::BTreeSet::new(),
+                target_branch: None,
             })
             .with_default_repository_id("github:repository:123");
 

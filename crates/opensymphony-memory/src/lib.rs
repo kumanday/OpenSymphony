@@ -259,6 +259,7 @@ pub struct MemoryRepositorySource {
     pub root: PathBuf,
     pub commit_sha: Option<String>,
     pub project_scope_ids: BTreeSet<String>,
+    pub target_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -623,6 +624,7 @@ pub struct MemoryConfig {
     pub default_repository_id: Option<String>,
     pub default_project_set_id: Option<String>,
     pub project_scope_ids: BTreeSet<String>,
+    pub code_index_target_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

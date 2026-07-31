@@ -2942,23 +2942,6 @@ fn refresh_memory_index_from_okf_inner(
                     path: config.index_path.clone(),
                     source,
                 })?;
-            for table in [
-                "issue_areas",
-                "pull_requests",
-                "changed_files",
-                "checks",
-                "reviews",
-            ] {
-                transaction
-                    .execute(
-                        &format!("DELETE FROM {table} WHERE issue_key = ?"),
-                        params![row.issue_key],
-                    )
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?;
-            }
         }
         transaction
             .execute(
@@ -3026,10 +3009,10 @@ fn refresh_memory_index_from_okf_inner(
                     path: config.index_path.clone(),
                     source,
                 })?;
-            transaction
-                .execute(
-                    "INSERT INTO issue_areas (issue_key, area) VALUES (?, ?)",
-                    params![row.issue_key, area],
+                transaction
+                    .execute(
+                        "INSERT INTO issue_areas (issue_key, area) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ?)",
+                        params![row.issue_key, area, row.issue_key, area],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -3037,18 +3020,20 @@ fn refresh_memory_index_from_okf_inner(
                 })?;
         }
         for pr in &row.prs {
-            transaction
-                .execute(
-                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        row.issue_key,
-                        pr.number as i64,
+                transaction
+                    .execute(
+                        "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ?)",
+                        params![
+                            row.issue_key,
+                            pr.number as i64,
                         pr.title.clone(),
                         pr.url.clone(),
-                        pr.branch.clone(),
-                        pr.merge_sha.clone(),
-                        pr.merged_at.map(|value| value.to_rfc3339()),
-                    ],
+                            pr.branch.clone(),
+                            pr.merge_sha.clone(),
+                            pr.merged_at.map(|value| value.to_rfc3339()),
+                            row.issue_key,
+                            pr.number as i64,
+                        ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),

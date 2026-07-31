@@ -1505,6 +1505,7 @@ fn load_runtime_memory_config(
                 root: source.checkout_path.clone(),
                 commit_sha: None,
                 project_scope_ids: source.project_scope_ids.clone(),
+                target_branch: Some(source.target_branch.clone()),
             });
     }
     if let Some(project_set_id) = runtime.project_set_id.clone() {

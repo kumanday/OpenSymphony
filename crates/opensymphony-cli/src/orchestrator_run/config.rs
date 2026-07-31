@@ -361,6 +361,7 @@ pub(crate) struct ResolvedMemorySource {
     pub(crate) repository_id: String,
     pub(crate) checkout_path: PathBuf,
     pub(crate) project_scope_ids: BTreeSet<String>,
+    pub(crate) target_branch: String,
 }
 
 #[derive(Debug, Error)]
@@ -1346,6 +1347,7 @@ fn resolve_memory_sources(
                 })
                 .map(|(project_id, _)| project_id.clone())
                 .collect(),
+            target_branch: repository.target_branch.clone(),
         };
         if sources.insert(repository_id, resolved).is_some() {
             return Err(CentralConfigError::InvalidReference {

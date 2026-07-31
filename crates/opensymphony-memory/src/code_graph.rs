@@ -1115,6 +1115,15 @@ pub fn code_graph_repos(
         })?;
 
     let mut repos = BTreeMap::<String, CodeRepoAccumulator>::new();
+    for repo_id in config.repository_sources.keys() {
+        repos.insert(
+            repo_id.clone(),
+            CodeRepoAccumulator {
+                repo_id: repo_id.clone(),
+                ..CodeRepoAccumulator::default()
+            },
+        );
+    }
     for (repo_id, path, language, indexed_at, freshness, commit_sha, dirty) in rows {
         let entry = repos.entry(repo_id.clone()).or_insert_with(|| {
             CodeRepoAccumulator {
@@ -1244,6 +1253,28 @@ pub fn code_graph_repos(
 }
 
 fn unindexed_code_repo_list(config: &MemoryConfig) -> CodeRepoList {
+    if !config.repository_sources.is_empty() {
+        return CodeRepoList {
+            schema_version: SchemaVersion::v1(),
+            repos: config
+                .repository_sources
+                .keys()
+                .map(|repo_id| CodeRepoSummary {
+                    repo_id: repo_id.clone(),
+                    display_root: repo_id.clone(),
+                    languages: Vec::new(),
+                    document_count: 0,
+                    symbol_count: 0,
+                    edge_count: 0,
+                    freshness: CodeGraphFreshness::Unknown,
+                    indexed: false,
+                    indexed_at: None,
+                    head_revision: None,
+                    worktree_dirty: false,
+                })
+                .collect(),
+        };
+    }
     CodeRepoList {
         schema_version: SchemaVersion::v1(),
         repos: vec![unindexed_code_repo_summary(config)],
@@ -3828,7 +3859,7 @@ struct CodeSnapshotState<'a> {
 pub fn code_index_target(
     config: &MemoryConfig,
 ) -> Result<Option<(String, String)>, CodeGraphProjectionError> {
-    let branch = code_index_branch(&config.repo_root)?;
+    let branch = code_index_branch_for_config(config)?;
     let Some(commit) = git_target_commit(&config.repo_root, &branch)? else {
         return Ok(None);
     };
@@ -4515,6 +4546,22 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
         .map(|value| value.trim_matches('`').trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_CODE_INDEX_BRANCH.to_string());
+    validate_code_index_branch(root, &branch)
+}
+
+fn code_index_branch_for_config(
+    config: &MemoryConfig,
+) -> Result<String, CodeGraphProjectionError> {
+    match config.code_index_target_branch.as_deref() {
+        Some(branch) => validate_code_index_branch(&config.repo_root, branch),
+        None => code_index_branch(&config.repo_root),
+    }
+}
+
+fn validate_code_index_branch(
+    root: &Path,
+    branch: &str,
+) -> Result<String, CodeGraphProjectionError> {
     if branch.starts_with('-')
         || branch.starts_with("origin/")
         || branch.starts_with("refs/")
@@ -4529,7 +4576,7 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
         ));
     }
     let branch_check = Command::new("git")
-        .args(["check-ref-format", "--branch", &branch])
+        .args(["check-ref-format", "--branch", branch])
         .output()
         .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
             path: root.to_path_buf(),
@@ -4540,7 +4587,7 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
             "configured target branch is invalid".to_string(),
         ));
     }
-    Ok(branch)
+    Ok(branch.to_string())
 }
 
 fn git_target_commit(

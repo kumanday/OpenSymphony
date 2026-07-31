@@ -113,6 +113,7 @@ impl MemoryConfig {
             default_repository_id: None,
             default_project_set_id: None,
             project_scope_ids: BTreeSet::new(),
+            code_index_target_branch: None,
         })
     }
 
