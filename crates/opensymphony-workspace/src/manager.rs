@@ -1312,10 +1312,12 @@ impl WorkspaceManager {
     }
 
     async fn git(&self, checkout: &Path, args: &[&str]) -> Result<String, WorkspaceError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(checkout)
-            .args(args)
+        let mut command = Command::new("git");
+        command.arg("-C").arg(checkout).args(args);
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
+        let output = command
             .kill_on_drop(true)
             .output()
             .await

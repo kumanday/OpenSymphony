@@ -1449,7 +1449,7 @@ fn central_workflow_front_matter(
                         .expect("length checked"),
                     project_id,
                     project_slug.clone(),
-                    vec![project.provider_project_id.clone()],
+                    Some(vec![project.provider_project_id.clone()]),
                     vec![project_slug],
                 )
             }
@@ -1501,11 +1501,12 @@ fn central_workflow_front_matter(
                     .get(first_project_id)
                     .expect("first project was resolved above");
                 let (_, project_slug) = project_front_matter_identity(first_project);
+                let complete_ids = project_ids.len() == project_slugs.len();
                 (
                     tracker,
-                    project_id,
+                    complete_ids.then_some(project_id).flatten(),
                     project_slug,
-                    project_ids,
+                    complete_ids.then_some(project_ids),
                     project_slugs,
                 )
             }
@@ -1527,7 +1528,7 @@ fn central_workflow_front_matter(
             api_key,
             project_id,
             project_slug: Some(project_slug),
-            project_ids: Some(project_ids),
+            project_ids,
             project_slugs: Some(project_slugs),
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
@@ -2689,6 +2690,19 @@ scheduler:
         );
         assert_eq!(
             resolved.workflow_front_matter.tracker.project_ids,
+            Some(vec!["core-project".to_owned(), "other-project".to_owned()])
+        );
+
+        let migrated_source = source.replace(
+            "provider_project_id: other-project\n",
+            "provider_project_id: other-project\n    provider_project_slug: other-project\n",
+        );
+        let migrated = resolve_central_config(&root.path().join("config.yaml"), &migrated_source)
+            .expect("mixed migrated project fixture should resolve");
+        assert_eq!(migrated.workflow_front_matter.tracker.project_id, None);
+        assert_eq!(migrated.workflow_front_matter.tracker.project_ids, None);
+        assert_eq!(
+            migrated.workflow_front_matter.tracker.project_slugs,
             Some(vec!["core-project".to_owned(), "other-project".to_owned()])
         );
     }
