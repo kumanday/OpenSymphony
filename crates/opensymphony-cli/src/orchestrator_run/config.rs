@@ -1647,8 +1647,8 @@ fn build_repository_routing(
             .collect::<BTreeSet<_>>();
         let keys = [
             Some(project_id.as_str()),
-            Some(project.provider_project_id.as_str()),
-            project.provider_project_slug.as_deref(),
+            Some(project.provider_project_id.trim()),
+            project.provider_project_slug.as_deref().map(str::trim),
         ];
         for key in keys.into_iter().flatten().filter(|key| !key.is_empty()) {
             if project_repositories
@@ -2555,6 +2555,35 @@ scheduler:
         assert!(matches!(
             resolved.repository_routing.resolve(
                 &["repo:core-renamed".to_string()],
+                Some("core-project"),
+                None,
+                false,
+            ),
+            crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_)
+        ));
+    }
+
+    #[test]
+    fn central_config_normalizes_project_routing_keys_before_indexing() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "provider_project_id: core-project",
+            "provider_project_id: ' core-project '",
+        );
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("whitespace around a project routing key should be normalized");
+        assert!(
+            resolved
+                .repository_routing
+                .active_projects
+                .contains("core-project")
+        );
+        assert!(matches!(
+            resolved.repository_routing.resolve(
+                &["repo:core".to_string()],
                 Some("core-project"),
                 None,
                 false,

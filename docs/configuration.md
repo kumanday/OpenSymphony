@@ -100,7 +100,8 @@ used for Linear lookup. Migrated legacy files may also carry
 older slug-based tracker configuration and is not a repository association or
 execution default. During routing, a supplied project ID or slug is selected
 when it matches an active project key; this lets a stale ID fall back to a
-valid active provider slug without choosing a repository.
+valid active provider slug without choosing a repository. Surrounding
+whitespace is trimmed before project IDs and slugs enter the routing indexes.
 
 ### Repository binding
 
@@ -113,13 +114,16 @@ repository-neutral and must not carry a managed repository label.
 
 Missing, unknown, duplicate, parent, out-of-scope, and disallowed bindings are
 retained as distinct scheduler routing outcomes and do not create workspaces.
+An empty managed label such as `repo:` remains visible to strict validation and
+is rejected as an invalid binding rather than being treated as an absent label.
 The resolved binding records the central config and inventory generations
 before a worker is claimed. A binding change on a claimed task supersedes the
 old generation and fences its late worker events. In `legacy_single` mode only,
 an unlabelled task resolves to the configured repository for compatibility.
 Generated planning front matter quotes repository aliases as YAML strings, and
 sub-issue regeneration moves a parent's binding to the generated terminal
-children while clearing it from the new parent.
+children while clearing it from the new parent; when the parent is neutral,
+existing child bindings are retained by child position during regeneration.
 Task-package `routingMode` must be a scalar `legacy_single` or `project_set`
 value; malformed YAML types are reported as ordinary package validation
 errors.

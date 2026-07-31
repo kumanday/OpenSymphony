@@ -240,7 +240,7 @@ pub fn managed_repository_aliases(labels: &[String]) -> Vec<String> {
                     .filter(|prefix| prefix.eq_ignore_ascii_case(MANAGED_LABEL_PREFIX))
                     .and_then(|_| label.get(MANAGED_LABEL_PREFIX.len()..))
             })?;
-            (!alias.trim().is_empty()).then(|| alias.trim().to_owned())
+            Some(alias.trim().to_owned())
         })
         .collect()
 }
@@ -365,6 +365,18 @@ mod tests {
                 ]),
             ),
             (
+                labels(&["repo:"]),
+                Some("project-id"),
+                false,
+                RepositoryBindingOutcome::UnknownAlias(String::new()),
+            ),
+            (
+                labels(&["repo:", "repo:one"]),
+                Some("project-id"),
+                false,
+                RepositoryBindingOutcome::MultipleBindings(vec!["".to_string(), "one".to_string()]),
+            ),
+            (
                 labels(&["repo:one"]),
                 Some("other-project"),
                 false,
@@ -427,5 +439,13 @@ mod tests {
             ),
             RepositoryBindingOutcome::Resolved(_)
         ));
+    }
+
+    #[test]
+    fn managed_empty_labels_remain_visible_to_routing() {
+        assert_eq!(
+            managed_repository_aliases(&labels(&["repo:"])),
+            vec![String::new()]
+        );
     }
 }

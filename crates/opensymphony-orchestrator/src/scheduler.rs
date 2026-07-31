@@ -9,12 +9,13 @@ use crate::opensymphony_domain::{
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptStatus, HealthStatus, IdentifierError, IssueExecution, IssueId,
     IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
-    OrchestratorSnapshot, ReleaseReason, RepositoryBindingOutcome, RepositoryRouting, RetryAttempt,
-    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals,
-    SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue,
-    TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
-    TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceRecord, managed_repository_aliases,
+    OrchestratorSnapshot, ReleaseReason, RepositoryBindingOutcome, RepositoryRouting,
+    RepositoryRoutingMode, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy,
+    RetryReason, RunAttempt, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
+    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef,
+    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
+    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    managed_repository_aliases,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -1036,30 +1037,41 @@ where
 
         let mut retry_records = Vec::new();
         for record in records {
-            if let Some(recovered_run) = record.recovered_run.as_ref() {
+            let mut recovered_run = record.recovered_run.clone();
+            if let Some(recovered_run) = recovered_run.as_ref() {
                 self.reserve_recovered_worker_id(&recovered_run.worker_id);
             }
             let issue_id = record.issue.id.clone();
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
-                let binding_changed = record.recovered_run.as_ref().is_some_and(|recovered_run| {
-                    normalized.repository_binding
-                        != recovered_run
-                            .repository_binding
+                let recovered_binding = recovered_run
+                    .as_ref()
+                    .and_then(|run| {
+                        run.repository_binding
                             .clone()
                             .map(RepositoryBindingOutcome::Resolved)
-                });
+                    })
+                    .or_else(|| self.legacy_recovered_binding(&normalized));
+                let binding_changed =
+                    recovered_run.is_some() && normalized.repository_binding != recovered_binding;
+                if let Some(run) = recovered_run.as_mut()
+                    && run.repository_binding.is_none()
+                {
+                    run.repository_binding = recovered_binding
+                        .as_ref()
+                        .and_then(|outcome| outcome.resolved_binding().cloned());
+                }
                 self.upsert_active_execution(
                     normalized.clone(),
                     observed_at,
                     Some(record.workspace),
                 )?;
                 if record.had_in_flight_run {
-                    if record.recovered_run.is_some() {
+                    if recovered_run.is_some() {
                         self.restore_recovered_run(
                             &issue_id,
-                            record.recovered_run,
+                            recovered_run,
                             recovered_harness_kind,
                             record.interrupt_reason,
                             observed_at,
@@ -1344,6 +1356,25 @@ where
             self.pending_recovery = Some(retry_records);
         }
         Ok(())
+    }
+
+    fn legacy_recovered_binding(
+        &self,
+        issue: &NormalizedIssue,
+    ) -> Option<RepositoryBindingOutcome> {
+        if self
+            .config
+            .repository_routing
+            .as_ref()
+            .is_none_or(|routing| routing.mode != RepositoryRoutingMode::LegacySingle)
+        {
+            return None;
+        }
+        issue
+            .repository_binding
+            .as_ref()
+            .and_then(|outcome| outcome.resolved_binding().cloned())
+            .map(RepositoryBindingOutcome::Resolved)
     }
 
     async fn reconcile_tracker_state(
@@ -2036,75 +2067,88 @@ where
         if identifiers.is_empty() {
             return Ok(());
         }
-        let mut detailed_by_identifier = match self
-            .tracker
-            .issues_by_identifiers(&identifiers)
-            .await
-        {
-            Ok(issues) => issues
-                .into_iter()
-                .map(|issue| (issue.identifier.to_ascii_uppercase(), issue))
-                .collect::<HashMap<_, _>>(),
-            Err(error) => {
-                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
-                    return Ok(());
+        let batch_size = available_capacity.max(1);
+        for identifier_batch in identifiers.chunks(batch_size) {
+            let mut detailed_by_identifier = match self
+                .tracker
+                .issues_by_identifiers(identifier_batch)
+                .await
+            {
+                Ok(issues) => issues
+                    .into_iter()
+                    .map(|issue| (issue.identifier.to_ascii_uppercase(), issue))
+                    .collect::<HashMap<_, _>>(),
+                Err(error) => {
+                    if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                        return Ok(());
+                    }
+                    if T::error_category(&error) == Some(TrackerErrorCategory::NotFound) {
+                        warn!(
+                            "skipping dispatch discovery because selected issue details were not found"
+                        );
+                        return Ok(());
+                    }
+                    return Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    });
                 }
-                if T::error_category(&error) == Some(TrackerErrorCategory::NotFound) {
-                    warn!(
-                        "skipping dispatch discovery because selected issue details were not found"
-                    );
-                    return Ok(());
-                }
-                return Err(SchedulerError::Tracker {
-                    detail: error.to_string(),
-                });
-            }
-        };
-
-        let mut detailed = Vec::new();
-        for summary in ready {
-            let key = summary.identifier.to_ascii_uppercase();
-            let Some(detailed_issue) = detailed_by_identifier.remove(&key) else {
-                warn!(
-                    identifier = %summary.identifier,
-                    "skipping stale dispatch candidate missing from detail refresh"
-                );
-                continue;
             };
-            let normalized = normalize_tracker_issue(&detailed_issue, &self.config)?;
-            if normalized.state.category != IssueStateCategory::Active {
-                warn!(
-                    identifier = %normalized.identifier,
-                    state = %normalized.state.name,
-                    "skipping dispatch candidate no longer in an active state"
-                );
-                continue;
-            }
-            // A released execution blocks dispatch until the hourly full
-            // refresh reconciles it. When the tracker reactivates such an
-            // issue (e.g. Backlog back to Todo after its workspace was
-            // recovered and parked), reopen it here so the 60s discovery
-            // cadence picks it up instead.
-            let needs_reopen = self
-                .executions
-                .get(&normalized.id)
-                .is_some_and(|execution| {
-                    execution.status() == SchedulerStatus::Released
-                        && !terminal_worker_outcome_prevents_reopen(execution)
-                });
-            if needs_reopen {
-                if self
-                    .interrupt_human_review_polling_for_merging(&normalized, observed_at)
-                    .await?
-                {
+
+            let mut detailed = Vec::new();
+            for summary in ready
+                .iter()
+                .filter(|summary| identifier_batch.contains(&summary.identifier))
+            {
+                let key = summary.identifier.to_ascii_uppercase();
+                let Some(detailed_issue) = detailed_by_identifier.remove(&key) else {
+                    warn!(
+                        identifier = %summary.identifier,
+                        "skipping stale dispatch candidate missing from detail refresh"
+                    );
+                    continue;
+                };
+                let normalized = normalize_tracker_issue(&detailed_issue, &self.config)?;
+                if normalized.state.category != IssueStateCategory::Active {
+                    warn!(
+                        identifier = %normalized.identifier,
+                        state = %normalized.state.name,
+                        "skipping dispatch candidate no longer in an active state"
+                    );
                     continue;
                 }
-                self.upsert_active_execution(normalized, observed_at, None)?;
+                // A released execution blocks dispatch until the hourly full
+                // refresh reconciles it. When the tracker reactivates such an
+                // issue (e.g. Backlog back to Todo after its workspace was
+                // recovered and parked), reopen it here so the 60s discovery
+                // cadence picks it up instead.
+                let needs_reopen = self
+                    .executions
+                    .get(&normalized.id)
+                    .is_some_and(|execution| {
+                        execution.status() == SchedulerStatus::Released
+                            && !terminal_worker_outcome_prevents_reopen(execution)
+                    });
+                if needs_reopen {
+                    if self
+                        .interrupt_human_review_polling_for_merging(&normalized, observed_at)
+                        .await?
+                    {
+                        continue;
+                    }
+                    self.upsert_active_execution(normalized, observed_at, None)?;
+                }
+                detailed.push(detailed_issue);
             }
-            detailed.push(detailed_issue);
+
+            self.dispatch_ready_issues(&detailed, observed_at).await?;
+            if self.worker_metadata.len()
+                >= usize::try_from(self.config.max_concurrent_agents).unwrap_or(usize::MAX)
+            {
+                break;
+            }
         }
 
-        self.dispatch_ready_issues(&detailed, observed_at).await
+        Ok(())
     }
 
     async fn dispatch_ready_issues(
@@ -2694,13 +2738,13 @@ where
             // task was discarded.
             return Ok(false);
         }
-        self.worker_metadata.remove(&run.worker_id);
         self.worker
             .abort_worker(&run.worker_id, reason)
             .await
             .map_err(|error| SchedulerError::Worker {
                 detail: error.to_string(),
             })?;
+        self.worker_metadata.remove(&run.worker_id);
         Ok(remote_stopped)
     }
 

@@ -62,7 +62,11 @@ Linear API quota:
 
 The lightweight dispatch query returns summary-shaped scheduler data only.
 Selected candidates must be reloaded through the project-scoped full-detail
-lookup before workspace creation, prompt construction, or worker launch.
+lookup before workspace creation, prompt construction, or worker launch. Detail
+refreshes are issued in bounded batches sized to the currently available worker
+capacity, so blocked or stale candidates do not force an unbounded Linear read.
+Restart recovery backfills a missing binding in a legacy run manifest from the
+current configured legacy repository before comparing generations for drift.
 
 When Linear returns a rate-limit error with retry metadata longer than the
 client's short retry backoff, the Linear client returns the error immediately

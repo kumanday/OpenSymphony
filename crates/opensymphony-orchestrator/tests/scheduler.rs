@@ -915,10 +915,10 @@ async fn dispatch_discovery_skips_blocked_bindings_when_filling_capacity() {
 
     assert_eq!(
         scheduler.tracker().detail_requests,
-        vec![vec![
-            "COE-548-BLOCKED".to_string(),
-            "COE-548-VALID".to_string()
-        ]]
+        vec![
+            vec!["COE-548-BLOCKED".to_string()],
+            vec!["COE-548-VALID".to_string()],
+        ]
     );
     assert_eq!(scheduler.worker().launches.len(), 1);
     assert_eq!(
@@ -4647,7 +4647,19 @@ async fn binding_supersession_restores_execution_when_abort_fails() {
         .tick(ts(100))
         .await
         .expect("initial repository-bound run should launch");
+    let old_worker_id = scheduler.worker().launches[0].run.worker_id.clone();
     scheduler.tracker_mut().active[0].labels = vec!["repo:two".to_string()];
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: old_worker_id,
+            observed_at: ts(3_600_050),
+            event_id: Some("abort-failure-late-event".to_string()),
+            event_kind: Some("runtime_event".to_string()),
+            summary: Some("metadata must remain until local abort succeeds".to_string()),
+            payload: None,
+        });
 
     assert!(scheduler.tick(ts(3_600_100)).await.is_err());
     let issue_id = IssueId::new("lin-repo-abort").expect("issue id should be valid");
@@ -4655,6 +4667,12 @@ async fn binding_supersession_restores_execution_when_abort_fails() {
         .execution(&issue_id)
         .expect("old execution must remain tracked after abort failure");
     assert_eq!(execution.status(), SchedulerStatus::Running);
+    assert_eq!(
+        execution
+            .conversation()
+            .and_then(|conversation| conversation.last_event_id.as_deref()),
+        Some("abort-failure-late-event")
+    );
     assert_eq!(scheduler.worker().launches.len(), 1);
     assert_eq!(scheduler.worker().aborted.len(), 1);
 }
@@ -4738,6 +4756,83 @@ async fn recovery_fences_persisted_binding_before_superseding_it() {
             .repository_binding
             .as_ref()
             .map(|binding: &RepositoryBinding| binding.alias.as_str()),
+        Some("one")
+    );
+}
+
+#[tokio::test]
+async fn legacy_recovery_backfills_binding_before_drift_comparison() {
+    let recovered_worker_id =
+        WorkerId::new("worker-legacy-recovery").expect("worker id should be valid");
+    let recovered_workspace = workspace_record(
+        "COE-548-LEGACY-RECOVERY",
+        "/tmp/recovered/COE-548-LEGACY-RECOVERY",
+    );
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            "lin-legacy-recovery",
+            "COE-548-LEGACY-RECOVERY",
+            "In Progress",
+            0,
+        )],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue(
+                "lin-legacy-recovery",
+                "COE-548-LEGACY-RECOVERY",
+                "In Progress",
+            ),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: None,
+            }),
+        }],
+        records: HashMap::from([("lin-legacy-recovery".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    let routing = repository_routing();
+    config.repository_routing = Some(RepositoryRouting {
+        mode: RepositoryRoutingMode::LegacySingle,
+        legacy_repository: Some("one".to_string()),
+        ..routing
+    });
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("legacy recovery should reattach without binding drift");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.worker().aborted.is_empty());
+    let execution = scheduler
+        .execution(&IssueId::new("lin-legacy-recovery").expect("issue id should be valid"))
+        .expect("recovered execution should remain tracked");
+    assert_eq!(
+        execution
+            .current_run()
+            .and_then(|run| run.repository_binding.as_ref())
+            .map(|binding| binding.alias.as_str()),
         Some("one")
     );
 }

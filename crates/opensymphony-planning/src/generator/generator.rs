@@ -348,10 +348,17 @@ impl PlanGenerator {
                                 &requirement,
                                 &intake,
                             );
+                            let existing_child_repositories = issue
+                                .sub_issues
+                                .iter()
+                                .map(|sub_issue| sub_issue.repository.clone())
+                                .collect::<Vec<_>>();
                             let mut sub_issues =
                                 self.generate_sub_issues_for_issue(&sub_issue_context);
-                            for sub_issue in &mut sub_issues {
-                                sub_issue.repository = issue.repository.clone();
+                            for (index, sub_issue) in sub_issues.iter_mut().enumerate() {
+                                sub_issue.repository = issue.repository.clone().or_else(|| {
+                                    existing_child_repositories.get(index).cloned().flatten()
+                                });
                             }
                             PlannedIssue {
                                 id: issue.id.clone(),
@@ -1271,6 +1278,32 @@ mod tests {
                 .sub_issues
                 .iter()
                 .all(|sub_issue| sub_issue.repository.as_deref() == Some("core"))
+        );
+    }
+
+    #[test]
+    fn strict_regeneration_preserves_child_repository_bindings() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let mut original = generator.generate().expect("generation should succeed");
+        let issue = &mut original.milestones[0].issues[0];
+        issue.repository = None;
+        issue.sub_issues[0].repository = Some("core".to_string());
+        issue.sub_issues[1].repository = Some("web".to_string());
+
+        let regenerated = generator
+            .regenerate(&original, &RegenerationScope::SubIssues { issue_ids: None })
+            .expect("strict sub-issue regeneration should succeed");
+        let issue = &regenerated.milestones[0].issues[0];
+
+        assert_eq!(issue.repository, None);
+        assert_eq!(
+            issue
+                .sub_issues
+                .iter()
+                .map(|sub_issue| sub_issue.repository.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("core"), Some("web")]
         );
     }
 
