@@ -163,6 +163,9 @@ pub fn reconcile_memory_sources(
         .cloned()
         .collect::<BTreeSet<_>>();
     drop(connection);
+    for repository_id in &withdrawn_repository_ids {
+        withdraw_code_repository(config, repository_id)?;
+    }
     for (source_id, repository_id) in withdrawn_source_ids {
         withdraw_memory_source_records(config, &source_id, &repository_id)?;
         let connection = open_index(config)?;
@@ -175,9 +178,6 @@ pub fn reconcile_memory_sources(
                 path: config.index_path.clone(),
                 source: error,
             })?;
-    }
-    for repository_id in withdrawn_repository_ids {
-        withdraw_code_repository(config, &repository_id)?;
     }
     let placeholders = std::iter::repeat_n("?", source_ids.len())
         .collect::<Vec<_>>()
@@ -270,6 +270,13 @@ pub fn withdraw_memory_source_records(
                 source: error,
             })?
     };
+    let active_project_scopes = config
+        .repository_sources
+        .values()
+        .flat_map(|source| source.project_scope_ids.iter())
+        .chain(config.project_scope_ids.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
             .unwrap_or_default();
@@ -316,9 +323,14 @@ pub fn withdraw_memory_source_records(
                         .is_some_and(|owner| owner == repository_id)
             });
             if !has_other_source {
-                scopes.retain(|scope| {
-                    !(scope.kind == KnowledgeScopeKind::Repository
-                        && scope.id == repository_id)
+                scopes.retain(|scope| match &scope.kind {
+                    KnowledgeScopeKind::Repository => scope.id != repository_id,
+                    KnowledgeScopeKind::Project => active_project_scopes.contains(&scope.id),
+                    KnowledgeScopeKind::ProjectSet => config
+                        .default_project_set_id
+                        .as_deref()
+                        .is_some_and(|id| scope.id == id),
+                    _ => true,
                 });
                 sources.retain(|source| source.repo_id.as_deref() != Some(repository_id));
                 transaction
@@ -396,12 +408,25 @@ pub fn withdraw_memory_repository_records(
         path: config.index_path.clone(),
         source: error,
     })?;
+    let active_project_scopes = config
+        .repository_sources
+        .values()
+        .flat_map(|source| source.project_scope_ids.iter())
+        .chain(config.project_scope_ids.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, scopes_json, sources_json) in rows {
         let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&scopes_json)
             .unwrap_or_default()
             .into_iter()
-            .filter(|scope| {
-                !(scope.kind == KnowledgeScopeKind::Repository && scope.id == repository_id)
+            .filter(|scope| match &scope.kind {
+                KnowledgeScopeKind::Repository => scope.id != repository_id,
+                KnowledgeScopeKind::Project => active_project_scopes.contains(&scope.id),
+                KnowledgeScopeKind::ProjectSet => config
+                    .default_project_set_id
+                    .as_deref()
+                    .is_some_and(|id| scope.id == id),
+                _ => true,
             })
             .collect::<Vec<_>>();
         let sources = serde_json::from_str::<Vec<MemorySourceRef>>(&sources_json)

@@ -1957,6 +1957,7 @@ async fn start_memory_server_with_auth(
 
 fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
     let mut source_ids = BTreeSet::new();
+    let registered_sources = registered_memory_sources(config)?;
     let mut legacy_repository_names = BTreeMap::<String, usize>::new();
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
@@ -1972,6 +1973,52 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             )));
         }
     }
+    let mut configured_source_ids = BTreeSet::new();
+    for source in config.repository_sources.values() {
+        let local_config = MemoryConfig::load(&source.root, None)?;
+        let mut roots = vec![
+            (MemorySourceKind::Repository, source.root.clone()),
+            (MemorySourceKind::Policy, local_config.config_path.clone()),
+            (
+                MemorySourceKind::PublicDocs,
+                local_config.docs.public_root.clone(),
+            ),
+            (
+                MemorySourceKind::LegacyStore,
+                local_config.memory_root.clone(),
+            ),
+        ];
+        for export_name in ["okf-export-public", "okf-export-private"] {
+            roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+        }
+        for (kind, root) in roots {
+            if !root.exists() {
+                continue;
+            }
+            let source_id = if kind == MemorySourceKind::OkfBundle {
+                let bundle_name = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default();
+                format!(
+                    "{}:{}:{}",
+                    source.repository_id,
+                    kind.as_str(),
+                    sha256_hex(&bundle_name)
+                )
+            } else {
+                format!("{}:{}", source.repository_id, kind.as_str())
+            };
+            configured_source_ids.insert(source_id);
+        }
+    }
+    let source_withdrawal_pending = registered_sources.iter().any(|existing| {
+        !configured_source_ids.contains(&existing.source_id)
+            && matches!(
+                existing.kind,
+                MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+            )
+    });
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
             migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
@@ -2024,11 +2071,15 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 None
             };
             let source_id = if kind == MemorySourceKind::OkfBundle {
+                let bundle_name = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default();
                 format!(
                     "{}:{}:{}",
                     source.repository_id,
                     kind.as_str(),
-                    root.display()
+                    sha256_hex(&bundle_name)
                 )
             } else {
                 format!("{}:{}", source.repository_id, kind.as_str())
@@ -2054,7 +2105,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                     && existing.generation == registration.generation
                     && existing.status == MemorySourceRegistrationStatus::Registered
             });
-            if !already_imported {
+            if !already_imported || source_withdrawal_pending {
                 register_memory_source(config, &registration)?;
                 let import_result: Result<(), MemoryError> = if same_catalog {
                     backfill_legacy_memory_source_scopes(
@@ -2237,8 +2288,9 @@ fn memory_source_registration_generation(
         source.project_scope_ids.iter().collect::<Vec<_>>(),
     ))?;
     Ok(sha256_hex(&format!(
-        "source-registration-v2\0{}\0{}\0{}",
+        "source-registration-v3\0{}\0{}\0{}\0{}",
         kind.as_str(),
+        commit_sha,
         content_generation,
         routing_scopes
     )))
