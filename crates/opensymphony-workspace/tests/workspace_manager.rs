@@ -407,6 +407,14 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         &["checkout", "--orphan", "rewritten"],
     );
     git(clean_retry.handle.workspace_path(), &["rm", "-rf", "."]);
+    git(
+        clean_retry.handle.workspace_path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(
+        clean_retry.handle.workspace_path(),
+        &["config", "user.name", "OpenSymphony Test"],
+    );
     std::fs::write(
         clean_retry.handle.workspace_path().join("AGENTS.md"),
         "rewritten instructions\n",
