@@ -3463,6 +3463,11 @@ fn refresh_memory_index_from_okf_inner(
                             project_scope_ids_for_source(config, existing_source_id)
                         })
                         .collect::<BTreeSet<_>>();
+                    let incoming_project_set_ids = scope_refs
+                        .iter()
+                        .filter(|scope| scope.kind == KnowledgeScopeKind::ProjectSet)
+                        .map(|scope| scope.id.clone())
+                        .collect::<BTreeSet<_>>();
                     for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
                         .unwrap_or_default()
                     {
@@ -3473,13 +3478,9 @@ fn refresh_memory_index_from_okf_inner(
                             && ((repository_id.is_some_and(|repository_id| {
                                 scope.kind == KnowledgeScopeKind::Repository
                                     && scope.id == repository_id
-                            }))
-                                || (config.default_project_set_id.as_deref().is_some_and(
-                                    |project_set_id| {
-                                        scope.kind == KnowledgeScopeKind::ProjectSet
-                                            && scope.id == project_set_id
-                                    },
-                                ))
+                                }))
+                                || (scope.kind == KnowledgeScopeKind::ProjectSet
+                                    && !incoming_project_set_ids.contains(&scope.id))
                                 || (scope.kind == KnowledgeScopeKind::Project
                                     && refreshed_project_scopes.contains(&scope.id)));
                         let stale_project_scope = scope.kind == KnowledgeScopeKind::Project

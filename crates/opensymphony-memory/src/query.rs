@@ -795,12 +795,11 @@ fn indexed_issue_matches_scope(
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
     if !config.repository_sources.is_empty() {
         return issue.scope_refs.iter().any(|scope| {
-            scope.kind == KnowledgeScopeKind::Repository && scope.id.eq_ignore_ascii_case(repo)
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == repo
         });
     }
     if issue.scope_refs.iter().any(|scope| {
-        scope.kind == KnowledgeScopeKind::Repository
-            && scope.id.eq_ignore_ascii_case(repo)
+        scope.kind == KnowledgeScopeKind::Repository && scope.id == repo
     }) {
         return true;
     }
