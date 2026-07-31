@@ -674,9 +674,10 @@ ownership from an unclean exit can be reclaimed while a live owner still
 blocks migration/startup.
 Stale lock recovery atomically renames the old lock to a unique quarantine file
 before removing it; it never removes a newly-created owner lock at the shared
-path. A project-set central config is also rejected by every doctor mode until
-strict routing is enabled, avoiding a probe against an unrelated legacy
-checkout.
+path. Project-set central configs are supported by doctor modes; probes use the
+selected repository policy and do not inspect an unrelated launch-directory
+checkout. Strict attach still requires a compatible verified checkout and
+runtime envelope.
 After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
 policy so operational recovery continues to use the migrated OpenHands and
 tracker settings.

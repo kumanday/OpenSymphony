@@ -301,15 +301,38 @@ impl WorkspaceManager {
         }
         clone_result?;
 
-        let facts = self
+        let facts = match self
             .verify_git_checkout(&staging_path, binding, repository, true)
-            .await?;
-        let instruction = self
+            .await
+        {
+            Ok(facts) => facts,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging_path).await;
+                return Err(error);
+            }
+        };
+        let instruction = match self
             .load_instruction_provenance(&staging_path, repository, &facts.head)
-            .await?;
-        self.exclude_metadata_from_git(&staging_path).await?;
+            .await
+        {
+            Ok(instruction) => instruction,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging_path).await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.exclude_metadata_from_git(&staging_path).await {
+            let _ = fs::remove_dir_all(&staging_path).await;
+            return Err(error);
+        }
 
-        let staging_path = self.canonicalize_path(&staging_path).await?;
+        let staging_path = match self.canonicalize_path(&staging_path).await {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging_path).await;
+                return Err(error);
+            }
+        };
         let staging_workspace = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
@@ -317,7 +340,32 @@ impl WorkspaceManager {
             staging_path,
         )
         .with_checkout_generation(generation.clone());
-        self.bootstrap_workspace_layout(&staging_workspace).await?;
+        let after_create = match self
+            .execute_hook(HookKind::AfterCreate, &staging_workspace)
+            .await
+        {
+            Ok(record) => record,
+            Err(failure) => {
+                let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+                return Err(failure.error);
+            }
+        };
+        if let Err(error) = self
+            .verify_git_checkout(
+                staging_workspace.workspace_path(),
+                binding,
+                repository,
+                true,
+            )
+            .await
+        {
+            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            return Err(error);
+        }
+        if let Err(error) = self.bootstrap_workspace_layout(&staging_workspace).await {
+            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            return Err(error);
+        }
 
         let now = Utc::now();
         let checkout_manifest = CheckoutManifest {
@@ -366,14 +414,23 @@ impl WorkspaceManager {
                 return Err(error);
             }
         };
+        if after_create.is_some()
+            && let Err(error) = self
+                .write_after_create_receipt_at_path(issue, &staging_workspace, &published_path)
+                .await
+        {
+            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            return Err(error);
+        }
 
-        fs::rename(staging_workspace.workspace_path(), &published_path)
-            .await
-            .map_err(|source| WorkspaceError::CheckoutOperation {
+        if let Err(source) = fs::rename(staging_workspace.workspace_path(), &published_path).await {
+            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            return Err(WorkspaceError::CheckoutOperation {
                 operation: "publish checkout generation".to_owned(),
                 path: published_path.clone(),
                 detail: source.to_string(),
-            })?;
+            });
+        }
         let workspace = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
@@ -381,21 +438,12 @@ impl WorkspaceManager {
             self.canonicalize_path(&published_path).await?,
         )
         .with_checkout_generation(generation);
-        let after_create = match self.execute_hook(HookKind::AfterCreate, &workspace).await {
-            Ok(record) => {
-                if record.is_some()
-                    && let Err(error) = self.write_after_create_receipt(issue, &workspace).await
-                {
-                    self.remove_published_checkout(&workspace).await;
-                    return Err(error);
-                }
-                record
+        let after_create = after_create.map(|mut record| {
+            if let Ok(relative) = record.cwd.strip_prefix(staging_workspace.workspace_path()) {
+                record.cwd = workspace.workspace_path().join(relative);
             }
-            Err(failure) => {
-                self.remove_published_checkout(&workspace).await;
-                return Err(failure.error);
-            }
-        };
+            record
+        });
         if let Err(error) = self.verify_checkout(&workspace).await {
             self.remove_published_checkout(&workspace).await;
             return Err(error);
@@ -872,12 +920,7 @@ impl WorkspaceManager {
             }
         }
         let remote = self.git(checkout, &["remote", "get-url", "origin"]).await?;
-        if Url::parse(&remote).is_ok_and(|url| {
-            url.password().is_some()
-                || (!url.username().is_empty()
-                    && !(url.scheme().eq_ignore_ascii_case("ssh")
-                        && url.username().eq_ignore_ascii_case("git")))
-        }) {
+        if remote_contains_credentials(&remote) {
             return Err(checkout_verification(
                 checkout,
                 "observed remote contains credentials",
@@ -999,7 +1042,12 @@ impl WorkspaceManager {
             let path = resolve_path_within_root(checkout, &relative)?;
             let metadata = match fs::symlink_metadata(&path).await {
                 Ok(metadata) => metadata,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if source == "configured" {
+                        return Err(WorkspaceError::MissingInstruction { path });
+                    }
+                    continue;
+                }
                 Err(source) => return Err(WorkspaceError::ReadManagedFile { path, source }),
             };
             if metadata.file_type().is_symlink() {
@@ -1581,7 +1629,7 @@ impl WorkspaceManager {
             repository_binding: issue.repository_binding.clone(),
         };
 
-        self.write_manifest(workspace, &workspace.issue_manifest_path(), &manifest)
+        self.write_manifest_atomically(workspace, &workspace.issue_manifest_path(), &manifest)
             .await?;
         Ok(manifest)
     }
@@ -1591,7 +1639,18 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         workspace: &WorkspaceHandle,
     ) -> Result<(), WorkspaceError> {
-        let receipt = AfterCreateBootstrapReceipt::new(workspace, issue);
+        self.write_after_create_receipt_at_path(issue, workspace, workspace.workspace_path())
+            .await
+    }
+
+    async fn write_after_create_receipt_at_path(
+        &self,
+        issue: &IssueDescriptor,
+        workspace: &WorkspaceHandle,
+        manifest_workspace_path: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let mut receipt = AfterCreateBootstrapReceipt::new(workspace, issue);
+        receipt.workspace_path = manifest_workspace_path.to_path_buf();
         self.write_manifest(workspace, &workspace.after_create_receipt_path(), &receipt)
             .await
     }
@@ -2117,6 +2176,44 @@ impl WorkspaceManager {
             })
     }
 
+    async fn write_manifest_atomically<T>(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        manifest: &T,
+    ) -> Result<(), WorkspaceError>
+    where
+        T: Serialize,
+    {
+        if let Some(parent) = path.parent() {
+            self.create_managed_directory(workspace, parent).await?;
+        }
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
+        let payload = serde_json::to_vec_pretty(manifest).map_err(|error| {
+            WorkspaceError::EncodeManifest {
+                path: path.clone(),
+                source: error,
+            }
+        })?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("manifest.json");
+        let temporary_path = path.with_file_name(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+        let temporary_path = self
+            .validate_workspace_owned_path(workspace, &temporary_path)
+            .await?;
+        if let Err(source) = fs::write(&temporary_path, payload).await {
+            let _ = fs::remove_file(&temporary_path).await;
+            return Err(WorkspaceError::WriteManifest { path, source });
+        }
+        if let Err(source) = fs::rename(&temporary_path, &path).await {
+            let _ = fs::remove_file(&temporary_path).await;
+            return Err(WorkspaceError::WriteManifest { path, source });
+        }
+        Ok(())
+    }
+
     async fn write_bytes_artifact(
         &self,
         workspace: &WorkspaceHandle,
@@ -2243,6 +2340,28 @@ fn checkout_verification(path: &Path, reason: &str) -> WorkspaceError {
         generation: "unknown".to_owned(),
         reason: reason.to_owned(),
     }
+}
+
+fn remote_contains_credentials(remote: &str) -> bool {
+    if let Ok(url) = Url::parse(remote)
+        && (url.password().is_some()
+            || (!url.username().is_empty()
+                && !(url.scheme().eq_ignore_ascii_case("ssh")
+                    && url.username().eq_ignore_ascii_case("git"))))
+    {
+        return true;
+    }
+
+    let Some((authority, _path)) = remote.split_once(':') else {
+        return false;
+    };
+    if authority.contains('/') || authority.contains('\\') {
+        return false;
+    }
+    let Some((username, host)) = authority.split_once('@') else {
+        return false;
+    };
+    host.is_empty() || !username.eq_ignore_ascii_case("git")
 }
 
 fn is_proven_checkout_invalid(error: &WorkspaceError) -> bool {
@@ -2538,7 +2657,7 @@ mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
 
-    use super::build_shell_command;
+    use super::{build_shell_command, remote_contains_credentials};
 
     #[cfg(unix)]
     #[test]
@@ -2552,5 +2671,19 @@ mod tests {
             args,
             vec![OsString::from("-c"), OsString::from("echo hook")]
         );
+    }
+
+    #[test]
+    fn remote_credential_detection_handles_urls_and_scp_locators() {
+        assert!(remote_contains_credentials(
+            "https://token@example.com/org/repo.git"
+        ));
+        assert!(remote_contains_credentials(
+            "TOKEN@example.com:org/repo.git"
+        ));
+        assert!(!remote_contains_credentials("git@example.com:org/repo.git"));
+        assert!(!remote_contains_credentials(
+            "https://example.com/org/repo.git"
+        ));
     }
 }

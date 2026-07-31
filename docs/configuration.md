@@ -115,12 +115,12 @@ legacy run cannot execute a project's tasks from an unrelated checkout.
 The repository inventory entry's `instructions.path` is resolved beneath its
 configured checkout and is the workflow file loaded for that legacy run;
 repository implementation guidance remains separate from central front matter.
-`project_set` validates the multi-repository model but remains disabled until
-its later release gates pass; it fails before starting the scheduler rather
-than silently falling back to the current directory. Operational recovery
-commands (`debug` and `rehydrate`), plus all doctor modes, reject the same gated
-mode before selecting an unrelated checkout for workflow or conversation-store
-discovery.
+`project_set` enables multi-repository routing. Each active project's
+repository association is resolved before tracker polling; tasks without a
+canonical binding are blocked rather than falling back to the current
+directory. Operational recovery commands (`debug` and `rehydrate`), plus all
+doctor modes, use the selected repository policy and verified checkout
+envelope, and refuse attach when binding or provenance is incompatible.
 `rehydrate` also accepts `--config <path>` when an instance is not the default
 home configuration. `memory init` refuses to treat a selected central config
 as a repository-local memory file; initialize the local memory config instead.

@@ -1755,7 +1755,11 @@ impl RuntimeWorkerBackend {
                         return;
                     }
                 };
-                if verified.generation != expected.checkout_generation
+                if verified.repository_binding != expected.repository_binding
+                    || verified.target_branch != expected.target_branch
+                    || verified.target_commit != expected.target_commit
+                    || ensured.handle.workspace_path() != expected.checkout_path
+                    || verified.generation != expected.checkout_generation
                     || verified.instruction != expected.instruction
                     || repository_instructions
                         != if allow_worker_changes {
