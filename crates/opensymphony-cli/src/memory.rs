@@ -2005,6 +2005,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 ))
             })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
+        let include_okf_exports = !local_config.index_path.is_file();
         let mut roots = vec![
             (MemorySourceKind::Repository, source.root.clone()),
             (MemorySourceKind::Policy, local_config.config_path.clone()),
@@ -2017,8 +2018,10 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 local_config.memory_root.clone(),
             ),
         ];
-        for export_name in ["okf-export-public", "okf-export-private"] {
-            roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+        if include_okf_exports {
+            for export_name in ["okf-export-public", "okf-export-private"] {
+                roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+            }
         }
         for (kind, root) in roots {
             if !root.exists() {
@@ -2083,6 +2086,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 ))
             })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
+        let include_okf_exports = !local_config.index_path.is_file();
         let mut roots = vec![
             (MemorySourceKind::Repository, source.root.clone()),
             (MemorySourceKind::Policy, local_config.config_path.clone()),
@@ -2095,8 +2099,10 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 local_config.memory_root.clone(),
             ),
         ];
-        for export_name in ["okf-export-public", "okf-export-private"] {
-            roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+        if include_okf_exports {
+            for export_name in ["okf-export-public", "okf-export-private"] {
+                roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+            }
         }
         for (kind, root) in roots {
             if !root.exists() {
@@ -2727,7 +2733,7 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
 }
 
 fn code_graph_tools_enabled(config: &MemoryConfig) -> bool {
-    config.code_intel.enabled
+    config.enabled && config.code_intel.enabled
         || config.repository_sources.values().any(|source| {
             MemoryConfig::load(&source.root, None)
                 .is_ok_and(|local| local.enabled && local.code_intel.enabled)
@@ -2778,7 +2784,7 @@ fn required_access_for_tool(name: &str, auth: &MemoryServerAuth) -> MemoryServer
 }
 
 fn ast_tools_enabled(config: &MemoryConfig) -> bool {
-    config.code_intel.enabled && config.code_intel.ast.enabled
+    config.enabled && config.code_intel.enabled && config.code_intel.ast.enabled
 }
 
 fn memory_config_for_code_intel_scope(
@@ -2823,7 +2829,7 @@ fn memory_config_for_code_graph_scope(
     if let Some(repository_id) = scope.repo {
         resolved.default_repository_id = Some(repository_id);
     }
-    if !resolved.code_intel.enabled {
+    if !resolved.enabled || !resolved.code_intel.enabled {
         return Err(MemoryError::InvalidInput(
             "indexed code graph tools are disabled for the selected repository".to_string(),
         ));
@@ -4882,6 +4888,7 @@ fn memory_config_for_repository(
     let mut resolved = config.clone();
     resolved.repo_root = source.root.clone();
     let local_config = MemoryConfig::load(&source.root, None)?;
+    resolved.enabled = local_config.enabled;
     resolved.code_intel = local_config.code_intel;
     Ok(resolved)
 }
@@ -10056,7 +10063,7 @@ Public memory concept.
         let repository = TempDir::new().expect("repository temp repo");
         std::fs::write(
             repository.path().join("opensymphony-memory.yaml"),
-            "code_intel:\n  ast:\n    enabled: false\n",
+            "enabled: false\ncode_intel:\n  ast:\n    enabled: true\n",
         )
         .expect("repository config");
         let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");

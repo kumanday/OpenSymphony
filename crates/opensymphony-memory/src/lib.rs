@@ -3877,6 +3877,56 @@ Reviews are triggered when you open a pull request for review.
         assert!(!projects.contains("project-b"));
     }
 
+    #[test]
+    fn okf_import_restricts_project_scopes_to_the_registered_repository() {
+        let repo = TempDir::new().expect("temp repo");
+        let bundle = repo.path().join("bundle");
+        fs::create_dir_all(bundle.join("issues")).expect("bundle");
+        fs::write(
+            bundle.join("issues/COE-550.md"),
+            r#"---
+type: issue
+title: "COE-550: Scoped import"
+opensymphony:
+  scope_refs:
+    - kind: work_item
+      id: COE-550
+    - kind: project
+      id: project-b
+    - kind: project_set
+      id: wrong-set
+---
+
+# COE-550: Scoped import
+"#,
+        )
+        .expect("concept");
+        let mut config = config_for(repo.path());
+        config.default_project_set_id = Some("set-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        merge_memory_index_from_okf(&config, &bundle, "repo-a", "repo-a:okf")
+            .expect("scoped import");
+        let connection = Connection::open(&config.index_path).expect("index");
+        let scope_refs_json: String = connection
+            .query_row("SELECT scope_refs_json FROM issues", [], |row| row.get(0))
+            .expect("scope refs");
+
+        assert!(scope_refs_json.contains("project-a"));
+        assert!(scope_refs_json.contains("set-a"));
+        assert!(!scope_refs_json.contains("project-b"));
+        assert!(!scope_refs_json.contains("wrong-set"));
+    }
+
     fn config_for(repo_root: &Path) -> MemoryConfig {
         let config_path = repo_root.join("opensymphony-memory.yaml");
         fs::write(

@@ -3241,6 +3241,21 @@ fn refresh_memory_index_from_okf_inner(
         }
         let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
             .unwrap_or_default();
+        if let Some(repository_id) = repository_id {
+            let project_scope_ids = config
+                .repository_sources
+                .get(repository_id)
+                .map(|source| &source.project_scope_ids);
+            scope_refs.retain(|scope| match &scope.kind {
+                KnowledgeScopeKind::Project => project_scope_ids
+                    .is_some_and(|project_scope_ids| project_scope_ids.contains(&scope.id)),
+                KnowledgeScopeKind::ProjectSet => config
+                    .default_project_set_id
+                    .as_deref()
+                    .is_some_and(|project_set_id| project_set_id == scope.id),
+                _ => true,
+            });
+        }
         if let Some(project_set_id) = config.default_project_set_id.as_deref()
             && !scope_refs
                 .iter()
