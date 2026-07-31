@@ -739,6 +739,19 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
+    for (kind, requested) in [
+        (KnowledgeScopeKind::ProjectSet, scope.project_set.as_ref()),
+        (KnowledgeScopeKind::Project, scope.project.as_ref()),
+    ] {
+        if let Some(requested) = requested.and_then(|value| normalize_optional(value))
+            && !issue
+                .scope_refs
+                .iter()
+                .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(&requested))
+        {
+            return false;
+        }
+    }
     if let Some(milestone) = scope.milestone.as_ref().and_then(|value| normalize_optional(value))
         && issue.milestone.as_deref() != Some(milestone.as_str())
     {

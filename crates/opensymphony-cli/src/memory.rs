@@ -18,6 +18,7 @@ use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{Mutex, OwnedMutexGuard, watch},
     task::JoinHandle,
@@ -945,6 +946,12 @@ fn apply_central_memory_root(
             },
         );
     }
+    if let Some(project_set_id) = central.project_set_id.clone() {
+        *config = config.clone().with_default_project_set_id(project_set_id);
+    }
+    *config = config
+        .clone()
+        .with_project_scope_ids(central.repository_routing.active_projects.iter().cloned());
     let active_repository_id = central.target_repo().and_then(|target| {
         central
             .memory_sources
@@ -972,6 +979,10 @@ fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryErr
     evolved.memory_root = config.memory_root.clone();
     evolved.index_path = config.index_path.clone();
     evolved.containment_root = config.containment_root.clone();
+    evolved.repository_sources = config.repository_sources.clone();
+    evolved.default_repository_id = config.default_repository_id.clone();
+    evolved.default_project_set_id = config.default_project_set_id.clone();
+    evolved.project_scope_ids = config.project_scope_ids.clone();
     Ok(evolved)
 }
 
@@ -1938,8 +1949,14 @@ async fn start_memory_server_with_auth(
 
 fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
     let mut source_ids = BTreeSet::new();
+    let mut legacy_repository_names = BTreeSet::new();
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
+            if !legacy_repository_names.insert(legacy_repo_id.to_string()) {
+                return Err(MemoryError::InvalidInput(format!(
+                    "ambiguous legacy repository basename `{legacy_repo_id}`; canonical migration requires unique checkout names"
+                )));
+            }
             migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
         }
         let commit_sha = source
@@ -2013,7 +2030,12 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 ) {
                     let mut import_config = config.clone();
                     import_config.repo_root = source.root.clone();
-                    merge_memory_index_from_okf(&import_config, &root, &source.repository_id)?;
+                    merge_memory_index_from_okf(
+                        &import_config,
+                        &root,
+                        &source.repository_id,
+                        &registration.source_id,
+                    )?;
                 }
                 register_memory_source(
                     config,
@@ -2070,29 +2092,41 @@ fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
             root.file_name()
                 .map(|name| name.to_string_lossy().as_bytes().to_vec())
                 .unwrap_or_default(),
-            fs::read(root).map_err(|source| MemoryError::ReadFile {
-                path: root.to_path_buf(),
-                source,
-            })?,
+            root.to_path_buf(),
         ));
     } else if metadata.file_type().is_dir() {
         collect_memory_source_entries(root, root, &mut entries)?;
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut material = Vec::new();
-    for (relative, contents) in entries {
-        material.extend_from_slice(&relative);
-        material.push(0);
-        material.extend_from_slice(&contents);
-        material.push(0);
+    let mut digest = Sha256::new();
+    for (relative, path) in entries {
+        digest.update(&relative);
+        digest.update([0]);
+        let mut file = fs::File::open(&path).map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read =
+                io::Read::read(&mut file, &mut buffer).map_err(|source| MemoryError::ReadFile {
+                    path: path.clone(),
+                    source,
+                })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        digest.update([0]);
     }
-    Ok(format!("sha256:{}", sha256_bytes_hex(&material)))
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 fn collect_memory_source_entries(
     root: &Path,
     current: &Path,
-    entries: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    entries: &mut Vec<(Vec<u8>, PathBuf)>,
 ) -> Result<(), MemoryError> {
     for entry in fs::read_dir(current).map_err(|source| MemoryError::ReadFile {
         path: current.to_path_buf(),
@@ -2116,11 +2150,15 @@ fn collect_memory_source_entries(
                 .to_string_lossy()
                 .as_bytes()
                 .to_vec();
-            let contents = fs::read(&path).map_err(|source| MemoryError::ReadFile {
-                path: path.clone(),
-                source,
-            })?;
-            entries.push((relative, contents));
+            let is_runtime_file =
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name == MEMORY_MIGRATION_LOCK || name == MEMORY_ACTIVITY_MARKER
+                    });
+            if !is_runtime_file {
+                entries.push((relative, path));
+            }
         }
     }
     Ok(())
@@ -2915,8 +2953,8 @@ struct AstDocuments {
     warnings: Vec<String>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn call_code_ast_status_tool(config: &MemoryConfig) -> Result<Value, MemoryError> {
-    let _ = resolve_code_intel_repo(config, None)?;
     Ok(json!({
         "provider": "tree-sitter-ast",
         "available": true,
@@ -5899,6 +5937,9 @@ fn issue_evidence_from_tracker(
         state: Some(issue.state),
         milestone: milestone.as_ref().map(|milestone| milestone.name.clone()),
         milestone_id: milestone.map(|milestone| milestone.id),
+        project_id: issue.project_id,
+        project_slug: issue.project_slug,
+        project_name: issue.project_name,
         parent,
         children,
         blocked_by,

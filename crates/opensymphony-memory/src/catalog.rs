@@ -12,6 +12,19 @@ impl MemoryConfig {
         self.default_repository_id = Some(repository_id.into());
         self
     }
+
+    pub fn with_default_project_set_id(mut self, project_set_id: impl Into<String>) -> Self {
+        self.default_project_set_id = Some(project_set_id.into());
+        self
+    }
+
+    pub fn with_project_scope_ids(
+        mut self,
+        project_scope_ids: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.project_scope_ids.extend(project_scope_ids);
+        self
+    }
 }
 
 pub fn register_memory_source(
@@ -127,22 +140,13 @@ pub fn reconcile_memory_sources(
             path: config.index_path.clone(),
             source: error,
         })?;
-    let active_repositories = existing
+    let withdrawn_source_ids = existing
         .iter()
         .filter(|(source_id, _, source_kind)| {
-            source_ids.contains(source_id)
-                && matches!(source_kind.as_str(), "legacy_store" | "okf_bundle")
-        })
-        .map(|(_, repository_id, _)| repository_id.clone())
-        .collect::<BTreeSet<_>>();
-    let withdrawn_repositories = existing
-        .iter()
-        .filter(|(source_id, repository_id, source_kind)| {
             !source_ids.contains(source_id)
                 && matches!(source_kind.as_str(), "legacy_store" | "okf_bundle")
-                && !active_repositories.contains(repository_id)
         })
-        .map(|(_, repository_id, _)| repository_id.clone())
+        .map(|(source_id, _, _)| source_id.clone())
         .collect::<BTreeSet<_>>();
     let placeholders = std::iter::repeat_n("?", source_ids.len())
         .collect::<Vec<_>>()
@@ -169,10 +173,99 @@ pub fn reconcile_memory_sources(
             })?;
     }
     drop(connection);
-    for repository_id in withdrawn_repositories {
-        withdraw_memory_repository_records(config, &repository_id)?;
+    for source_id in withdrawn_source_ids {
+        withdraw_memory_source_records(config, &source_id)?;
     }
     Ok(())
+}
+
+pub fn withdraw_memory_source_records(
+    config: &MemoryConfig,
+    source_id: &str,
+) -> Result<(), MemoryError> {
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|error| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source: error,
+    })?;
+    let mut statement = connection
+        .prepare("SELECT issue_key, concept_id, source_ids_json FROM issues")
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?;
+    drop(statement);
+    let transaction = connection.transaction().map_err(|error| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source: error,
+    })?;
+    for (issue_key, concept_id, encoded_source_ids) in rows {
+        let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
+            .unwrap_or_default();
+        if !source_ids.iter().any(|value| value == source_id) {
+            continue;
+        }
+        source_ids.retain(|value| value != source_id);
+        if source_ids.is_empty() {
+            transaction
+                .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            transaction
+                .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+            }
+        } else {
+            transaction
+                .execute(
+                    "UPDATE issues SET source_ids_json = ? WHERE issue_key = ?",
+                    duckdb::params![serde_json::to_string(&source_ids)?, issue_key],
+                )
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+        }
+    }
+    transaction.commit().map_err(|error| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source: error,
+    })
 }
 
 pub fn withdraw_memory_repository_records(

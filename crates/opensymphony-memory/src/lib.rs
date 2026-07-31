@@ -22,7 +22,7 @@ pub const ISSUE_CAPSULE_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED ISSUE CAP
 pub const ISSUE_CAPSULE_END: &str = "<!-- END OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const TOPIC_DOC_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->";
 pub const TOPIC_DOC_END: &str = "<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->";
-const MEMORY_SCHEMA_VERSION: i64 = 3;
+const MEMORY_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -620,6 +620,8 @@ pub struct MemoryConfig {
     pub redaction: RedactionConfig,
     pub repository_sources: BTreeMap<String, MemoryRepositorySource>,
     pub default_repository_id: Option<String>,
+    pub default_project_set_id: Option<String>,
+    pub project_scope_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -837,6 +839,12 @@ pub struct IssueEvidence {
     pub milestone: Option<String>,
     #[serde(default)]
     pub milestone_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
     #[serde(default)]
     pub parent: Option<IssueLinkEvidence>,
     #[serde(default)]

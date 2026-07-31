@@ -1504,6 +1504,12 @@ fn load_runtime_memory_config(
                 commit_sha: None,
             });
     }
+    if let Some(project_set_id) = runtime.project_set_id.clone() {
+        config = config.with_default_project_set_id(project_set_id);
+    }
+    if let Some(repository_routing) = runtime.repository_routing.as_ref() {
+        config = config.with_project_scope_ids(repository_routing.active_projects.iter().cloned());
+    }
     let active_repository_id = runtime
         .memory_sources
         .values()
@@ -1803,6 +1809,7 @@ mod tests {
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
             memory_sources: BTreeMap::new(),
+            project_set_id: None,
             retain_failed: true,
             preserve_terminal_workspaces: true,
             memory: config::RunMemoryConfig {

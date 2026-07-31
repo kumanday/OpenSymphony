@@ -277,6 +277,35 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
         id: area.clone(),
         label: None,
     }));
+    if let Some(project_set_id) = config.default_project_set_id.as_deref() {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::ProjectSet,
+            id: project_set_id.to_string(),
+            label: None,
+        });
+    }
+    for project_id in &config.project_scope_ids {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Project,
+            id: project_id.clone(),
+            label: None,
+        });
+    }
+    for project_id in [plan.issue.project_id.as_ref(), plan.issue.project_slug.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !refs
+            .iter()
+            .any(|scope| scope.kind == KnowledgeScopeKind::Project && scope.id == *project_id)
+        {
+            refs.push(KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: project_id.clone(),
+                label: None,
+            });
+        }
+    }
     if let Some(repository_id) = config.default_repository_id.as_deref()
         && !refs
             .iter()
@@ -428,6 +457,7 @@ CREATE TABLE IF NOT EXISTS issues (
   tags_json TEXT NOT NULL DEFAULT '[]',
   scope_refs_json TEXT NOT NULL DEFAULT '[]',
   source_refs_json TEXT NOT NULL DEFAULT '[]',
+  source_ids_json TEXT NOT NULL DEFAULT '[]',
   links_json TEXT NOT NULL DEFAULT '[]',
   citations_json TEXT NOT NULL DEFAULT '[]',
   freshness TEXT NOT NULL DEFAULT 'unknown',
@@ -454,6 +484,10 @@ ALTER TABLE issues ADD COLUMN IF NOT EXISTS source_refs_json TEXT DEFAULT '[]';
 UPDATE issues SET source_refs_json = '[]' WHERE source_refs_json IS NULL;
 ALTER TABLE issues ALTER COLUMN source_refs_json SET DEFAULT '[]';
 ALTER TABLE issues ALTER COLUMN source_refs_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS source_ids_json TEXT DEFAULT '[]';
+UPDATE issues SET source_ids_json = '[]' WHERE source_ids_json IS NULL;
+ALTER TABLE issues ALTER COLUMN source_ids_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN source_ids_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS links_json TEXT DEFAULT '[]';
 UPDATE issues SET links_json = '[]' WHERE links_json IS NULL;
 ALTER TABLE issues ALTER COLUMN links_json SET DEFAULT '[]';
@@ -2591,15 +2625,22 @@ pub fn refresh_memory_index_from_okf(
     config: &MemoryConfig,
     bundle_root: &Path,
 ) -> Result<MemoryReindexReport, MemoryError> {
-    refresh_memory_index_from_okf_inner(config, bundle_root, true, None)
+    refresh_memory_index_from_okf_inner(config, bundle_root, true, None, None)
 }
 
 pub fn merge_memory_index_from_okf(
     config: &MemoryConfig,
     bundle_root: &Path,
     repository_id: &str,
+    source_id: &str,
 ) -> Result<MemoryReindexReport, MemoryError> {
-    refresh_memory_index_from_okf_inner(config, bundle_root, false, Some(repository_id))
+    refresh_memory_index_from_okf_inner(
+        config,
+        bundle_root,
+        false,
+        Some(repository_id),
+        Some(source_id),
+    )
 }
 
 fn refresh_memory_index_from_okf_inner(
@@ -2607,6 +2648,7 @@ fn refresh_memory_index_from_okf_inner(
     bundle_root: &Path,
     replace_existing: bool,
     repository_id: Option<&str>,
+    source_id: Option<&str>,
 ) -> Result<MemoryReindexReport, MemoryError> {
     ensure_repo_contained(&config.repo_root, bundle_root)?;
     let bundle_root = canonicalize_existing_path(bundle_root)?;
@@ -2680,6 +2722,9 @@ fn refresh_memory_index_from_okf_inner(
                 row.scope_refs_json = serde_json::to_string(&scope_refs)?;
             }
         }
+        if let Some(source_id) = source_id {
+            row.source_ids_json = serde_json::to_string(&vec![source_id])?;
+        }
         rows.push(row);
     }
 
@@ -2727,20 +2772,102 @@ fn refresh_memory_index_from_okf_inner(
     } else {
         "INSERT OR REPLACE INTO"
     };
+    if let Some(source_id) = source_id {
+        let incoming = rows
+            .iter()
+            .map(|row| row.concept_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let stale = {
+            let mut statement = transaction
+                .prepare("SELECT issue_key, concept_id, source_ids_json FROM issues")
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
+        for (issue_key, concept_id, encoded_source_ids) in stale {
+            let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
+                .unwrap_or_default();
+            if incoming.contains(concept_id.as_str())
+                || !source_ids.iter().any(|value| value == source_id)
+            {
+                continue;
+            }
+            source_ids.retain(|value| value != source_id);
+            if source_ids.is_empty() {
+                transaction
+                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                transaction
+                    .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                for table in [
+                    "issue_areas",
+                    "pull_requests",
+                    "changed_files",
+                    "checks",
+                    "reviews",
+                ] {
+                    transaction
+                        .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                }
+            } else {
+                transaction
+                    .execute(
+                        "UPDATE issues SET source_ids_json = ? WHERE issue_key = ?",
+                        params![serde_json::to_string(&source_ids)?, issue_key],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+    }
     for row in &rows {
         let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
             .unwrap_or_default();
         let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&row.source_refs_json)
             .unwrap_or_default();
+        let mut source_ids = serde_json::from_str::<Vec<String>>(&row.source_ids_json)
+            .unwrap_or_default();
         if !replace_existing {
             let existing = transaction
                 .query_row(
-                    "SELECT scope_refs_json, source_refs_json FROM issues WHERE issue_key = ?",
+                    "SELECT scope_refs_json, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
                     params![row.issue_key],
                     |query_row| {
                         Ok((
                             query_row.get::<_, String>(0)?,
                             query_row.get::<_, String>(1)?,
+                            query_row.get::<_, String>(2)?,
                         ))
                     },
                 )
@@ -2749,7 +2876,7 @@ fn refresh_memory_index_from_okf_inner(
                     path: config.index_path.clone(),
                     source,
                 })?;
-            if let Some((existing_scopes, existing_sources)) = existing {
+            if let Some((existing_scopes, existing_sources, existing_source_ids)) = existing {
                 for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
                     .unwrap_or_default()
                 {
@@ -2764,8 +2891,16 @@ fn refresh_memory_index_from_okf_inner(
                         source_refs.push(source);
                     }
                 }
+                for existing_source_id in serde_json::from_str::<Vec<String>>(&existing_source_ids)
+                    .unwrap_or_default()
+                {
+                    if !source_ids.contains(&existing_source_id) {
+                        source_ids.push(existing_source_id);
+                    }
+                }
             }
         }
+        let source_ids_json = serde_json::to_string(&source_ids)?;
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
         let source_refs_json = serde_json::to_string(&source_refs)?;
         if !replace_existing {
@@ -2798,7 +2933,7 @@ fn refresh_memory_index_from_okf_inner(
         }
         transaction
             .execute(
-                &format!("{issue_insert} issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+                &format!("{issue_insert} issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, source_ids_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
                 params![
                     row.issue_key,
                     row.title,
@@ -2820,6 +2955,7 @@ fn refresh_memory_index_from_okf_inner(
                     row.tags_json,
                     scope_refs_json,
                     source_refs_json,
+                    source_ids_json,
                     row.links_json,
                     row.citations_json,
                     row.freshness.as_str(),
@@ -2932,6 +3068,7 @@ struct OkfIndexRow {
     tags_json: String,
     scope_refs_json: String,
     source_refs_json: String,
+    source_ids_json: String,
     links_json: String,
     citations_json: String,
     freshness: MemoryFreshness,
@@ -2996,6 +3133,7 @@ impl OkfIndexRow {
             tags_json: serde_json::to_string(&tags)?,
             scope_refs_json: serde_json::to_string(&scope_refs)?,
             source_refs_json: serde_json::to_string(&source_refs)?,
+            source_ids_json: "[]".to_string(),
             links_json: serde_json::to_string(&links)?,
             citations_json: serde_json::to_string(&citations)?,
             freshness: okf_index_freshness(&concept),
