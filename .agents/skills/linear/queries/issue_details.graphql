@@ -1,4 +1,4 @@
-query IssueDetails($id: String!) {
+query IssueDetails($id: String!, $labelsAfter: String) {
   issue(id: $id) {
     id
     identifier
@@ -11,6 +11,16 @@ query IssueDetails($id: String!) {
       name
       type
     }
+    labels(first: 100, after: $labelsAfter) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        name
+      }
+    }
     team {
       id
       key
@@ -21,6 +31,12 @@ query IssueDetails($id: String!) {
       name
       slugId
       url
+    }
+    children(first: 1) {
+      nodes {
+        id
+        identifier
+      }
     }
     attachments {
       nodes {

@@ -18,6 +18,19 @@ credential references, review profiles, scheduler, integration, workspace, and
 memory-catalog policy. Relative paths resolve from the central config file.
 Remote values may contain no credentials, repository aliases are unique, and
 strict unknown fields fail before tracker polling or workspace creation.
+The central loader trims surrounding repository-alias whitespace before
+building the routing inventory, so managed labels and legacy defaults resolve
+against the same canonical alias key.
+The active project's provider ID and optional provider slug are routing keys;
+if any such key is shared by multiple active projects, their allowed
+repository sets must be identical or central configuration fails as ambiguous.
+The inventory generation hashes the normalized alias-to-identity map, so an
+alias change advances the generation even when the underlying repository
+identities are unchanged.
+Canonical identities normalize the default authority for public providers, so
+equivalent `owner/repository` and provider URL locators resolve to the same
+durable repository identity and safe fingerprint. A Linear project association
+constrains the allowed aliases but never supplies a terminal task's binding.
 Any central-only key such as `instance`, `routing`, `tracker_profiles`, or
 `repositories` selects the strict central parser, even when its discriminator
 is malformed; those files fail closed instead of falling through to legacy
@@ -49,6 +62,30 @@ marker keeps the issue parked across a later run.
 Pending retry manifests also retain their scheduled time, due deadline,
 reason, and redacted error summary, so recovery preserves the original
 backoff instead of redispatching immediately.
+While a retry is queued, the scheduler includes it in the frequent tracker
+state refresh; a binding mutation is therefore reconciled before the retry's
+due time rather than dispatching the old repository generation. Bounded detail
+lookups also recheck configured project membership after hydration, protecting
+against tasks moved out of the selected Linear project between full refreshes.
+The instance-level retry marker remains until the replacement `start_run`
+metadata is durable, even when replacement workspace materialization succeeds;
+this closes the crash window between workspace preparation and run ownership.
+If recovery finds both that metadata-only workspace and the instance retry
+marker, it merges the marker into the workspace recovery instead of discarding
+the retry budget. An external retry marker is restored only when the current
+project-filtered active snapshot proves the issue is still dispatchable;
+otherwise the stale marker is cleared. If the recovered issue manifest proves
+a different canonical repository than the live binding, recovery removes the
+old workspace before restoring the retry so normal dispatch rematerializes it
+safely. Legacy-single routing also never applies its default repository to a
+parent task. When a recovered run still points at the same canonical
+repository, its persisted config and inventory generations remain attached to
+that run; a formatting-only locator change cannot relabel an in-flight attempt
+as a newer configuration generation. Scheme-default authority ports are
+normalized for repository identity, while non-default ports remain distinct.
+The same frequent refresh reads current child presence, so a running task that
+becomes a parent is made repository-neutral and its old worker generation is
+superseded before another turn can continue.
 If a crash leaves a `Preparing` or `Prepared` run without a conversation
 manifest, recovery consumes that attempt as a reconciliation retry and still
 enforces `scheduler.retry.max_attempts`.
@@ -89,7 +126,67 @@ the central model or its serialized diagnostics.
 used for Linear lookup. Migrated legacy files may also carry
 `provider_project_slug`; that field is an explicit compatibility fallback for
 older slug-based tracker configuration and is not a repository association or
-execution default.
+execution default. During routing, a supplied project ID or slug is selected
+when it matches an active project key; this lets a stale ID fall back to a
+valid active provider slug without choosing a repository. Surrounding
+whitespace is trimmed before project IDs and slugs enter the routing indexes.
+
+### Repository binding
+
+In `project_set` mode, each terminal child task must carry exactly one managed
+`repo:<alias>` label. The alias resolves through the central repository
+inventory to a provider-qualified canonical repository ID and a credential-free
+remote fingerprint. A project's `repositories` list constrains the aliases
+that are valid for its tasks; it never selects a default. Parent tasks remain
+repository-neutral and must not carry a managed repository label.
+
+When a remote exposes an authority such as `github.com` or a GitHub Enterprise
+host, that authority is included with the provider-native ID in both the
+canonical repository ID and safe fingerprint; this prevents two provider
+installations from colliding while remaining stable across rename or transfer.
+Missing, unknown, duplicate, parent, out-of-scope, and disallowed bindings are
+retained as distinct scheduler routing outcomes and do not create workspaces.
+An empty managed label such as `repo:` remains visible to strict validation and
+is rejected as an invalid binding rather than being treated as an absent label.
+The resolved binding records the central config and inventory generations
+before a worker is claimed. A binding change on a claimed task stops and
+removes the old generation's workspace before materializing the replacement,
+and fences late worker events from the old generation. A binding change on a
+queued retry removes its stale workspace while preserving the retry entry in
+the replacement workspace or in the instance retry-state root when the new
+binding is blocked. A recovered worker is stopped and acknowledged before an
+unproven workspace is removed. A
+legacy workspace with no issue binding may be backfilled only when its
+persisted issue, run, or after-create receipt metadata proves the requested
+repository; the current legacy configuration alone is not historical proof.
+Unproven in-flight recovery is rematerialized through the normal retry path. In `legacy_single` mode only, an unlabelled task resolves to
+the configured repository for compatibility.
+Generated planning front matter quotes repository aliases as YAML strings, and
+sub-issue regeneration moves a parent's binding to the generated terminal
+children while clearing it from the new parent; when the parent is neutral,
+existing child bindings are retained by child position during regeneration.
+Task-package conversion rejects explicitly blank repository aliases in every
+routing mode while continuing to accept unlabelled tasks in `legacy_single`.
+Task-package `routingMode` must be a scalar `legacy_single` or `project_set`
+value; malformed YAML types are reported as ordinary package validation
+errors. The planning compiler emits `project_set` plus the sorted
+`repositoryAliases` inventory whenever terminal bindings are present, so
+compiled task packages retain the planning artifact's explicit routing mode and
+trusted `repositoryAliases` inventory through publication, even when a
+malformed strict plan has not yet assigned bindings to its terminal tasks; the
+converter then rejects the missing bindings instead of downgrading the package
+to legacy dispatch.
+Every configured and task-level alias must remain non-empty after trimming.
+The Rust manifest validator applies the same strict cardinality and inventory
+checks, including rejecting multi-alias list forms before a package can be
+accepted. During publication, existing Linear child presence is checked before
+adding a repository label so removed package children cannot leave a bound
+parent behind. Gateway task-graph and run-detail blockers preserve the typed
+repository-binding reason for operators.
+An explicitly configured but blank `remote.provider_id` is rejected rather
+than falling back to the mutable repository locator for canonical identity.
+Issue regeneration retains terminal-child bindings by position and keeps the
+regenerated parent repository-neutral.
 
 ## Configuration migration
 

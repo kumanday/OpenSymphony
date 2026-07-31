@@ -69,6 +69,7 @@ class Task:
     blocked_by: list[str]
     blocks: list[str]
     areas: list[str]
+    repository_aliases: list[str]
     parent: str | None
     body: str
 
@@ -83,6 +84,8 @@ class Package:
     manifest_tasks: list[ManifestTask]
     tasks: dict[str, Task]
     waves: list[list[str]]
+    repository_mode: str
+    repository_aliases: set[str]
 
 
 class ValidationError(Exception):
@@ -176,6 +179,18 @@ def load_package(repo_root: Path, manifest_path: Path) -> Package:
     tasks_dir = require_non_empty_string(manifest, "tasksDir", errors)
     milestones = normalize_milestones(manifest.get("milestones"), errors)
     manifest_tasks = normalize_manifest_tasks(manifest.get("tasks"), errors)
+    repository_mode = manifest.get("routingMode", "legacy_single")
+    if not isinstance(repository_mode, str) or repository_mode not in {"legacy_single", "project_set"}:
+        errors.append("manifest field routingMode must be legacy_single or project_set")
+        repository_mode = "legacy_single"
+    configured_repository_aliases = manifest.get("repositoryAliases", [])
+    if not isinstance(configured_repository_aliases, list) or not all(
+        isinstance(alias, str) for alias in configured_repository_aliases
+    ):
+        errors.append("manifest field repositoryAliases must be a list of strings")
+        configured_repository_aliases = []
+    elif any(not alias.strip() for alias in configured_repository_aliases):
+        errors.append("manifest field repositoryAliases entries must be non-empty after trimming")
 
     tasks: dict[str, Task] = {}
     for manifest_task in manifest_tasks:
@@ -188,6 +203,12 @@ def load_package(repo_root: Path, manifest_path: Path) -> Package:
 
     validate_manifest_references(manifest_tasks, tasks, milestones, errors)
     validate_task_graph(tasks, errors)
+    validate_repository_bindings(
+        tasks,
+        repository_mode,
+        {alias.strip() for alias in configured_repository_aliases},
+        errors,
+    )
 
     if errors:
         raise ValidationError(render_errors("Task package validation failed", errors))
@@ -202,6 +223,8 @@ def load_package(repo_root: Path, manifest_path: Path) -> Package:
         manifest_tasks=manifest_tasks,
         tasks=tasks,
         waves=waves,
+        repository_mode=repository_mode,
+        repository_aliases={alias.strip() for alias in configured_repository_aliases},
     )
 
 
@@ -319,6 +342,12 @@ def load_task(
     blocked_by = frontmatter.get("blockedBy")
     blocks = frontmatter.get("blocks")
     areas = normalize_area_slugs(frontmatter.get("areas", []), manifest_task.id, errors)
+    repository_aliases = normalize_repository_aliases(
+        frontmatter.get("repository"),
+        frontmatter.get("labels", []),
+        manifest_task.id,
+        errors,
+    )
     parent = frontmatter.get("parent")
 
     if task_id != manifest_task.id:
@@ -357,6 +386,7 @@ def load_task(
         blocked_by=list(blocked_by) if is_string_list(blocked_by) else [],
         blocks=list(blocks) if is_string_list(blocks) else [],
         areas=areas,
+        repository_aliases=repository_aliases,
         parent=parent.strip() if isinstance(parent, str) else None,
         body=body,
     )
@@ -424,6 +454,57 @@ def validate_task_graph(tasks: dict[str, Task], errors: list[str]) -> None:
         errors.append(f"creation dependencies contain a cycle: {' -> '.join(cycle)}")
 
 
+def normalize_repository_aliases(
+    repository: Any,
+    labels: Any,
+    task_id: str,
+    errors: list[str],
+) -> list[str]:
+    aliases: list[str] = []
+    if repository is not None:
+        values = [repository] if isinstance(repository, str) else repository
+        if not is_string_list(values):
+            errors.append(f"task {task_id} repository must be a non-empty string or list of strings")
+        else:
+            aliases.extend(value.strip() for value in values)
+    if labels is not None:
+        if not is_string_list(labels):
+            errors.append(f"task {task_id} labels must be a list of strings")
+        else:
+            aliases.extend(
+                label.split(":", 1)[1].strip()
+                for label in labels
+                if label.strip().lower().startswith("repo:")
+            )
+    return aliases
+
+
+def validate_repository_bindings(
+    tasks: dict[str, Task],
+    mode: str,
+    configured_aliases: set[str],
+    errors: list[str],
+) -> None:
+    if mode == "project_set" and not configured_aliases:
+        errors.append("project_set packages must declare a non-empty repositoryAliases inventory")
+    parent_ids = {task.parent for task in tasks.values() if task.parent}
+    for task in tasks.values():
+        aliases = task.repository_aliases
+        if len(aliases) > 1:
+            errors.append(f"task {task.id} has multiple managed repository bindings: {', '.join(aliases)}")
+        if aliases and task.id in parent_ids:
+            errors.append(f"parent task {task.id} must not declare a repository binding")
+        if mode == "project_set" and task.id not in parent_ids and len(aliases) != 1:
+            errors.append(f"terminal task {task.id} must declare exactly one repository binding")
+        for alias in aliases:
+            if not alias:
+                errors.append(f"task {task.id} repository alias must be non-empty")
+                continue
+            if mode == "project_set" or configured_aliases:
+                if alias not in configured_aliases:
+                    errors.append(f"task {task.id} references unknown repository alias {alias}")
+
+
 def dependency_waves(tasks: dict[str, Task]) -> list[list[str]]:
     remaining = set(tasks)
     created: set[str] = set()
@@ -474,6 +555,10 @@ def area_slug(value: str) -> str:
 
 def area_label_name(area: str) -> str:
     return f"area:{area}"
+
+
+def repository_label_name(alias: str) -> str:
+    return f"repo:{alias}"
 
 
 def counts(values: list[str]) -> dict[str, int]:
@@ -678,6 +763,12 @@ def ensure_issues(
     publish_tasks = publish.get("tasks", {}) if isinstance(publish.get("tasks"), dict) else {}
     issue_map: dict[str, dict[str, Any]] = {}
     area_label_ids = ensure_area_labels(client, package, team)
+    repository_label_ids = ensure_repository_labels(client, package, team)
+    project_issues_by_id = {
+        issue.get("id"): issue
+        for issue in project.get("issues", {}).get("nodes", [])
+        if issue.get("id")
+    }
 
     for wave in package.waves:
         for task_id in wave:
@@ -685,7 +776,12 @@ def ensure_issues(
             mapped = publish_tasks.get(task_id, {}) if isinstance(publish_tasks.get(task_id), dict) else {}
             existing = None
             if mapped.get("issueId"):
-                existing = {"id": mapped["issueId"], "identifier": mapped.get("issue"), "url": mapped.get("url")}
+                existing = project_issues_by_id.get(mapped["issueId"], {}).copy()
+                if not existing:
+                    existing = fetch_issue_for_label_merge(client, mapped["issueId"])
+                existing.setdefault("id", mapped["issueId"])
+                existing.setdefault("identifier", mapped.get("issue"))
+                existing.setdefault("url", mapped.get("url"))
             elif task_id in existing_by_provenance:
                 existing = existing_by_provenance[task_id]
 
@@ -701,8 +797,30 @@ def ensure_issues(
             }
             if task.parent:
                 input_data["parentId"] = issue_map[task.parent]["id"]
-            label_ids = [area_label_ids[area] for area in task.areas if area in area_label_ids]
-            if label_ids:
+            if existing and task.repository_aliases and issue_has_children(existing):
+                identifier = existing.get("identifier") or existing["id"]
+                raise LinearError(
+                    f"task {task.id} cannot receive a repository binding because "
+                    f"existing Linear issue {identifier} has children"
+                )
+            if existing and issue_labels_need_pagination(existing):
+                existing = fetch_issue_for_label_merge(client, existing["id"])
+            existing_labels = (
+                [
+                    label
+                    for label in existing.get("labels", {}).get("nodes", [])
+                    if isinstance(label, dict)
+                ]
+                if existing
+                else []
+            )
+            label_ids = merge_issue_label_ids(
+                task,
+                existing_labels,
+                area_label_ids,
+                repository_label_ids,
+            )
+            if label_ids or existing is not None:
                 input_data["labelIds"] = label_ids
 
             if existing:
@@ -713,6 +831,41 @@ def ensure_issues(
                 print(f"created issue: {issue['identifier']} {task.title}")
             issue_map[task_id] = issue
     return issue_map
+
+
+def fetch_issue_for_label_merge(client: LinearClient, issue_id: str) -> dict[str, Any]:
+    data = client.call("issue_details.graphql", {"id": issue_id})
+    issue = data.get("data", {}).get("issue")
+    if not isinstance(issue, dict):
+        raise LinearError(f"mapped Linear issue not found: {issue_id}")
+    issue = issue.copy()
+    labels = list(issue.get("labels", {}).get("nodes", []))
+    page_info = issue.get("labels", {}).get("pageInfo", {})
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            raise LinearError(f"Linear label pagination returned no cursor: {issue_id}")
+        data = client.call(
+            "issue_details.graphql",
+            {"id": issue_id, "labelsAfter": cursor},
+        )
+        next_issue = data.get("data", {}).get("issue")
+        if not isinstance(next_issue, dict):
+            raise LinearError(f"mapped Linear issue not found: {issue_id}")
+        labels.extend(next_issue.get("labels", {}).get("nodes", []))
+        page_info = next_issue.get("labels", {}).get("pageInfo", {})
+    issue["labels"] = {"nodes": labels, "pageInfo": {"hasNextPage": False, "endCursor": None}}
+    return issue
+
+
+def issue_labels_need_pagination(issue: dict[str, Any]) -> bool:
+    page_info = issue.get("labels", {}).get("pageInfo", {})
+    return bool(page_info.get("hasNextPage"))
+
+
+def issue_has_children(issue: dict[str, Any]) -> bool:
+    children = issue.get("children", {})
+    return bool(children.get("nodes")) if isinstance(children, dict) else False
 
 
 def ensure_area_labels(client: LinearClient, package: Package, team: dict[str, Any]) -> dict[str, str]:
@@ -741,6 +894,56 @@ def ensure_area_labels(client: LinearClient, package: Package, team: dict[str, A
         label_ids[area] = label["id"]
         print(f"created area label: {name}")
     return label_ids
+
+
+def ensure_repository_labels(client: LinearClient, package: Package, team: dict[str, Any]) -> dict[str, str]:
+    aliases = sorted({alias for task in package.tasks.values() for alias in task.repository_aliases})
+    label_ids: dict[str, str] = {}
+    for alias in aliases:
+        name = repository_label_name(alias)
+        existing = find_issue_label(client, name, team["id"])
+        if existing:
+            label_ids[alias] = existing["id"]
+            continue
+        data = client.call(
+            "issue_label_create.graphql",
+            {"input": {"name": name, "teamId": team["id"]}},
+            allow_errors=True,
+        )
+        if data.get("errors"):
+            existing = find_issue_label(client, name, team["id"])
+            if existing:
+                label_ids[alias] = existing["id"]
+                continue
+            raise LinearError(f"failed to create label {name}: {json.dumps(data['errors'], indent=2)}")
+        label_ids[alias] = data["data"]["issueLabelCreate"]["issueLabel"]["id"]
+        print(f"created repository label: {name}")
+    return label_ids
+
+
+def merge_issue_label_ids(
+    task: Task,
+    existing_labels: list[dict[str, Any]],
+    area_label_ids: dict[str, str],
+    repository_label_ids: dict[str, str],
+) -> list[str]:
+    # Repository labels are the managed routing namespace. Remove every
+    # previously published repo:* label before adding the task's single
+    # desired binding, while leaving all unrelated labels untouched.
+    unmanaged_label_ids = [
+        label["id"]
+        for label in existing_labels
+        if label.get("id")
+        and not str(label.get("name", "")).strip().lower().startswith(("repo:", "area:"))
+    ]
+    label_ids = unmanaged_label_ids + [
+        area_label_ids[area] for area in task.areas if area in area_label_ids
+    ] + [
+        repository_label_ids[alias]
+        for alias in task.repository_aliases
+        if alias in repository_label_ids
+    ]
+    return list(dict.fromkeys(label_ids))
 
 
 def find_issue_label(client: LinearClient, name: str, team_id: str) -> dict[str, Any] | None:
@@ -868,6 +1071,7 @@ def issue_body(package: Package, task: Task, issue_map: dict[str, dict[str, Any]
             f"- Planning wave: {package.planning_wave}\n"
             f"- Milestone: {task.milestone}\n"
             f"- Areas: {', '.join(area_label_name(area) for area in task.areas) if task.areas else 'None'}\n"
+            f"- Repository: {repository_label_name(task.repository_aliases[0]) if task.repository_aliases else 'None'}\n"
             f"- Priority: {PRIORITY_NAMES.get(task.priority, task.priority)}\n"
             f"- Estimate: {task.estimate}",
             "## Definition of Done\n\n"

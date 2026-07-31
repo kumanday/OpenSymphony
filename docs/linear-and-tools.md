@@ -53,16 +53,25 @@ Local scheduler polling keeps the 5s worker/snapshot tick, but Linear reads are
 cadenced separately so a busy local workstation does not burn through the shared
 Linear API quota:
 
-- running issue state is refreshed with the lightweight by-ID state query every
-  30s
+- running issue state and managed repository labels are refreshed with the
+  lightweight by-ID state query every 30s, so a binding mutation fences the
+  claimed generation without waiting for the hourly full-detail pass; nested
+  label pages are walked per issue before the binding is resolved, and archived
+  children are included so parent neutrality is preserved during reconciliation
 - dispatch discovery uses a lightweight active-issue summary query every 60s
 - terminal cleanup reads run at startup and then every 5 minutes
 - full-detail active issue reads run at startup, for selected dispatches, and
   then hourly
 
 The lightweight dispatch query returns summary-shaped scheduler data only.
-Selected candidates must be reloaded through the project-scoped full-detail
-lookup before workspace creation, prompt construction, or worker launch.
+Selected candidates must be reloaded through bounded issue-by-identifier
+full-detail lookups before workspace creation, prompt construction, or worker
+launch. Detail refreshes are issued in bounded batches sized to the currently
+available worker capacity, so blocked or stale candidates do not force a full
+project rescan for every batch. A repository supersession removes the stopped
+generation's workspace before the replacement claim is materialized.
+Restart recovery backfills a missing binding in a legacy run manifest from the
+current configured legacy repository before comparing generations for drift.
 
 When Linear returns a rate-limit error with retry metadata longer than the
 client's short retry backoff, the Linear client returns the error immediately
@@ -100,6 +109,28 @@ Important normalization rules:
 - gateway task graph `root_ids` are the returned node identifiers whose Linear
   parent is absent or outside the returned node set; clients must not infer
   tracker hierarchy from fixture data or local fallbacks
+- `repository_binding` is derived from managed `repo:<alias>` labels and the
+  central repository inventory; project associations validate the binding but
+  never provide a default. Parents keep this field unresolved and repository
+  aliases are propagated through planning and conversion without storing
+  remotes or workspace paths in Linear. Conversion removes stale managed
+  `repo:*` labels before adding the current binding, while preserving unrelated
+  labels; the converter-managed `area:*` namespace is replaced in the same
+  operation so stale area labels do not accumulate. Label connections are
+  paged before replacement, both for project snapshots and mapped issue
+  lookups. When the final managed binding is removed from an existing issue,
+  the conversion mutation explicitly sends an empty label list. Strict
+  project-set packages must declare a non-empty alias inventory. If a publish
+  mapping points to an issue outside the paged project snapshot, conversion
+  fetches that issue's labels before replacing the managed subset so unrelated
+  labels are not lost. Lightweight running-state snapshots also include a
+  current child-presence bit, allowing the scheduler to neutralize a running
+  task immediately when it becomes a parent. The planning-state and mapped
+  issue detail queries also inspect existing child presence before the
+  converter adds a repository label, so a stale Linear child cannot turn a
+  formerly terminal issue into a repository-bound parent. Gateway task-graph
+  and run-detail blockers retain the typed repository-binding diagnostic
+  instead of collapsing every routing failure into a dependency message.
 
 ## 3. Agent-side Linear access
 

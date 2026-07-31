@@ -50,6 +50,12 @@ fn yaml_escape(s: &str) -> String {
     result
 }
 
+fn yaml_optional_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", yaml_escape(value)))
+        .unwrap_or_else(|| "null".to_string())
+}
+
 /// Collapses a string to one rendered Markdown line for list items and summaries.
 fn collapse_markdown_line(s: &str) -> String {
     s.replace('\n', "\\n").replace('\r', "")
@@ -165,7 +171,7 @@ impl PlanGenerator {
         self.validate_session()?;
 
         let milestones = self.generate_milestones();
-        let manifest = self.generate_manifest(&milestones);
+        let manifest = self.generate_manifest(&milestones, None);
         let milestone_index = self.render_milestone_index(&milestones);
         let task_files = self.generate_task_files(&milestones);
 
@@ -208,7 +214,7 @@ impl PlanGenerator {
         };
 
         let manifest = if scope.includes_manifest() {
-            self.generate_manifest(&milestones)
+            self.generate_manifest(&milestones, Some(&existing.manifest))
         } else {
             existing.manifest.clone()
         };
@@ -286,7 +292,36 @@ impl PlanGenerator {
                         open_questions: self.session.intake.open_questions.clone(),
                         reference_docs: self.session.intake.reference_docs.clone(),
                     };
-                    let issues = self.generate_issues_for_milestone(&intake);
+                    let generated_issues = self.generate_issues_for_milestone(&intake);
+                    let issues = generated_issues
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, mut issue)| {
+                            let existing_issue = milestone.issues.get(index);
+                            let inherited_repository =
+                                existing_issue.and_then(|issue| issue.repository.clone());
+                            let existing_child_repositories = existing_issue
+                                .map(|issue| {
+                                    issue
+                                        .sub_issues
+                                        .iter()
+                                        .map(|sub_issue| sub_issue.repository.clone())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            for (child_index, sub_issue) in issue.sub_issues.iter_mut().enumerate()
+                            {
+                                sub_issue.repository = inherited_repository.clone().or_else(|| {
+                                    existing_child_repositories
+                                        .get(child_index)
+                                        .cloned()
+                                        .flatten()
+                                });
+                            }
+                            issue.repository = None;
+                            issue
+                        })
+                        .collect();
                     PlannedMilestone {
                         id: milestone.id.clone(),
                         name: milestone.name.clone(),
@@ -342,7 +377,18 @@ impl PlanGenerator {
                                 &requirement,
                                 &intake,
                             );
-                            let sub_issues = self.generate_sub_issues_for_issue(&sub_issue_context);
+                            let existing_child_repositories = issue
+                                .sub_issues
+                                .iter()
+                                .map(|sub_issue| sub_issue.repository.clone())
+                                .collect::<Vec<_>>();
+                            let mut sub_issues =
+                                self.generate_sub_issues_for_issue(&sub_issue_context);
+                            for (index, sub_issue) in sub_issues.iter_mut().enumerate() {
+                                sub_issue.repository = issue.repository.clone().or_else(|| {
+                                    existing_child_repositories.get(index).cloned().flatten()
+                                });
+                            }
                             PlannedIssue {
                                 id: issue.id.clone(),
                                 title: issue.title.clone(),
@@ -361,6 +407,7 @@ impl PlanGenerator {
                                 blocks: issue.blocks.clone(),
                                 sub_issues,
                                 task_file: issue.task_file.clone(),
+                                repository: None,
                             }
                         } else {
                             issue.clone()
@@ -571,6 +618,7 @@ impl PlanGenerator {
                 blocks: Vec::new(),
                 sub_issues,
                 task_file: Some(format!("{}/{}.md", self.session.tasks_dir, issue_id)),
+                repository: None,
             });
         }
 
@@ -625,6 +673,7 @@ impl PlanGenerator {
             blocked_by: Vec::new(),
             blocks: vec![val_id.clone()],
             task_file: Some(format!("{}/{}.md", self.session.tasks_dir, impl_id)),
+            repository: None,
         });
 
         // Validation sub-issue is blocked by the implementation sub-issue
@@ -661,12 +710,17 @@ impl PlanGenerator {
             blocked_by: vec![impl_id],
             blocks: Vec::new(),
             task_file: Some(format!("{}/{}.md", self.session.tasks_dir, val_id)),
+            repository: None,
         });
 
         sub_issues
     }
 
-    fn generate_manifest(&self, milestones: &[PlannedMilestone]) -> TaskPackageManifest {
+    fn generate_manifest(
+        &self,
+        milestones: &[PlannedMilestone],
+        existing: Option<&TaskPackageManifest>,
+    ) -> TaskPackageManifest {
         let mut tasks = Vec::new();
         let mut milestone_names = Vec::new();
 
@@ -692,11 +746,22 @@ impl PlanGenerator {
             }
         }
 
+        let (routing_mode, repository_aliases) = existing
+            .map(|manifest| (manifest.routing_mode, manifest.repository_aliases.clone()))
+            .unwrap_or_else(|| {
+                (
+                    self.session.routing_mode,
+                    self.session.repository_aliases.clone(),
+                )
+            });
+
         TaskPackageManifest {
             planning_wave: self.session.intake.planning_wave.clone(),
             tasks_dir: self.session.tasks_dir.clone(),
             milestones: milestone_names,
             tasks,
+            routing_mode,
+            repository_aliases,
         }
     }
 
@@ -751,6 +816,7 @@ estimate: {estimate}
 blockedBy: [{blocked_by}]
 blocks: [{blocks}]
 parent: null
+repository: {repository}
 ---
 
 ## Summary
@@ -801,6 +867,7 @@ parent: null
                 .unwrap_or_else(|| "null".to_string()),
             blocked_by = render_id_list(&issue.blocked_by),
             blocks = render_id_list(&issue.blocks),
+            repository = yaml_optional_string(issue.repository.as_deref()),
             summary = collapse_markdown_line(&issue.summary),
             scope_in = render_bullets(&issue.scope_in),
             scope_out = render_optional_bullets(&issue.scope_out),
@@ -839,6 +906,7 @@ estimate: {estimate}
 blockedBy: [{blocked_by}]
 blocks: [{blocks}]
 parent: {parent}
+repository: {repository}
 ---
 
 ## Summary
@@ -890,6 +958,7 @@ parent: {parent}
             blocked_by = render_id_list(&sub_issue.blocked_by),
             blocks = render_id_list(&sub_issue.blocks),
             parent = parent_issue.id,
+            repository = yaml_optional_string(sub_issue.repository.as_deref()),
             summary = collapse_markdown_line(&sub_issue.summary),
             scope_in = render_bullets(&sub_issue.scope_in),
             scope_out = render_optional_bullets(&sub_issue.scope_out),
@@ -1025,6 +1094,48 @@ mod tests {
             serde_yaml::from_str(&yaml).expect("escaped frontmatter should parse");
 
         assert_eq!(parsed.get("title").map(String::as_str), Some(raw));
+    }
+
+    #[test]
+    fn fresh_generation_preserves_explicit_repository_routing_metadata() {
+        let session = make_sample_session().with_repository_routing(
+            RepositoryRoutingMode::ProjectSet,
+            vec!["core".to_string(), "web".to_string()],
+        );
+        let mut generator = PlanGenerator::new(session);
+
+        let artifacts = generator.generate().expect("generation should succeed");
+
+        assert_eq!(
+            artifacts.manifest.routing_mode,
+            RepositoryRoutingMode::ProjectSet
+        );
+        assert_eq!(
+            artifacts.manifest.repository_aliases,
+            vec!["core".to_string(), "web".to_string()]
+        );
+    }
+
+    #[test]
+    fn generated_frontmatter_quotes_repository_aliases() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let artifacts = generator.generate().expect("generation should succeed");
+        let milestone = &artifacts.milestones[0];
+        let mut issue = milestone.issues[0].clone();
+        issue.repository = Some("core: api #1".to_string());
+
+        let rendered = generator.render_issue_task_file(&issue, milestone);
+        let frontmatter = rendered
+            .split("---")
+            .nth(1)
+            .expect("rendered task should contain frontmatter");
+        let parsed: BTreeMap<String, serde_yaml::Value> =
+            serde_yaml::from_str(frontmatter).expect("frontmatter should parse");
+        assert_eq!(
+            parsed.get("repository").and_then(serde_yaml::Value::as_str),
+            Some("core: api #1")
+        );
     }
 
     #[test]
@@ -1170,6 +1281,47 @@ mod tests {
     }
 
     #[test]
+    fn issue_regeneration_preserves_terminal_child_repository_bindings() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let mut original = generator.generate().expect("generation should succeed");
+        let issue = &mut original.milestones[0].issues[0];
+        issue.repository = None;
+        issue.sub_issues[0].repository = Some("core".to_string());
+        issue.sub_issues[1].repository = Some("web".to_string());
+        original.manifest.routing_mode = RepositoryRoutingMode::ProjectSet;
+        original.manifest.repository_aliases = vec!["core".to_string(), "web".to_string()];
+
+        let regenerated = generator
+            .regenerate(
+                &original,
+                &RegenerationScope::Issues {
+                    milestone_ids: None,
+                },
+            )
+            .expect("issue regeneration should succeed");
+        let issue = &regenerated.milestones[0].issues[0];
+
+        assert_eq!(issue.repository, None);
+        assert_eq!(
+            issue
+                .sub_issues
+                .iter()
+                .map(|sub_issue| sub_issue.repository.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("core"), Some("web")]
+        );
+        assert_eq!(
+            regenerated.manifest.routing_mode,
+            RepositoryRoutingMode::ProjectSet
+        );
+        assert_eq!(
+            regenerated.manifest.repository_aliases,
+            vec!["core".to_string(), "web".to_string()]
+        );
+    }
+
+    #[test]
     fn regeneration_with_unscoped_sub_issues_regenerates_all_sub_issues() {
         let session = make_sample_session();
         let mut generator = PlanGenerator::new(session);
@@ -1210,6 +1362,53 @@ mod tests {
             regenerated
                 .task_files
                 .contains_key(&regenerated_issue.sub_issues[0].id)
+        );
+    }
+
+    #[test]
+    fn regeneration_moves_repository_binding_to_generated_sub_issues() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let mut original = generator.generate().expect("generation should succeed");
+        original.milestones[0].issues[0].repository = Some("core".to_string());
+
+        let regenerated = generator
+            .regenerate(&original, &RegenerationScope::SubIssues { issue_ids: None })
+            .expect("sub-issue regeneration should succeed");
+        let issue = &regenerated.milestones[0].issues[0];
+
+        assert_eq!(issue.repository, None);
+        assert!(
+            issue
+                .sub_issues
+                .iter()
+                .all(|sub_issue| sub_issue.repository.as_deref() == Some("core"))
+        );
+    }
+
+    #[test]
+    fn strict_regeneration_preserves_child_repository_bindings() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let mut original = generator.generate().expect("generation should succeed");
+        let issue = &mut original.milestones[0].issues[0];
+        issue.repository = None;
+        issue.sub_issues[0].repository = Some("core".to_string());
+        issue.sub_issues[1].repository = Some("web".to_string());
+
+        let regenerated = generator
+            .regenerate(&original, &RegenerationScope::SubIssues { issue_ids: None })
+            .expect("strict sub-issue regeneration should succeed");
+        let issue = &regenerated.milestones[0].issues[0];
+
+        assert_eq!(issue.repository, None);
+        assert_eq!(
+            issue
+                .sub_issues
+                .iter()
+                .map(|sub_issue| sub_issue.repository.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("core"), Some("web")]
         );
     }
 
@@ -1304,6 +1503,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_b.clone(),
@@ -1323,6 +1523,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_c.clone(),
@@ -1342,6 +1543,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                 ],
                 acceptance_criteria: vec![],
@@ -1366,6 +1568,8 @@ mod tests {
                         file: "docs/tasks/c.md".to_string(),
                     },
                 ],
+                routing_mode: RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: BTreeMap::new(),
@@ -1415,6 +1619,7 @@ mod tests {
                         blocks: vec![cycle_b.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_b.clone(),
@@ -1434,6 +1639,7 @@ mod tests {
                         blocks: vec![cycle_c.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_c.clone(),
@@ -1453,6 +1659,7 @@ mod tests {
                         blocks: vec![],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                 ],
                 acceptance_criteria: vec![],
@@ -1477,6 +1684,8 @@ mod tests {
                         file: "docs/tasks/c.md".to_string(),
                     },
                 ],
+                routing_mode: RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: BTreeMap::new(),
@@ -1527,6 +1736,7 @@ mod tests {
                         blocks: vec![cycle_b.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_b.clone(),
@@ -1546,6 +1756,7 @@ mod tests {
                         blocks: vec![cycle_c.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                     PlannedIssue {
                         id: cycle_c.clone(),
@@ -1565,6 +1776,7 @@ mod tests {
                         blocks: vec![cycle_a.clone()],
                         sub_issues: vec![],
                         task_file: None,
+                        repository: None,
                     },
                 ],
                 acceptance_criteria: vec![],
@@ -1576,6 +1788,8 @@ mod tests {
                 tasks_dir: "docs/tasks".to_string(),
                 milestones: vec!["M1: Test".to_string()],
                 tasks: vec![],
+                routing_mode: RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: BTreeMap::new(),

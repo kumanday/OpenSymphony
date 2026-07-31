@@ -69,6 +69,7 @@ fn fixture_snapshot(
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: None,
             transport_target: None,

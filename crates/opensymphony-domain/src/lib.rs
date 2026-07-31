@@ -3,6 +3,7 @@ mod harness;
 mod identifiers;
 mod issue;
 mod journal;
+mod repository;
 mod runtime;
 mod snapshot;
 mod state_machine;
@@ -27,6 +28,11 @@ pub use identifiers::{
 };
 pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, NormalizedIssue};
 pub use journal::{EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker};
+pub use repository::{
+    CanonicalRepositoryId, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
+    RepositoryIdentityError, RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode,
+    SafeRemoteFingerprint, managed_repository_aliases,
+};
 pub use runtime::{
     ConversationActivityEvent, ConversationMetadata, DetachMetadata, DetachReason,
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
@@ -142,6 +148,7 @@ mod tests {
             project_slug: None,
             project_name: None,
             parent_id: None,
+            repository_binding: None,
             blocked_by: Vec::new(),
             sub_issues: vec![IssueRef {
                 id: must(IssueId::new("lin_261")),

@@ -26,6 +26,7 @@ use super::{
 
 pub struct WorkspaceManager {
     config: WorkspaceManagerConfig,
+    legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
 }
 
 struct HookFailure {
@@ -44,7 +45,7 @@ enum ExistingReceiptState {
     Missing,
     Owned,
     ForeignArtifact,
-    Conflict(AfterCreateBootstrapReceipt),
+    Conflict(Box<AfterCreateBootstrapReceipt>),
 }
 
 enum ExistingWorkspaceState {
@@ -68,7 +69,18 @@ enum HookCommandOutput {
 impl WorkspaceManager {
     pub fn new(mut config: WorkspaceManagerConfig) -> Result<Self, WorkspaceError> {
         config.root = normalize_absolute_path(&config.root)?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            legacy_repository: None,
+        })
+    }
+
+    pub fn with_legacy_repository(
+        mut self,
+        legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
+    ) -> Self {
+        self.legacy_repository = legacy_repository;
+        self
     }
 
     pub fn config(&self) -> &WorkspaceManagerConfig {
@@ -117,6 +129,54 @@ impl WorkspaceManager {
                     requested_identifier: issue.identifier.clone(),
                 }),
             });
+        }
+
+        if matches!(
+            &existing_state,
+            ExistingWorkspaceState::Owned | ExistingWorkspaceState::AfterCreateCompleted
+        ) {
+            let existing_repository = self
+                .load_issue_manifest(&handle)
+                .await?
+                .and_then(|manifest| manifest.repository_binding)
+                .and_then(|binding| binding.repository_id().cloned())
+                .map(|repository| repository.to_string());
+            let historical_repository = self
+                .load_run_manifest(&handle)
+                .await?
+                .and_then(|manifest| manifest.repository_binding)
+                .map(|binding| binding.repository_id().to_string());
+            let receipt_repository = self
+                .load_manifest::<AfterCreateBootstrapReceipt>(
+                    &handle,
+                    &handle.after_create_receipt_path(),
+                )
+                .await?
+                .and_then(|receipt| receipt.repository_binding)
+                .map(|binding| binding.repository_id().to_string());
+            let historical_repository = historical_repository.or(receipt_repository);
+            let requested_repository = issue
+                .repository_binding
+                .as_ref()
+                .and_then(|binding| binding.repository_id().cloned())
+                .map(|repository| repository.to_string());
+            let configured_legacy_repository =
+                self.legacy_repository.as_ref().map(ToString::to_string);
+            let legacy_repository_mismatch = configured_legacy_repository
+                .as_ref()
+                .is_some_and(|configured| Some(configured) != requested_repository.as_ref());
+            if existing_repository != requested_repository
+                && requested_repository.is_some()
+                && (existing_repository.is_some()
+                    || historical_repository != requested_repository
+                    || legacy_repository_mismatch)
+            {
+                return Err(WorkspaceError::RepositoryBindingMismatch {
+                    workspace: handle.workspace_path().to_path_buf(),
+                    existing_repository,
+                    requested_repository,
+                });
+            }
         }
 
         let created = matches!(
@@ -600,6 +660,7 @@ impl WorkspaceManager {
                 .unwrap_or(now),
             updated_at: now,
             last_seen_tracker_refresh_at: issue.last_seen_tracker_refresh_at,
+            repository_binding: issue.repository_binding.clone(),
         };
 
         self.write_manifest(workspace, &workspace.issue_manifest_path(), &manifest)
@@ -717,7 +778,7 @@ impl WorkspaceManager {
         match receipt_state {
             ExistingReceiptState::Owned => Ok(ExistingWorkspaceState::AfterCreateCompleted),
             ExistingReceiptState::Conflict(receipt) => Ok(ExistingWorkspaceState::Conflict(
-                ownership_claim_from_after_create_receipt(receipt),
+                ownership_claim_from_after_create_receipt(*receipt),
             )),
             ExistingReceiptState::ForeignArtifact => Ok(ExistingWorkspaceState::ForeignArtifact),
             ExistingReceiptState::Missing => {
@@ -1311,7 +1372,7 @@ fn classify_after_create_receipt_ownership(
     if receipt.issue_id == issue.issue_id && receipt.identifier == issue.identifier {
         ExistingReceiptState::Owned
     } else {
-        ExistingReceiptState::Conflict(receipt)
+        ExistingReceiptState::Conflict(Box::new(receipt))
     }
 }
 

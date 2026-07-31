@@ -5,7 +5,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::{
-    ConversationId, DurationMs, IssueId, IssueIdentifier, TimestampMs, WorkerId, WorkspaceKey,
+    ConversationId, DurationMs, IssueId, IssueIdentifier, RepositoryBinding, TimestampMs, WorkerId,
+    WorkspaceKey,
 };
 
 /// Normalized liveness phase for a long-running OpenSymphony execution turn.
@@ -790,6 +791,8 @@ pub struct RunAttempt {
     pub issue_id: IssueId,
     pub issue_identifier: IssueIdentifier,
     pub workspace_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding: Option<RepositoryBinding>,
     pub claimed_at: TimestampMs,
     pub started_at: Option<TimestampMs>,
     pub attempt: Option<RetryAttempt>,
@@ -813,6 +816,7 @@ impl RunAttempt {
             issue_id,
             issue_identifier,
             workspace_path,
+            repository_binding: None,
             claimed_at,
             started_at: None,
             attempt,
@@ -824,6 +828,14 @@ impl RunAttempt {
 
     pub fn with_normal_retry_count(mut self, normal_retry_count: u32) -> Self {
         self.normal_retry_count = normal_retry_count;
+        self
+    }
+
+    pub fn with_repository_binding(
+        mut self,
+        repository_binding: Option<RepositoryBinding>,
+    ) -> Self {
+        self.repository_binding = repository_binding;
         self
     }
 

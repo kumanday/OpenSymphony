@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ReleaseReason;
+use super::{ReleaseReason, RepositoryBindingOutcome};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotEnvelope {
@@ -131,6 +131,8 @@ pub struct ControlPlaneIssueSnapshot {
     #[serde(default)]
     pub runtime_seconds: u64,
     pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding: Option<RepositoryBindingOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -306,7 +306,14 @@ query IssueInverseRelationsPage($issueId: String!, $first: Int!, $after: String)
 "#;
 
 pub(super) const ISSUE_STATES_BY_IDS_QUERY: &str = r#"
-query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $after: String) {
+query IssueStatesByIds(
+  $projectSlug: String!
+  $issueIds: [ID!]
+  $first: Int!
+  $after: String
+  $labelFirst: Int!
+  $labelAfter: String
+) {
   issues(
     filter: {
       id: { in: $issueIds }
@@ -324,6 +331,20 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $a
         id
         name
         type
+      }
+      labels(first: $labelFirst, after: $labelAfter) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+      children(includeArchived: true, first: 1) {
+        nodes {
+          id
+        }
       }
     }
     pageInfo {
@@ -712,6 +733,8 @@ pub(super) struct IssueStatesByIdsVariables {
     pub issue_ids: Vec<String>,
     pub first: usize,
     pub after: Option<String>,
+    pub label_first: usize,
+    pub label_after: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -980,6 +1003,22 @@ pub(super) struct LinearIssueStateNode {
     pub identifier: String,
     pub updated_at: DateTime<Utc>,
     pub state: LinearWorkflowState,
+    #[serde(default)]
+    pub labels: LinearLabelConnection,
+    #[serde(default)]
+    pub children: LinearIssueStateChildrenConnection,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct LinearIssueStateChildrenConnection {
+    #[serde(default)]
+    pub nodes: Vec<LinearIssueStateChildNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearIssueStateChildNode {
+    #[allow(dead_code)]
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize)]

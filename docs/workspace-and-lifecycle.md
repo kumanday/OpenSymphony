@@ -29,6 +29,17 @@ Examples:
 
 Because this sanitization is not injective, workspace reuse must be gated by the persisted issue manifest for the current path. If an existing current-path manifest claims the same sanitized key for a different issue, OpenSymphony must refuse reuse instead of silently aliasing two issues onto one workspace.
 
+For repository-bound tasks, reuse is also gated by the persisted canonical
+repository identity. If the requested binding differs from the manifest's
+identity, workspace ensuring fails before the manifest is rewritten; checkout
+replacement remains an explicit lifecycle operation rather than an implicit
+reuse side effect. A legacy manifest with no stored binding may be backfilled
+from the current resolved binding once only when the workspace manager has a
+proven configured legacy repository identity and it matches that binding. If
+the existing checkout is unbound and no such legacy identity is configured,
+reuse fails rather than claiming that an unknown checkout belongs to the
+requested repository.
+
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.
@@ -83,7 +94,7 @@ Recommended layout inside each issue workspace:
 Notes:
 
 - `.opensymphony/` is OpenSymphony-owned metadata.
-- `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
+- `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap. When a repository binding is known, the receipt carries that resolved identity as historical proof for a later metadata-bootstrap resume.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
 - `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, active reuse policy, timestamps, transport diagnostics, the launch profile needed to resume the same OpenHands thread later through `opensymphony debug`, and an `llm_config_fingerprint` that tracks the model name for observability (no longer used for drift detection).
@@ -128,6 +139,11 @@ Do not rerun it on every worker attempt.
 If the first `after_create` attempt fails before bootstrap completes, the next `ensure` attempt should retry `after_create` instead of treating the partially initialized workspace directory as fully reusable.
 
 After a successful first-time `after_create`, OpenSymphony must persist a root-scoped bootstrap receipt before it starts creating `.opensymphony/` metadata. If later bootstrap steps fail, the next `ensure` should resume metadata bootstrap without rerunning `after_create`.
+
+Recovery must not infer an old checkout's repository from the current legacy
+configuration alone. If an in-flight run has no persisted repository proof in
+its issue, run, or bootstrap receipt metadata, the workspace is removed and the
+issue is rematerialized through the normal retry path.
 
 Steady-state workspace ownership is still determined by a decodable OpenSymphony-owned `issue.json` whose workspace path and sanitized key match the current workspace, not by raw file existence. Repository-provided, copied, or undecodable `.opensymphony/issue.json` or `.opensymphony.after_create.json` artifacts must not suppress a required first-bootstrap retry.
 
@@ -270,6 +286,19 @@ Current repository note:
 - if worker launch fails before `start_run` can create `run.json`, the runtime
   backend writes a non-in-flight preparation-failure manifest carrying the
   pending retry, so the next startup follows the same recovery path
+- if a repository supersession removes the old workspace before the replacement
+  binding can be materialized, the retry is written under the instance retry
+  state root and rehydrated before normal dispatch; the external marker is
+  retained until the replacement `start_run` metadata is durable, even when
+  workspace preparation succeeds. External pending
+  retry markers use the immutable tracker issue ID as their filename key for
+  both persistence and clearing, independent of the human-facing identifier.
+- queued retry recovery and frequent state reconciliation preserve the binding
+  generation boundary: a changed repository binding removes the old workspace
+  and prevents that retry from launching until the replacement is materialized.
+  The frequent state read also refreshes child presence, so a running issue that
+  becomes a parent is made repository-neutral and its old generation is stopped
+  before dispatch can continue it.
 
 ## 8. Conversation metadata manifest
 

@@ -9,12 +9,12 @@
 //! entity ids, urls, and publish timestamps are intentionally left blank
 //! so the publish stage can fill them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
 use super::super::generator::domain::{
-    PlanArtifacts, PlannedIssue, PlannedMilestone, PlannedSubIssue, TaskId,
+    PlanArtifacts, PlannedIssue, PlannedMilestone, PlannedSubIssue, RepositoryRoutingMode, TaskId,
     TaskPackageManifest as GeneratedManifest,
 };
 use super::domain::{
@@ -32,6 +32,10 @@ pub struct CompiledManifestYaml<'a> {
     pub planning_wave: &'a str,
     #[serde(rename = "tasksDir")]
     pub tasks_dir: &'a str,
+    #[serde(rename = "routingMode")]
+    pub routing_mode: &'static str,
+    #[serde(rename = "repositoryAliases")]
+    pub repository_aliases: Vec<String>,
     pub milestones: Vec<&'a str>,
     pub tasks: Vec<CompiledManifestTaskYaml<'a>>,
 }
@@ -103,7 +107,13 @@ impl PlanCompiler {
             compiled_milestones.push(compile_milestone(milestone));
         }
 
-        let manifest_yaml = render_manifest_yaml(planning_wave, tasks_dir, milestones);
+        let manifest_yaml = render_manifest_yaml(
+            planning_wave,
+            tasks_dir,
+            milestones,
+            manifest.routing_mode,
+            &manifest.repository_aliases,
+        );
 
         let applied_hierarchy = AppliedHierarchy {
             planning_wave: artifacts.planning_wave.clone(),
@@ -380,7 +390,7 @@ fn validate_manifest_consistency(
     compiled_milestones: &[CompiledMilestone],
     validation_messages: &mut Vec<ValidationMessage>,
 ) {
-    let compiled_milestone_names: std::collections::BTreeSet<&str> = compiled_milestones
+    let compiled_milestone_names: BTreeSet<&str> = compiled_milestones
         .iter()
         .map(|m| m.name.as_str())
         .collect();
@@ -410,8 +420,7 @@ fn validate_manifest_consistency(
     }
 
     let mut compiled_task_ids: BTreeMap<&str, &str> = BTreeMap::new();
-    let mut compiled_present_ids: std::collections::BTreeSet<&str> =
-        std::collections::BTreeSet::new();
+    let mut compiled_present_ids: BTreeSet<&str> = BTreeSet::new();
     for milestone in compiled_milestones {
         for issue in &milestone.issues {
             compiled_present_ids.insert(issue.task_id.0.as_str());
@@ -426,7 +435,7 @@ fn validate_manifest_consistency(
             }
         }
     }
-    let mut mismatched_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut mismatched_ids: BTreeSet<&str> = BTreeSet::new();
     for task in &manifest.tasks {
         let id_key = task.id.0.as_str();
         match compiled_task_ids.get(id_key) {
@@ -502,6 +511,8 @@ fn render_manifest_yaml(
     planning_wave: &str,
     tasks_dir: &str,
     milestones: &[PlannedMilestone],
+    routing_mode: RepositoryRoutingMode,
+    repository_aliases: &[String],
 ) -> String {
     let milestone_refs: Vec<&str> = milestones.iter().map(|m| m.name.as_str()).collect();
     let mut tasks: Vec<CompiledManifestTaskYaml<'_>> = Vec::new();
@@ -526,6 +537,11 @@ fn render_manifest_yaml(
     let yaml_struct = CompiledManifestYaml {
         planning_wave,
         tasks_dir,
+        routing_mode: match routing_mode {
+            RepositoryRoutingMode::LegacySingle => "legacy_single",
+            RepositoryRoutingMode::ProjectSet => "project_set",
+        },
+        repository_aliases: repository_aliases.to_vec(),
         milestones: milestone_refs,
         tasks,
     };
@@ -566,6 +582,7 @@ fn build_publish_receipt(
                     linear_kind: TaskKind::Issue,
                     linear_milestone: milestone.name.clone(),
                     parent_task_id: None,
+                    repository: issue.repository.clone(),
                     blocked_by: issue.blocked_by.clone(),
                     blocks: issue.blocks.clone(),
                     review_comments,
@@ -591,6 +608,7 @@ fn build_publish_receipt(
                         linear_kind: TaskKind::SubIssue,
                         linear_milestone: milestone.name.clone(),
                         parent_task_id: Some(issue.task_id.clone()),
+                        repository: sub.repository.clone(),
                         blocked_by: sub.blocked_by.clone(),
                         blocks: sub.blocks.clone(),
                         review_comments: Vec::new(),
@@ -654,7 +672,8 @@ fn sort_messages(taxonomy: &mut [TaxonomyViolation], messages: &mut [ValidationM
 mod tests {
     use super::*;
     use crate::opensymphony_planning::generator::domain::{
-        AcceptanceCriterion, PlanArtifacts, TaskPackageManifest as GeneratedManifest, TaskPriority,
+        AcceptanceCriterion, PlanArtifacts, RepositoryRoutingMode,
+        TaskPackageManifest as GeneratedManifest, TaskPriority,
     };
     use chrono::Utc;
     use std::collections::BTreeMap;
@@ -704,6 +723,7 @@ mod tests {
                     blocked_by: vec![],
                     blocks: vec![sub_val.clone()],
                     task_file: Some("docs/tasks/osym-733-impl.md".to_string()),
+                    repository: None,
                 },
                 PlannedSubIssue {
                     id: sub_val.clone(),
@@ -725,11 +745,13 @@ mod tests {
                     blocked_by: vec![sub_impl.clone()],
                     blocks: vec![],
                     task_file: Some("docs/tasks/osym-733-val.md".to_string()),
+                    repository: None,
                 },
             ],
             task_file: Some(
                 "docs/tasks/osym-733-milestone-issue-and-sub-issue-compiler.md".to_string(),
             ),
+            repository: None,
         };
 
         let mut tasks = Vec::new();
@@ -755,6 +777,8 @@ mod tests {
             tasks_dir: "docs/tasks".to_string(),
             milestones: vec!["M9: Collaborative Planning Alpha".to_string()],
             tasks,
+            routing_mode: RepositoryRoutingMode::LegacySingle,
+            repository_aliases: vec![],
         };
 
         PlanArtifacts {
@@ -797,6 +821,40 @@ mod tests {
             result
                 .publish_receipt_yaml
                 .contains("planningWave: rich-client-hosted-mode")
+        );
+    }
+
+    #[test]
+    fn compile_manifest_emits_explicit_strict_routing_metadata() {
+        let mut artifact = sample_artifact("multi-repository-wave");
+        artifact.milestones[0].issues[0].sub_issues[0].repository = Some("core".to_string());
+        artifact.milestones[0].issues[0].sub_issues[1].repository = Some("web".to_string());
+        artifact.manifest.routing_mode = RepositoryRoutingMode::ProjectSet;
+        artifact.manifest.repository_aliases = vec!["core".to_string(), "web".to_string()];
+
+        let result = PlanCompiler::new().compile(&artifact);
+
+        assert!(result.manifest_yaml.contains("routingMode: project_set"));
+        assert!(result.manifest_yaml.contains("repositoryAliases:"));
+        assert!(result.manifest_yaml.contains("- core"));
+        assert!(result.manifest_yaml.contains("- web"));
+    }
+
+    #[test]
+    fn compile_preserves_strict_routing_metadata_when_bindings_are_missing() {
+        let mut artifact = sample_artifact("malformed-multi-repository-wave");
+        artifact.manifest.routing_mode = RepositoryRoutingMode::ProjectSet;
+        artifact.manifest.repository_aliases = vec!["core".to_string(), "web".to_string()];
+
+        let result = PlanCompiler::new().compile(&artifact);
+
+        assert!(result.manifest_yaml.contains("routingMode: project_set"));
+        assert!(result.manifest_yaml.contains("- core"));
+        assert!(result.manifest_yaml.contains("- web"));
+        assert!(
+            result
+                .manifest_yaml
+                .contains("routingMode: project_set\nrepositoryAliases:")
         );
     }
 

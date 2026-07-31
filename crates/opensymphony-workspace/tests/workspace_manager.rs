@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use crate::opensymphony_domain::{
+    CanonicalRepositoryId, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
+    SafeRemoteFingerprint,
+};
 use crate::opensymphony_workspace::{
     CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
     HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
@@ -19,6 +23,7 @@ fn sample_issue(identifier: &str) -> IssueDescriptor {
         title: format!("Issue {identifier}"),
         current_state: "In Progress".to_string(),
         last_seen_tracker_refresh_at: None,
+        repository_binding: None,
     }
 }
 
@@ -445,7 +450,22 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
         CleanupConfig::default(),
     ))
     .expect("manager should build");
-    let issue = sample_issue("COE-263-after-create-receipt");
+    let mut issue = sample_issue("COE-263-after-create-receipt");
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:core")
+                .expect("repository id should be valid"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("core"),
+                "owner/repository",
+            )
+            .expect("fingerprint should be valid"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    }));
 
     let first_error = manager
         .ensure(&issue)
@@ -463,6 +483,14 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
         tokio::fs::try_exists(workspace_path.join(".opensymphony.after_create.json"))
             .await
             .expect("after_create receipt lookup should succeed")
+    );
+    let receipt = tokio::fs::read_to_string(workspace_path.join(".opensymphony.after_create.json"))
+        .await
+        .expect("after_create receipt should be readable");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&receipt).expect("receipt should be valid JSON")
+            ["repository_binding"]["repository"]["id"],
+        "github:repository:core"
     );
 
     tokio::fs::remove_file(workspace_path.join(".opensymphony"))
@@ -574,6 +602,188 @@ async fn start_run_executes_before_run_in_workspace_and_persists_manifest() {
     assert_eq!(persisted.status, RunStatus::Prepared);
     assert_eq!(persisted.normal_retry_count, 2);
     assert_eq!(persisted.sanitized_workspace_key, "feature_42");
+}
+
+#[tokio::test]
+async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let binding = RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:42").expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("42"),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_legacy_repository(Some(binding.repository.id.clone()));
+    let mut issue = sample_issue("COE-548");
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+    assert_eq!(
+        ensured.issue_manifest.repository_binding,
+        Some(RepositoryBindingOutcome::Resolved(binding.clone()))
+    );
+
+    let manifest = manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("run-binding", 1).with_repository_binding(Some(binding.clone())),
+        )
+        .await
+        .expect("run manifest should be written");
+    assert_eq!(manifest.repository_binding, Some(binding));
+}
+
+#[tokio::test]
+async fn existing_workspace_rejects_a_changed_repository_identity() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let binding = |alias: &str, id: &str| RepositoryBinding {
+        alias: alias.to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new(id).expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some(id),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let first_binding = binding("core", "github:repository:core");
+    let second_binding = binding("web", "github:repository:web");
+    let mut first_issue = sample_issue("COE-548-rebind");
+    first_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(first_binding));
+    manager
+        .ensure(&first_issue)
+        .await
+        .expect("initial workspace should exist");
+
+    let mut changed_issue = first_issue;
+    changed_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(second_binding));
+    let error = manager
+        .ensure(&changed_issue)
+        .await
+        .expect_err("changed repository identity must not reuse the old workspace");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::RepositoryBindingMismatch { .. }
+    ));
+}
+
+#[tokio::test]
+async fn legacy_workspace_backfills_a_new_repository_identity() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let binding = RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:core").expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("core"),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_legacy_repository(Some(binding.repository.id.clone()));
+    let legacy_issue = sample_issue("COE-548-legacy");
+    let legacy_workspace = manager
+        .ensure(&legacy_issue)
+        .await
+        .expect("legacy workspace should exist");
+    manager
+        .start_run(
+            &legacy_workspace.handle,
+            &RunDescriptor::new("legacy-proof", 1).with_repository_binding(Some(binding.clone())),
+        )
+        .await
+        .expect("legacy run should persist repository proof");
+
+    let mut upgraded_issue = legacy_issue;
+    upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let ensured = manager
+        .ensure(&upgraded_issue)
+        .await
+        .expect("legacy workspace should accept a safe repository backfill");
+
+    assert_eq!(
+        ensured.issue_manifest.repository_binding,
+        Some(RepositoryBindingOutcome::Resolved(binding))
+    );
+}
+
+#[tokio::test]
+async fn legacy_workspace_rejects_unproven_repository_backfill() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let binding = RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:core").expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("core"),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let legacy_issue = sample_issue("COE-548-unproven-legacy");
+    manager
+        .ensure(&legacy_issue)
+        .await
+        .expect("legacy workspace should exist");
+
+    let mut upgraded_issue = legacy_issue;
+    upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding));
+    let error = manager
+        .ensure(&upgraded_issue)
+        .await
+        .expect_err("unproven legacy repository must not be backfilled");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::RepositoryBindingMismatch { .. }
+    ));
 }
 
 #[tokio::test]

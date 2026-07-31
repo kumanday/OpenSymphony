@@ -65,6 +65,19 @@ Rust owns:
 
 OpenHands conversation state is informative, not authoritative.
 
+Repository routing is also orchestrator-owned: terminal child metadata carries
+one alias, the central inventory resolves it to a canonical provider identity,
+and the scheduler persists that identity plus its config and inventory
+generations before claiming work. Project associations are validation scope,
+not routing defaults; parents have no execution repository. A binding mutation
+supersedes the claimed generation and fences late events from its worker. If
+stop persistence or the harness abort fails, the old execution remains owned
+and fenced for retry; restart recovery first reattaches the persisted binding
+generation and then performs the same supersession against fresh tracker state.
+Repository binding outcomes are carried into the control-plane issue snapshot;
+invalid outcomes mark the issue blocked while preserving the typed diagnostic
+for operator clients.
+
 ### 3.2 OpenHands is the execution adapter
 
 OpenHands provides:

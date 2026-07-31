@@ -169,6 +169,10 @@ fn map_issue(
             generated_at,
             runtime_state,
         ));
+    let repository_binding = issue.issue.repository_binding.clone();
+    let repository_binding_blocked = repository_binding
+        .as_ref()
+        .is_some_and(|binding| binding.resolved_binding().is_none());
 
     IssueSnapshot {
         identifier: issue.issue.identifier.to_string(),
@@ -248,17 +252,20 @@ fn map_issue(
             .unwrap_or(0),
         max_turns: worker.map(|worker| worker.max_turns).unwrap_or(0),
         runtime_seconds,
-        blocked: issue.issue.blocked_by.iter().any(|blocker| {
-            blocker
-                .state
-                .as_deref()
-                .is_none_or(|state| !is_terminal_state(terminal_states, state))
-        }) || (!issue.issue.sub_issues.is_empty()
-            && issue
-                .issue
-                .sub_issues
-                .iter()
-                .any(|sub_issue| !is_terminal_state(terminal_states, &sub_issue.state))),
+        blocked: repository_binding_blocked
+            || issue.issue.blocked_by.iter().any(|blocker| {
+                blocker
+                    .state
+                    .as_deref()
+                    .is_none_or(|state| !is_terminal_state(terminal_states, state))
+            })
+            || (!issue.issue.sub_issues.is_empty()
+                && issue
+                    .issue
+                    .sub_issues
+                    .iter()
+                    .any(|sub_issue| !is_terminal_state(terminal_states, &sub_issue.state))),
+        repository_binding,
         blocked_by: issue
             .issue
             .blocked_by
@@ -594,6 +601,7 @@ tracker:
                     project_slug: Some("opensymphony-bootstrap".to_owned()),
                     project_name: Some("OpenSymphony".to_owned()),
                     parent_id: None,
+                    repository_binding: None,
                     blocked_by: Vec::<BlockerRef>::new(),
                     sub_issues: Vec::<IssueRef>::new(),
                     created_at: None,
@@ -697,6 +705,29 @@ tracker:
         assert_eq!(mapped.issues[0].workspace_label.as_deref(), Some("COE-352"));
     }
 
+    #[test]
+    fn map_snapshot_exposes_blocked_repository_binding() {
+        let mut issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::Completed,
+        );
+        issue.issue.repository_binding = Some(
+            crate::opensymphony_domain::RepositoryBindingOutcome::UnknownAlias(
+                "missing".to_string(),
+            ),
+        );
+
+        let mapped = map_single_issue(issue);
+
+        assert!(mapped.blocked);
+        assert!(matches!(
+            mapped.repository_binding,
+            Some(crate::opensymphony_domain::RepositoryBindingOutcome::UnknownAlias(alias))
+                if alias == "missing"
+        ));
+    }
+
     fn released_issue_snapshot(
         state_name: &str,
         category: IssueStateCategory,
@@ -722,6 +753,7 @@ tracker:
                 project_slug: None,
                 project_name: None,
                 parent_id: None,
+                repository_binding: None,
                 blocked_by: Vec::<BlockerRef>::new(),
                 sub_issues: Vec::<IssueRef>::new(),
                 created_at: None,

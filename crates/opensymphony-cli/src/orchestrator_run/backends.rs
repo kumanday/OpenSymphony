@@ -31,9 +31,9 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, TrackerBackend, WorkerAbortReason,
-    WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
-    WorkspaceBackend,
+    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
+    WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -612,7 +612,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
         &mut self,
         identifiers: &[String],
     ) -> Result<Vec<TrackerIssue>, Self::Error> {
-        self.client.project_issues_by_identifiers(identifiers).await
+        self.client.issues_by_identifiers(identifiers).await
     }
 
     async fn issue_states_by_ids(
@@ -894,6 +894,44 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(records)
     }
 
+    async fn recover_retry_pending(&mut self) -> Result<Vec<RetryPendingRecord>, Self::Error> {
+        let directory = self.retry_state_root.join("retry-pending");
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(CliWorkspaceError::RetryState(format!(
+                    "failed to list {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        let mut records = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path).await.map_err(|error| {
+                CliWorkspaceError::RetryState(format!("failed to read {}: {error}", path.display()))
+            })?;
+            let record = serde_json::from_str::<RetryPendingRecord>(&raw).map_err(|error| {
+                CliWorkspaceError::RetryState(format!(
+                    "failed to parse {}: {error}",
+                    path.display()
+                ))
+            })?;
+            records.push(record);
+        }
+        records.sort_by(|left, right| left.issue.identifier.cmp(&right.issue.identifier));
+        Ok(records)
+    }
+
     async fn cleanup_workspace(
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
@@ -904,6 +942,14 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     }
 
     async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(workspace, true, true)
+            .await
+    }
+
+    async fn remove_workspace(
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
     ) -> Result<(), Self::Error> {
@@ -1050,6 +1096,58 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         let path = self
             .retry_state_root
             .join("retry-exhaustion")
+            .join(format!("{key}.json"));
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(CliWorkspaceError::RetryState(format!(
+                "failed to clear {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    async fn persist_retry_pending_without_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        retry: &RetryEntry,
+    ) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue.id.as_str())?;
+        let directory = self.retry_state_root.join("retry-pending");
+        fs::create_dir_all(&directory).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to create {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = directory.join(format!("{key}.json"));
+        let temporary = directory.join(format!(".{key}.json.tmp"));
+        let contents = serde_json::to_vec_pretty(&RetryPendingRecord {
+            issue: issue.clone(),
+            retry: retry.clone(),
+        })
+        .map_err(|error| CliWorkspaceError::RetryState(error.to_string()))?;
+        fs::write(&temporary, contents).await.map_err(|error| {
+            CliWorkspaceError::RetryState(format!(
+                "failed to write {}: {error}",
+                temporary.display()
+            ))
+        })?;
+        if let Err(error) = replace_retry_exhaustion_marker(&temporary, &path).await {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(CliWorkspaceError::RetryState(format!(
+                "failed to activate {}: {error}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn clear_retry_pending(&mut self, issue_id: &IssueId) -> Result<(), Self::Error> {
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue_id.as_str())?;
+        let path = self
+            .retry_state_root
+            .join("retry-pending")
             .join(format!("{key}.json"));
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -1253,6 +1351,7 @@ fn recovered_run_from_manifests(
         worker_id,
         conversation: conversation_metadata_from_manifest(conversation_manifest),
         normal_retry_count: run_manifest.normal_retry_count,
+        repository_binding: run_manifest.repository_binding.clone(),
     })
 }
 
@@ -1393,7 +1492,8 @@ impl RuntimeWorkerBackend {
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
-                .with_normal_retry_count(run.normal_retry_count);
+                .with_normal_retry_count(run.normal_retry_count)
+                .with_repository_binding(run.repository_binding.clone());
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
@@ -4051,6 +4151,7 @@ fn normalized_issue_from_manifest(
         project_slug: None,
         project_name: None,
         parent_id: None,
+        repository_binding: manifest.repository_binding.clone(),
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
@@ -4065,6 +4166,7 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
         title: issue.title.clone(),
         current_state: issue.state.name.clone(),
         last_seen_tracker_refresh_at: issue.updated_at.map(timestamp_to_datetime),
+        repository_binding: issue.repository_binding.clone(),
     }
 }
 
@@ -6918,6 +7020,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_retry_marker_uses_issue_id_for_persistence_and_clearing() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let state_root = tempdir.path().join("state-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: RetryAttempt::new(1).expect("retry attempt should be valid"),
+            normal_retry_count: 1,
+            scheduled_at: TimestampMs::new(250),
+            due_at: TimestampMs::new(1_200),
+            reason: RetryReason::Failure,
+            error: Some("retry marker".to_owned()),
+        };
+        let mut backend = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
+            workspace_manager,
+            &workflow,
+            false,
+            state_root.clone(),
+        );
+
+        backend
+            .persist_retry_pending_without_workspace(&issue, &retry)
+            .await
+            .expect("pending retry marker should persist");
+        assert!(state_root.join("retry-pending/issue-1.json").is_file());
+        backend
+            .clear_retry_pending(&issue.id)
+            .await
+            .expect("pending retry marker should clear by issue id");
+        assert!(!state_root.join("retry-pending/issue-1.json").exists());
+    }
+
+    #[tokio::test]
     async fn active_store_preparation_moves_legacy_current_issue_before_startup() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
@@ -7089,6 +7232,7 @@ Run the scheduler.
             tool_dir: None,
             openhands_conversation_store: None,
             retry_max_attempts: None,
+            repository_routing: None,
             state_root: None,
             memory_catalog_root: None,
             retain_failed: true,
@@ -7347,6 +7491,7 @@ Run the scheduler.
             project_slug: None,
             project_name: None,
             parent_id: None,
+            repository_binding: None,
             blocked_by: Vec::new(),
             sub_issues: Vec::new(),
             created_at: None,

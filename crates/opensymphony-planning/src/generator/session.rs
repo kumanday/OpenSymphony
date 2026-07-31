@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::super::codebase::CodebaseAnalysis;
 use super::super::linear_graph::LinearGraphAnalysis;
 use super::super::research::ResearchArtifactStore;
+use crate::opensymphony_domain::RepositoryRoutingMode;
 
 /// Intake captures the initial requirements, constraints, and goals
 /// gathered from human-AI collaboration sessions.
@@ -42,6 +43,17 @@ pub struct PlanningSession {
     pub research: Option<ResearchArtifactStore>,
     /// Directory where task files should be generated (e.g., "docs/tasks").
     pub tasks_dir: String,
+    /// Routing mode selected by the planning context, independent of the
+    /// bindings currently present on generated terminal tasks.
+    #[serde(default = "default_repository_routing_mode")]
+    pub routing_mode: RepositoryRoutingMode,
+    /// Trusted repository aliases supplied by the planning context.
+    #[serde(default)]
+    pub repository_aliases: Vec<String>,
+}
+
+fn default_repository_routing_mode() -> RepositoryRoutingMode {
+    RepositoryRoutingMode::LegacySingle
 }
 
 impl PlanningSession {
@@ -53,7 +65,21 @@ impl PlanningSession {
             linear_graph_analysis: None,
             research: None,
             tasks_dir: tasks_dir.into(),
+            routing_mode: RepositoryRoutingMode::LegacySingle,
+            repository_aliases: Vec::new(),
         }
+    }
+
+    /// Carries explicit repository routing metadata into fresh plan
+    /// generation so strict artifacts do not infer mode from task bindings.
+    pub fn with_repository_routing(
+        mut self,
+        routing_mode: RepositoryRoutingMode,
+        repository_aliases: Vec<String>,
+    ) -> Self {
+        self.routing_mode = routing_mode;
+        self.repository_aliases = repository_aliases;
+        self
     }
 
     /// Sets the codebase analysis for this session.

@@ -10,6 +10,9 @@
             "id": "state-done",
             "name": "Done",
             "type": "completed"
+          },
+          "children": {
+            "nodes": [{ "id": "child-260" }]
           }
         },
         {

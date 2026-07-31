@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ConversationMetadata, DurationMs, HarnessInterruptCommand, HarnessInterruptExpectedNextState,
-    HarnessInterruptReason, HarnessInterruptState, HarnessInterruptStatus, IssueId,
-    NormalizedIssue, ReleaseReason, RetryAttempt, RetryEntry, RunAttempt, StallMetadata,
-    TimestampMs, WorkerId, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+    CanonicalRepositoryId, ConversationMetadata, DurationMs, HarnessInterruptCommand,
+    HarnessInterruptExpectedNextState, HarnessInterruptReason, HarnessInterruptState,
+    HarnessInterruptStatus, IssueId, NormalizedIssue, ReleaseReason, RepositoryBindingOutcome,
+    RetryAttempt, RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerId,
+    WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
 };
 
 const MAX_RECENT_WORKER_OUTCOMES: usize = 10;
@@ -121,6 +122,11 @@ pub enum StateTransitionError {
         expected: WorkerId,
         actual: WorkerId,
     },
+    #[error("repository binding changed after claim: expected {expected:?}, got {actual:?}")]
+    RepositoryBindingChanged {
+        expected: Option<CanonicalRepositoryId>,
+        actual: Option<CanonicalRepositoryId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +199,28 @@ impl IssueExecution {
             return Err(StateTransitionError::IssueMismatch {
                 expected: self.issue.id.clone(),
                 actual: issue.id,
+            });
+        }
+
+        if matches!(
+            self.status(),
+            SchedulerStatus::Claimed | SchedulerStatus::Running
+        ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
+            self.issue.repository_binding.as_ref(),
+            issue.repository_binding.as_ref(),
+        ) {
+            return Err(StateTransitionError::RepositoryBindingChanged {
+                expected: self
+                    .issue
+                    .repository_binding
+                    .as_ref()
+                    .and_then(RepositoryBindingOutcome::repository_id)
+                    .cloned(),
+                actual: issue
+                    .repository_binding
+                    .as_ref()
+                    .and_then(RepositoryBindingOutcome::repository_id)
+                    .cloned(),
             });
         }
 
@@ -695,6 +723,25 @@ impl IssueExecution {
             return Err(StateTransitionError::IssueMismatch {
                 expected: self.issue.id.clone(),
                 actual: run.issue_id.clone(),
+            });
+        }
+
+        if let Some(expected) = self
+            .issue
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::resolved_binding)
+            && run
+                .repository_binding
+                .as_ref()
+                .is_none_or(|actual| actual.repository.id != expected.repository.id)
+        {
+            return Err(StateTransitionError::RepositoryBindingChanged {
+                expected: Some(expected.repository.id.clone()),
+                actual: run
+                    .repository_binding
+                    .as_ref()
+                    .map(|binding| binding.repository.id.clone()),
             });
         }
 

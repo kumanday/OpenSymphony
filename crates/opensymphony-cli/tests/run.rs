@@ -463,6 +463,7 @@ async fn seed_recovered_human_review_workspace(
             title: "Merging Supersedes Human Review Polling".to_string(),
             current_state: "Human Review".to_string(),
             last_seen_tracker_refresh_at: None,
+            repository_binding: None,
         })
         .await
         .expect("workspace should be created");

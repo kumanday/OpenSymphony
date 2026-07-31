@@ -758,6 +758,7 @@ fn sample_issue() -> NormalizedIssue {
         project_slug: None,
         project_name: None,
         parent_id: None,
+        repository_binding: None,
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: Some(TimestampMs::new(1)),
@@ -772,6 +773,7 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
         title: issue.title.clone(),
         current_state: issue.state.name.clone(),
         last_seen_tracker_refresh_at: None,
+        repository_binding: issue.repository_binding.clone(),
     }
 }
 

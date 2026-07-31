@@ -2046,6 +2046,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_seen_tracker_refresh_at: None,
+            repository_binding: None,
         }
     }
 

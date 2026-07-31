@@ -41,6 +41,14 @@ pub enum WorkspaceError {
     WorkspaceOwnershipConflict {
         details: Box<WorkspaceOwnershipConflictDetails>,
     },
+    #[error(
+        "workspace {workspace} is bound to repository {existing_repository:?}, cannot reuse it for {requested_repository:?}"
+    )]
+    RepositoryBindingMismatch {
+        workspace: PathBuf,
+        existing_repository: Option<String>,
+        requested_repository: Option<String>,
+    },
     #[error("path {path} escapes configured root {root}")]
     PathEscape { root: PathBuf, path: PathBuf },
     #[error("issue workspace path may not be a symlink: {path}")]
