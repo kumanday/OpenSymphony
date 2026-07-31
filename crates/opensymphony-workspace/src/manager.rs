@@ -372,7 +372,7 @@ impl WorkspaceManager {
         run_id: Option<&str>,
         checkout_timeout: Option<Duration>,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        let checkout_deadline = checkout_deadline(checkout_timeout);
+        let mut checkout_deadline = checkout_deadline(checkout_timeout);
         self.create_directory(&self.config.root).await?;
         let workspace_key = checkout_workspace_key(
             &issue.identifier,
@@ -433,7 +433,7 @@ impl WorkspaceManager {
             checkout_time_remaining(checkout_deadline),
             &staging_path,
             "verify acquired checkout",
-            self.verify_git_checkout(&staging_path, binding, repository, true),
+            self.verify_git_checkout(&staging_path, binding, repository, true, true),
         )
         .await
         {
@@ -483,6 +483,7 @@ impl WorkspaceManager {
             staging_path,
         )
         .with_checkout_generation(generation.clone());
+        let after_create_started = Instant::now();
         let after_create = match self
             .execute_hook(HookKind::AfterCreate, &staging_workspace)
             .await
@@ -493,6 +494,9 @@ impl WorkspaceManager {
                 return Err(failure.error);
             }
         };
+        if let Some(deadline) = checkout_deadline.as_mut() {
+            *deadline += after_create_started.elapsed();
+        }
         if let Err(error) = checkout_operation_with_timeout(
             checkout_time_remaining(checkout_deadline),
             staging_workspace.workspace_path(),
@@ -501,6 +505,7 @@ impl WorkspaceManager {
                 staging_workspace.workspace_path(),
                 binding,
                 repository,
+                true,
                 true,
             ),
         )
@@ -717,6 +722,7 @@ impl WorkspaceManager {
                 workspace.workspace_path(),
                 &manifest.repository_binding,
                 repository,
+                !allow_worker_changes,
                 !allow_worker_changes,
             ),
         )
@@ -1161,6 +1167,7 @@ impl WorkspaceManager {
         binding: &RepositoryBinding,
         repository: &CheckoutRepository,
         enforce_worktree_state: bool,
+        require_remote_head: bool,
     ) -> Result<GitFacts, WorkspaceError> {
         let inside = self
             .git(checkout, &["rev-parse", "--is-inside-work-tree"])
@@ -1264,6 +1271,15 @@ impl WorkspaceManager {
                 checkout_verification(checkout, "target branch is not present on origin")
             })?;
         let head = self.git(checkout, &["rev-parse", "HEAD"]).await?;
+        if require_remote_head {
+            let remote_head = self.git(checkout, &["rev-parse", &remote_ref]).await?;
+            if head != remote_head {
+                return Err(checkout_verification(
+                    checkout,
+                    "HEAD does not match the configured target branch tip",
+                ));
+            }
+        }
         let shallow = self
             .git(checkout, &["rev-parse", "--is-shallow-repository"])
             .await?
@@ -1722,10 +1738,17 @@ impl WorkspaceManager {
                 continue;
             }
 
-            if let Some((handle, manifest)) =
-                self.load_workspace_from_directory(&entry.path()).await?
-            {
-                workspaces.push((handle, manifest));
+            match self.load_workspace_from_directory(&entry.path()).await {
+                Ok(Some((handle, manifest))) => workspaces.push((handle, manifest)),
+                Ok(None) => {}
+                Err(WorkspaceError::DecodeManifest { path, source }) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %source,
+                        "skipping workspace with malformed checkout manifest during recovery"
+                    );
+                }
+                Err(error) => return Err(error),
             }
         }
 
