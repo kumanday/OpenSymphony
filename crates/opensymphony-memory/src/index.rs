@@ -338,22 +338,6 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
             label: None,
         });
     }
-    if let Some(repository_id) = routed_repository_id.as_deref()
-        && let Some(source) = config.repository_sources.get(repository_id)
-    {
-        for project_id in &source.project_scope_ids {
-            if !refs
-                .iter()
-                .any(|scope| scope.kind == KnowledgeScopeKind::Project && scope.id == *project_id)
-            {
-                refs.push(KnowledgeScope {
-                    kind: KnowledgeScopeKind::Project,
-                    id: project_id.clone(),
-                    label: None,
-                });
-            }
-        }
-    }
     refs
 }
 

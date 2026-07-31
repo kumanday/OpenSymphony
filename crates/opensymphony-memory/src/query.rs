@@ -115,7 +115,7 @@ pub fn search_with_scope(
     let mut scored = Vec::new();
     for indexed in load_indexed_issues(config)?
         .into_iter()
-        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
         let haystack = format!(
             "{} {} {} {}",
@@ -176,7 +176,7 @@ pub fn related_by_issue_with_scope(
     let indexed_areas = indexed.areas();
     for candidate in load_indexed_issues(config)?
         .into_iter()
-        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
         if candidate.issue_key == issue_key {
             continue;
@@ -230,7 +230,7 @@ pub fn related_by_area_with_scope(
     let mut results = Vec::new();
     for candidate in load_indexed_issues(config)?
         .into_iter()
-        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
         let areas = candidate.areas();
         if areas.iter().any(|candidate_area| candidate_area == &area) {
@@ -809,7 +809,7 @@ pub fn status_with_scope(
     scope: &MemoryScopeFilter,
 ) -> Result<StatusReport, MemoryError> {
     let mut issues = load_indexed_issues(config)?;
-    issues.retain(|issue| indexed_issue_matches_scope(config, issue, scope));
+    issues.retain(|issue| indexed_issue_visible_in_scope(config, issue, scope));
     if let Some(area) = selection.area.as_ref().map(|area| slugify(area)) {
         issues.retain(|issue| issue.areas().contains(&area));
     }
@@ -892,6 +892,15 @@ fn indexed_issue_matches_scope(
         return false;
     }
     true
+}
+
+fn indexed_issue_visible_in_scope(
+    config: &MemoryConfig,
+    issue: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> bool {
+    indexed_issue_matches_scope(config, issue, scope)
+        && (scope.all_accessible || !has_multiple_repository_owners(&issue.scope_refs))
 }
 
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {

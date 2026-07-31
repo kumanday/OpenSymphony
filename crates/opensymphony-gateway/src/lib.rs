@@ -2143,7 +2143,7 @@ async fn get_run_code_diff_overlay(
     AxumPath(run_id): AxumPath<String>,
     Query(params): Query<RunCodeDiffOverlayQuery>,
 ) -> Result<Json<CodeDiffOverlay>, (StatusCode, Json<serde_json::Value>)> {
-    let config = configured_code_memory(&state)?;
+    let config = configured_code_memory(&state)?.clone();
     let envelope = state.store.current().await;
     let issue = find_issue_snapshot(&envelope, &run_id).ok_or_else(|| {
         code_graph_response(StatusCode::NOT_FOUND, "run_not_found", "run not found")
@@ -2168,8 +2168,8 @@ async fn get_run_code_diff_overlay(
             "run code diff overlay requires a repo id",
         )
     })?;
+    let config = code_memory_for_repository(config, &repo_id)?;
     let comparison_bases = state.comparison_bases.clone();
-    let config = config.clone();
     let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
     let overlay = tokio::task::spawn_blocking({
         let workspace_path = workspace_path.clone();
@@ -2229,6 +2229,7 @@ async fn get_run_code_graph(
             "run code graph requires a repo id",
         )
     })?;
+    let config = code_memory_for_repository(config, &repo_id)?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -2516,6 +2517,7 @@ fn code_memory_for_repository(
         config.code_index_target_branch = source.target_branch.clone();
         let local_config =
             MemoryConfig::load(&source.root, None).map_err(code_graph_memory_error)?;
+        config.enabled = local_config.enabled;
         config.code_intel = local_config.code_intel;
         return Ok(config);
     }

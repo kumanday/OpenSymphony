@@ -2798,7 +2798,13 @@ fn memory_config_for_code_graph_scope(
     if let Some(repository_id) = optional_string_arg(arguments, "repository") {
         scope.repo = Some(repository_id);
     }
-    let resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if scope.repo.is_none() && (scope.project.is_some() || scope.project_set.is_some()) {
+        scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+    }
+    let mut resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if let Some(repository_id) = scope.repo {
+        resolved.default_repository_id = Some(repository_id);
+    }
     if !resolved.code_intel.enabled {
         return Err(MemoryError::InvalidInput(
             "indexed code graph tools are disabled for the selected repository".to_string(),
@@ -2913,11 +2919,6 @@ async fn call_memory_tool_with_workspace(
     }
     if is_memory_writer_tool(name) {
         reject_project_set_memory_write(central_config_path, name)?;
-    }
-    if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
-        return Err(MemoryError::InvalidInput(
-            "AST code-intelligence tools are disabled".to_string(),
-        ));
     }
     match name {
         "memory.context" => {
@@ -10068,6 +10069,7 @@ Public memory concept.
         )
         .expect("first repository config");
         let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.code_intel.enabled = false;
         config.repository_sources.insert(
             "repo-a".to_string(),
             MemoryRepositorySource {
@@ -10100,6 +10102,40 @@ Public memory concept.
         .expect("project-only AST scope should select its repository");
 
         assert_eq!(result["available"], true);
+    }
+
+    #[test]
+    fn code_graph_tools_resolve_project_only_scope_to_unique_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let resolved =
+            super::memory_config_for_code_graph_scope(&config, &json!({"project": "project-b"}))
+                .expect("project-only graph scope should select its repository");
+        assert_eq!(resolved.default_repository_id.as_deref(), Some("repo-b"));
+        assert_eq!(resolved.repo_root, second.path());
     }
 
     #[tokio::test]

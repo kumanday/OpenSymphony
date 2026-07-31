@@ -3348,6 +3348,41 @@ Reviews are triggered when you open a pull request for review.
             )
             .expect("merge scope refs");
 
+        let scoped = MemoryScopeFilter {
+            repo: Some("repo-a".to_string()),
+            ..MemoryScopeFilter::default()
+        };
+        assert!(
+            search_with_scope(&config, "websocket", 10, &scoped)
+                .expect("scoped search")
+                .is_empty()
+        );
+        assert!(
+            related_by_area_with_scope(&config, "openhands-runtime", 10, &scoped)
+                .expect("scoped related")
+                .is_empty()
+        );
+        assert_eq!(
+            status_with_scope(&config, &IssueSelection::default(), &scoped)
+                .expect("scoped status")
+                .issue_count,
+            0
+        );
+        assert_eq!(
+            search_with_scope(
+                &config,
+                "websocket",
+                10,
+                &MemoryScopeFilter {
+                    all_accessible: true,
+                    ..MemoryScopeFilter::default()
+                },
+            )
+            .expect("all-accessible search")
+            .len(),
+            1
+        );
+
         let context_source = SourceFile {
             issues: vec![IssueEvidence {
                 identifier: "COE-200".to_string(),
@@ -3795,6 +3830,50 @@ Reviews are triggered when you open a pull request for review.
     #[test]
     fn sanitized_issue_keys_avoid_separator_collisions() {
         assert_ne!(sanitize_issue_key("COE_123"), sanitize_issue_key("COE-123"));
+    }
+
+    #[test]
+    fn capture_scopes_keep_only_the_captured_issue_project_aliases() {
+        let repo = TempDir::new().expect("temp repo");
+        let source_repo = TempDir::new().expect("source repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: source_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from([
+                    "project-a".to_string(),
+                    "project-b".to_string(),
+                ]),
+                target_branch: None,
+            },
+        );
+        let mut issue = sample_source().issues[0].clone();
+        issue.project_id = Some("project-a".to_string());
+        issue.project_slug = Some("alpha-project".to_string());
+        let plan = CaptureIssuePlan {
+            issue,
+            prs: Vec::new(),
+            capsule_path: PathBuf::new(),
+            areas: Vec::new(),
+            docs_targets: Vec::new(),
+            source_hash: String::new(),
+            already_captured: false,
+            stale: false,
+            warnings: Vec::new(),
+        };
+
+        let scopes = capture_scope_refs(&config, &plan);
+        let projects = scopes
+            .iter()
+            .filter(|scope| scope.kind == KnowledgeScopeKind::Project)
+            .map(|scope| scope.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(projects, BTreeSet::from(["alpha-project", "project-a"]));
+        assert!(!projects.contains("project-b"));
     }
 
     fn config_for(repo_root: &Path) -> MemoryConfig {
