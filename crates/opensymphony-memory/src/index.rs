@@ -3057,7 +3057,7 @@ fn refresh_memory_index_from_okf_inner(
     let mut rows = Vec::new();
     for path in files {
         let relative = bundle_relative_path(&bundle_root, &path)?;
-        let bundle_path = OkfBundlePath::new(relative)?;
+        let bundle_path = OkfBundlePath::new(&relative)?;
         if bundle_path.reserved_file().is_some() {
             continue;
         }
@@ -3065,7 +3065,7 @@ fn refresh_memory_index_from_okf_inner(
         let concept = parse_okf_concept(&bundle_root, &path, &contents)?;
         let mut row = OkfIndexRow::from_concept(
             config,
-            path.clone(),
+            relative.clone(),
             concept,
             contents,
             warnings_by_path.remove(&path).unwrap_or_default(),
@@ -3088,9 +3088,9 @@ fn refresh_memory_index_from_okf_inner(
         let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
             .unwrap_or_default();
         if let Some(project_set_id) = config.default_project_set_id.as_deref()
-            && !scope_refs.iter().any(|scope| {
-                scope.kind == KnowledgeScopeKind::ProjectSet && scope.id == project_set_id
-            })
+            && !scope_refs
+                .iter()
+                .any(|scope| scope.kind == KnowledgeScopeKind::ProjectSet)
         {
             scope_refs.push(KnowledgeScope {
                 kind: KnowledgeScopeKind::ProjectSet,
@@ -3102,10 +3102,11 @@ fn refresh_memory_index_from_okf_inner(
             .and_then(|repository_id| config.repository_sources.get(repository_id))
             .map(|source| &source.project_scope_ids)
             .unwrap_or(&config.project_scope_ids);
-        for project_id in project_scope_ids {
-            if !scope_refs.iter().any(|scope| {
-                scope.kind == KnowledgeScopeKind::Project && scope.id == *project_id
-            }) {
+        if !scope_refs
+            .iter()
+            .any(|scope| scope.kind == KnowledgeScopeKind::Project)
+        {
+            for project_id in project_scope_ids {
                 scope_refs.push(KnowledgeScope {
                     kind: KnowledgeScopeKind::Project,
                     id: project_id.clone(),

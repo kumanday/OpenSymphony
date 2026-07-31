@@ -1973,8 +1973,19 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             )));
         }
     }
-    let mut configured_source_ids = BTreeSet::new();
+    let mut configured_source_generations = BTreeMap::new();
     for source in config.repository_sources.values() {
+        let commit_sha = source
+            .commit_sha
+            .clone()
+            .or_else(|| git_commit_sha_for_repo(&source.root))
+            .ok_or_else(|| {
+                MemoryError::InvalidInput(format!(
+                    "cannot resolve an exact Git commit for configured repository `{}` at {}",
+                    source.repository_id,
+                    source.root.display()
+                ))
+            })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
         let mut roots = vec![
             (MemorySourceKind::Repository, source.root.clone()),
@@ -2009,15 +2020,33 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             } else {
                 format!("{}:{}", source.repository_id, kind.as_str())
             };
-            configured_source_ids.insert(source_id);
+            if matches!(
+                kind,
+                MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+            ) {
+                configured_source_generations.insert(
+                    source_id,
+                    memory_source_registration_generation(
+                        &root,
+                        source,
+                        kind,
+                        &commit_sha,
+                        config,
+                    )?,
+                );
+            }
         }
     }
-    let source_withdrawal_pending = registered_sources.iter().any(|existing| {
-        !configured_source_ids.contains(&existing.source_id)
-            && matches!(
-                existing.kind,
-                MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
-            )
+    let source_reimport_pending = registered_sources.iter().any(|existing| {
+        if !matches!(
+            existing.kind,
+            MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+        ) {
+            return false;
+        }
+        configured_source_generations
+            .get(&existing.source_id)
+            .is_none_or(|generation| generation != &existing.generation)
     });
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
@@ -2105,7 +2134,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                     && existing.generation == registration.generation
                     && existing.status == MemorySourceRegistrationStatus::Registered
             });
-            if !already_imported || source_withdrawal_pending {
+            if !already_imported || source_reimport_pending {
                 register_memory_source(config, &registration)?;
                 let import_result: Result<(), MemoryError> = if same_catalog {
                     backfill_legacy_memory_source_scopes(
@@ -2831,7 +2860,7 @@ async fn call_memory_tool_with_workspace(
                     .collect(),
                 limit: usize_arg(&arguments, "limit", 20),
                 scope: {
-                    let mut scope = scope_filter_from_mcp(&arguments, true);
+                    let mut scope = scope_filter_from_mcp(config, &arguments, true)?;
                     scope.issue = None;
                     scope
                 },
@@ -2844,7 +2873,7 @@ async fn call_memory_tool_with_workspace(
                 text = append_code_intel_context_blocking(
                     config.clone(),
                     text,
-                    scope_filter_from_mcp(&arguments, true),
+                    scope_filter_from_mcp(config, &arguments, true)?,
                     options.paths.clone(),
                     options.limit,
                 )
@@ -2854,14 +2883,14 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.search" => {
             let query = required_string_arg(&arguments, "query")?;
-            let scope = scope_filter_from_mcp(&arguments, true);
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
             let results =
                 search_with_scope(config, &query, usize_arg(&arguments, "limit", 10), &scope)?;
             Ok(json!({ "results": search_results_json(config, &results) }))
         }
         "memory.related" => {
             let limit = usize_arg(&arguments, "limit", 10);
-            let scope = scope_filter_from_mcp(&arguments, false);
+            let scope = scope_filter_from_mcp(config, &arguments, false)?;
             let results = if let Some(issue) = optional_string_arg(&arguments, "issue") {
                 related_by_issue_with_scope(config, &issue, limit, &scope)?
             } else if let Some(area) = optional_string_arg(&arguments, "area") {
@@ -2887,14 +2916,16 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
+            let scope = scope_filter_from_mcp(config, &arguments, false)?;
+            let docs_config = memory_config_for_docs_scope(config, &scope)?;
             Ok(mcp_text(docs_for_area_with_scope(
-                config,
+                &docs_config,
                 &area,
-                &scope_filter_from_mcp(&arguments, false),
+                &scope,
             )?))
         }
         "memory.status" => {
-            let scope = scope_filter_from_mcp(&arguments, true);
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
             let report = status_with_scope(
                 config,
                 &IssueSelection {
@@ -3356,7 +3387,7 @@ async fn call_code_ast_context_tool(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
-    let scope = scope_filter_from_mcp(arguments, true);
+    let scope = scope_filter_from_mcp(config, arguments, true)?;
     let paths = ast_path_args(arguments)?;
     let limit = ast_limit(config, arguments);
     let symbol_kinds = normalized_string_set_args(arguments, &["symbols"]);
@@ -3430,7 +3461,7 @@ where
 }
 
 fn ast_documents(config: &MemoryConfig, arguments: &Value) -> Result<AstDocuments, MemoryError> {
-    let scope = scope_filter_from_mcp(arguments, false);
+    let scope = scope_filter_from_mcp(config, arguments, false)?;
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let paths = ast_path_args(arguments)?;
     let mut files = Vec::new();
@@ -3880,7 +3911,7 @@ async fn call_memory_ingest_code_intel_tool(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
-    let scope = scope_filter_from_mcp(arguments, false);
+    let scope = scope_filter_from_mcp(config, arguments, false)?;
     let paths = string_list_arg(arguments, "paths")
         .into_iter()
         .map(PathBuf::from)
@@ -4961,8 +4992,12 @@ fn env_scope_value(name: &str) -> Option<String> {
     env::var(name).ok().and_then(|value| non_empty(&value))
 }
 
-fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeFilter {
-    MemoryScopeFilter {
+fn scope_filter_from_mcp(
+    config: &MemoryConfig,
+    arguments: &Value,
+    include_issue: bool,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let mut scope = MemoryScopeFilter {
         project_set: optional_string_arg(arguments, "projectSet"),
         project: optional_string_arg(arguments, "project"),
         milestone: optional_string_arg(arguments, "milestone"),
@@ -4973,14 +5008,7 @@ fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeF
         area: optional_string_arg(arguments, "area"),
         all_accessible: bool_arg(arguments, "allAccessible")
             || bool_arg(arguments, "all_accessible"),
-    }
-}
-
-fn brief_scope_filter(
-    config: &MemoryConfig,
-    arguments: &Value,
-) -> Result<MemoryScopeFilter, MemoryError> {
-    let mut scope = scope_filter_from_mcp(arguments, false);
+    };
     if scope.all_accessible
         || scope.project_set.is_some()
         || scope.project.is_some()
@@ -4992,12 +5020,51 @@ fn brief_scope_filter(
         scope.project_set = Some(project_set_id.clone());
     } else if let Some(repository_id) = &config.default_repository_id {
         scope.repo = Some(repository_id.clone());
-    } else {
+    } else if config.repository_sources.len() == 1 {
+        scope.repo = config.repository_sources.keys().next().cloned();
+    } else if config.repository_sources.len() > 1 {
         return Err(MemoryError::InvalidInput(
-            "memory.brief requires a projectSet, project, or repo scope".to_string(),
+            "a projectSet, project, or repo scope is required when multiple repository sources are registered"
+                .to_string(),
         ));
     }
     Ok(scope)
+}
+
+fn brief_scope_filter(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    if scope.all_accessible
+        || scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.repo.is_some()
+    {
+        return Ok(scope);
+    }
+    Err(MemoryError::InvalidInput(
+        "memory.brief requires a projectSet, project, or repo scope".to_string(),
+    ))
+}
+
+fn memory_config_for_docs_scope(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+) -> Result<MemoryConfig, MemoryError> {
+    let Some(repository_id) = scope.repo.as_deref() else {
+        return Ok(config.clone());
+    };
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        return Err(MemoryError::InvalidInput(format!(
+            "unknown canonical repository id `{repository_id}`"
+        )));
+    };
+    let local_config = MemoryConfig::load(&source.root, None)?;
+    let mut resolved = config.clone();
+    resolved.docs = local_config.docs;
+    resolved.areas = local_config.areas;
+    Ok(resolved)
 }
 
 fn path_for_json(config: &MemoryConfig, path: &Path) -> String {
