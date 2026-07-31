@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
@@ -133,3 +134,14 @@ class RepositoryBindingTests(unittest.TestCase):
             {"core": "repository-label"},
         )
         self.assertEqual(labels, ["customer-label", "repository-label"])
+
+    def test_malformed_routing_mode_returns_validation_error(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "task-package.yaml"
+            manifest.write_text("routingMode: []\n", encoding="utf-8")
+
+            with self.assertRaises(CONVERTER.ValidationError) as raised:
+                CONVERTER.load_package(root, manifest)
+
+        self.assertIn("manifest field routingMode must be legacy_single or project_set", str(raised.exception))

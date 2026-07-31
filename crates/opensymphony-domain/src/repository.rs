@@ -141,13 +141,21 @@ impl RepositoryRouting {
             return RepositoryBindingOutcome::ParentBindingNotAllowed;
         }
 
-        let project_key = project_id
-            .or(project_slug)
+        let project_keys = [project_id, project_slug]
+            .into_iter()
+            .flatten()
             .map(str::trim)
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let project_key = project_keys
+            .iter()
+            .find(|key| self.active_projects.contains(*key))
+            .cloned()
+            .or_else(|| project_keys.first().cloned());
 
         if self.mode == RepositoryRoutingMode::ProjectSet {
-            let Some(project_key) = project_key else {
+            let Some(project_key) = project_key.as_deref() else {
                 return RepositoryBindingOutcome::ProjectOutsideActiveSet(String::new());
             };
             if !self.active_projects.contains(project_key) {
@@ -170,12 +178,13 @@ impl RepositoryRouting {
 
         if self.mode == RepositoryRoutingMode::ProjectSet
             && !project_key
+                .as_deref()
                 .and_then(|key| self.project_repositories.get(key))
                 .is_some_and(|allowed| allowed.contains(&entry.identity.id))
         {
             return RepositoryBindingOutcome::RepositoryNotAllowedForProject(
                 entry.identity.id.clone(),
-                project_key.unwrap_or_default().to_owned(),
+                project_key.unwrap_or_default(),
             );
         }
 
@@ -402,6 +411,21 @@ mod tests {
             strict.resolve(&labels(&["repo:one"]), Some("project-id"), None, false),
             RepositoryBindingOutcome::RepositoryNotAllowedForProject(_, ref project)
                 if project == "project-id"
+        ));
+    }
+
+    #[test]
+    fn project_routing_falls_back_to_an_active_provider_slug() {
+        let strict = routing(RepositoryRoutingMode::ProjectSet);
+
+        assert!(matches!(
+            strict.resolve(
+                &labels(&["repo:one"]),
+                Some("stale-provider-id"),
+                Some("project-id"),
+                false,
+            ),
+            RepositoryBindingOutcome::Resolved(_)
         ));
     }
 }

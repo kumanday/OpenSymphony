@@ -376,6 +376,8 @@ pub enum CentralConfigError {
     InvalidReference { field: String },
     #[error("central config aliases must be unique: `{alias}`")]
     DuplicateAlias { alias: String },
+    #[error("central config project routing key is ambiguous: `{key}`")]
+    AmbiguousProjectRoutingKey { key: String },
     #[error("central config roots overlap: `{left}` and `{right}`")]
     OverlappingRoots { left: PathBuf, right: PathBuf },
     #[error("central config repository remote contains credentials")]
@@ -1649,6 +1651,14 @@ fn build_repository_routing(
             project.provider_project_slug.as_deref(),
         ];
         for key in keys.into_iter().flatten().filter(|key| !key.is_empty()) {
+            if project_repositories
+                .get(key)
+                .is_some_and(|existing| existing != &allowed)
+            {
+                return Err(CentralConfigError::AmbiguousProjectRoutingKey {
+                    key: key.to_owned(),
+                });
+            }
             active_projects.insert(key.to_owned());
             project_repositories.insert(key.to_owned(), allowed.clone());
         }
@@ -1661,6 +1671,11 @@ fn build_repository_routing(
         .and_then(|repository| config.repositories.get(repository))
         .and_then(|repository| repository.aliases.first())
         .map(|alias| alias.trim().to_owned());
+    let inventory_generation = generation_hash(&serde_json::to_vec(&inventory).map_err(|_| {
+        CentralConfigError::InvalidReference {
+            field: "repositories".to_owned(),
+        }
+    })?);
 
     Ok(RepositoryRouting {
         mode: match mode {
@@ -1672,11 +1687,7 @@ fn build_repository_routing(
         active_projects,
         legacy_repository,
         config_generation,
-        inventory_generation: generation_hash(&serde_json::to_vec(&identities).map_err(|_| {
-            CentralConfigError::InvalidReference {
-                field: "repositories".to_owned(),
-            }
-        })?),
+        inventory_generation,
     })
 }
 
@@ -2521,14 +2532,29 @@ scheduler:
         let root = tempfile::tempdir().expect("central config root should exist");
         std::fs::write(root.path().join("integration.md"), "integration\n")
             .expect("integration instructions should be written");
-        let source = central_fixture(root.path()).replace("aliases: [core]", "aliases: [' core ']");
+        let source =
+            central_fixture(root.path()).replace("aliases: [core]", "aliases: [' core-renamed ']");
 
         let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect("whitespace around an alias should be normalized");
-        assert!(resolved.repository_routing.inventory.contains_key("core"));
+        assert!(
+            resolved
+                .repository_routing
+                .inventory
+                .contains_key("core-renamed")
+        );
+        let base = resolve_central_config(
+            &root.path().join("base-config.yaml"),
+            &central_fixture(root.path()),
+        )
+        .expect("base fixture should resolve");
+        assert_ne!(
+            base.repository_routing.inventory_generation,
+            resolved.repository_routing.inventory_generation
+        );
         assert!(matches!(
             resolved.repository_routing.resolve(
-                &["repo:core".to_string()],
+                &["repo:core-renamed".to_string()],
                 Some("core-project"),
                 None,
                 false,
@@ -2653,6 +2679,30 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("duplicate aliases should fail");
         assert!(matches!(error, CentralConfigError::DuplicateAlias { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_ambiguous_project_routing_keys() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("projects: [core]", "projects: [core, other]")
+            .replace(
+                "linear_projects:\n  core:",
+                "linear_projects:\n  other:\n    provider_project_id: core\n    repositories: [other-repo]\n  core:",
+            )
+            .replace(
+                "repositories:\n  core-repo:",
+                "repositories:\n  other-repo:\n    aliases: [other]\n    remote:\n      provider: github\n      locator: example/other\n      clone: git@github.com:example/other.git\n    target_branch: develop\n    credential: github-ssh\n    review_profile: github-standard\n    instructions:\n      path: AGENTS.md\n  core-repo:",
+            );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("colliding project keys should fail closed");
+        assert!(matches!(
+            error,
+            CentralConfigError::AmbiguousProjectRoutingKey { key } if key == "core"
+        ));
     }
 
     #[test]

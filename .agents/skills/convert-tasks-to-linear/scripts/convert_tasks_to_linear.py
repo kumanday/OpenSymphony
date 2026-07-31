@@ -180,7 +180,7 @@ def load_package(repo_root: Path, manifest_path: Path) -> Package:
     milestones = normalize_milestones(manifest.get("milestones"), errors)
     manifest_tasks = normalize_manifest_tasks(manifest.get("tasks"), errors)
     repository_mode = manifest.get("routingMode", "legacy_single")
-    if repository_mode not in {"legacy_single", "project_set"}:
+    if not isinstance(repository_mode, str) or repository_mode not in {"legacy_single", "project_set"}:
         errors.append("manifest field routingMode must be legacy_single or project_set")
         repository_mode = "legacy_single"
     configured_repository_aliases = manifest.get("repositoryAliases", [])

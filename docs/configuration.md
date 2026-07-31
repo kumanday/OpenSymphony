@@ -21,6 +21,12 @@ strict unknown fields fail before tracker polling or workspace creation.
 The central loader trims surrounding repository-alias whitespace before
 building the routing inventory, so managed labels and legacy defaults resolve
 against the same canonical alias key.
+The active project's provider ID and optional provider slug are routing keys;
+if any such key is shared by multiple active projects, their allowed
+repository sets must be identical or central configuration fails as ambiguous.
+The inventory generation hashes the normalized alias-to-identity map, so an
+alias change advances the generation even when the underlying repository
+identities are unchanged.
 Any central-only key such as `instance`, `routing`, `tracker_profiles`, or
 `repositories` selects the strict central parser, even when its discriminator
 is malformed; those files fail closed instead of falling through to legacy
@@ -92,7 +98,9 @@ the central model or its serialized diagnostics.
 used for Linear lookup. Migrated legacy files may also carry
 `provider_project_slug`; that field is an explicit compatibility fallback for
 older slug-based tracker configuration and is not a repository association or
-execution default.
+execution default. During routing, a supplied project ID or slug is selected
+when it matches an active project key; this lets a stale ID fall back to a
+valid active provider slug without choosing a repository.
 
 ### Repository binding
 
@@ -112,6 +120,9 @@ an unlabelled task resolves to the configured repository for compatibility.
 Generated planning front matter quotes repository aliases as YAML strings, and
 sub-issue regeneration moves a parent's binding to the generated terminal
 children while clearing it from the new parent.
+Task-package `routingMode` must be a scalar `legacy_single` or `project_set`
+value; malformed YAML types are reported as ordinary package validation
+errors.
 
 ## Configuration migration
 
