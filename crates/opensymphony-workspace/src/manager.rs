@@ -669,6 +669,7 @@ impl WorkspaceManager {
                 .env("GIT_ASKPASS", path)
                 .env("GIT_TERMINAL_PROMPT", "0");
         }
+        command.kill_on_drop(true);
         let output = match command.output().await {
             Ok(output) => output,
             Err(source) => {
