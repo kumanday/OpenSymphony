@@ -141,6 +141,11 @@ impl WorkspaceManager {
                 .and_then(|manifest| manifest.repository_binding)
                 .and_then(|binding| binding.repository_id().cloned())
                 .map(|repository| repository.to_string());
+            let historical_repository = self
+                .load_run_manifest(&handle)
+                .await?
+                .and_then(|manifest| manifest.repository_binding)
+                .map(|binding| binding.repository_id().to_string());
             let requested_repository = issue
                 .repository_binding
                 .as_ref()
@@ -150,7 +155,11 @@ impl WorkspaceManager {
                 self.legacy_repository.as_ref().map(ToString::to_string);
             if existing_repository != requested_repository
                 && (existing_repository.is_some()
-                    || configured_legacy_repository != requested_repository)
+                    || (requested_repository.is_some()
+                        && (historical_repository != requested_repository
+                            || configured_legacy_repository.is_some_and(|configured| {
+                                Some(configured) != requested_repository
+                            }))))
             {
                 return Err(WorkspaceError::RepositoryBindingMismatch {
                     workspace: handle.workspace_path().to_path_buf(),

@@ -312,6 +312,10 @@ pub trait WorkspaceBackend {
         self.cleanup_workspace(workspace, true).await
     }
 
+    async fn remove_workspace(&mut self, workspace: &WorkspaceRecord) -> Result<(), Self::Error> {
+        self.cleanup_workspace(workspace, true).await
+    }
+
     async fn persist_retry_count(
         &mut self,
         _workspace: &WorkspaceRecord,
@@ -1655,6 +1659,15 @@ where
                 self.insert_execution(issue_id, execution);
                 return Ok(());
             }
+        }
+
+        if let Some(workspace) = execution.workspace().cloned()
+            && let Err(error) = self.workspace.remove_workspace(&workspace).await
+        {
+            self.insert_execution(issue_id, execution);
+            return Err(SchedulerError::Workspace {
+                detail: error.to_string(),
+            });
         }
 
         self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));

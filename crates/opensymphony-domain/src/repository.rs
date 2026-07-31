@@ -250,8 +250,13 @@ fn normalize_component(value: &str) -> String {
 }
 
 fn normalize_locator(value: &str) -> String {
-    let mut value = value.trim().to_ascii_lowercase();
-    if let Some((_, without_scheme)) = value.split_once("://") {
+    let mut value = value.trim().to_owned();
+    if let Some((scheme, without_scheme)) = value.split_once("://")
+        && matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "ssh" | "git"
+        )
+    {
         value = without_scheme.to_owned();
     }
     value = value.trim_end_matches('/').to_owned();
@@ -335,6 +340,21 @@ mod tests {
         let lower_fingerprint =
             SafeRemoteFingerprint::from_remote("github", Some("repoa"), "owner/repo")
                 .expect("lower-case provider id should fingerprint");
+
+        assert_ne!(upper, lower);
+        assert_ne!(upper_fingerprint, lower_fingerprint);
+    }
+
+    #[test]
+    fn locator_derived_repository_ids_preserve_locator_case() {
+        let upper = CanonicalRepositoryId::from_remote("github", None, "Owner/Repo")
+            .expect("upper-case locator should be valid");
+        let lower = CanonicalRepositoryId::from_remote("github", None, "owner/repo")
+            .expect("lower-case locator should be valid");
+        let upper_fingerprint = SafeRemoteFingerprint::from_remote("github", None, "Owner/Repo")
+            .expect("upper-case locator should fingerprint");
+        let lower_fingerprint = SafeRemoteFingerprint::from_remote("github", None, "owner/repo")
+            .expect("lower-case locator should fingerprint");
 
         assert_ne!(upper, lower);
         assert_ne!(upper_fingerprint, lower_fingerprint);

@@ -429,6 +429,7 @@ struct FakeWorkspace {
     ensured: Vec<String>,
     cleaned: Vec<(String, bool)>,
     failed_cleaned: Vec<String>,
+    removed: Vec<String>,
     cleanup_results: VecDeque<Result<(), FakeError>>,
     records: HashMap<String, WorkspaceRecord>,
     persisted_retry_counts: Vec<u32>,
@@ -489,6 +490,11 @@ impl WorkspaceBackend for FakeWorkspace {
     ) -> Result<(), Self::Error> {
         self.failed_cleaned
             .push(workspace.workspace_key.to_string());
+        self.cleanup_workspace(workspace, true).await
+    }
+
+    async fn remove_workspace(&mut self, workspace: &WorkspaceRecord) -> Result<(), Self::Error> {
+        self.removed.push(workspace.workspace_key.to_string());
         self.cleanup_workspace(workspace, true).await
     }
 
@@ -4947,6 +4953,7 @@ async fn claimed_repository_binding_is_immutable_and_stale_events_are_ignored() 
             .id,
         old_binding.repository.id
     );
+    assert_eq!(scheduler.workspace().removed, vec!["COE-548-CHANGE"]);
 
     scheduler
         .worker_mut()

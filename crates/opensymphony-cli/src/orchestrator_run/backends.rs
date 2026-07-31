@@ -612,7 +612,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
         &mut self,
         identifiers: &[String],
     ) -> Result<Vec<TrackerIssue>, Self::Error> {
-        self.client.project_issues_by_identifiers(identifiers).await
+        self.client.issues_by_identifiers(identifiers).await
     }
 
     async fn issue_states_by_ids(
@@ -904,6 +904,14 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     }
 
     async fn cleanup_failed_workspace(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(workspace, true, true)
+            .await
+    }
+
+    async fn remove_workspace(
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
     ) -> Result<(), Self::Error> {

@@ -63,10 +63,12 @@ Linear API quota:
   then hourly
 
 The lightweight dispatch query returns summary-shaped scheduler data only.
-Selected candidates must be reloaded through the project-scoped full-detail
-lookup before workspace creation, prompt construction, or worker launch. Detail
-refreshes are issued in bounded batches sized to the currently available worker
-capacity, so blocked or stale candidates do not force an unbounded Linear read.
+Selected candidates must be reloaded through bounded issue-by-identifier
+full-detail lookups before workspace creation, prompt construction, or worker
+launch. Detail refreshes are issued in bounded batches sized to the currently
+available worker capacity, so blocked or stale candidates do not force a full
+project rescan for every batch. A repository supersession removes the stopped
+generation's workspace before the replacement claim is materialized.
 Restart recovery backfills a missing binding in a legacy run manifest from the
 current configured legacy repository before comparing generations for drift.
 

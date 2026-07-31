@@ -696,10 +696,17 @@ async fn legacy_workspace_backfills_a_new_repository_identity() {
     .expect("manager should build")
     .with_legacy_repository(Some(binding.repository.id.clone()));
     let legacy_issue = sample_issue("COE-548-legacy");
-    manager
+    let legacy_workspace = manager
         .ensure(&legacy_issue)
         .await
         .expect("legacy workspace should exist");
+    manager
+        .start_run(
+            &legacy_workspace.handle,
+            &RunDescriptor::new("legacy-proof", 1).with_repository_binding(Some(binding.clone())),
+        )
+        .await
+        .expect("legacy run should persist repository proof");
 
     let mut upgraded_issue = legacy_issue;
     upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
