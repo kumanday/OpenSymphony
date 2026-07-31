@@ -966,6 +966,19 @@ fn resolve_central_config(
                 field: format!("repositories.{repository_id}.credential"),
             });
         }
+        let Some(credential) = config.credentials.get(&repository.credential) else {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.credential"),
+            });
+        };
+        if !matches!(credential.kind.as_str(), "ssh-agent")
+            && !(credential.kind == "environment" && credential.variable.is_some())
+            && credential.reference.is_none()
+        {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.credential"),
+            });
+        }
         if !config
             .review_profiles
             .contains_key(&repository.review_profile)
@@ -1320,8 +1333,18 @@ fn build_repository_checkouts(
         let checkout = CheckoutRepository {
             provider: repository.remote.provider.clone(),
             provider_id: repository.remote.provider_id.clone(),
+            remote_locator: repository.remote.locator.clone(),
             remote: repository.remote.clone.clone(),
             target_branch: repository.target_branch.clone(),
+            credential_kind: config
+                .credentials
+                .get(&repository.credential)
+                .map(|credential| credential.kind.clone())
+                .unwrap_or_default(),
+            credential_reference: config
+                .credentials
+                .get(&repository.credential)
+                .and_then(|credential| credential.reference.clone()),
             credential_env,
             instructions_path: PathBuf::from(&repository.instructions.path),
             review_profile: repository.review_profile.clone(),
@@ -2861,6 +2884,18 @@ scheduler:
         let source = central_fixture(root.path()).replace("    variable: LINEAR_API_KEY\n", "");
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("tracker credentials without a variable should fail");
+        assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_repository_credentials_without_a_provider() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent",
+            "  github-ssh:\n    kind: environment",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("repository credentials without a provider should fail");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
     }
 

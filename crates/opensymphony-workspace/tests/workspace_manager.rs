@@ -270,8 +270,11 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let repository = CheckoutRepository {
         provider: "local".to_owned(),
         provider_id: None,
+        remote_locator: origin.to_str().expect("origin path").to_owned(),
         remote: origin.to_str().expect("origin path").to_owned(),
         target_branch: "main".to_owned(),
+        credential_kind: "ssh-agent".to_owned(),
+        credential_reference: None,
         credential_env: Some("CHECKOUT_SECRET_CANARY".to_owned()),
         instructions_path: "AGENTS.md".into(),
         review_profile: "local".to_owned(),
@@ -311,6 +314,10 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let manifest_record: CheckoutManifest =
         serde_json::from_str(&manifest).expect("checkout manifest should decode");
     assert_eq!(manifest_record.run_id, "run-terminal-1");
+    assert_eq!(
+        manifest_record.workspace_path,
+        first.handle.workspace_path()
+    );
     assert!(!manifest.contains("CHECKOUT_SECRET_CANARY"));
     assert!(!manifest.contains(origin.to_str().expect("origin path")));
 
@@ -363,6 +370,25 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         clean_retry.handle.workspace_path(),
         repaired.handle.workspace_path()
     );
+
+    let checkout_manifest_path = clean_retry.handle.checkout_manifest_path();
+    let mut tampered_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&checkout_manifest_path)
+            .await
+            .expect("checkout manifest should be readable"),
+    )
+    .expect("checkout manifest should decode");
+    tampered_manifest["target_commit"] = serde_json::Value::String("tampered".to_owned());
+    tokio::fs::write(
+        &checkout_manifest_path,
+        serde_json::to_vec_pretty(&tampered_manifest).expect("tampered manifest should encode"),
+    )
+    .await
+    .expect("tampered manifest should be writable");
+    assert!(matches!(
+        manager.verify_checkout(&clean_retry.handle).await,
+        Err(WorkspaceError::CheckoutVerification { .. })
+    ));
 }
 
 #[tokio::test]

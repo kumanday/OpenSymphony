@@ -15,8 +15,12 @@ pub struct CheckoutRepository {
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    pub remote_locator: String,
     pub remote: String,
     pub target_branch: String,
+    pub credential_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_env: Option<String>,
     pub instructions_path: PathBuf,

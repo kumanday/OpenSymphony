@@ -283,11 +283,9 @@ impl WorkspaceManager {
         }
 
         let generation = Uuid::new_v4().simple().to_string();
-        let published_path = self
-            .config
-            .root
-            .join(format!("{workspace_key}--{generation}"));
-        let staging_root = self.config.root.join(".opensymphony-staging");
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let published_path = canonical_root.join(format!("{workspace_key}--{generation}"));
+        let staging_root = canonical_root.join(".opensymphony-staging");
         self.reject_symlinked_workspace_root(&staging_root).await?;
         self.create_directory(&staging_root).await?;
         let canonical_staging_root = self.canonicalize_path(&staging_root).await?;
@@ -311,35 +309,25 @@ impl WorkspaceManager {
             .await?;
         self.exclude_metadata_from_git(&staging_path).await?;
 
-        fs::rename(&staging_path, &published_path)
-            .await
-            .map_err(|source| WorkspaceError::CheckoutOperation {
-                operation: "publish checkout generation".to_owned(),
-                path: published_path.clone(),
-                detail: source.to_string(),
-            })?;
-        let published_path = self.canonicalize_path(&published_path).await?;
-        let workspace = WorkspaceHandle::new(
+        let staging_path = self.canonicalize_path(&staging_path).await?;
+        let staging_workspace = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
             workspace_key,
-            published_path,
+            staging_path,
         )
         .with_checkout_generation(generation.clone());
-        if let Err(error) = self.bootstrap_workspace_layout(&workspace).await {
-            self.remove_published_checkout(&workspace).await;
-            return Err(error);
-        }
+        self.bootstrap_workspace_layout(&staging_workspace).await?;
 
         let now = Utc::now();
         let checkout_manifest = CheckoutManifest {
             schema_version: 1,
-            generation,
+            generation: generation.clone(),
             issue_id: issue.issue_id.clone(),
             identifier: issue.identifier.clone(),
             run_id: run_id.unwrap_or(&issue.issue_id).to_owned(),
-            sanitized_workspace_key: workspace.workspace_key().to_owned(),
-            workspace_path: workspace.workspace_path().to_path_buf(),
+            sanitized_workspace_key: staging_workspace.workspace_key().to_owned(),
+            workspace_path: published_path.clone(),
             repository_binding: binding.clone(),
             remote_fingerprint: binding
                 .repository
@@ -359,22 +347,40 @@ impl WorkspaceManager {
         };
         if let Err(error) = self
             .write_manifest(
-                &workspace,
-                &workspace.checkout_manifest_path(),
+                &staging_workspace,
+                &staging_workspace.checkout_manifest_path(),
                 &checkout_manifest,
             )
             .await
         {
-            self.remove_published_checkout(&workspace).await;
+            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
             return Err(error);
         }
-        let issue_manifest = match self.upsert_issue_manifest(issue, &workspace).await {
+        let issue_manifest = match self
+            .upsert_issue_manifest_at_path(issue, &staging_workspace, &published_path)
+            .await
+        {
             Ok(manifest) => manifest,
             Err(error) => {
-                self.remove_published_checkout(&workspace).await;
+                let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
                 return Err(error);
             }
         };
+
+        fs::rename(staging_workspace.workspace_path(), &published_path)
+            .await
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "publish checkout generation".to_owned(),
+                path: published_path.clone(),
+                detail: source.to_string(),
+            })?;
+        let workspace = WorkspaceHandle::new(
+            issue.issue_id.clone(),
+            issue.identifier.clone(),
+            staging_workspace.workspace_key().to_owned(),
+            self.canonicalize_path(&published_path).await?,
+        )
+        .with_checkout_generation(generation);
         let after_create = match self.execute_hook(HookKind::AfterCreate, &workspace).await {
             Ok(record) => {
                 if record.is_some()
@@ -454,10 +460,27 @@ impl WorkspaceManager {
                 !allow_worker_changes,
             )
             .await?;
+        if manifest.schema_version != 1
+            || manifest.remote_fingerprint
+                != manifest
+                    .repository_binding
+                    .repository
+                    .safe_remote_fingerprint
+                    .as_str()
+            || manifest.target_branch != repository.target_branch
+            || manifest.target_branch != manifest.current_branch
+            || manifest.target_commit != manifest.head
+        {
+            return Err(WorkspaceError::CheckoutVerification {
+                path: workspace.workspace_path().to_path_buf(),
+                generation: manifest.generation,
+                reason: "checkout manifest provenance is inconsistent".to_owned(),
+            });
+        }
         if (!allow_worker_changes && facts.head != manifest.head)
             || facts.branch != manifest.current_branch
             || facts.shallow != manifest.shallow
-            || (!allow_worker_changes && !facts.clean)
+            || (!allow_worker_changes && (!facts.clean || manifest.clean != facts.clean))
         {
             return Err(WorkspaceError::CheckoutVerification {
                 path: workspace.workspace_path().to_path_buf(),
@@ -720,6 +743,21 @@ impl WorkspaceManager {
         repository: &CheckoutRepository,
         destination: &Path,
     ) -> Result<(), WorkspaceError> {
+        let environment_credential = repository.credential_kind == "environment";
+        let ssh_agent_credential = repository.credential_kind == "ssh-agent";
+        if (!environment_credential && !ssh_agent_credential)
+            || (environment_credential
+                && repository
+                    .credential_env
+                    .as_deref()
+                    .is_none_or(|variable| std::env::var_os(variable).is_none()))
+        {
+            return Err(WorkspaceError::CheckoutOperation {
+                operation: "resolve repository credential provider".to_owned(),
+                path: destination.to_path_buf(),
+                detail: "repository credential provider is unavailable".to_owned(),
+            });
+        }
         let askpass_path = if let Some(variable) = repository.credential_env.as_deref()
             && std::env::var_os(variable).is_some()
         {
@@ -810,6 +848,29 @@ impl WorkspaceManager {
         if inside != "true" {
             return Err(checkout_verification(checkout, "not a Git worktree"));
         }
+        let canonical_checkout = self
+            .canonicalize_path(checkout)
+            .await
+            .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        for git_path in ["--git-dir", "--git-common-dir"] {
+            let git_path = self.git(checkout, &["rev-parse", git_path]).await?;
+            let git_path = PathBuf::from(&git_path);
+            let git_path = if git_path.is_absolute() {
+                git_path
+            } else {
+                canonical_checkout.join(git_path)
+            };
+            let canonical_git_path = self
+                .canonicalize_path(&git_path)
+                .await
+                .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+            if ensure_descendant(&canonical_checkout, &canonical_git_path).is_err() {
+                return Err(checkout_verification(
+                    checkout,
+                    "Git directory escapes the checkout generation",
+                ));
+            }
+        }
         let remote = self.git(checkout, &["remote", "get-url", "origin"]).await?;
         if Url::parse(&remote).is_ok_and(|url| {
             url.password().is_some()
@@ -834,9 +895,12 @@ impl WorkspaceManager {
             &remote,
         )
         .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
-        let expected_locator =
-            SafeRemoteFingerprint::from_remote(&repository.provider, None, &repository.remote)
-                .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        let expected_locator = SafeRemoteFingerprint::from_remote(
+            &repository.provider,
+            None,
+            &repository.remote_locator,
+        )
+        .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
         let actual_locator =
             SafeRemoteFingerprint::from_remote(&repository.provider, None, &remote)
                 .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
@@ -1472,6 +1536,16 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         workspace: &WorkspaceHandle,
     ) -> Result<IssueManifest, WorkspaceError> {
+        self.upsert_issue_manifest_at_path(issue, workspace, workspace.workspace_path())
+            .await
+    }
+
+    async fn upsert_issue_manifest_at_path(
+        &self,
+        issue: &IssueDescriptor,
+        workspace: &WorkspaceHandle,
+        manifest_workspace_path: &Path,
+    ) -> Result<IssueManifest, WorkspaceError> {
         let existing = match self.inspect_issue_manifest_state(issue, workspace).await? {
             ExistingIssueManifestState::Owned(manifest) => Some(manifest),
             ExistingIssueManifestState::Conflict(manifest) => {
@@ -1497,7 +1571,7 @@ impl WorkspaceManager {
             title: issue.title.clone(),
             current_state: issue.current_state.clone(),
             sanitized_workspace_key: workspace.workspace_key().to_string(),
-            workspace_path: workspace.workspace_path().to_path_buf(),
+            workspace_path: manifest_workspace_path.to_path_buf(),
             created_at: existing
                 .as_ref()
                 .map(|manifest| manifest.created_at)
