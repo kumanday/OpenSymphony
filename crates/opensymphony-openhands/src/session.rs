@@ -1034,6 +1034,8 @@ pub enum IssueSessionError {
     UnexpectedEarlyResult(String),
     #[error("rehydration failed: {0}")]
     RehydrationFailed(String),
+    #[error("conversation retirement failed: {0}")]
+    ConversationRetirementFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1181,7 +1183,10 @@ enum Step<T> {
 
 enum ReuseSession {
     Active(Box<ActiveSession>),
-    Reset(String),
+    Reset {
+        reason: String,
+        manifest: Box<IssueConversationManifest>,
+    },
 }
 
 struct PreparedTurn {
@@ -1442,7 +1447,7 @@ impl IssueSessionRunner {
             .await?
         {
             ReuseSession::Active(session) => *session,
-            ReuseSession::Reset(reason) => {
+            ReuseSession::Reset { reason, .. } => {
                 return Err(IssueSessionError::RehydrationFailed(reason));
             }
         };
@@ -1661,6 +1666,19 @@ impl IssueSessionRunner {
                 );
 
                 let _ = active_session.stream.close().await;
+                if let Err(retirement_error) = self
+                    .retire_conversation(
+                        &active_session.manifest,
+                        "condenser tool-matching recovery",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %retirement_error,
+                        "condenser tool-matching recovery could not retire the old conversation"
+                    );
+                    break (active_session, outcome);
+                }
 
                 match self
                     .create_fresh_session(
@@ -1830,23 +1848,30 @@ impl IssueSessionRunner {
                     Some(manifest)
                         if run_manifest.runtime_envelope.as_ref().is_some_and(|expected| {
                             manifest.runtime_envelope.as_ref() != Some(expected)
-                        }) => self
-                        .create_fresh_session(
-                            workspace_manager,
-                            workspace,
-                            run_manifest,
-                            observed_run,
-                            issue,
-                            workflow,
-                            Some("terminal runtime envelope changed; superseding conversation".into()),
-                        )
-                        .await,
+                        }) => {
+                            self.retire_conversation(
+                                &manifest,
+                                "terminal runtime envelope changed",
+                            )
+                            .await?;
+                            self.create_fresh_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                issue,
+                                workflow,
+                                Some("terminal runtime envelope changed; superseding conversation".into()),
+                            )
+                            .await
+                        }
                     Some(manifest) => match self
                         .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
                         .await?
                     {
                         ReuseSession::Active(session) => Ok(Step::Continue(*session)),
-                        ReuseSession::Reset(reason) => {
+                        ReuseSession::Reset { reason, manifest } => {
+                            self.retire_conversation(&manifest, &reason).await?;
                             self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
@@ -1883,6 +1908,13 @@ impl IssueSessionRunner {
                             .to_string(),
                     )
                 });
+                if let Some(manifest) = loaded.manifest.as_ref() {
+                    self.retire_conversation(
+                        manifest,
+                        "workflow reuse policy `fresh_each_run` requested a new conversation",
+                    )
+                    .await?;
+                }
                 self.create_fresh_session(
                     workspace_manager,
                     workspace,
@@ -2323,7 +2355,12 @@ impl IssueSessionRunner {
     ) -> Result<ReuseSession, IssueSessionError> {
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
             Ok(conversation_id) => conversation_id,
-            Err(error) => return Ok(ReuseSession::Reset(error)),
+            Err(error) => {
+                return Ok(ReuseSession::Reset {
+                    reason: error,
+                    manifest: Box::new(manifest),
+                });
+            }
         };
 
         // Check if condenser config has changed and requires reset
@@ -2341,9 +2378,10 @@ impl IssueSessionRunner {
             .and_then(|p| p.condenser.as_ref());
 
         if workflow_condenser.is_some() && manifest_condenser.is_none() {
-            return Ok(ReuseSession::Reset(
-                "workflow now has condenser enabled, but existing conversation was created without condenser - resetting to apply condenser".to_string(),
-            ));
+            return Ok(ReuseSession::Reset {
+                reason: "workflow now has condenser enabled, but existing conversation was created without condenser - resetting to apply condenser".to_string(),
+                manifest: Box::new(manifest),
+            });
         }
 
         // Defensive check: if previous run ended with error status and had activity,
@@ -2353,9 +2391,10 @@ impl IssueSessionRunner {
         if manifest.last_execution_status.as_deref() == Some("error")
             && manifest.last_event_id.is_some()
         {
-            return Ok(ReuseSession::Reset(
-                "previous run ended with error status, resetting to avoid potential corrupted event history".to_string(),
-            ));
+            return Ok(ReuseSession::Reset {
+                reason: "previous run ended with error status, resetting to avoid potential corrupted event history".to_string(),
+                manifest: Box::new(manifest),
+            });
         }
 
         // Simplified conversation resumption: just try to attach directly.
@@ -2370,6 +2409,37 @@ impl IssueSessionRunner {
             conversation_id,
         )
         .await
+    }
+
+    async fn retire_conversation(
+        &self,
+        manifest: &IssueConversationManifest,
+        reason: &str,
+    ) -> Result<(), IssueSessionError> {
+        let conversation_id = parse_uuid(manifest.conversation_id.as_str()).map_err(|error| {
+            IssueSessionError::ConversationRetirementFailed(format!(
+                "cannot retire conversation {} for {reason}: {error}",
+                manifest.conversation_id
+            ))
+        })?;
+        match self.client.delete_conversation(conversation_id).await {
+            Ok(())
+            | Err(OpenHandsError::HttpStatus {
+                status_code: 404, ..
+            }) => {}
+            Err(error) => {
+                return Err(IssueSessionError::ConversationRetirementFailed(format!(
+                    "failed to retire conversation {} for {reason}: {error}",
+                    manifest.conversation_id
+                )));
+            }
+        }
+        tracing::info!(
+            conversation_id = %manifest.conversation_id,
+            %reason,
+            "retired superseded OpenHands conversation"
+        );
+        Ok(())
     }
 
     async fn try_attach_and_resume(
@@ -2391,10 +2461,13 @@ impl IssueSessionRunner {
         {
             Ok(stream) => stream,
             Err(error) => {
-                return Ok(ReuseSession::Reset(format!(
-                    "failed to attach existing conversation {}: {error}",
-                    manifest_conversation_id
-                )));
+                return Ok(ReuseSession::Reset {
+                    reason: format!(
+                        "failed to attach existing conversation {}: {error}",
+                        manifest_conversation_id
+                    ),
+                    manifest: Box::new(manifest),
+                });
             }
         };
 

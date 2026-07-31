@@ -100,6 +100,14 @@ where
     }
 }
 
+fn checkout_deadline(timeout_duration: Option<Duration>) -> Option<Instant> {
+    timeout_duration.map(|duration| Instant::now() + duration)
+}
+
+fn checkout_time_remaining(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
 enum HookCommandOutput {
     Completed(std::process::Output),
     TimedOut { stdout: String, stderr: String },
@@ -364,6 +372,7 @@ impl WorkspaceManager {
         run_id: Option<&str>,
         checkout_timeout: Option<Duration>,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
+        let checkout_deadline = checkout_deadline(checkout_timeout);
         self.create_directory(&self.config.root).await?;
         let workspace_key = checkout_workspace_key(
             &issue.identifier,
@@ -372,7 +381,7 @@ impl WorkspaceManager {
         )?;
 
         if let Some(existing) = self
-            .find_compatible_checkout(issue, binding, checkout_timeout)
+            .find_compatible_checkout(issue, binding, checkout_deadline)
             .await?
         {
             if let Some(run_id) = run_id {
@@ -396,7 +405,7 @@ impl WorkspaceManager {
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
         self.reject_symlinked_workspace_root(&staging_path).await?;
         let mut staging_cleanup = StagingCleanupGuard::new(staging_path.clone());
-        let clone_result = match checkout_timeout {
+        let clone_result = match checkout_time_remaining(checkout_deadline) {
             Some(timeout_duration) => match timeout(
                 timeout_duration,
                 self.run_git_clone(repository, &staging_path, &mut staging_cleanup),
@@ -421,7 +430,7 @@ impl WorkspaceManager {
         clone_result?;
 
         let facts = match checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             &staging_path,
             "verify acquired checkout",
             self.verify_git_checkout(&staging_path, binding, repository, true),
@@ -435,7 +444,7 @@ impl WorkspaceManager {
             }
         };
         let instruction = match checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             &staging_path,
             "discover checkout instructions",
             self.load_instruction_provenance(&staging_path, repository, &facts.head),
@@ -449,7 +458,7 @@ impl WorkspaceManager {
             }
         };
         if let Err(error) = checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             &staging_path,
             "prepare checkout metadata",
             self.exclude_metadata_from_git(&staging_path),
@@ -485,7 +494,7 @@ impl WorkspaceManager {
             }
         };
         if let Err(error) = checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             staging_workspace.workspace_path(),
             "verify checkout after creation hook",
             self.verify_git_checkout(
@@ -584,7 +593,7 @@ impl WorkspaceManager {
             record
         });
         if let Err(error) = checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
             "verify published checkout",
             self.verify_checkout(&workspace),
@@ -667,7 +676,7 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
         allow_worker_changes: bool,
-        checkout_timeout: Option<Duration>,
+        checkout_deadline: Option<Instant>,
     ) -> Result<CheckoutManifest, WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
         let manifest = self
@@ -700,7 +709,7 @@ impl WorkspaceManager {
                 reason: "repository policy is unavailable".to_owned(),
             })?;
         let facts = checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
             "verify retained checkout",
             self.verify_git_checkout(
@@ -741,7 +750,7 @@ impl WorkspaceManager {
         }
         if allow_worker_changes {
             let ancestry = checkout_operation_with_timeout(
-                checkout_timeout,
+                checkout_time_remaining(checkout_deadline),
                 workspace.workspace_path(),
                 "verify retained checkout ancestry",
                 self.git(
@@ -765,7 +774,7 @@ impl WorkspaceManager {
             }
         }
         let instruction = checkout_operation_with_timeout(
-            checkout_timeout,
+            checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
             "verify checkout instructions",
             self.load_instruction_provenance(
@@ -841,7 +850,7 @@ impl WorkspaceManager {
         &self,
         issue: &IssueDescriptor,
         binding: &RepositoryBinding,
-        checkout_timeout: Option<Duration>,
+        checkout_deadline: Option<Instant>,
     ) -> Result<Option<EnsureWorkspaceResult>, WorkspaceError> {
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
             WorkspaceError::ReadDirectory {
@@ -949,7 +958,7 @@ impl WorkspaceManager {
                 .verify_checkout_with_worker_changes_timeout(
                     &handle,
                     allow_worker_changes,
-                    checkout_timeout,
+                    checkout_deadline,
                 )
                 .await
             {

@@ -202,10 +202,14 @@ struct LinearWorkpadCommentSource {
 #[derive(Clone, Debug, Default)]
 struct OverlayEnvironment {
     overrides: BTreeMap<String, String>,
+    blocked: BTreeSet<String>,
 }
 
 impl Environment for OverlayEnvironment {
     fn get(&self, name: &str) -> Option<String> {
+        if self.blocked.contains(name) {
+            return None;
+        }
         self.overrides
             .get(name)
             .cloned()
@@ -1477,11 +1481,13 @@ impl RuntimeWorkerBackend {
     }
 
     fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
+        let checkout_credential_envs = self.checkout_credential_envs.clone();
         let mut runner = IssueSessionRunner::with_environment(
             self.client.clone(),
             self.runner_config.clone(),
             OverlayEnvironment {
                 overrides: self.worker_env.clone(),
+                blocked: checkout_credential_envs.clone(),
             },
         );
         if let Some(source) = self.workpad_comment_source.clone() {
@@ -1504,7 +1510,6 @@ impl RuntimeWorkerBackend {
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let worker_env = self.worker_env.clone();
-        let checkout_credential_envs = self.checkout_credential_envs.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let codex_interrupts = Arc::clone(&self.codex_interrupts);
         let issue = request.issue.clone();
@@ -4316,6 +4321,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             self.runner_config.clone(),
             OverlayEnvironment {
                 overrides: self.worker_env.clone(),
+                blocked: self.checkout_credential_envs.clone(),
             },
         );
         if let Some(source) = self.workpad_comment_source.clone() {
@@ -6769,9 +6775,20 @@ mod tests {
                 "LINEAR_API_KEY".to_string(),
                 "Bearer minted".to_string(),
             )]),
+            blocked: BTreeSet::new(),
         };
 
         assert_eq!(env.get("LINEAR_API_KEY").as_deref(), Some("Bearer minted"));
+    }
+
+    #[test]
+    fn overlay_environment_blocks_checkout_credentials_from_runtime_lookup() {
+        let env = OverlayEnvironment {
+            overrides: BTreeMap::from([("CHECKOUT_TOKEN".to_string(), "secret".to_string())]),
+            blocked: BTreeSet::from(["CHECKOUT_TOKEN".to_string()]),
+        };
+
+        assert_eq!(env.get("CHECKOUT_TOKEN"), None);
     }
 
     #[test]

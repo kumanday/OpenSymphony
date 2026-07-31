@@ -839,13 +839,7 @@ async fn issue_session_runner_fresh_each_run_creates_a_new_full_prompt_conversat
             .as_str(),
     )
     .expect("conversation ID should parse");
-    let first_messages = latest_message_texts(
-        client
-            .search_all_events(first_conversation_id)
-            .await
-            .expect("first conversation events should be searchable")
-            .items(),
-    );
+    let first_events = client.search_all_events(first_conversation_id).await;
     let second_messages = latest_message_texts(
         client
             .search_all_events(second_conversation_id)
@@ -853,7 +847,10 @@ async fn issue_session_runner_fresh_each_run_creates_a_new_full_prompt_conversat
             .expect("second conversation events should be searchable")
             .items(),
     );
-    assert_eq!(first_messages.len(), 1);
+    assert!(
+        first_events.is_err(),
+        "superseded conversation should be retired"
+    );
     assert_eq!(second_messages.len(), 1);
     assert!(second_messages[0].contains("Issue: COE-282-fresh-each-run"));
 
