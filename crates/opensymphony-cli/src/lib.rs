@@ -2388,8 +2388,8 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
             central_instruction_path = central.repository_instruction_path.clone();
             (
                 central
-                    .require_legacy_target_repo()
-                    .map_err(|error| error.to_string())?,
+                    .target_repo()
+                    .unwrap_or_else(|| config_path.parent().unwrap_or(current_dir).to_path_buf()),
                 central.tool_dir(),
                 Some(central.workflow_front_matter.clone()),
             )
@@ -2425,19 +2425,24 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         (current_dir.to_path_buf(), None, None)
     };
 
+    let central_instruction_configured = central_instruction_path.is_some();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
-    if !workflow_path.exists() {
+    if central_front_matter.is_none() && !workflow_path.exists() {
         return Err(format!(
             "repository instruction file not found at {}",
             workflow_path.display()
         ));
     }
 
-    let workflow_content = fs::read_to_string(&workflow_path)
-        .await
-        .map_err(|e| format!("failed to read repository instruction file: {}", e))?;
-    let workflow_def = WorkflowDefinition::parse(&workflow_content)
-        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+    let workflow_def = if central_front_matter.is_some() && !central_instruction_configured {
+        WorkflowDefinition::parse("").expect("empty central project-set workflow should parse")
+    } else {
+        let workflow_content = fs::read_to_string(&workflow_path)
+            .await
+            .map_err(|e| format!("failed to read repository instruction file: {}", e))?;
+        WorkflowDefinition::parse(&workflow_content)
+            .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?
+    };
     let workflow_def = central_front_matter
         .map(|front_matter| WorkflowDefinition {
             front_matter,

@@ -114,6 +114,7 @@ fn terminal_states() -> HashSet<String> {
 fn test_config(base_url: &str) -> LinearConfig {
     let mut config = LinearConfig::new("test-token", "e7b957855cb7");
     config.base_url = base_url.to_string();
+    config.project_ids = vec!["e7b957855cb7".to_string()];
     config.project_slugs = vec!["e7b957855cb7".to_string()];
     config.active_states = vec!["In Progress".to_string()];
     config.terminal_states = vec!["Done".to_string(), "Canceled".to_string()];

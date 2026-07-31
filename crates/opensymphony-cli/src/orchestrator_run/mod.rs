@@ -1090,6 +1090,15 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         workspace_manager,
         memory_env.clone(),
         linear_worker_env,
+    )
+    .with_checkout_credential_envs(
+        runtime
+            .repository_checkouts
+            .as_ref()
+            .into_iter()
+            .flat_map(|checkouts| checkouts.values())
+            .filter_map(|checkout| checkout.credential_env.clone())
+            .collect(),
     );
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;

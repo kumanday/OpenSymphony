@@ -831,7 +831,9 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
                     })?;
             if super::orchestrator_run::config::looks_like_central_config(&raw) {
                 let central = super::orchestrator_run::config::load_central_config(path).await?;
-                let target_repo = central.require_legacy_target_repo()?;
+                let target_repo = central
+                    .target_repo()
+                    .unwrap_or_else(|| path.parent().unwrap_or(&current_dir).to_path_buf());
                 (
                     target_repo,
                     central.tool_dir(),
@@ -864,13 +866,18 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
             (default_target_repo, None, None, None)
         };
 
+    let central_instruction_configured = central_instruction_path.is_some();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
-    let workflow = WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
-        DebugCommandError::LoadWorkflow {
-            path: workflow_path.clone(),
-            source,
-        }
-    })?;
+    let workflow = if central_front_matter.is_some() && !central_instruction_configured {
+        WorkflowDefinition::parse("").expect("empty central project-set workflow should parse")
+    } else {
+        WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
+            DebugCommandError::LoadWorkflow {
+                path: workflow_path.clone(),
+                source,
+            }
+        })?
+    };
     let workflow = central_front_matter
         .map(|front_matter| WorkflowDefinition {
             front_matter,

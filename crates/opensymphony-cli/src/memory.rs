@@ -5463,6 +5463,7 @@ fn linear_client_from_resolved_workflow(
         resolved.config.tracker.project_slug.clone(),
     );
     linear_config.base_url = resolved.config.tracker.endpoint.clone();
+    linear_config.project_ids = resolved.config.tracker.project_ids.clone();
     linear_config.project_slugs = resolved.config.tracker.project_slugs.clone();
     linear_config.project_id = resolved.config.tracker.project_id.clone();
     linear_config.active_states = resolved.config.tracker.active_states.clone();

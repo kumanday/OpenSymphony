@@ -69,6 +69,7 @@ pub struct LinearConfig {
     pub api_key: String,
     pub base_url: String,
     pub project_slug: String,
+    pub project_ids: Vec<String>,
     pub project_slugs: Vec<String>,
     pub project_id: Option<String>,
     pub active_states: Vec<String>,
@@ -84,6 +85,7 @@ impl LinearConfig {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             project_slug: project_slug.into(),
+            project_ids: Vec::new(),
             project_slugs: Vec::new(),
             project_id: None,
             active_states: Vec::new(),
@@ -276,6 +278,11 @@ impl LinearClient {
         config.api_key = normalize_required_string("LINEAR_API_KEY", &config.api_key)?;
         config.project_slug =
             normalize_required_string("tracker.project_slug", &config.project_slug)?;
+        config.project_ids = config
+            .project_ids
+            .iter()
+            .map(|id| normalize_required_string("tracker.project_ids", id))
+            .collect::<Result<Vec<_>, _>>()?;
         config.project_slugs = if config.project_slugs.is_empty() {
             vec![config.project_slug.clone()]
         } else {
@@ -847,31 +854,8 @@ impl LinearClient {
         let slug = self
             .project_slug_cache
             .get_or_try_init(|| async {
-                let response: ProjectByIdData = self
-                    .execute_graphql(
-                        PROJECT_BY_ID_QUERY,
-                        json!(ProjectByIdVariables {
-                            id: project_id.to_owned(),
-                        }),
-                    )
-                    .await?;
-                let Some(project) = response.projects.nodes.into_iter().next() else {
-                    if self.config.project_slug != *project_id {
-                        // Migrated legacy configs explicitly carry the old slug
-                        // in project_slug. Typed central configs leave it equal
-                        // to the provider ID, so an unresolved ID fails closed.
-                        return Ok(self.config.project_slug.clone());
-                    }
-                    return Err(LinearError::InvalidConfiguration(format!(
-                        "configured tracker.project_id `{project_id}` could not be resolved to a Linear project"
-                    )));
-                };
-                if project.slug_id.trim().is_empty() {
-                    return Err(LinearError::InvalidConfiguration(format!(
-                        "configured tracker.project_id `{project_id}` resolved to a Linear project without a slugId"
-                    )));
-                }
-                Ok(project.slug_id)
+                self.fetch_project_slug_by_id(project_id, Some(&self.config.project_slug))
+                    .await
             })
             .await?;
         Ok(slug.clone())
@@ -879,10 +863,56 @@ impl LinearClient {
 
     async fn project_slugs_for_queries(&self) -> Result<Vec<String>, LinearError> {
         let mut project_slugs = self.config.project_slugs.clone();
-        if self.config.project_id.is_some() {
-            project_slugs[0] = self.project_slug_for_queries().await?;
+        if self.config.project_ids.is_empty() {
+            if self.config.project_id.is_some() {
+                project_slugs[0] = self.project_slug_for_queries().await?;
+            }
+            return Ok(project_slugs);
+        }
+        if self.config.project_ids.len() != project_slugs.len() {
+            return Err(LinearError::InvalidConfiguration(
+                "tracker project ID and slug lists must have the same length".to_owned(),
+            ));
+        }
+        for (index, project_id) in self.config.project_ids.iter().enumerate() {
+            project_slugs[index] = if index == 0 && self.config.project_id.is_some() {
+                self.project_slug_for_queries().await?
+            } else {
+                self.fetch_project_slug_by_id(project_id, None).await?
+            };
         }
         Ok(project_slugs)
+    }
+
+    async fn fetch_project_slug_by_id(
+        &self,
+        project_id: &str,
+        fallback_slug: Option<&str>,
+    ) -> Result<String, LinearError> {
+        let response: ProjectByIdData = self
+            .execute_graphql(
+                PROJECT_BY_ID_QUERY,
+                json!(ProjectByIdVariables {
+                    id: project_id.to_owned(),
+                }),
+            )
+            .await?;
+        let Some(project) = response.projects.nodes.into_iter().next() else {
+            if let Some(fallback_slug) = fallback_slug
+                && fallback_slug != project_id
+            {
+                return Ok(fallback_slug.to_owned());
+            }
+            return Err(LinearError::InvalidConfiguration(format!(
+                "configured tracker.project_id `{project_id}` could not be resolved to a Linear project"
+            )));
+        };
+        if project.slug_id.trim().is_empty() {
+            return Err(LinearError::InvalidConfiguration(format!(
+                "configured tracker.project_id `{project_id}` resolved to a Linear project without a slugId"
+            )));
+        }
+        Ok(project.slug_id)
     }
 
     pub async fn update_project_content(

@@ -550,19 +550,33 @@ pub(super) async fn resolve_runtime_config(
         .as_deref()
         .and_then(Path::parent)
         .unwrap_or(cwd.as_path());
+    let central_project_set = central_repository_routing
+        .as_ref()
+        .is_some_and(|routing| matches!(routing.mode, RepositoryRoutingMode::ProjectSet));
     let target_repo = config
         .target_repo
         .as_deref()
         .map(|path| super::super::resolve_path(config_root, path))
-        .unwrap_or_else(|| cwd.clone());
+        .unwrap_or_else(|| {
+            if central_project_set {
+                config_root.to_path_buf()
+            } else {
+                cwd.clone()
+            }
+        });
+    let central_instruction_configured = central_repository_instruction_path.is_some();
     let workflow_path =
         central_repository_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
-    let workflow = WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
-        RunCommandError::LoadWorkflow {
-            path: workflow_path.clone(),
-            source,
-        }
-    })?;
+    let workflow = if central_project_set && central_config && !central_instruction_configured {
+        WorkflowDefinition::parse("").expect("empty central project-set workflow should parse")
+    } else {
+        WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
+            RunCommandError::LoadWorkflow {
+                path: workflow_path.clone(),
+                source,
+            }
+        })?
+    };
     let workflow = central_workflow_front_matter
         .map(|front_matter| {
             // Central config owns orchestration fields, while repository-local
@@ -1391,86 +1405,97 @@ fn central_workflow_front_matter(
             field: "openhands.transport_session_api_key_env".to_owned(),
         });
     }
-    let (tracker, project_id, project_slug, project_slugs) = match config.routing.mode.trim() {
-        "legacy_single" => {
-            if config.tracker_profiles.len() != 1 {
-                return Err(CentralConfigError::InvalidReference {
-                    field: "routing.repository.tracker_profile".to_owned(),
-                });
-            }
-            if config.linear_projects.len() != 1 {
-                return Err(CentralConfigError::InvalidReference {
-                    field: "routing.repository.linear_project".to_owned(),
-                });
-            }
-            let project = config
-                .linear_projects
-                .values()
-                .next()
-                .expect("length checked");
-            let (project_id, project_slug) = project_front_matter_identity(project);
-            (
-                config
-                    .tracker_profiles
+    let (tracker, project_id, project_slug, project_ids, project_slugs) =
+        match config.routing.mode.trim() {
+            "legacy_single" => {
+                if config.tracker_profiles.len() != 1 {
+                    return Err(CentralConfigError::InvalidReference {
+                        field: "routing.repository.tracker_profile".to_owned(),
+                    });
+                }
+                if config.linear_projects.len() != 1 {
+                    return Err(CentralConfigError::InvalidReference {
+                        field: "routing.repository.linear_project".to_owned(),
+                    });
+                }
+                let project = config
+                    .linear_projects
                     .values()
                     .next()
-                    .expect("length checked"),
-                project_id,
-                project_slug.clone(),
-                vec![project_slug],
-            )
-        }
-        "project_set" => {
-            let project_set_id = config
-                .routing
-                .active_project_set
-                .as_deref()
-                .ok_or_else(|| CentralConfigError::InvalidReference {
-                    field: "routing.active_project_set".to_owned(),
+                    .expect("length checked");
+                let (project_id, project_slug) = project_front_matter_identity(project);
+                (
+                    config
+                        .tracker_profiles
+                        .values()
+                        .next()
+                        .expect("length checked"),
+                    project_id,
+                    project_slug.clone(),
+                    vec![project.provider_project_id.clone()],
+                    vec![project_slug],
+                )
+            }
+            "project_set" => {
+                let project_set_id =
+                    config
+                        .routing
+                        .active_project_set
+                        .as_deref()
+                        .ok_or_else(|| CentralConfigError::InvalidReference {
+                            field: "routing.active_project_set".to_owned(),
+                        })?;
+                let project_set = config.project_sets.get(project_set_id).ok_or_else(|| {
+                    CentralConfigError::InvalidReference {
+                        field: "routing.active_project_set".to_owned(),
+                    }
                 })?;
-            let project_set = config.project_sets.get(project_set_id).ok_or_else(|| {
-                CentralConfigError::InvalidReference {
-                    field: "routing.active_project_set".to_owned(),
-                }
-            })?;
-            let tracker = config
-                .tracker_profiles
-                .get(&project_set.tracker_profile)
-                .ok_or_else(|| CentralConfigError::InvalidReference {
-                    field: format!("project_sets.{project_set_id}.tracker_profile"),
-                })?;
-            let first_project_id = project_set.projects.first().ok_or_else(|| {
-                CentralConfigError::InvalidReference {
-                    field: format!("project_sets.{project_set_id}.projects"),
-                }
-            })?;
-            let mut project_id = None;
-            let mut project_slugs = Vec::with_capacity(project_set.projects.len());
-            for project_key in &project_set.projects {
-                let project = config.linear_projects.get(project_key).ok_or_else(|| {
+                let tracker = config
+                    .tracker_profiles
+                    .get(&project_set.tracker_profile)
+                    .ok_or_else(|| CentralConfigError::InvalidReference {
+                        field: format!("project_sets.{project_set_id}.tracker_profile"),
+                    })?;
+                let first_project_id = project_set.projects.first().ok_or_else(|| {
                     CentralConfigError::InvalidReference {
                         field: format!("project_sets.{project_set_id}.projects"),
                     }
                 })?;
-                let (candidate_id, project_slug) = project_front_matter_identity(project);
-                if project_key == first_project_id {
-                    project_id = candidate_id;
+                let mut project_id = None;
+                let mut project_ids = Vec::with_capacity(project_set.projects.len());
+                let mut project_slugs = Vec::with_capacity(project_set.projects.len());
+                for project_key in &project_set.projects {
+                    let project = config.linear_projects.get(project_key).ok_or_else(|| {
+                        CentralConfigError::InvalidReference {
+                            field: format!("project_sets.{project_set_id}.projects"),
+                        }
+                    })?;
+                    let (candidate_id, project_slug) = project_front_matter_identity(project);
+                    project_ids.push(project.provider_project_id.clone());
+                    if project_key == first_project_id {
+                        project_id = candidate_id;
+                    }
+                    project_slugs.push(project_slug);
                 }
-                project_slugs.push(project_slug);
+                let first_project = config
+                    .linear_projects
+                    .get(first_project_id)
+                    .expect("first project was resolved above");
+                let (_, project_slug) = project_front_matter_identity(first_project);
+                (
+                    tracker,
+                    project_id,
+                    project_slug,
+                    project_ids,
+                    project_slugs,
+                )
             }
-            let first_project = config
-                .linear_projects
-                .get(first_project_id)
-                .expect("first project was resolved above");
-            let (_, project_slug) = project_front_matter_identity(first_project);
-            (tracker, project_id, project_slug, project_slugs)
-        }
-        _ => {
-            return Err(CentralConfigError::InvalidReference {
-                field: "routing.mode".to_owned(),
-            });
-        }
-    };
+            _ => {
+                return Err(CentralConfigError::InvalidReference {
+                    field: "routing.mode".to_owned(),
+                });
+            }
+        };
     let api_key = config
         .credentials
         .get(&tracker.credential)
@@ -1483,6 +1508,7 @@ fn central_workflow_front_matter(
             api_key,
             project_id,
             project_slug: Some(project_slug),
+            project_ids: Some(project_ids),
             project_slugs: Some(project_slugs),
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
@@ -2640,6 +2666,10 @@ scheduler:
             .expect("multi-project central fixture should resolve");
         assert_eq!(
             resolved.workflow_front_matter.tracker.project_slugs,
+            Some(vec!["core-project".to_owned(), "other-project".to_owned()])
+        );
+        assert_eq!(
+            resolved.workflow_front_matter.tracker.project_ids,
             Some(vec!["core-project".to_owned(), "other-project".to_owned()])
         );
     }

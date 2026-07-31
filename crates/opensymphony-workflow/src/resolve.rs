@@ -100,6 +100,22 @@ fn resolve_tracker<E: Environment>(
         DEFAULT_LINEAR_ENDPOINT,
     )?;
     let project_slug = require_literal(tracker.project_slug.as_deref(), "tracker.project_slug")?;
+    let project_ids = match tracker.project_ids.as_deref() {
+        Some([]) => {
+            return Err(WorkflowConfigError::MissingRequiredField {
+                field: "tracker.project_ids",
+            });
+        }
+        Some(ids) => ids
+            .iter()
+            .map(|id| require_literal(Some(id.as_str()), "tracker.project_ids"))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => tracker
+            .project_id
+            .as_deref()
+            .map(|id| vec![id.trim().to_owned()])
+            .unwrap_or_default(),
+    };
     let project_slugs = match tracker.project_slugs.as_deref() {
         Some([]) => {
             return Err(WorkflowConfigError::MissingRequiredField {
@@ -125,6 +141,7 @@ fn resolve_tracker<E: Environment>(
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
         project_slug,
+        project_ids,
         project_slugs,
         active_states: resolve_state_list(
             tracker.active_states.as_deref(),

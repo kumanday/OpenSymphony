@@ -105,9 +105,18 @@ impl Drop for StagingCleanupGuard {
         if paths.is_empty() {
             return;
         }
-        for path in paths {
-            let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_dir_all(&path);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            drop(handle.spawn_blocking(move || {
+                for path in paths {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }));
+        } else {
+            for path in paths {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir_all(&path);
+            }
         }
     }
 }

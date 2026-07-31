@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
     process::{Child, Command, Stdio},
@@ -65,6 +65,7 @@ pub struct SupervisedServerConfig {
     pub command: Option<Vec<String>>,
     pub port_override: Option<u16>,
     pub extra_env: BTreeMap<String, String>,
+    pub env_remove: BTreeSet<String>,
     pub startup_timeout: Duration,
     pub probe: ProbeConfig,
     pub forward_stderr: bool,
@@ -77,6 +78,7 @@ impl SupervisedServerConfig {
             command: None,
             port_override: None,
             extra_env: BTreeMap::new(),
+            env_remove: BTreeSet::new(),
             startup_timeout: Duration::from_secs(10),
             probe: ProbeConfig::default(),
             forward_stderr: true,
@@ -261,6 +263,9 @@ impl LocalServerSupervisor {
                         Stdio::null()
                     })
                     .envs(&launch.env);
+                for variable in &config.env_remove {
+                    command.env_remove(variable);
+                }
                 configure_server_command(&mut command);
 
                 let mut child = command.spawn().map_err(|source| SupervisorError::Spawn {

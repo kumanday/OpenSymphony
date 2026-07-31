@@ -1,7 +1,7 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -149,6 +149,7 @@ pub(super) struct RuntimeWorkerBackend {
     runner_config: IssueSessionRunnerConfig,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
     worker_env: BTreeMap<String, String>,
+    checkout_credential_envs: BTreeSet<String>,
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
     codex_interrupts: CodexInterruptRegistry,
@@ -271,6 +272,7 @@ pub(super) fn build_linear_client(
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
+    config.project_ids = tracker.project_ids.clone();
     config.project_slugs = tracker.project_slugs.clone();
     config.project_id = tracker.project_id.clone();
     config.active_states = tracker.active_states.clone();
@@ -574,6 +576,13 @@ pub(super) async fn build_runtime_transport(
     config.command = local_server.command.clone();
     config.extra_env = local_server.env.clone();
     config.extra_env.extend(worker_env.clone());
+    config.env_remove = runtime
+        .repository_checkouts
+        .as_ref()
+        .into_iter()
+        .flat_map(|checkouts| checkouts.values())
+        .filter_map(|checkout| checkout.credential_env.clone())
+        .collect();
     if let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() {
         conversation_store.ensure_active_and_archived()?;
         config.extra_env.insert(
@@ -1427,6 +1436,7 @@ impl RuntimeWorkerBackend {
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
             worker_env,
+            checkout_credential_envs: BTreeSet::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             codex_interrupts: Arc::new(Mutex::new(HashMap::new())),
@@ -1435,6 +1445,11 @@ impl RuntimeWorkerBackend {
             updates_rx,
             tasks: HashMap::new(),
         }
+    }
+
+    pub(super) fn with_checkout_credential_envs(mut self, variables: BTreeSet<String>) -> Self {
+        self.checkout_credential_envs = variables;
+        self
     }
 
     fn abort_tracked_task(&mut self, worker_id: &str) {
@@ -1486,6 +1501,7 @@ impl RuntimeWorkerBackend {
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let worker_env = self.worker_env.clone();
+        let checkout_credential_envs = self.checkout_credential_envs.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let codex_interrupts = Arc::clone(&self.codex_interrupts);
         let issue = request.issue.clone();
@@ -1841,6 +1857,7 @@ impl RuntimeWorkerBackend {
                     &updates_tx,
                     &mut launch_tx,
                     &worker_env,
+                    &checkout_credential_envs,
                     recovered,
                 )
                 .await;
@@ -2114,6 +2131,7 @@ async fn run_codex_stdio_issue(
         updates_tx,
         launch_tx,
         worker_env,
+        &BTreeSet::new(),
         false,
     )
     .await
@@ -2135,6 +2153,7 @@ async fn run_codex_stdio_issue_with_mode(
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
+    checkout_credential_envs: &BTreeSet<String>,
     recovered: bool,
 ) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
@@ -2152,6 +2171,7 @@ async fn run_codex_stdio_issue_with_mode(
         updates_tx,
         launch_tx,
         worker_env,
+        checkout_credential_envs,
         recovered,
     )
     .await
@@ -2230,6 +2250,7 @@ async fn try_run_codex_stdio_issue(
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
+    checkout_credential_envs: &BTreeSet<String>,
     recovered: bool,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
@@ -2237,14 +2258,19 @@ async fn try_run_codex_stdio_issue(
     let schema_validator =
         cached_installed_codex_schema_validator(codex_schema_validators, codex_bin).await?;
     let (program, args) = adapter.launch().to_command();
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(args)
         .current_dir(workspace.workspace_path())
         .envs(worker_env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    for variable in checkout_credential_envs {
+        command.env_remove(variable);
+    }
+    let mut child = command
         .spawn()
         .map_err(|source| {
             format!(
@@ -5923,6 +5949,7 @@ mod tests {
             &updates_tx,
             &mut launch_tx,
             &BTreeMap::new(),
+            &BTreeSet::new(),
             true,
         )
         .await;

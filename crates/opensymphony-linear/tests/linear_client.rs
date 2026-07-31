@@ -157,11 +157,19 @@ async fn candidate_issues_normalize_fixture_payloads() {
 async fn candidate_issues_scan_every_configured_project() {
     let fixture = include_str!("fixtures/candidate_issues_page.json");
     let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"first-id","name":"First","slugId":"first-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"second-id","name":"Second","slugId":"second-project","url":null,"content":null}]}}}"#,
+        ),
         QueuedResponse::json(fixture),
         QueuedResponse::json(fixture),
     ])
     .await;
     let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["first-id".to_owned(), "second-id".to_owned()];
     config.project_slugs = vec!["first-project".to_owned(), "second-project".to_owned()];
     let client = LinearClient::new(config).expect("client configuration should be valid");
 
@@ -172,13 +180,15 @@ async fn candidate_issues_scan_every_configured_project() {
 
     assert_eq!(issues.len(), 4);
     let requests = server.recorded_requests().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["variables"]["id"], "first-id");
+    assert_eq!(requests[1].body["variables"]["id"], "second-id");
     assert_eq!(
-        requests[0].body["variables"]["projectSlug"],
+        requests[2].body["variables"]["projectSlug"],
         "first-project"
     );
     assert_eq!(
-        requests[1].body["variables"]["projectSlug"],
+        requests[3].body["variables"]["projectSlug"],
         "second-project"
     );
 }
