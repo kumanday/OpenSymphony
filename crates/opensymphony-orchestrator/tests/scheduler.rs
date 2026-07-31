@@ -47,6 +47,8 @@ fn scheduler_config() -> SchedulerConfig {
         terminal_states: vec!["Done".to_string(), "Canceled".to_string()],
         tracker_project_id: None,
         tracker_project_slug: None,
+        tracker_project_ids: Vec::new(),
+        tracker_project_slugs: Vec::new(),
         routing: RoutingConfig {
             harness: "openhands_agent_server".into(),
             model: None,

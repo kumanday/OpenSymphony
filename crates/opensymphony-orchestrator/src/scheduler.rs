@@ -51,6 +51,8 @@ pub struct SchedulerConfig {
     pub terminal_states: Vec<String>,
     pub tracker_project_id: Option<String>,
     pub tracker_project_slug: Option<String>,
+    pub tracker_project_ids: Vec<String>,
+    pub tracker_project_slugs: Vec<String>,
     pub routing: RoutingConfig,
     pub repository_routing: Option<RepositoryRouting>,
 }
@@ -103,6 +105,8 @@ impl SchedulerConfig {
             terminal_states: workflow.config.tracker.terminal_states.clone(),
             tracker_project_id: workflow.config.tracker.project_id.clone(),
             tracker_project_slug: Some(workflow.config.tracker.project_slug.clone()),
+            tracker_project_ids: workflow.config.tracker.project_ids.clone(),
+            tracker_project_slugs: workflow.config.tracker.project_slugs.clone(),
             routing: workflow.config.routing.clone(),
             repository_routing: None,
         })
@@ -3688,7 +3692,11 @@ fn tracker_issue_belongs_to_configured_project(
     issue: &TrackerIssue,
     config: &SchedulerConfig,
 ) -> bool {
-    if config.tracker_project_id.is_none() && config.tracker_project_slug.is_none() {
+    if config.tracker_project_id.is_none()
+        && config.tracker_project_slug.is_none()
+        && config.tracker_project_ids.is_empty()
+        && config.tracker_project_slugs.is_empty()
+    {
         return true;
     }
     if let Some(project_id) = config.tracker_project_id.as_deref()
@@ -3697,6 +3705,14 @@ fn tracker_issue_belongs_to_configured_project(
             .as_deref()
             .is_some_and(|issue_project_id| issue_project_id.trim() == project_id.trim())
     {
+        return true;
+    }
+    if issue.project_id.as_deref().is_some_and(|issue_project_id| {
+        config
+            .tracker_project_ids
+            .iter()
+            .any(|project_id| issue_project_id.trim() == project_id.trim())
+    }) {
         return true;
     }
     config
@@ -3712,6 +3728,16 @@ fn tracker_issue_belongs_to_configured_project(
                         .eq_ignore_ascii_case(project_slug.trim())
                 })
         })
+        || issue
+            .project_slug
+            .as_deref()
+            .is_some_and(|issue_project_slug| {
+                config.tracker_project_slugs.iter().any(|project_slug| {
+                    issue_project_slug
+                        .trim()
+                        .eq_ignore_ascii_case(project_slug.trim())
+                })
+            })
 }
 
 fn normalize_tracker_issue(

@@ -1850,11 +1850,10 @@ impl IssueSessionRunner {
                             envelope.conversation_binding.as_deref()
                                 != Some(manifest.conversation_id.as_str())
                         }) => {
-                            self.retire_conversation(
-                                &manifest,
-                                "conversation runtime envelope binding changed",
-                            )
-                            .await?;
+                            tracing::warn!(
+                                conversation_id = %manifest.conversation_id,
+                                "skipping retirement of conversation with mismatched runtime envelope binding"
+                            );
                             self.create_fresh_session(
                                 workspace_manager,
                                 workspace,

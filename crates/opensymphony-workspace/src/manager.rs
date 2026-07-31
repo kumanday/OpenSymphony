@@ -2134,7 +2134,18 @@ impl WorkspaceManager {
             .await
         {
             Ok(Some(checkout)) => handle.with_checkout_generation(checkout.generation),
-            Ok(None) | Err(WorkspaceError::DecodeManifest { .. }) => handle,
+            Ok(None) => handle,
+            Err(error @ WorkspaceError::DecodeManifest { .. })
+                if workspace_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(&format!("{}--", manifest.sanitized_workspace_key))
+                    }) =>
+            {
+                return Err(error);
+            }
+            Err(WorkspaceError::DecodeManifest { .. }) => handle,
             Err(error) => return Err(error),
         };
 
