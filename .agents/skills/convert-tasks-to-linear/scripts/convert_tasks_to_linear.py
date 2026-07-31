@@ -481,6 +481,8 @@ def validate_repository_bindings(
     configured_aliases: set[str],
     errors: list[str],
 ) -> None:
+    if mode == "project_set" and not configured_aliases:
+        errors.append("project_set packages must declare a non-empty repositoryAliases inventory")
     parent_ids = {task.parent for task in tasks.values() if task.parent}
     for task in tasks.values():
         aliases = task.repository_aliases
@@ -490,7 +492,7 @@ def validate_repository_bindings(
             errors.append(f"parent task {task.id} must not declare a repository binding")
         if mode == "project_set" and task.id not in parent_ids and len(aliases) != 1:
             errors.append(f"terminal task {task.id} must declare exactly one repository binding")
-        if configured_aliases:
+        if mode == "project_set" or configured_aliases:
             for alias in aliases:
                 if alias not in configured_aliases:
                     errors.append(f"task {task.id} references unknown repository alias {alias}")
@@ -786,14 +788,18 @@ def ensure_issues(
             }
             if task.parent:
                 input_data["parentId"] = issue_map[task.parent]["id"]
-            existing_label_ids = [
-                label["id"]
-                for label in existing.get("labels", {}).get("nodes", [])
-                if isinstance(label, dict) and label.get("id")
-            ] if existing else []
+            existing_labels = (
+                [
+                    label
+                    for label in existing.get("labels", {}).get("nodes", [])
+                    if isinstance(label, dict)
+                ]
+                if existing
+                else []
+            )
             label_ids = merge_issue_label_ids(
                 task,
-                existing_label_ids,
+                existing_labels,
                 area_label_ids,
                 repository_label_ids,
             )
@@ -865,11 +871,20 @@ def ensure_repository_labels(client: LinearClient, package: Package, team: dict[
 
 def merge_issue_label_ids(
     task: Task,
-    existing_label_ids: list[str],
+    existing_labels: list[dict[str, Any]],
     area_label_ids: dict[str, str],
     repository_label_ids: dict[str, str],
 ) -> list[str]:
-    label_ids = existing_label_ids + [
+    # Repository labels are the managed routing namespace. Remove every
+    # previously published repo:* label before adding the task's single
+    # desired binding, while leaving all unrelated labels untouched.
+    unmanaged_label_ids = [
+        label["id"]
+        for label in existing_labels
+        if label.get("id")
+        and not str(label.get("name", "")).strip().lower().startswith("repo:")
+    ]
+    label_ids = unmanaged_label_ids + [
         area_label_ids[area] for area in task.areas if area in area_label_ids
     ] + [
         repository_label_ids[alias]

@@ -1043,6 +1043,13 @@ where
             let recovered_harness_kind = record.harness_kind.clone();
             if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
+                let binding_changed = record.recovered_run.as_ref().is_some_and(|recovered_run| {
+                    normalized.repository_binding
+                        != recovered_run
+                            .repository_binding
+                            .clone()
+                            .map(RepositoryBindingOutcome::Resolved)
+                });
                 self.upsert_active_execution(
                     normalized.clone(),
                     observed_at,
@@ -1058,6 +1065,14 @@ where
                             observed_at,
                         )
                         .await?;
+                        if binding_changed {
+                            self.supersede_binding(
+                                issue_id.clone(),
+                                normalized.clone(),
+                                observed_at,
+                            )
+                            .await?;
+                        }
                         if record.interrupt_reason.is_some() {
                             self.retry_recovered_interrupt(&issue_id, observed_at)
                                 .await?;
@@ -1362,12 +1377,6 @@ where
                 }
             }
             if self
-                .interrupt_human_review_polling_for_merging(&normalized, observed_at)
-                .await?
-            {
-                continue;
-            }
-            if self
                 .executions
                 .get(&normalized.id)
                 .is_some_and(|execution| {
@@ -1379,6 +1388,12 @@ where
             {
                 self.supersede_binding(normalized.id.clone(), normalized, observed_at)
                     .await?;
+                continue;
+            }
+            if self
+                .interrupt_human_review_polling_for_merging(&normalized, observed_at)
+                .await?
+            {
                 continue;
             }
             self.upsert_active_execution(normalized, observed_at, None)?;
@@ -1565,21 +1580,33 @@ where
             return Ok(());
         };
 
-        if let Some(run) = execution.current_run().cloned()
-            && !self
+        if let Some(run) = execution.current_run().cloned() {
+            let remote_stopped = match self
                 .abort_worker(
                     &mut execution,
                     &run,
                     WorkerAbortReason::BindingSuperseded,
                     observed_at,
                 )
-                .await?
-        {
-            // Keep the old generation fenced until the harness confirms its
-            // stop. A later reconciliation retries the stop instead of
-            // allowing the replacement to share an active worker.
-            self.insert_execution(issue_id, execution);
-            return Ok(());
+                .await
+            {
+                Ok(remote_stopped) => remote_stopped,
+                Err(error) => {
+                    // The old generation remains authoritative when stop
+                    // persistence or the harness abort fails. Reinsert it so
+                    // the next reconciliation retries the stop instead of
+                    // dispatching a replacement beside a live worker.
+                    self.insert_execution(issue_id.clone(), execution);
+                    return Err(error);
+                }
+            };
+            if !remote_stopped {
+                // Keep the old generation fenced until the harness confirms
+                // its stop. A later reconciliation retries the stop instead
+                // of allowing the replacement to share an active worker.
+                self.insert_execution(issue_id, execution);
+                return Ok(());
+            }
         }
 
         self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));
@@ -1792,14 +1819,29 @@ where
         } else {
             None
         };
+        let recovered_binding = recovered_run
+            .repository_binding
+            .clone()
+            .map(RepositoryBindingOutcome::Resolved);
+        let mut recovery_issue = current_execution.issue().clone();
+        if recovery_issue.repository_binding != recovered_binding {
+            // The persisted run owns the old generation. Attach that binding
+            // before claim so config/inventory drift cannot reject recovery;
+            // bootstrap reconciliation supersedes it against the fresh issue
+            // binding immediately after reattachment.
+            recovery_issue.repository_binding = recovered_binding;
+        }
         let mut execution = current_execution.clone();
+        if execution.issue() != &recovery_issue {
+            execution.refresh_issue(recovery_issue.clone())?;
+        }
         if let Some(retry) = retry {
             execution = execution.restore_retry(retry)?;
         }
         let run = RunAttempt::new(
             recovered_run.worker_id.clone(),
-            current_execution.issue().id.clone(),
-            current_execution.issue().identifier.clone(),
+            recovery_issue.id.clone(),
+            recovery_issue.identifier.clone(),
             workspace.path.clone(),
             observed_at,
             (recovered_run.normal_retry_count > 0)
@@ -1810,12 +1852,12 @@ where
         .with_normal_retry_count(recovered_run.normal_retry_count)
         .with_repository_binding(recovered_run.repository_binding.clone());
         let route = recovered_route(
-            decide_issue_route(current_execution.issue(), &self.config)?,
+            decide_issue_route(&recovery_issue, &self.config)?,
             harness_kind.as_deref(),
         )?;
         execution = execution.claim(run.clone())?;
         let start_request = WorkerStartRequest {
-            issue: current_execution.issue().clone(),
+            issue: recovery_issue,
             workspace: workspace.clone(),
             run: run.clone(),
             route: route.clone(),

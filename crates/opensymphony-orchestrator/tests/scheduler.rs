@@ -6,8 +6,8 @@ use std::{
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, HarnessInterruptCommand, HarnessInterruptReason, HarnessInterruptStatus,
-    RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode,
-    SafeRemoteFingerprint, TrackerErrorCategory,
+    RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity, RepositoryInventoryEntry,
+    RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint, TrackerErrorCategory,
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
@@ -551,6 +551,7 @@ struct FakeWorker {
     launches: Vec<WorkerStartRequest>,
     updates: VecDeque<WorkerUpdate>,
     aborted: Vec<(String, WorkerAbortReason)>,
+    abort_results: VecDeque<Result<(), FakeError>>,
     interrupts: Vec<HarnessInterruptCommand>,
     interrupt_results: VecDeque<Result<WorkerInterruptAcknowledgement, FakeError>>,
     launch_results: VecDeque<Result<WorkerLaunch, FakeError>>,
@@ -582,7 +583,7 @@ impl WorkerBackend for FakeWorker {
         reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
         self.aborted.push((worker_id.to_string(), reason));
-        Ok(())
+        self.abort_results.pop_front().unwrap_or(Ok(()))
     }
 
     async fn interrupt_worker(
@@ -4466,10 +4467,132 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
         .expect("blocked issue should remain observable");
     assert!(matches!(
         execution.issue().repository_binding,
-        Some(crate::opensymphony_domain::RepositoryBindingOutcome::MissingBinding)
+        Some(RepositoryBindingOutcome::MissingBinding)
     ));
     assert!(scheduler.workspace().ensured.is_empty());
     assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn binding_supersession_restores_execution_when_abort_fails() {
+    let mut issue = tracker_issue("lin-repo-abort", "COE-548-ABORT", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker {
+        abort_results: VecDeque::from([Err(FakeError {
+            message: "abort failed".to_string(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial repository-bound run should launch");
+    scheduler.tracker_mut().active[0].labels = vec!["repo:two".to_string()];
+
+    assert!(scheduler.tick(ts(3_600_100)).await.is_err());
+    let issue_id = IssueId::new("lin-repo-abort").expect("issue id should be valid");
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("old execution must remain tracked after abort failure");
+    assert_eq!(execution.status(), SchedulerStatus::Running);
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+}
+
+#[tokio::test]
+async fn recovery_fences_persisted_binding_before_superseding_it() {
+    let recovered_worker_id =
+        WorkerId::new("worker-recovered-binding").expect("worker id should be valid");
+    let recovered_workspace =
+        workspace_record("COE-548-RECOVERY", "/tmp/recovered/COE-548-RECOVERY");
+    let old_binding = match repository_routing().resolve(
+        &["repo:two".to_string()],
+        Some("project-id"),
+        None,
+        false,
+    ) {
+        RepositoryBindingOutcome::Resolved(binding) => binding,
+        outcome => panic!("expected persisted binding, got {outcome:?}"),
+    };
+    let tracker = FakeTracker {
+        active: vec![{
+            let mut issue =
+                tracker_issue("lin-repo-recovery", "COE-548-RECOVERY", "In Progress", 0);
+            issue.project_id = Some("project-id".to_string());
+            issue.labels = vec!["repo:one".to_string()];
+            issue
+        }],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-repo-recovery", "COE-548-RECOVERY", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: Some(old_binding),
+            }),
+        }],
+        records: HashMap::from([("lin-repo-recovery".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("binding-drift recovery should reattach then supersede");
+
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::BindingSuperseded
+    );
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-recovery").expect("issue id should be valid"))
+        .expect("replacement execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::Running);
+    assert_eq!(
+        execution
+            .current_run()
+            .expect("replacement run should be active")
+            .repository_binding
+            .as_ref()
+            .map(|binding: &RepositoryBinding| binding.alias.as_str()),
+        Some("one")
+    );
 }
 
 #[tokio::test]
@@ -4548,4 +4671,48 @@ async fn claimed_repository_binding_is_immutable_and_stale_events_are_ignored() 
             .last_event_id,
         None
     );
+}
+
+#[tokio::test]
+async fn binding_supersession_precedes_simultaneous_merging_transition() {
+    let mut issue = tracker_issue("lin-repo-merging", "COE-548-MERGING", "Human Review", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.active_states.push("Human Review".to_string());
+    config.active_states.push("Merging".to_string());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("Human Review worker should launch");
+    scheduler.tracker_mut().active[0].state = "Merging".to_string();
+    scheduler.tracker_mut().active[0].labels = vec!["repo:two".to_string()];
+
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("binding supersession should handle simultaneous Merging");
+
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::BindingSuperseded
+    );
+    assert_eq!(scheduler.worker().interrupts.len(), 1);
+    assert_eq!(
+        scheduler.worker().interrupts[0].reason,
+        HarnessInterruptReason::SchedulerAbort
+    );
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.worker().launches[1].issue.state.name, "Merging");
 }

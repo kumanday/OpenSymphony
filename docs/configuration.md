@@ -106,6 +106,9 @@ The resolved binding records the central config and inventory generations
 before a worker is claimed. A binding change on a claimed task supersedes the
 old generation and fences its late worker events. In `legacy_single` mode only,
 an unlabelled task resolves to the configured repository for compatibility.
+Generated planning front matter quotes repository aliases as YAML strings, and
+sub-issue regeneration moves a parent's binding to the generated terminal
+children while clearing it from the new parent.
 
 ## Configuration migration
 

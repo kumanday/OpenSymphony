@@ -45,6 +45,19 @@ class RepositoryBindingTests(unittest.TestCase):
         self.assertIn("task MULTIPLE has multiple managed repository bindings: core, web", errors)
         self.assertIn("task UNKNOWN references unknown repository alias other", errors)
 
+    def test_project_set_requires_repository_inventory(self):
+        errors: list[str] = []
+
+        CONVERTER.validate_repository_bindings(
+            {"TASK": task("TASK", ["core"])}, "project_set", set(), errors
+        )
+
+        self.assertIn(
+            "project_set packages must declare a non-empty repositoryAliases inventory",
+            errors,
+        )
+        self.assertIn("task TASK references unknown repository alias core", errors)
+
 
     def test_legacy_single_allows_unlabelled_task(self):
         errors: list[str] = []
@@ -61,7 +74,10 @@ class RepositoryBindingTests(unittest.TestCase):
 
         label_ids = CONVERTER.merge_issue_label_ids(
             source,
-            ["unmanaged-label"],
+            [
+                {"id": "unmanaged-label", "name": "area:orchestrator"},
+                {"id": "old-repository-label", "name": "repo:old"},
+            ],
             {"orchestrator": "area-label"},
             {"core": "repository-label"},
         )

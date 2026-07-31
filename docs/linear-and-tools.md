@@ -104,7 +104,9 @@ Important normalization rules:
   central repository inventory; project associations validate the binding but
   never provide a default. Parents keep this field unresolved and repository
   aliases are propagated through planning and conversion without storing
-  remotes or workspace paths in Linear
+  remotes or workspace paths in Linear. Conversion removes stale managed
+  `repo:*` labels before adding the current binding, while preserving unrelated
+  labels; strict project-set packages must declare a non-empty alias inventory.
 
 ## 3. Agent-side Linear access
 

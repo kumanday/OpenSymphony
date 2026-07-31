@@ -50,6 +50,12 @@ fn yaml_escape(s: &str) -> String {
     result
 }
 
+fn yaml_optional_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", yaml_escape(value)))
+        .unwrap_or_else(|| "null".to_string())
+}
+
 /// Collapses a string to one rendered Markdown line for list items and summaries.
 fn collapse_markdown_line(s: &str) -> String {
     s.replace('\n', "\\n").replace('\r', "")
@@ -342,7 +348,11 @@ impl PlanGenerator {
                                 &requirement,
                                 &intake,
                             );
-                            let sub_issues = self.generate_sub_issues_for_issue(&sub_issue_context);
+                            let mut sub_issues =
+                                self.generate_sub_issues_for_issue(&sub_issue_context);
+                            for sub_issue in &mut sub_issues {
+                                sub_issue.repository = issue.repository.clone();
+                            }
                             PlannedIssue {
                                 id: issue.id.clone(),
                                 title: issue.title.clone(),
@@ -361,7 +371,7 @@ impl PlanGenerator {
                                 blocks: issue.blocks.clone(),
                                 sub_issues,
                                 task_file: issue.task_file.clone(),
-                                repository: issue.repository.clone(),
+                                repository: None,
                             }
                         } else {
                             issue.clone()
@@ -806,7 +816,7 @@ repository: {repository}
                 .unwrap_or_else(|| "null".to_string()),
             blocked_by = render_id_list(&issue.blocked_by),
             blocks = render_id_list(&issue.blocks),
-            repository = issue.repository.as_deref().unwrap_or("null"),
+            repository = yaml_optional_string(issue.repository.as_deref()),
             summary = collapse_markdown_line(&issue.summary),
             scope_in = render_bullets(&issue.scope_in),
             scope_out = render_optional_bullets(&issue.scope_out),
@@ -897,7 +907,7 @@ repository: {repository}
             blocked_by = render_id_list(&sub_issue.blocked_by),
             blocks = render_id_list(&sub_issue.blocks),
             parent = parent_issue.id,
-            repository = sub_issue.repository.as_deref().unwrap_or("null"),
+            repository = yaml_optional_string(sub_issue.repository.as_deref()),
             summary = collapse_markdown_line(&sub_issue.summary),
             scope_in = render_bullets(&sub_issue.scope_in),
             scope_out = render_optional_bullets(&sub_issue.scope_out),
@@ -1033,6 +1043,28 @@ mod tests {
             serde_yaml::from_str(&yaml).expect("escaped frontmatter should parse");
 
         assert_eq!(parsed.get("title").map(String::as_str), Some(raw));
+    }
+
+    #[test]
+    fn generated_frontmatter_quotes_repository_aliases() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let artifacts = generator.generate().expect("generation should succeed");
+        let milestone = &artifacts.milestones[0];
+        let mut issue = milestone.issues[0].clone();
+        issue.repository = Some("core: api #1".to_string());
+
+        let rendered = generator.render_issue_task_file(&issue, milestone);
+        let frontmatter = rendered
+            .split("---")
+            .nth(1)
+            .expect("rendered task should contain frontmatter");
+        let parsed: BTreeMap<String, serde_yaml::Value> =
+            serde_yaml::from_str(frontmatter).expect("frontmatter should parse");
+        assert_eq!(
+            parsed.get("repository").and_then(serde_yaml::Value::as_str),
+            Some("core: api #1")
+        );
     }
 
     #[test]
@@ -1218,6 +1250,27 @@ mod tests {
             regenerated
                 .task_files
                 .contains_key(&regenerated_issue.sub_issues[0].id)
+        );
+    }
+
+    #[test]
+    fn regeneration_moves_repository_binding_to_generated_sub_issues() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let mut original = generator.generate().expect("generation should succeed");
+        original.milestones[0].issues[0].repository = Some("core".to_string());
+
+        let regenerated = generator
+            .regenerate(&original, &RegenerationScope::SubIssues { issue_ids: None })
+            .expect("sub-issue regeneration should succeed");
+        let issue = &regenerated.milestones[0].issues[0];
+
+        assert_eq!(issue.repository, None);
+        assert!(
+            issue
+                .sub_issues
+                .iter()
+                .all(|sub_issue| sub_issue.repository.as_deref() == Some("core"))
         );
     }
 
