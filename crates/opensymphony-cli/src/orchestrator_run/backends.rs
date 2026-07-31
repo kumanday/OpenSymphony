@@ -39,7 +39,7 @@ use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWork
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
     RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, WorkspaceManagerConfig,
+    WorkspaceManager, WorkspaceManagerConfig, compose_terminal_prompt,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -1505,9 +1505,9 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
-            let allow_worker_changes =
+            let prior_run_manifest =
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
-                    Ok(manifest) => manifest.is_some_and(|manifest| manifest.pending_retry),
+                    Ok(manifest) => manifest,
                     Err(error) => {
                         report_launch_failure(
                             &mut launch_tx,
@@ -1516,6 +1516,23 @@ impl RuntimeWorkerBackend {
                         return;
                     }
                 };
+            let allow_worker_changes = prior_run_manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.pending_retry);
+            let persisted_conversation_binding = prior_run_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.runtime_envelope.as_ref())
+                .and_then(|envelope| envelope.conversation_binding.clone());
+            let persisted_conversation_binding = if persisted_conversation_binding.is_some() {
+                persisted_conversation_binding
+            } else {
+                recovered_conversation_manifest(&workspace_manager, &ensured.handle)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|manifest| manifest.runtime_envelope)
+                    .and_then(|envelope| envelope.conversation_binding)
+            };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
                 match if allow_worker_changes {
@@ -1545,7 +1562,7 @@ impl RuntimeWorkerBackend {
                             .unwrap_or_else(|| "default".to_owned()),
                         requested_execution_scope: "single_checkout".to_owned(),
                         effective_containment: "trusted_host_process_cwd".to_owned(),
-                        conversation_binding: None,
+                        conversation_binding: persisted_conversation_binding,
                         cleanup_intent: "workspace_manager_owned".to_owned(),
                     }),
                     Err(error) => {
@@ -1585,6 +1602,44 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
+            let terminal_prompt = if let Some(checkout) = runtime_envelope.as_ref() {
+                let central_procedure = match workflow
+                    .render_prompt(&issue, run.attempt.map(|attempt| attempt.get()))
+                {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to render workflow prompt: {error}"),
+                        );
+                        return;
+                    }
+                };
+                Some(compose_terminal_prompt(
+                    &central_procedure,
+                    &format!(
+                        "Issue: {}\nTitle: {}\nAttempt: {}",
+                        issue.identifier, issue.title, attempt
+                    ),
+                    &format!(
+                        "Path: {}\nGeneration: {}\nBranch: {}\nCommit: {}",
+                        checkout.checkout_path.display(),
+                        checkout.checkout_generation,
+                        checkout.target_branch,
+                        checkout.target_commit
+                    ),
+                    repository_instructions.as_deref(),
+                    &format!(
+                        "harness={} cwd={} containment={}",
+                        checkout.harness,
+                        checkout.checkout_path.display(),
+                        checkout.effective_containment
+                    ),
+                ))
+            } else {
+                None
+            };
+            runner = runner.with_terminal_prompt(terminal_prompt.clone());
             let run_descriptor = RunDescriptor::new(run_id, attempt)
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
@@ -1592,7 +1647,10 @@ impl RuntimeWorkerBackend {
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
-                        let conversation_manifest = if run_manifest.status == RunStatus::Prepared {
+                        let conversation_manifest = if matches!(
+                            run_manifest.status,
+                            RunStatus::Prepared | RunStatus::Running
+                        ) {
                             if route.harness_kind == CODEX_APP_SERVER_KIND {
                                 match load_codex_conversation_manifest(
                                     &workspace_manager,
@@ -1759,7 +1817,7 @@ impl RuntimeWorkerBackend {
                     &issue,
                     &run,
                     &workflow,
-                    repository_instructions.as_deref(),
+                    terminal_prompt.as_deref(),
                     &codex_bin,
                     &codex_schema_validators,
                     &codex_interrupts,
@@ -2574,6 +2632,11 @@ async fn try_run_codex_stdio_issue(
         ));
     }
     let prompt = match (prompt_kind, first_run_prompt) {
+        (IssueSessionPromptKind::Full, _) if repository_instructions.is_some() => {
+            repository_instructions
+                .expect("terminal prompt checked above")
+                .to_owned()
+        }
         (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
         (IssueSessionPromptKind::Full, None) => workflow
             .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
@@ -2582,9 +2645,6 @@ async fn try_run_codex_stdio_issue(
             })?,
         (IssueSessionPromptKind::Continuation, _) => build_continuation_guidance(issue, run),
     };
-    let prompt = repository_instructions.map_or(prompt.clone(), |instructions| {
-        format!("{prompt}\n\n## Repository Instructions\n\n{instructions}\n")
-    });
     let turn_start = adapter
         .start_issue_turn_request(
             &mut session,

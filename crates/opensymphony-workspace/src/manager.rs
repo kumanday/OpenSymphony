@@ -274,6 +274,10 @@ impl WorkspaceManager {
         )?;
 
         if let Some(existing) = self.find_compatible_checkout(issue, binding).await? {
+            if let Some(run_id) = run_id {
+                self.update_checkout_run_id(&existing.handle, run_id)
+                    .await?;
+            }
             return Ok(existing);
         }
 
@@ -496,7 +500,7 @@ impl WorkspaceManager {
                 path: path.clone(),
                 source,
             })?;
-        let content = if manifest.instruction.source == "workflow" {
+        let content = if is_workflow_instruction_path(&manifest.instruction.path) {
             workflow_body(&bytes)
         } else {
             bytes
@@ -570,8 +574,21 @@ impl WorkspaceManager {
                 .await
             {
                 Ok(_) => {
-                    let issue_manifest =
-                        self.load_issue_manifest(&handle).await?.unwrap_or(manifest);
+                    if self.config.hooks.after_create.is_some()
+                        && !matches!(
+                            self.inspect_after_create_receipt_state(issue, &handle)
+                                .await?,
+                            ExistingReceiptState::Owned
+                        )
+                    {
+                        self.quarantine_checkout(
+                            &handle,
+                            "after_create hook completion receipt is missing or invalid".to_owned(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
                     return Ok(Some(EnsureWorkspaceResult {
                         handle,
                         issue_manifest,
@@ -593,7 +610,14 @@ impl WorkspaceManager {
         reason: String,
     ) -> Result<(), WorkspaceError> {
         let quarantine_root = self.config.root.join(".opensymphony-quarantine");
+        self.reject_symlinked_workspace_root(&quarantine_root)
+            .await?;
         self.create_directory(&quarantine_root).await?;
+        self.reject_symlinked_workspace_root(&quarantine_root)
+            .await?;
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let canonical_quarantine_root = self.canonicalize_path(&quarantine_root).await?;
+        ensure_descendant(&canonical_root, &canonical_quarantine_root)?;
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -606,6 +630,7 @@ impl WorkspaceManager {
                 .and_then(|name| name.to_str())
                 .unwrap_or("checkout")
         ));
+        self.reject_symlinked_workspace_root(&destination).await?;
         fs::rename(workspace.workspace_path(), &destination)
             .await
             .map_err(|source| WorkspaceError::CheckoutQuarantined {
@@ -848,7 +873,7 @@ impl WorkspaceManager {
                     path: path.clone(),
                     source,
                 })?;
-        if source == "workflow" {
+        if is_workflow_instruction_path(&relative) {
             content = workflow_body(&content);
         }
         Ok(InstructionProvenance {
@@ -858,6 +883,25 @@ impl WorkspaceManager {
             source: source.to_owned(),
             native_discovery_paths: agents,
         })
+    }
+
+    async fn update_checkout_run_id(
+        &self,
+        workspace: &WorkspaceHandle,
+        run_id: &str,
+    ) -> Result<(), WorkspaceError> {
+        let Some(mut manifest) = self
+            .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
+            .await?
+        else {
+            return Ok(());
+        };
+        if manifest.run_id != run_id {
+            manifest.run_id = run_id.to_owned();
+            self.write_manifest(workspace, &workspace.checkout_manifest_path(), &manifest)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn exclude_metadata_from_git(&self, checkout: &Path) -> Result<(), WorkspaceError> {
@@ -1924,6 +1968,12 @@ pub fn compose_terminal_prompt(
     format!(
         "## Central Execution Procedure\n\n{central_procedure}\n\n## Task Facts\n\n{task_facts}\n\n## Verified Checkout\n\n{checkout_facts}\n\n## Repository Instructions\n\n{repository_section}\n\n## Runtime Capabilities\n\n{capabilities}\n"
     )
+}
+
+fn is_workflow_instruction_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("WORKFLOW.md"))
 }
 
 async fn run_hook_command(

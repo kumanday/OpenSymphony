@@ -22,7 +22,7 @@ use crate::opensymphony_workflow::{
 };
 use crate::opensymphony_workspace::{
     RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager,
+    WorkspaceManager, compose_terminal_prompt,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -86,6 +86,7 @@ pub struct IssueSessionRunnerConfig {
     pub finished_drain_timeout: Duration,
     pub memory: Option<MemoryWorkerAccess>,
     pub repository_instructions: Option<String>,
+    pub terminal_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,6 +322,7 @@ impl Default for IssueSessionRunnerConfig {
             finished_drain_timeout: Duration::from_millis(100),
             memory: None,
             repository_instructions: None,
+            terminal_prompt: None,
         }
     }
 }
@@ -346,6 +348,7 @@ impl IssueSessionRunnerConfig {
             finished_drain_timeout: Duration::from_millis(100),
             memory: None,
             repository_instructions: None,
+            terminal_prompt: None,
         }
     }
 
@@ -356,6 +359,11 @@ impl IssueSessionRunnerConfig {
 
     pub fn with_repository_instructions(mut self, instructions: Option<String>) -> Self {
         self.repository_instructions = instructions;
+        self
+    }
+
+    pub fn with_terminal_prompt(mut self, prompt: Option<String>) -> Self {
+        self.terminal_prompt = prompt;
         self
     }
 }
@@ -1228,6 +1236,11 @@ impl IssueSessionRunner {
 
     pub fn with_repository_instructions(mut self, instructions: Option<String>) -> Self {
         self.config.repository_instructions = instructions;
+        self
+    }
+
+    pub fn with_terminal_prompt(mut self, prompt: Option<String>) -> Self {
+        self.config.terminal_prompt = prompt;
         self
     }
 
@@ -2799,17 +2812,28 @@ impl IssueSessionRunner {
         prompt_kind: IssueSessionPromptKind,
     ) -> Result<String, String> {
         match prompt_kind {
-            IssueSessionPromptKind::Full => workflow
-                .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
-                .map(|prompt| {
-                    self.config.repository_instructions.as_deref().map_or(
-                        prompt.clone(),
-                        |instructions| {
-                            format!("{prompt}\n\n## Repository Instructions\n\n{instructions}\n")
-                        },
-                    )
-                })
-                .map_err(|error| error.to_string()),
+            IssueSessionPromptKind::Full => {
+                if let Some(prompt) = self.config.terminal_prompt.as_deref() {
+                    return Ok(prompt.to_owned());
+                }
+                workflow
+                    .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+                    .map(|prompt| {
+                        self.config.repository_instructions.as_deref().map_or(
+                            prompt.clone(),
+                            |instructions| {
+                                compose_terminal_prompt(
+                                    &prompt,
+                                    &format!("Issue: {}\nTitle: {}", issue.identifier, issue.title),
+                                    "Verified checkout facts are persisted in the run envelope.",
+                                    Some(instructions),
+                                    "trusted_host_process_cwd",
+                                )
+                            },
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+            }
             IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
         }
     }
@@ -4525,6 +4549,7 @@ mod tests {
                 finished_drain_timeout: Duration::from_millis(25),
                 memory: None,
                 repository_instructions: None,
+                terminal_prompt: None,
             },
         );
 
