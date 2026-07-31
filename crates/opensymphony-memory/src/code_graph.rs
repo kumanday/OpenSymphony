@@ -3861,21 +3861,45 @@ pub fn migrate_code_repository_identity(
         path: config.index_path.clone(),
         source,
     })?;
-    for table in [
-        "code_documents",
-        "code_documents_staging",
-        "code_document_revisions",
-        "code_symbols",
-        "code_edges",
-        "code_edge_revisions",
-        "code_skipped_files",
-        "code_skipped_files_staging",
-        "code_diagnostics",
-        "code_diagnostic_revisions",
-        "code_index_snapshots",
-        "code_snapshot_membership",
-        "code_snapshot_membership_staging",
-    ] {
+    let tables = [
+        ("code_documents", "path, content_sha256, parser_version, query_pack_version"),
+        (
+            "code_documents_staging",
+            "commit_sha, path, parser_version, query_pack_version",
+        ),
+        (
+            "code_document_revisions",
+            "commit_sha, path, parser_version, query_pack_version",
+        ),
+        ("code_symbols", "symbol_id"),
+        ("code_edges", "edge_id"),
+        ("code_edge_revisions", "commit_sha, edge_id"),
+        ("code_skipped_files", "commit_sha, path, content_sha256"),
+        (
+            "code_skipped_files_staging",
+            "commit_sha, path, content_sha256",
+        ),
+        ("code_diagnostics", "diagnostic_id"),
+        ("code_diagnostic_revisions", "commit_sha, diagnostic_id"),
+        ("code_index_snapshots", "commit_sha"),
+        ("code_snapshot_membership", "commit_sha, path"),
+        (
+            "code_snapshot_membership_staging",
+            "run_id, commit_sha, path",
+        ),
+    ];
+    for (table, key_columns) in tables {
+        transaction
+            .execute(
+                &format!(
+                    "DELETE FROM {table} WHERE repo_id = ? AND ({key_columns}) IN (SELECT {key_columns} FROM {table} WHERE repo_id = ?)"
+                ),
+                params![canonical_repo_id, legacy_repo_id],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
         transaction
             .execute(
                 &format!("UPDATE {table} SET repo_id = ? WHERE repo_id = ?"),
@@ -7489,7 +7513,7 @@ mod code_graph_tests {
         CodeDiffConnectionScope, CodeDiffEdgeStatus, CodeDiffSymbol, CodeGraphConfidence,
         CodeGraphMode, CodeGraphSnapshotOptions, DtoDiffStatus,
         index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
-        migrate_index, open_existing_index_read_only, open_index,
+        migrate_code_repository_identity, migrate_index, open_existing_index_read_only, open_index,
         query_code_edges_for_revision, query_revision_file_symbols, query_symbol_diagnostics,
         re_resolve_workspace_edges,
         CodeEdgeRecord, CodeSymbolRecord,
@@ -9549,5 +9573,34 @@ mod code_graph_tests {
         assert!(repository_scope_matches(&scopes, "team/repo"));
         assert!(!repository_scope_matches(&scopes, "missing-repo"));
         assert!(has_work_item_scope(&scopes));
+    }
+
+    #[test]
+    fn repository_identity_migration_drops_only_colliding_legacy_snapshot_rows() {
+        let repository = TempDir::new().expect("repository");
+        let config = MemoryConfig::load(repository.path(), None).expect("config");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("schema");
+        for repo_id in ["legacy-repo", "canonical-repo"] {
+            connection
+                .execute(
+                    "INSERT INTO code_index_snapshots (repo_id, commit_sha, target_branch, status, total_files, parsed_files, skipped_files, deleted_files, config_fingerprint, indexed_at) VALUES (?, 'abc', 'develop', 'complete', 1, 1, 0, 0, '', 'now')",
+                    [repo_id],
+                )
+                .expect("snapshot");
+        }
+        drop(connection);
+
+        migrate_code_repository_identity(&config, "legacy-repo", "canonical-repo")
+            .expect("identity migration");
+        let connection = open_index(&config).expect("index reopened");
+        let rows = connection
+            .prepare("SELECT repo_id FROM code_index_snapshots ORDER BY repo_id")
+            .expect("query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(rows, vec!["canonical-repo"]);
     }
 }

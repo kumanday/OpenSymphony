@@ -360,6 +360,7 @@ pub struct ResolvedIntegrationInstructions {
 pub(crate) struct ResolvedMemorySource {
     pub(crate) repository_id: String,
     pub(crate) checkout_path: PathBuf,
+    pub(crate) project_scope_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Error)]
@@ -1287,7 +1288,7 @@ fn resolve_central_config(
         active_repositories,
         generation.clone(),
     )?;
-    let memory_sources = resolve_memory_sources(&config, config_root)?;
+    let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     Ok(ResolvedCentralConfig {
         instance_id,
@@ -1312,6 +1313,7 @@ fn resolve_central_config(
 fn resolve_memory_sources(
     config: &CentralConfigFile,
     config_root: &Path,
+    repository_routing: &RepositoryRouting,
 ) -> Result<BTreeMap<String, ResolvedMemorySource>, CentralConfigError> {
     let mut sources = BTreeMap::new();
     for repository in config.repositories.values() {
@@ -1334,6 +1336,16 @@ fn resolve_memory_sources(
                 checkout_path,
                 "repositories.checkout_path",
             )?,
+            project_scope_ids: repository_routing
+                .project_repositories
+                .iter()
+                .filter(|(_, repositories)| {
+                    repositories
+                        .iter()
+                        .any(|candidate| candidate.to_string() == repository_id)
+                })
+                .map(|(project_id, _)| project_id.clone())
+                .collect(),
         };
         if sources.insert(repository_id, resolved).is_some() {
             return Err(CentralConfigError::InvalidReference {

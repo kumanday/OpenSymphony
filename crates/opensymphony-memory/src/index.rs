@@ -2735,7 +2735,11 @@ fn refresh_memory_index_from_okf_inner(
                 label: None,
             });
         }
-        for project_id in &config.project_scope_ids {
+        let project_scope_ids = repository_id
+            .and_then(|repository_id| config.repository_sources.get(repository_id))
+            .map(|source| &source.project_scope_ids)
+            .unwrap_or(&config.project_scope_ids);
+        for project_id in project_scope_ids {
             if !scope_refs.iter().any(|scope| {
                 scope.kind == KnowledgeScopeKind::Project && scope.id == *project_id
             }) {

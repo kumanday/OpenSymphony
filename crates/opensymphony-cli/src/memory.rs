@@ -942,6 +942,7 @@ fn apply_central_memory_root(
                 repository_id: source.repository_id.clone(),
                 root: source.checkout_path.clone(),
                 commit_sha: None,
+                project_scope_ids: source.project_scope_ids.clone(),
             },
         );
     }
@@ -9373,6 +9374,7 @@ Public memory concept.
                 repository_id: "github:repository:123".to_string(),
                 root: repository.path().to_path_buf(),
                 commit_sha: Some("abc123".to_string()),
+                project_scope_ids: std::collections::BTreeSet::new(),
             })
             .with_default_repository_id("github:repository:123");
 

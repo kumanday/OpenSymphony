@@ -1504,6 +1504,7 @@ fn load_runtime_memory_config(
                 repository_id: source.repository_id.clone(),
                 root: source.checkout_path.clone(),
                 commit_sha: None,
+                project_scope_ids: source.project_scope_ids.clone(),
             });
     }
     if let Some(project_set_id) = runtime.project_set_id.clone() {

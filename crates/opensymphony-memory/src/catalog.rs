@@ -148,9 +148,24 @@ pub fn reconcile_memory_sources(
         })
         .map(|(source_id, repository_id, _)| (source_id.clone(), repository_id.clone()))
         .collect::<Vec<_>>();
+    drop(connection);
+    for (source_id, repository_id) in withdrawn_source_ids {
+        withdraw_memory_source_records(config, &source_id, &repository_id)?;
+        let connection = open_index(config)?;
+        connection
+            .execute(
+                "DELETE FROM registered_memory_sources WHERE source_id = ?",
+                [&source_id],
+            )
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+    }
     let placeholders = std::iter::repeat_n("?", source_ids.len())
         .collect::<Vec<_>>()
         .join(", ");
+    let connection = open_index(config)?;
     if source_ids.is_empty() {
         connection
             .execute("DELETE FROM registered_memory_sources", [])
@@ -171,10 +186,6 @@ pub fn reconcile_memory_sources(
                 path: config.index_path.clone(),
                 source: error,
             })?;
-    }
-    drop(connection);
-    for (source_id, repository_id) in withdrawn_source_ids {
-        withdraw_memory_source_records(config, &source_id, &repository_id)?;
     }
     Ok(())
 }

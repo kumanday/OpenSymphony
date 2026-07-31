@@ -258,6 +258,7 @@ pub struct MemoryRepositorySource {
     pub repository_id: String,
     pub root: PathBuf,
     pub commit_sha: Option<String>,
+    pub project_scope_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
