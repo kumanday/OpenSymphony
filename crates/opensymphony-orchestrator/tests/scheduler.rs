@@ -2812,6 +2812,17 @@ async fn same_repository_recovery_retains_persisted_binding_generations() {
             .map(|binding| binding.inventory_generation.as_str()),
         Some("inventory-before-restart")
     );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-same-repository-generation").expect("issue id"))
+            .expect("recovered execution should remain tracked")
+            .issue()
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::resolved_binding)
+            .map(|binding| binding.config_generation.as_str()),
+        Some("config-test")
+    );
 }
 
 #[tokio::test]

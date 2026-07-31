@@ -2192,12 +2192,16 @@ where
             .repository_binding
             .clone()
             .map(RepositoryBindingOutcome::Resolved);
+        let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+            current_execution.issue().repository_binding.as_ref(),
+            recovered_binding.as_ref(),
+        );
         let mut recovery_issue = current_execution.issue().clone();
-        if recovered_binding.is_some() {
+        if binding_changed {
             // The persisted run owns the old generation. Attach that binding
-            // before claim so config/inventory drift cannot reject recovery.
-            // Bootstrap reconciliation supersedes it against the fresh issue
-            // binding when the canonical identity actually changed.
+            // before claim so a canonical identity change can be superseded
+            // safely after reattachment. Same-identity recovery keeps the
+            // refreshed issue metadata while the run retains its proof.
             recovery_issue.repository_binding = recovered_binding.clone();
         }
         let mut execution = current_execution.clone();

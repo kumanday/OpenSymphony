@@ -731,7 +731,10 @@ impl IssueExecution {
             .repository_binding
             .as_ref()
             .and_then(RepositoryBindingOutcome::resolved_binding)
-            && run.repository_binding.as_ref() != Some(expected)
+            && run
+                .repository_binding
+                .as_ref()
+                .is_none_or(|actual| actual.repository.id != expected.repository.id)
         {
             return Err(StateTransitionError::RepositoryBindingChanged {
                 expected: Some(expected.repository.id.clone()),
