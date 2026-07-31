@@ -52,6 +52,8 @@ pub struct TerminalRuntimeEnvelope {
     pub instruction: InstructionProvenance,
     pub harness: String,
     pub model_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub requested_execution_scope: String,
     pub effective_containment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

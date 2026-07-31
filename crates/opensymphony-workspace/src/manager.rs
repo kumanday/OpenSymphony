@@ -1372,6 +1372,13 @@ impl WorkspaceManager {
             if metadata.file_type().is_symlink() {
                 return Err(WorkspaceError::InstructionPathEscape { path });
             }
+            if source == "configured" && !metadata.is_file() {
+                return Err(WorkspaceError::CheckoutVerification {
+                    path,
+                    generation: source_commit.to_owned(),
+                    reason: "configured instruction path is not a regular file".to_owned(),
+                });
+            }
             if metadata.is_file() {
                 selected = Some((relative, path, source));
                 break;

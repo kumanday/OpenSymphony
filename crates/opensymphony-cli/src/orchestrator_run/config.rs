@@ -1447,9 +1447,9 @@ fn central_workflow_front_matter(
                         .values()
                         .next()
                         .expect("length checked"),
-                    project_id,
+                    project_id.clone(),
                     project_slug.clone(),
-                    Some(vec![project.provider_project_id.clone()]),
+                    project_id.as_ref().map(|id| vec![id.clone()]),
                     vec![project_slug],
                 )
             }
@@ -2704,6 +2704,26 @@ scheduler:
         assert_eq!(
             migrated.workflow_front_matter.tracker.project_slugs,
             Some(vec!["core-project".to_owned(), "other-project".to_owned()])
+        );
+    }
+
+    #[test]
+    fn central_config_preserves_legacy_slug_fallback_without_project_ids() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "provider_project_id: core-project\n",
+            "provider_project_id: core-project\n    provider_project_slug: core-project\n",
+        );
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("legacy central fixture should resolve");
+        assert_eq!(resolved.workflow_front_matter.tracker.project_id, None);
+        assert_eq!(resolved.workflow_front_matter.tracker.project_ids, None);
+        assert_eq!(
+            resolved.workflow_front_matter.tracker.project_slugs,
+            Some(vec!["core-project".to_owned()])
         );
     }
 

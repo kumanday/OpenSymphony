@@ -264,6 +264,10 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     git(&source, &["config", "user.name", "OpenSymphony Test"]);
     std::fs::write(source.join("AGENTS.md"), "source-only instructions\n")
         .expect("instructions should be written");
+    std::fs::create_dir(source.join("configured-dir"))
+        .expect("non-file instruction path should be written");
+    std::fs::write(source.join("configured-dir/marker"), "not instructions\n")
+        .expect("non-file instruction marker should be written");
     std::fs::write(source.join("README.md"), "clean\n").expect("readme should be written");
     git(&source, &["add", "."]);
     git(&source, &["commit", "-m", "initial"]);
@@ -318,7 +322,7 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     .expect("manager should build")
     .with_repository_checkouts(BTreeMap::from([(
         binding.repository_id().to_string(),
-        repository,
+        repository.clone(),
     )]));
     let mut issue = sample_issue("COE-549/terminal");
     issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
@@ -358,6 +362,30 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         reused.handle.workspace_path(),
         first.handle.workspace_path()
     );
+
+    let mut non_file_repository = repository.clone();
+    non_file_repository.instructions_path = "configured-dir".into();
+    let non_file_manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("non-file manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        non_file_repository,
+    )]));
+    let mut non_file_issue = sample_issue("COE-549/non-file");
+    non_file_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let error = non_file_manager
+        .ensure_with_run_id(&non_file_issue, Some("run-non-file"))
+        .await
+        .expect_err("configured instruction directories must block publication");
+    assert!(matches!(
+        error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "configured instruction path is not a regular file"
+    ));
 
     git(
         first.handle.workspace_path(),

@@ -206,6 +206,7 @@ struct LinearDoctorConfig {
 struct DoctorRuntimeConfig {
     target_repo: PathBuf,
     workflow_path: PathBuf,
+    instruction_path_required: bool,
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
     probe_model: Option<String>,
@@ -228,10 +229,14 @@ fn strict_recovery_enabled(repository_routing: Option<&RepositoryRouting>) -> bo
 
 struct DoctorWorkflowEnvironment {
     fallback_linear_api_key: bool,
+    blocked: BTreeSet<String>,
 }
 
 impl Environment for DoctorWorkflowEnvironment {
     fn get(&self, name: &str) -> Option<String> {
+        if self.blocked.contains(name) {
+            return None;
+        }
         env::var_os(name)
             .map(|value| value.to_string_lossy().into_owned())
             .or_else(|| {
@@ -601,7 +606,14 @@ pub async fn run_doctor_command(
 
     let (runtime, rendered_probe_prompt) = match runtime {
         Ok(runtime) => {
-            checks.push(check_target_repo(&runtime.target_repo, &runtime.workflow_path).await);
+            checks.push(
+                check_target_repo(
+                    &runtime.target_repo,
+                    &runtime.workflow_path,
+                    runtime.instruction_path_required,
+                )
+                .await,
+            );
             checks.push(check_workflow(&runtime));
 
             let rendered_probe_prompt = match render_doctor_probe_prompt(&runtime.workflow) {
@@ -636,6 +648,7 @@ pub async fn run_doctor_command(
                 check_target_repo(
                     &fallback_target_repo,
                     &fallback_target_repo.join("WORKFLOW.md"),
+                    true,
                 )
                 .await,
             );
@@ -723,19 +736,30 @@ pub async fn run_doctor_command(
 
     // Run bulk rehydration if requested
     if rehydrate {
-        match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
-            Ok((success_count, total_count)) => {
-                let fail_count = total_count - success_count;
-                checks.push(CheckResult::pass(
-                    "rehydration",
-                    format!(
-                        "rehydrated {}/{} conversations ({} failed)",
-                        success_count, total_count, fail_count
-                    ),
-                ));
-            }
-            Err(error) => {
-                checks.push(CheckResult::fail("rehydration", error));
+        if strict_recovery_enabled(
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_routing),
+        ) {
+            checks.push(CheckResult::fail(
+                "rehydration",
+                "bulk doctor rehydration is unavailable for project_set; use issue-scoped strict recovery",
+            ));
+        } else {
+            match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
+                Ok((success_count, total_count)) => {
+                    let fail_count = total_count - success_count;
+                    checks.push(CheckResult::pass(
+                        "rehydration",
+                        format!(
+                            "rehydrated {}/{} conversations ({} failed)",
+                            success_count, total_count, fail_count
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    checks.push(CheckResult::fail("rehydration", error));
+                }
             }
         }
     }
@@ -1191,8 +1215,15 @@ fn resolve_doctor_runtime(
     let workflow_path = central_instruction_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
-    let workflow = WorkflowDefinition::load_from_path(&workflow_path)
-        .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
+    let instruction_path_required =
+        central_front_matter.is_none() || central_instruction_path.is_some();
+    let workflow = if central_front_matter.is_some() && central_instruction_path.is_none() {
+        WorkflowDefinition::parse("")
+            .map_err(|error| format!("failed to parse central workflow front matter: {error}"))?
+    } else {
+        WorkflowDefinition::load_from_path(&workflow_path)
+            .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?
+    };
     let workflow = central_front_matter
         .cloned()
         .map(|front_matter| WorkflowDefinition {
@@ -1206,6 +1237,7 @@ fn resolve_doctor_runtime(
     Ok(DoctorRuntimeConfig {
         target_repo,
         workflow_path,
+        instruction_path_required,
         workflow,
         tool_dir: config
             .openhands
@@ -1230,6 +1262,7 @@ fn resolve_doctor_workflow(
             target_repo,
             &DoctorWorkflowEnvironment {
                 fallback_linear_api_key: true,
+                blocked: BTreeSet::new(),
             },
         )
     }
@@ -1293,7 +1326,11 @@ fn check_repo_root(repo_root: &Path) -> CheckResult {
     }
 }
 
-async fn check_target_repo(target_repo: &Path, workflow_path: &Path) -> CheckResult {
+async fn check_target_repo(
+    target_repo: &Path,
+    workflow_path: &Path,
+    instruction_path_required: bool,
+) -> CheckResult {
     if !target_repo.exists() {
         return CheckResult::fail(
             "target-repo",
@@ -1301,7 +1338,15 @@ async fn check_target_repo(target_repo: &Path, workflow_path: &Path) -> CheckRes
         );
     }
 
-    if workflow_path.exists() {
+    if !instruction_path_required {
+        CheckResult::pass(
+            "target-repo",
+            format!(
+                "found target repo {}; using central workflow front matter",
+                target_repo.display()
+            ),
+        )
+    } else if workflow_path.exists() {
         CheckResult::pass("target-repo", format!("found {}", workflow_path.display()))
     } else {
         CheckResult::fail(
@@ -2281,17 +2326,22 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     println!("Created at: {:?}", old_manifest.created_at);
     println!("Last attached: {:?}", old_manifest.last_attached_at);
 
-    // Create OpenHands client with optional local server startup
-    let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
-        .map_err(|e| format!("failed to create transport config: {}", e))?;
-
     let checkout_credential_envs = runtime
         .repository_checkouts
         .as_ref()
         .into_iter()
         .flat_map(|checkouts| checkouts.values())
         .filter_map(|checkout| checkout.credential_env.clone())
-        .collect();
+        .collect::<BTreeSet<_>>();
+    let environment = BlockedEnvironment {
+        base: ProcessEnvironment,
+        blocked: checkout_credential_envs.clone(),
+    };
+
+    // Create OpenHands client with optional local server startup
+    let transport = TransportConfig::from_workflow(&workflow, &environment)
+        .map_err(|e| format!("failed to create transport config: {}", e))?;
+
     let (client, _supervisor, server_message) = build_rehydrate_client(
         &workflow,
         &transport,
@@ -2302,7 +2352,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 
     // Create session runner
     let runner_config = IssueSessionRunnerConfig::default();
-    let runner = IssueSessionRunner::new(client, runner_config);
+    let runner = IssueSessionRunner::with_environment(client, runner_config, environment);
 
     // Create a minimal run descriptor for the rehydration
     use crate::opensymphony_workspace::RunDescriptor;
@@ -2408,7 +2458,7 @@ async fn resolve_rehydrate_runtime(
     .await
 }
 
-async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
+async fn resolve_rehydrate_runtime_with_environment<E: Environment + Clone>(
     current_dir: &Path,
     explicit_config_path: Option<&Path>,
     environment: &E,
@@ -2469,6 +2519,12 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         };
 
     let central_instruction_configured = central_instruction_path.is_some();
+    let checkout_credential_envs = repository_checkouts
+        .as_ref()
+        .into_iter()
+        .flat_map(|checkouts| checkouts.values())
+        .filter_map(|checkout| checkout.credential_env.clone())
+        .collect::<BTreeSet<_>>();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     if central_front_matter.is_none() && !workflow_path.exists() {
         return Err(format!(
@@ -2493,12 +2549,19 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         })
         .unwrap_or(workflow_def);
     let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
-        workflow_def.resolve(&target_repo, environment)
+        workflow_def.resolve(
+            &target_repo,
+            &BlockedEnvironment {
+                base: environment.clone(),
+                blocked: checkout_credential_envs.clone(),
+            },
+        )
     } else {
         workflow_def.resolve(
             &target_repo,
             &DoctorWorkflowEnvironment {
                 fallback_linear_api_key: true,
+                blocked: checkout_credential_envs,
             },
         )
     }
@@ -2510,6 +2573,22 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         repository_routing,
         repository_checkouts,
     })
+}
+
+#[derive(Clone, Debug)]
+struct BlockedEnvironment<E> {
+    base: E,
+    blocked: BTreeSet<String>,
+}
+
+impl<E: Environment> Environment for BlockedEnvironment<E> {
+    fn get(&self, name: &str) -> Option<String> {
+        if self.blocked.contains(name) {
+            None
+        } else {
+            self.base.get(name)
+        }
+    }
 }
 
 fn resolve_rehydrate_value(path: &Path, value: String) -> Result<String, String> {
@@ -2635,10 +2714,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
-        executable_suffixes, find_cargo_workspace_root, resolve_doctor_runtime,
-        resolve_doctor_workflow, resolve_rehydrate_runtime,
+        CheckStatus, Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
+        central_doctor_probe_settings, check_target_repo, command_check_name,
+        effective_openhands_probe_base_url, executable_suffixes, find_cargo_workspace_root,
+        resolve_doctor_runtime, resolve_doctor_workflow, resolve_rehydrate_runtime,
         resolve_rehydrate_runtime_with_environment, sample_snapshot, spawn_demo_updates,
     };
 
@@ -2824,6 +2903,45 @@ mod tests {
 
         assert_eq!(runtime.workflow_path, instruction_path);
         assert_eq!(runtime.workflow.config.tracker.project_slug, "central");
+    }
+
+    #[tokio::test]
+    async fn doctor_runtime_accepts_instructionless_central_workflow() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target_repo = temp_dir.path().join("checkout");
+        fs::create_dir_all(&target_repo).expect("target repo should exist");
+        let front_matter = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: central\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./central-workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n",
+        )
+        .expect("central front matter should parse")
+        .front_matter;
+        let config = super::DoctorConfig {
+            target_repo: None,
+            openhands: super::OpenHandsDoctorConfig {
+                tool_dir: None,
+                probe_model: None,
+                probe_api_key_env: None,
+                probe_llm_base_url_env: None,
+            },
+            linear: super::LinearDoctorConfig { enabled: false },
+        };
+
+        let runtime = resolve_doctor_runtime(
+            &config,
+            temp_dir.path(),
+            &target_repo,
+            None,
+            Some(&front_matter),
+        )
+        .expect("instructionless central workflow should resolve");
+
+        assert!(!runtime.instruction_path_required);
+        assert!(matches!(
+            check_target_repo(&runtime.target_repo, &runtime.workflow_path, false)
+                .await
+                .status,
+            CheckStatus::Pass
+        ));
     }
 
     #[test]
@@ -3085,6 +3203,7 @@ openhands:
         DoctorRuntimeConfig {
             target_repo,
             workflow_path: temp_dir.path().join("target-repo/WORKFLOW.md"),
+            instruction_path_required: true,
             workflow,
             tool_dir: Some(temp_dir.path().join("tools/openhands-server")),
             probe_model: None,

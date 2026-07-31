@@ -2207,6 +2207,7 @@ openhands:
             &target_repo,
             &super::super::DoctorWorkflowEnvironment {
                 fallback_linear_api_key: true,
+                blocked: std::collections::BTreeSet::new(),
             },
         )
         .expect("workflow should resolve");

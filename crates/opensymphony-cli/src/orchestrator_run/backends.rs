@@ -1606,6 +1606,7 @@ impl RuntimeWorkerBackend {
                             .model_profile
                             .clone()
                             .unwrap_or_else(|| "default".to_owned()),
+                        model: route.model.clone(),
                         requested_execution_scope: "single_checkout".to_owned(),
                         effective_containment: "trusted_host_process_cwd".to_owned(),
                         conversation_binding: persisted_conversation_binding,
