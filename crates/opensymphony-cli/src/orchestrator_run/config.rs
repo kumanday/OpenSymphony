@@ -1086,6 +1086,7 @@ fn resolve_central_config(
             )?;
         }
     }
+    reject_checkout_credential_env_reuse(&config)?;
     for (project_id, project) in &config.linear_projects {
         required_literal(project_id, "linear_projects.id")?;
         required_literal(
@@ -1344,6 +1345,95 @@ fn resolve_central_config(
     })
 }
 
+fn reject_checkout_credential_env_reuse(
+    config: &CentralConfigFile,
+) -> Result<(), CentralConfigError> {
+    let checkout_variables = config
+        .repositories
+        .iter()
+        .filter_map(|(repository_id, repository)| {
+            config
+                .credentials
+                .get(&repository.credential)
+                .and_then(|credential| credential.variable.as_deref())
+                .map(|variable| (variable.to_owned(), repository_id))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for (tracker_id, tracker) in &config.tracker_profiles {
+        let Some(variable) = config
+            .credentials
+            .get(&tracker.credential)
+            .and_then(|credential| credential.variable.as_deref())
+        else {
+            continue;
+        };
+        if checkout_variables.contains_key(variable) {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("tracker_profiles.{tracker_id}.credential"),
+            });
+        }
+    }
+
+    let mut non_checkout_variables = BTreeMap::new();
+    if let Some(variable) = config.openhands.transport_session_api_key_env.as_deref() {
+        non_checkout_variables.insert(
+            variable.to_owned(),
+            "openhands.transport_session_api_key_env",
+        );
+    }
+    if let Some(front_matter) = config.openhands.front_matter.as_ref() {
+        let value = serde_yaml::to_value(front_matter).map_err(|_| {
+            CentralConfigError::InvalidReference {
+                field: "openhands.front_matter".to_owned(),
+            }
+        })?;
+        collect_central_env_references(
+            &value,
+            "openhands.front_matter",
+            &mut non_checkout_variables,
+        );
+    }
+    if let Some((_, field)) = non_checkout_variables
+        .iter()
+        .find(|(variable, _)| checkout_variables.contains_key(*variable))
+    {
+        return Err(CentralConfigError::InvalidReference {
+            field: (*field).to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn collect_central_env_references(
+    value: &serde_yaml::Value,
+    path: &str,
+    references: &mut BTreeMap<String, &'static str>,
+) {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                let Some(key) = key.as_str() else {
+                    continue;
+                };
+                let child_path = format!("{path}.{key}");
+                if key.ends_with("_env")
+                    && let Some(variable) = value.as_str()
+                {
+                    references.insert(variable.to_owned(), "openhands.front_matter");
+                }
+                collect_central_env_references(value, &child_path, references);
+            }
+        }
+        serde_yaml::Value::Sequence(sequence) => {
+            for value in sequence {
+                collect_central_env_references(value, path, references);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn build_repository_checkouts(
     config: &CentralConfigFile,
 ) -> Result<BTreeMap<String, CheckoutRepository>, CentralConfigError> {
@@ -1422,7 +1512,7 @@ fn central_workflow_front_matter(
             field: "openhands.transport_session_api_key_env".to_owned(),
         });
     }
-    let (tracker, project_id, project_slug, project_ids, project_slugs) =
+    let (tracker, project_id, project_slug, project_ids, project_slugs, project_id_slug_fallbacks) =
         match config.routing.mode.trim() {
             "legacy_single" => {
                 if config.tracker_profiles.len() != 1 {
@@ -1451,6 +1541,7 @@ fn central_workflow_front_matter(
                     project_slug.clone(),
                     project_id.as_ref().map(|id| vec![id.clone()]),
                     vec![project_slug],
+                    None,
                 )
             }
             "project_set" => {
@@ -1481,6 +1572,7 @@ fn central_workflow_front_matter(
                 let mut project_id = None;
                 let mut project_ids = Vec::with_capacity(project_set.projects.len());
                 let mut project_slugs = Vec::with_capacity(project_set.projects.len());
+                let mut project_id_slug_fallbacks = Vec::with_capacity(project_set.projects.len());
                 for project_key in &project_set.projects {
                     let project = config.linear_projects.get(project_key).ok_or_else(|| {
                         CentralConfigError::InvalidReference {
@@ -1488,9 +1580,8 @@ fn central_workflow_front_matter(
                         }
                     })?;
                     let (candidate_id, project_slug) = project_front_matter_identity(project);
-                    if let Some(candidate_id) = candidate_id.as_ref() {
-                        project_ids.push(candidate_id.clone());
-                    }
+                    project_ids.push(candidate_id.clone().unwrap_or_else(|| project_slug.clone()));
+                    project_id_slug_fallbacks.push(candidate_id.is_none());
                     if project_key == first_project_id {
                         project_id = candidate_id;
                     }
@@ -1501,13 +1592,17 @@ fn central_workflow_front_matter(
                     .get(first_project_id)
                     .expect("first project was resolved above");
                 let (_, project_slug) = project_front_matter_identity(first_project);
-                let complete_ids = project_ids.len() == project_slugs.len();
+                let project_ids = (!project_id_slug_fallbacks.iter().all(|fallback| *fallback))
+                    .then_some(project_ids);
+                let project_id_slug_fallbacks =
+                    project_ids.as_ref().map(|_| project_id_slug_fallbacks);
                 (
                     tracker,
-                    complete_ids.then_some(project_id).flatten(),
+                    project_id,
                     project_slug,
-                    complete_ids.then_some(project_ids),
+                    project_ids,
                     project_slugs,
+                    project_id_slug_fallbacks,
                 )
             }
             _ => {
@@ -1530,6 +1625,7 @@ fn central_workflow_front_matter(
             project_slug: Some(project_slug),
             project_ids,
             project_slugs: Some(project_slugs),
+            project_id_slug_fallbacks,
             active_states: (!tracker.active_states.is_empty())
                 .then(|| tracker.active_states.clone()),
             terminal_states: (!tracker.terminal_states.is_empty())
@@ -2699,12 +2795,44 @@ scheduler:
         );
         let migrated = resolve_central_config(&root.path().join("config.yaml"), &migrated_source)
             .expect("mixed migrated project fixture should resolve");
-        assert_eq!(migrated.workflow_front_matter.tracker.project_id, None);
-        assert_eq!(migrated.workflow_front_matter.tracker.project_ids, None);
+        assert_eq!(
+            migrated.workflow_front_matter.tracker.project_id,
+            Some("core-project".to_owned())
+        );
+        assert_eq!(
+            migrated.workflow_front_matter.tracker.project_ids,
+            Some(vec!["core-project".to_owned(), "other-project".to_owned()])
+        );
+        assert_eq!(
+            migrated
+                .workflow_front_matter
+                .tracker
+                .project_id_slug_fallbacks,
+            Some(vec![false, true])
+        );
         assert_eq!(
             migrated.workflow_front_matter.tracker.project_slugs,
             Some(vec!["core-project".to_owned(), "other-project".to_owned()])
         );
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_tracker() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent",
+            "  github-ssh:\n    kind: environment\n    variable: LINEAR_API_KEY",
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("checkout and tracker credential variables must not overlap");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "tracker_profiles.linear.credential"
+        ));
     }
 
     #[test]

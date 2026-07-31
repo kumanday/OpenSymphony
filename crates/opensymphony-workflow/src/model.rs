@@ -78,6 +78,8 @@ pub struct TrackerFrontMatter {
     pub project_slug: Option<String>,
     pub project_ids: Option<Vec<String>>,
     pub project_slugs: Option<Vec<String>>,
+    #[serde(default)]
+    pub project_id_slug_fallbacks: Option<Vec<bool>>,
     pub active_states: Option<Vec<String>>,
     pub terminal_states: Option<Vec<String>>,
 }
@@ -286,6 +288,7 @@ pub struct TrackerConfig {
     pub project_slug: String,
     pub project_ids: Vec<String>,
     pub project_slugs: Vec<String>,
+    pub project_id_slug_fallbacks: Vec<bool>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
 }

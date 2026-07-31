@@ -279,6 +279,7 @@ pub(super) fn build_linear_client(
     config.base_url = tracker.endpoint.clone();
     config.project_ids = tracker.project_ids.clone();
     config.project_slugs = tracker.project_slugs.clone();
+    config.project_id_slug_fallbacks = tracker.project_id_slug_fallbacks.clone();
     config.project_id = tracker.project_id.clone();
     config.active_states = tracker.active_states.clone();
     config.terminal_states = tracker.terminal_states.clone();

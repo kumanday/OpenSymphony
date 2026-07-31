@@ -839,6 +839,7 @@ async fn issue_session_runner_fresh_each_run_creates_a_new_full_prompt_conversat
             .as_str(),
     )
     .expect("conversation ID should parse");
+
     let first_events = client.search_all_events(first_conversation_id).await;
     let second_messages = latest_message_texts(
         client

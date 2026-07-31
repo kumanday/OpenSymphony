@@ -1929,10 +1929,12 @@ impl IssueSessionRunner {
                     )
                 });
                 if let Some(manifest) = loaded.manifest.as_ref() {
-                    if manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
-                        envelope.conversation_binding.as_deref()
-                            != Some(manifest.conversation_id.as_str())
-                    }) {
+                    if run_manifest.runtime_envelope.is_some()
+                        && manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+                            envelope.conversation_binding.as_deref()
+                                != Some(manifest.conversation_id.as_str())
+                        })
+                    {
                         tracing::warn!(
                             conversation_id = %manifest.conversation_id,
                             "skipping retirement of fresh_each_run conversation with mismatched runtime envelope binding"

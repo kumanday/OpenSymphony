@@ -212,6 +212,7 @@ struct DoctorRuntimeConfig {
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
     probe_llm_base_url_env: Option<String>,
+    checkout_credential_envs: BTreeSet<String>,
 }
 
 struct RehydrateRuntimeConfig {
@@ -596,6 +597,16 @@ pub async fn run_doctor_command(
         central_config
             .as_ref()
             .map(|central| &central.workflow_front_matter),
+        central_config
+            .as_ref()
+            .map(|central| {
+                central
+                    .repository_checkouts
+                    .values()
+                    .filter_map(|checkout| checkout.credential_env.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
     );
 
     // For repo check, try to find the cargo workspace root from the config_root
@@ -723,10 +734,21 @@ pub async fn run_doctor_command(
     let mut live_checks_supervisor = None;
 
     if live_openhands {
-        let live_checks =
-            run_live_openhands_checks(&runtime, &rendered_probe_prompt, tooling.as_ref()).await;
-        checks.extend(live_checks.checks);
-        live_checks_supervisor = live_checks.supervisor;
+        if strict_recovery_enabled(
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_routing),
+        ) {
+            checks.push(CheckResult::fail(
+                "openhands-live",
+                "live OpenHands checks are unavailable for project_set until a verified issue checkout is selected",
+            ));
+        } else {
+            let live_checks =
+                run_live_openhands_checks(&runtime, &rendered_probe_prompt, tooling.as_ref()).await;
+            checks.extend(live_checks.checks);
+            live_checks_supervisor = live_checks.supervisor;
+        }
     } else {
         checks.push(CheckResult::skip(
             "openhands-live",
@@ -1192,7 +1214,9 @@ fn build_doctor_transport(
     runtime: &DoctorRuntimeConfig,
     base_url_override: Option<String>,
 ) -> Result<TransportConfig, String> {
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)
+    let environment =
+        BlockedEnvironment::new(ProcessEnvironment, runtime.checkout_credential_envs.clone());
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &environment)
         .map_err(|error| error.to_string())?;
     Ok(match base_url_override {
         Some(base_url) => TransportConfig::new(base_url).with_auth(transport.auth().clone()),
@@ -1206,6 +1230,7 @@ fn resolve_doctor_runtime(
     default_target_repo: &Path,
     central_instruction_path: Option<&Path>,
     central_front_matter: Option<&crate::opensymphony_workflow::WorkflowFrontMatter>,
+    checkout_credential_envs: BTreeSet<String>,
 ) -> Result<DoctorRuntimeConfig, String> {
     let target_repo = config
         .target_repo
@@ -1247,6 +1272,7 @@ fn resolve_doctor_runtime(
         probe_model: config.openhands.probe_model.clone(),
         probe_api_key_env: config.openhands.probe_api_key_env.clone(),
         probe_llm_base_url_env: config.openhands.probe_llm_base_url_env.clone(),
+        checkout_credential_envs,
     })
 }
 
@@ -1937,6 +1963,7 @@ fn maybe_start_local_supervisor(
         .local_server
         .env
         .clone();
+    supervisor_config.env_remove = runtime.checkout_credential_envs.clone();
     supervisor_config.startup_timeout = Duration::from_millis(
         runtime
             .workflow
@@ -2904,6 +2931,7 @@ mod tests {
             &target_repo,
             Some(&instruction_path),
             Some(&front_matter),
+            BTreeSet::new(),
         )
         .expect("doctor runtime should use the configured instruction path");
 
@@ -2938,6 +2966,7 @@ mod tests {
             &target_repo,
             None,
             Some(&front_matter),
+            BTreeSet::new(),
         )
         .expect("instructionless central workflow should resolve");
 
@@ -3215,6 +3244,7 @@ openhands:
             probe_model: None,
             probe_api_key_env: None,
             probe_llm_base_url_env: None,
+            checkout_credential_envs: BTreeSet::new(),
         }
     }
 }

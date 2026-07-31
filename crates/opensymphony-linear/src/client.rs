@@ -71,6 +71,7 @@ pub struct LinearConfig {
     pub project_slug: String,
     pub project_ids: Vec<String>,
     pub project_slugs: Vec<String>,
+    pub project_id_slug_fallbacks: Vec<bool>,
     pub project_id: Option<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -87,6 +88,7 @@ impl LinearConfig {
             project_slug: project_slug.into(),
             project_ids: Vec::new(),
             project_slugs: Vec::new(),
+            project_id_slug_fallbacks: Vec::new(),
             project_id: None,
             active_states: Vec::new(),
             terminal_states: Vec::new(),
@@ -293,6 +295,16 @@ impl LinearClient {
                 .map(|slug| normalize_required_string("tracker.project_slugs", slug))
                 .collect::<Result<Vec<_>, _>>()?
         };
+        if !config.project_ids.is_empty() {
+            if config.project_id_slug_fallbacks.is_empty() {
+                config.project_id_slug_fallbacks = vec![false; config.project_ids.len()];
+            } else if config.project_id_slug_fallbacks.len() != config.project_ids.len() {
+                return Err(LinearError::InvalidConfiguration(
+                    "tracker project ID fallback flags must have the same length as project IDs"
+                        .to_owned(),
+                ));
+            }
+        }
         config.project_id = config
             .project_id
             .as_deref()
@@ -887,7 +899,9 @@ impl LinearClient {
                     ));
                 }
                 for (index, project_id) in self.config.project_ids.iter().enumerate() {
-                    project_slugs[index] = if index == 0 && self.config.project_id.is_some() {
+                    project_slugs[index] = if self.config.project_id_slug_fallbacks[index] {
+                        project_slugs[index].clone()
+                    } else if index == 0 && self.config.project_id.is_some() {
                         self.project_slug_for_queries().await?
                     } else {
                         self.fetch_project_slug_by_id(project_id, None).await?

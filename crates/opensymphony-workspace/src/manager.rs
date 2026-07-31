@@ -2805,6 +2805,9 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                         source,
                     })?;
             if file_type.is_symlink() {
+                if entry.file_name() == "AGENTS.md" {
+                    return Err(WorkspaceError::InstructionPathEscape { path });
+                }
                 continue;
             }
             if file_type.is_dir() {
@@ -3041,7 +3044,34 @@ mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
 
-    use super::{build_shell_command, remote_contains_credentials};
+    use super::{
+        WorkspaceError, build_shell_command, discover_agents, remote_contains_credentials,
+    };
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discover_agents_rejects_symlinked_nested_agents_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let nested = root.path().join("nested");
+        tokio::fs::create_dir(&nested)
+            .await
+            .expect("nested directory should exist");
+        let outside = root.path().join("outside.md");
+        tokio::fs::write(&outside, "outside instructions")
+            .await
+            .expect("outside instructions should exist");
+        symlink(&outside, nested.join("AGENTS.md")).expect("nested symlink should exist");
+
+        let error = discover_agents(root.path())
+            .await
+            .expect_err("symlinked nested instructions must block discovery");
+        assert!(matches!(
+            error,
+            WorkspaceError::InstructionPathEscape { .. }
+        ));
+    }
 
     #[cfg(unix)]
     #[test]

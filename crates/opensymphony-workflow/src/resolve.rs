@@ -130,6 +130,16 @@ fn resolve_tracker<E: Environment>(
     };
     reject_duplicate_tracker_values("tracker.project_ids", &project_ids, false)?;
     reject_duplicate_tracker_values("tracker.project_slugs", &project_slugs, true)?;
+    let project_id_slug_fallbacks = tracker
+        .project_id_slug_fallbacks
+        .clone()
+        .unwrap_or_else(|| vec![false; project_ids.len()]);
+    if project_id_slug_fallbacks.len() != project_ids.len() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "tracker.project_id_slug_fallbacks",
+            message: "must have the same length as project_ids".to_owned(),
+        });
+    }
     let api_key = resolve_tracker_api_key(tracker, env)?;
 
     Ok(TrackerConfig {
@@ -145,6 +155,7 @@ fn resolve_tracker<E: Environment>(
         project_slug,
         project_ids,
         project_slugs,
+        project_id_slug_fallbacks,
         active_states: resolve_state_list(
             tracker.active_states.as_deref(),
             "tracker.active_states",

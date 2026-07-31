@@ -194,6 +194,32 @@ async fn candidate_issues_scan_every_configured_project() {
 }
 
 #[tokio::test]
+async fn mixed_project_ids_keep_slug_only_entries_on_their_slug() {
+    let fixture = include_str!("fixtures/candidate_issues_page.json");
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"typed-id","name":"Typed","slugId":"typed-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(fixture),
+        QueuedResponse::json(fixture),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["legacy-project".to_owned(), "typed-id".to_owned()];
+    config.project_slugs = vec!["legacy-project".to_owned(), "typed-id".to_owned()];
+    config.project_id_slug_fallbacks = vec![true, false];
+
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("mixed project scan should resolve");
+
+    assert_eq!(issues.len(), 4);
+}
+
+#[tokio::test]
 async fn configured_project_id_resolves_to_the_linear_project_slug_for_issue_queries() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(
