@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -28,8 +28,8 @@ use super::{
     EnsureWorkspaceResult, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, IssueManifest,
     PromptCaptureDescriptor, PromptCaptureManifest, RunDescriptor, RunManifest, RunStatus,
-    SessionContextArtifact, WorkspaceError, WorkspaceHandle, WorkspaceManagerConfig,
-    WorkspaceOwnershipConflictDetails,
+    SessionContextArtifact, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
+    WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
     models::{AfterCreateBootstrapReceipt, InstructionProvenance, redact_runtime_diagnostic},
     paths::{
         checkout_workspace_key, normalize_absolute_path, resolve_path_within_root,
@@ -42,6 +42,7 @@ pub struct WorkspaceManager {
     config: WorkspaceManagerConfig,
     legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
     checkout_repositories: BTreeMap<String, CheckoutRepository>,
+    checkout_credential_envs: BTreeSet<String>,
 }
 
 struct HookFailure {
@@ -128,6 +129,7 @@ impl WorkspaceManager {
             config,
             legacy_repository: None,
             checkout_repositories: BTreeMap::new(),
+            checkout_credential_envs: BTreeSet::new(),
         })
     }
 
@@ -143,6 +145,10 @@ impl WorkspaceManager {
         mut self,
         repositories: BTreeMap<String, CheckoutRepository>,
     ) -> Self {
+        self.checkout_credential_envs = repositories
+            .values()
+            .filter_map(|repository| repository.credential_env.clone())
+            .collect();
         self.checkout_repositories = repositories;
         self
     }
@@ -507,6 +513,28 @@ impl WorkspaceManager {
     ) -> Result<CheckoutManifest, WorkspaceError> {
         self.verify_checkout_with_worker_changes(workspace, false)
             .await
+    }
+
+    pub async fn verify_runtime_envelope(
+        &self,
+        workspace: &WorkspaceHandle,
+        expected: &TerminalRuntimeEnvelope,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
+        let manifest = self.verify_checkout(workspace).await?;
+        if manifest.repository_binding != expected.repository_binding
+            || manifest.generation != expected.checkout_generation
+            || workspace.workspace_path() != expected.checkout_path
+            || manifest.target_branch != expected.target_branch
+            || manifest.target_commit != expected.target_commit
+            || manifest.instruction != expected.instruction
+        {
+            return Err(WorkspaceError::CheckoutVerification {
+                path: workspace.workspace_path().to_path_buf(),
+                generation: manifest.generation,
+                reason: "runtime envelope does not match the verified checkout".to_owned(),
+            });
+        }
+        Ok(manifest)
     }
 
     async fn verify_checkout_with_worker_changes(
@@ -965,23 +993,10 @@ impl WorkspaceManager {
                 ));
             }
         }
-        let remote = self.git(checkout, &["remote", "get-url", "origin"]).await?;
-        if remote_contains_credentials(&remote) {
-            return Err(checkout_verification(
-                checkout,
-                "observed remote contains credentials",
-            ));
-        }
         let expected = SafeRemoteFingerprint::from_remote(
             &repository.provider,
             repository.provider_id.as_deref(),
             &repository.remote,
-        )
-        .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
-        let actual = SafeRemoteFingerprint::from_remote(
-            &repository.provider,
-            repository.provider_id.as_deref(),
-            &remote,
         )
         .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
         let expected_locator = SafeRemoteFingerprint::from_remote(
@@ -990,17 +1005,55 @@ impl WorkspaceManager {
             &repository.remote_locator,
         )
         .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
-        let actual_locator =
-            SafeRemoteFingerprint::from_remote(&repository.provider, None, &remote)
+        for (kind, args) in [
+            ("fetch", vec!["remote", "get-url", "--all", "origin"]),
+            (
+                "push",
+                vec!["remote", "get-url", "--all", "--push", "origin"],
+            ),
+        ] {
+            let remotes = self
+                .git(checkout, &args)
+                .await
+                .map_err(|_| checkout_verification(checkout, "origin remote is unavailable"))?;
+            let mut found = false;
+            for remote in remotes
+                .lines()
+                .map(str::trim)
+                .filter(|remote| !remote.is_empty())
+            {
+                found = true;
+                if remote_contains_credentials(remote) {
+                    return Err(checkout_verification(
+                        checkout,
+                        "observed remote contains credentials",
+                    ));
+                }
+                let actual = SafeRemoteFingerprint::from_remote(
+                    &repository.provider,
+                    repository.provider_id.as_deref(),
+                    remote,
+                )
                 .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
-        if actual != expected
-            || actual != binding.repository.safe_remote_fingerprint
-            || actual_locator != expected_locator
-        {
-            return Err(checkout_verification(
-                checkout,
-                "remote fingerprint mismatch",
-            ));
+                let actual_locator =
+                    SafeRemoteFingerprint::from_remote(&repository.provider, None, remote)
+                        .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+                if actual != expected
+                    || actual != binding.repository.safe_remote_fingerprint
+                    || actual_locator != expected_locator
+                {
+                    return Err(checkout_verification(
+                        checkout,
+                        &format!("{kind} remote fingerprint mismatch"),
+                    ));
+                }
+            }
+            if !found {
+                return Err(checkout_verification(
+                    checkout,
+                    &format!("origin {kind} remote is unavailable"),
+                ));
+            }
         }
         let branch = self.git(checkout, &["branch", "--show-current"]).await?;
         if branch != repository.target_branch {
@@ -1885,6 +1938,9 @@ impl WorkspaceManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
 
         let started_at = Utc::now();
         let started = Instant::now();

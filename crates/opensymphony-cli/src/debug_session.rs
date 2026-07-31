@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, io,
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
@@ -21,8 +21,9 @@ use crate::opensymphony_openhands::{
 };
 use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueManifest, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, WorkspaceManagerConfig,
+    CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueManifest,
+    TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle, WorkspaceManager,
+    WorkspaceManagerConfig,
 };
 use clap::Args;
 use crossterm::{
@@ -79,6 +80,7 @@ struct DebugRuntimeConfig {
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
     conversation_store: Option<OpenHandsConversationStorePaths>,
+    repository_checkouts: Option<BTreeMap<String, CheckoutRepository>>,
 }
 
 #[derive(Debug, Error)]
@@ -115,6 +117,8 @@ enum DebugCommandError {
     },
     #[error("failed to create workspace manager: {0}")]
     WorkspaceManager(#[from] WorkspaceError),
+    #[error("strict recovery verification failed: {detail}")]
+    StrictRecovery { detail: String },
     #[error(
         "no managed workspace for issue reference `{issue_reference}` exists under {workspace_root}"
     )]
@@ -363,7 +367,8 @@ pub async fn run_command(args: DebugArgs) -> ExitCode {
 
 async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     let runtime = resolve_runtime_config(&args).await?;
-    let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?;
+    let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?
+        .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
     let workspace = manager
         .find_workspace_by_issue_reference(&args.issue_id)
         .await?
@@ -373,6 +378,7 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         })?;
     let manifest_path = workspace.conversation_manifest_path();
     let raw_manifest = load_conversation_manifest_raw(&manager, &workspace).await?;
+    verify_strict_recovery_envelope(&runtime, &manager, &workspace, &raw_manifest).await?;
     if let Some(mut codex) = codex_debug_metadata_from_raw_manifest(
         &raw_manifest,
         &manifest_path,
@@ -820,51 +826,57 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         current_dir.clone()
     };
 
-    let (target_repo, configured_tool_dir, central_front_matter, central_instruction_path) =
-        if let Some(path) = config_path.as_ref() {
-            let raw =
-                fs::read_to_string(path)
-                    .await
-                    .map_err(|source| DebugCommandError::ReadConfig {
-                        path: path.clone(),
-                        source,
-                    })?;
-            if super::orchestrator_run::config::looks_like_central_config(&raw) {
-                let central = super::orchestrator_run::config::load_central_config(path).await?;
-                let target_repo = central
-                    .target_repo()
-                    .unwrap_or_else(|| path.parent().unwrap_or(&current_dir).to_path_buf());
-                (
-                    target_repo,
-                    central.tool_dir(),
-                    Some(central.workflow_front_matter.clone()),
-                    central.repository_instruction_path,
-                )
-            } else {
-                let config = serde_yaml::from_str::<DebugConfigFile>(&raw).map_err(|source| {
-                    DebugCommandError::ParseConfig {
-                        path: path.clone(),
-                        source,
-                    }
+    let (
+        target_repo,
+        configured_tool_dir,
+        central_front_matter,
+        central_instruction_path,
+        repository_checkouts,
+    ) = if let Some(path) = config_path.as_ref() {
+        let raw =
+            fs::read_to_string(path)
+                .await
+                .map_err(|source| DebugCommandError::ReadConfig {
+                    path: path.clone(),
+                    source,
                 })?;
-                let config_root = path.parent().unwrap_or(&current_dir);
-                let target_repo = config
-                    .target_repo
-                    .as_deref()
-                    .map(|value| resolve_config_path(path, config_root, value))
-                    .transpose()?
-                    .unwrap_or_else(|| default_target_repo.clone());
-                let tool_dir = config
-                    .openhands
-                    .tool_dir
-                    .as_deref()
-                    .map(|value| resolve_config_path(path, config_root, value))
-                    .transpose()?;
-                (target_repo, tool_dir, None, None)
-            }
+        if super::orchestrator_run::config::looks_like_central_config(&raw) {
+            let central = super::orchestrator_run::config::load_central_config(path).await?;
+            let target_repo = central
+                .target_repo()
+                .unwrap_or_else(|| path.parent().unwrap_or(&current_dir).to_path_buf());
+            (
+                target_repo,
+                central.tool_dir(),
+                Some(central.workflow_front_matter.clone()),
+                central.repository_instruction_path,
+                Some(central.repository_checkouts),
+            )
         } else {
-            (default_target_repo, None, None, None)
-        };
+            let config = serde_yaml::from_str::<DebugConfigFile>(&raw).map_err(|source| {
+                DebugCommandError::ParseConfig {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            let config_root = path.parent().unwrap_or(&current_dir);
+            let target_repo = config
+                .target_repo
+                .as_deref()
+                .map(|value| resolve_config_path(path, config_root, value))
+                .transpose()?
+                .unwrap_or_else(|| default_target_repo.clone());
+            let tool_dir = config
+                .openhands
+                .tool_dir
+                .as_deref()
+                .map(|value| resolve_config_path(path, config_root, value))
+                .transpose()?;
+            (target_repo, tool_dir, None, None, None)
+        }
+    } else {
+        (default_target_repo, None, None, None, None)
+    };
 
     let central_instruction_configured = central_instruction_path.is_some();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
@@ -899,7 +911,50 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         workflow,
         tool_dir: configured_tool_dir,
         conversation_store,
+        repository_checkouts,
     })
+}
+
+async fn verify_strict_recovery_envelope(
+    runtime: &DebugRuntimeConfig,
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    raw_manifest: &str,
+) -> Result<(), DebugCommandError> {
+    if runtime
+        .repository_checkouts
+        .as_ref()
+        .is_none_or(BTreeMap::is_empty)
+    {
+        return Ok(());
+    }
+    let run_envelope = manager
+        .load_run_manifest(workspace)
+        .await?
+        .and_then(|manifest| manifest.runtime_envelope);
+    let conversation_envelope = serde_json::from_str::<serde_json::Value>(raw_manifest)
+        .ok()
+        .and_then(|manifest| manifest.get("runtime_envelope").cloned())
+        .and_then(|envelope| serde_json::from_value::<TerminalRuntimeEnvelope>(envelope).ok());
+    if let (Some(run), Some(conversation)) = (&run_envelope, &conversation_envelope)
+        && run != conversation
+    {
+        return Err(DebugCommandError::StrictRecovery {
+            detail: "run and conversation runtime envelopes disagree".to_owned(),
+        });
+    }
+    let expected = run_envelope.or(conversation_envelope).ok_or_else(|| {
+        DebugCommandError::StrictRecovery {
+            detail: "strict checkout has no persisted runtime envelope".to_owned(),
+        }
+    })?;
+    manager
+        .verify_runtime_envelope(workspace, &expected)
+        .await
+        .map(|_| ())
+        .map_err(|error| DebugCommandError::StrictRecovery {
+            detail: format!("verified checkout/runtime envelope mismatch: {error}"),
+        })
 }
 
 fn resolve_config_path(
@@ -2094,6 +2149,7 @@ openhands:
             workflow,
             tool_dir,
             conversation_store: None,
+            repository_checkouts: None,
         }
     }
 }

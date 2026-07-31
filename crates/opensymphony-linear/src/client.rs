@@ -102,6 +102,7 @@ pub struct LinearClient {
     http: Client,
     config: LinearConfig,
     project_slug_cache: Arc<OnceCell<String>>,
+    project_slugs_cache: Arc<OnceCell<Vec<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +312,7 @@ impl LinearClient {
             http,
             config,
             project_slug_cache: Arc::new(OnceCell::new()),
+            project_slugs_cache: Arc::new(OnceCell::new()),
         })
     }
 
@@ -862,26 +864,31 @@ impl LinearClient {
     }
 
     async fn project_slugs_for_queries(&self) -> Result<Vec<String>, LinearError> {
-        let mut project_slugs = self.config.project_slugs.clone();
-        if self.config.project_ids.is_empty() {
-            if self.config.project_id.is_some() {
-                project_slugs[0] = self.project_slug_for_queries().await?;
-            }
-            return Ok(project_slugs);
-        }
-        if self.config.project_ids.len() != project_slugs.len() {
-            return Err(LinearError::InvalidConfiguration(
-                "tracker project ID and slug lists must have the same length".to_owned(),
-            ));
-        }
-        for (index, project_id) in self.config.project_ids.iter().enumerate() {
-            project_slugs[index] = if index == 0 && self.config.project_id.is_some() {
-                self.project_slug_for_queries().await?
-            } else {
-                self.fetch_project_slug_by_id(project_id, None).await?
-            };
-        }
-        Ok(project_slugs)
+        self.project_slugs_cache
+            .get_or_try_init(|| async {
+                let mut project_slugs = self.config.project_slugs.clone();
+                if self.config.project_ids.is_empty() {
+                    if self.config.project_id.is_some() {
+                        project_slugs[0] = self.project_slug_for_queries().await?;
+                    }
+                    return Ok(project_slugs);
+                }
+                if self.config.project_ids.len() != project_slugs.len() {
+                    return Err(LinearError::InvalidConfiguration(
+                        "tracker project ID and slug lists must have the same length".to_owned(),
+                    ));
+                }
+                for (index, project_id) in self.config.project_ids.iter().enumerate() {
+                    project_slugs[index] = if index == 0 && self.config.project_id.is_some() {
+                        self.project_slug_for_queries().await?
+                    } else {
+                        self.fetch_project_slug_by_id(project_id, None).await?
+                    };
+                }
+                Ok(project_slugs)
+            })
+            .await
+            .cloned()
     }
 
     async fn fetch_project_slug_by_id(

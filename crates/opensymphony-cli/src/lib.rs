@@ -9,7 +9,7 @@ mod orchestrator_run;
 mod update_repo;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     net::SocketAddr,
     num::NonZeroU64,
@@ -214,6 +214,8 @@ struct DoctorRuntimeConfig {
 struct RehydrateRuntimeConfig {
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
+    repository_checkouts:
+        Option<BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>>,
 }
 
 struct DoctorWorkflowEnvironment {
@@ -2220,7 +2222,8 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     // Setup workspace manager
     let workspace_config = build_rehydrate_workspace_config(&workflow);
     let workspace_manager = WorkspaceManager::new(workspace_config)
-        .map_err(|e| format!("failed to create workspace manager: {}", e))?;
+        .map_err(|e| format!("failed to create workspace manager: {}", e))?
+        .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
 
     // Find workspace by issue reference
     let workspace = workspace_manager
@@ -2246,6 +2249,23 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         serde_json::from_str(&manifest_content)
             .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
 
+    if runtime
+        .repository_checkouts
+        .as_ref()
+        .is_some_and(|checkouts| !checkouts.is_empty())
+    {
+        let envelope = old_manifest.runtime_envelope.as_ref().ok_or_else(|| {
+            format!(
+                "strict workspace {} has no persisted runtime envelope",
+                workspace.identifier()
+            )
+        })?;
+        workspace_manager
+            .verify_runtime_envelope(&workspace, envelope)
+            .await
+            .map_err(|error| format!("strict recovery verification failed: {error}"))?;
+    }
+
     println!(
         "Found existing conversation: {}",
         old_manifest.conversation_id
@@ -2269,6 +2289,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     use crate::opensymphony_workspace::RunDescriptor;
     let run_descriptor = RunDescriptor::new("rehydrate", 1);
     let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
+    run_manifest.runtime_envelope = old_manifest.runtime_envelope.clone();
 
     // Create a minimal RunAttempt for the rehydration
     use crate::opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
@@ -2377,53 +2398,55 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
             .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
     let mut central_instruction_path = None;
-    let (target_repo, tool_dir, central_front_matter) = if config_path.is_file() {
-        let raw = fs::read_to_string(&config_path)
-            .await
-            .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
-        if orchestrator_run::config::looks_like_central_config(&raw) {
-            let central = orchestrator_run::config::load_central_config(&config_path)
+    let (target_repo, tool_dir, central_front_matter, repository_checkouts) =
+        if config_path.is_file() {
+            let raw = fs::read_to_string(&config_path)
                 .await
-                .map_err(|error| error.to_string())?;
-            central_instruction_path = central.repository_instruction_path.clone();
-            (
-                central
-                    .target_repo()
-                    .unwrap_or_else(|| config_path.parent().unwrap_or(current_dir).to_path_buf()),
-                central.tool_dir(),
-                Some(central.workflow_front_matter.clone()),
-            )
-        } else {
-            let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
-                .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
-            config.target_repo = config
-                .target_repo
-                .take()
-                .map(|value| resolve_rehydrate_value(&config_path, value))
-                .transpose()?;
-            config.openhands.tool_dir = config
-                .openhands
-                .tool_dir
-                .take()
-                .map(|value| resolve_rehydrate_value(&config_path, value))
-                .transpose()?;
+                .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
+            if orchestrator_run::config::looks_like_central_config(&raw) {
+                let central = orchestrator_run::config::load_central_config(&config_path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                central_instruction_path = central.repository_instruction_path.clone();
+                (
+                    central.target_repo().unwrap_or_else(|| {
+                        config_path.parent().unwrap_or(current_dir).to_path_buf()
+                    }),
+                    central.tool_dir(),
+                    Some(central.workflow_front_matter.clone()),
+                    Some(central.repository_checkouts),
+                )
+            } else {
+                let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
+                    .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
+                config.target_repo = config
+                    .target_repo
+                    .take()
+                    .map(|value| resolve_rehydrate_value(&config_path, value))
+                    .transpose()?;
+                config.openhands.tool_dir = config
+                    .openhands
+                    .tool_dir
+                    .take()
+                    .map(|value| resolve_rehydrate_value(&config_path, value))
+                    .transpose()?;
 
-            let config_root = config_path.parent().unwrap_or(current_dir);
-            let target_repo = config
-                .target_repo
-                .as_deref()
-                .map(|value| resolve_path(config_root, value))
-                .unwrap_or_else(|| current_dir.to_path_buf());
-            let tool_dir = config
-                .openhands
-                .tool_dir
-                .as_deref()
-                .map(|value| resolve_path(config_root, value));
-            (target_repo, tool_dir, None)
-        }
-    } else {
-        (current_dir.to_path_buf(), None, None)
-    };
+                let config_root = config_path.parent().unwrap_or(current_dir);
+                let target_repo = config
+                    .target_repo
+                    .as_deref()
+                    .map(|value| resolve_path(config_root, value))
+                    .unwrap_or_else(|| current_dir.to_path_buf());
+                let tool_dir = config
+                    .openhands
+                    .tool_dir
+                    .as_deref()
+                    .map(|value| resolve_path(config_root, value));
+                (target_repo, tool_dir, None, None)
+            }
+        } else {
+            (current_dir.to_path_buf(), None, None, None)
+        };
 
     let central_instruction_configured = central_instruction_path.is_some();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
@@ -2461,7 +2484,11 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
     }
     .map_err(|e| format!("failed to resolve workflow: {}", e))?;
 
-    Ok(RehydrateRuntimeConfig { workflow, tool_dir })
+    Ok(RehydrateRuntimeConfig {
+        workflow,
+        tool_dir,
+        repository_checkouts,
+    })
 }
 
 fn resolve_rehydrate_value(path: &Path, value: String) -> Result<String, String> {

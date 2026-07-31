@@ -30,9 +30,6 @@ async fn fake_linear_hierarchy_keeps_parent_blocked_until_child_completes() {
             ),
             active_leaf_issue("issue-s1", "COE-278", Some("issue-p1")),
         ])),
-        QueuedResponse::json(
-            r#"{"data":{"projects":{"nodes":[{"id":"e7b957855cb7","name":"OpenSymphony","slugId":"e7b957855cb7","url":null,"content":null}]}}}"#,
-        ),
         QueuedResponse::json(&candidate_issues_payload(vec![
             active_parent_with_children(
                 "issue-p1",
@@ -82,9 +79,6 @@ async fn fake_linear_hierarchy_reblocks_parent_when_new_child_is_added() {
         QueuedResponse::json(&candidate_issues_payload(vec![
             active_parent_with_children("issue-p1", "COE-277", &[]),
         ])),
-        QueuedResponse::json(
-            r#"{"data":{"projects":{"nodes":[{"id":"e7b957855cb7","name":"OpenSymphony","slugId":"e7b957855cb7","url":null,"content":null}]}}}"#,
-        ),
         QueuedResponse::json(&candidate_issues_payload(vec![
             active_parent_with_children(
                 "issue-p1",
