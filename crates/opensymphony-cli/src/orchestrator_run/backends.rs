@@ -1491,7 +1491,7 @@ impl RuntimeWorkerBackend {
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
-            let run_id = run.worker_id.to_string();
+            let run_id = format!("run-{launch_worker_id}");
             let ensured = match workspace_manager
                 .ensure_with_run_id(&issue_descriptor(&issue), Some(&run_id))
                 .await
@@ -1585,7 +1585,7 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
+            let run_descriptor = RunDescriptor::new(run_id, attempt)
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
                 .with_runtime_envelope(runtime_envelope.clone());

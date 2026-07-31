@@ -5,11 +5,11 @@ use crate::opensymphony_domain::{
     SafeRemoteFingerprint,
 };
 use crate::opensymphony_workspace::{
-    CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest, HookConfig,
-    HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact,
-    IssueDescriptor, IssueLifecycleState, PromptCaptureDescriptor, PromptKind, RunDescriptor,
-    RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
-    compose_terminal_prompt,
+    CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest,
+    HookConfig, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
+    IssueContextArtifact, IssueDescriptor, IssueLifecycleState, PromptCaptureDescriptor,
+    PromptKind, RunDescriptor, RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager,
+    WorkspaceManagerConfig, compose_terminal_prompt,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -290,7 +290,7 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
 
     let first = manager
-        .ensure(&issue)
+        .ensure_with_run_id(&issue, Some("run-terminal-1"))
         .await
         .expect("checkout should publish");
     assert!(first.created);
@@ -308,6 +308,9 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let manifest = tokio::fs::read_to_string(first.handle.checkout_manifest_path())
         .await
         .expect("checkout manifest should exist");
+    let manifest_record: CheckoutManifest =
+        serde_json::from_str(&manifest).expect("checkout manifest should decode");
+    assert_eq!(manifest_record.run_id, "run-terminal-1");
     assert!(!manifest.contains("CHECKOUT_SECRET_CANARY"));
     assert!(!manifest.contains(origin.to_str().expect("origin path")));
 
