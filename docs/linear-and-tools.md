@@ -53,8 +53,9 @@ Local scheduler polling keeps the 5s worker/snapshot tick, but Linear reads are
 cadenced separately so a busy local workstation does not burn through the shared
 Linear API quota:
 
-- running issue state is refreshed with the lightweight by-ID state query every
-  30s
+- running issue state and managed repository labels are refreshed with the
+  lightweight by-ID state query every 30s, so a binding mutation fences the
+  claimed generation without waiting for the hourly full-detail pass
 - dispatch discovery uses a lightweight active-issue summary query every 60s
 - terminal cleanup reads run at startup and then every 5 minutes
 - full-detail active issue reads run at startup, for selected dispatches, and

@@ -261,6 +261,7 @@ fn tracker_state_snapshot(
             tracker_type: tracker_type.to_string(),
             kind: TrackerIssueStateKind::from_tracker_type(tracker_type),
         },
+        labels: Vec::new(),
         updated_at: dt(updated_at),
     }
 }
@@ -975,6 +976,67 @@ async fn running_state_polling_uses_lightweight_state_refresh_interval() {
             .state
             .name,
         "Human Review"
+    );
+}
+
+#[tokio::test]
+async fn running_state_polling_reconciles_repository_binding_changes() {
+    let mut issue = tracker_issue("lin-repo-poll", "COE-548-POLL", "In Progress", 0);
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial binding should launch");
+    let old_binding = scheduler.worker().launches[0]
+        .run
+        .repository_binding
+        .clone()
+        .expect("initial run should carry its binding");
+    let mut refreshed = tracker_state_snapshot(
+        "lin-repo-poll",
+        "COE-548-POLL",
+        "In Progress",
+        "started",
+        30_000,
+    );
+    refreshed.labels = vec!["repo:two".to_string()];
+    scheduler
+        .tracker_mut()
+        .states
+        .insert("lin-repo-poll".to_string(), refreshed);
+
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("frequent running refresh should reconcile binding changes");
+
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::BindingSuperseded
+    );
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_ne!(
+        scheduler.worker().launches[1]
+            .run
+            .repository_binding
+            .as_ref()
+            .expect("replacement run should carry its binding")
+            .repository
+            .id,
+        old_binding.repository.id
     );
 }
 

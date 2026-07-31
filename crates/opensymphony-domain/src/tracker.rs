@@ -64,6 +64,8 @@ pub struct TrackerIssueStateSnapshot {
     pub id: String,
     pub identifier: String,
     pub state: TrackerIssueState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     pub updated_at: DateTime<Utc>,
 }
 

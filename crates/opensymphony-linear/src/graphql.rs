@@ -325,6 +325,11 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $a
         name
         type
       }
+      labels(first: 100) {
+        nodes {
+          name
+        }
+      }
     }
     pageInfo {
       hasNextPage
@@ -980,6 +985,8 @@ pub(super) struct LinearIssueStateNode {
     pub identifier: String,
     pub updated_at: DateTime<Utc>,
     pub state: LinearWorkflowState,
+    #[serde(default)]
+    pub labels: LinearLabelConnection,
 }
 
 #[derive(Debug, Deserialize)]

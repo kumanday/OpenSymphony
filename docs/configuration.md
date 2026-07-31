@@ -134,6 +134,8 @@ malformed strict plan has not yet assigned bindings to its terminal tasks; the
 converter then rejects the missing bindings instead of downgrading the package
 to legacy dispatch.
 Every configured and task-level alias must remain non-empty after trimming.
+An explicitly configured but blank `remote.provider_id` is rejected rather
+than falling back to the mutable repository locator for canonical identity.
 Issue regeneration retains terminal-child bindings by position and keeps the
 regenerated parent repository-neutral.
 

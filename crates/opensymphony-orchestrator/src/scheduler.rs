@@ -1462,6 +1462,23 @@ where
                     if let Some(existing) = self.executions.get(&issue_id) {
                         let mut issue = existing.issue().clone();
                         issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
+                        issue.labels = snapshot.labels.clone();
+                        issue.repository_binding = resolve_repository_binding(
+                            &self.config,
+                            &issue.labels,
+                            issue.project_id.as_deref(),
+                            issue.project_slug.as_deref(),
+                            !issue.sub_issues.is_empty(),
+                        );
+                        if matches!(
+                            existing.status(),
+                            SchedulerStatus::Claimed | SchedulerStatus::Running
+                        ) && existing.issue().repository_binding != issue.repository_binding
+                        {
+                            self.supersede_binding(issue_id.clone(), issue, observed_at)
+                                .await?;
+                            continue;
+                        }
                         if self
                             .interrupt_human_review_polling_for_merging(&issue, observed_at)
                             .await?
@@ -3296,21 +3313,13 @@ fn normalize_tracker_issue(
     config: &SchedulerConfig,
 ) -> Result<NormalizedIssue, SchedulerError> {
     let is_parent = !issue.sub_issues.is_empty();
-    let repository_binding = config.repository_routing.as_ref().and_then(|routing| {
-        // An unlabeled parent is intentionally repository-neutral. Only a
-        // managed label on a parent is invalid; terminal children still use
-        // strict routing outcomes for missing or malformed bindings.
-        if is_parent && managed_repository_aliases(&issue.labels).is_empty() {
-            None
-        } else {
-            Some(routing.resolve(
-                &issue.labels,
-                issue.project_id.as_deref(),
-                issue.project_slug.as_deref(),
-                is_parent,
-            ))
-        }
-    });
+    let repository_binding = resolve_repository_binding(
+        config,
+        &issue.labels,
+        issue.project_id.as_deref(),
+        issue.project_slug.as_deref(),
+        is_parent,
+    );
     Ok(NormalizedIssue {
         id: IssueId::new(issue.id.clone())?,
         identifier: IssueIdentifier::new(issue.identifier.clone())?,
@@ -3373,16 +3382,35 @@ fn minimal_issue_from_state_snapshot(
         branch_name: None,
         pr_url: None,
         url: None,
-        labels: Vec::new(),
+        labels: snapshot.labels.clone(),
         project_id: None,
         project_slug: None,
         project_name: None,
         parent_id: None,
-        repository_binding: None,
+        repository_binding: resolve_repository_binding(config, &snapshot.labels, None, None, false),
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: None,
         updated_at: Some(datetime_to_timestamp(snapshot.updated_at)),
+    })
+}
+
+fn resolve_repository_binding(
+    config: &SchedulerConfig,
+    labels: &[String],
+    project_id: Option<&str>,
+    project_slug: Option<&str>,
+    is_parent: bool,
+) -> Option<RepositoryBindingOutcome> {
+    config.repository_routing.as_ref().and_then(|routing| {
+        // An unlabeled parent is intentionally repository-neutral. Only a
+        // managed label on a parent is invalid; terminal children still use
+        // strict routing outcomes for missing or malformed bindings.
+        if is_parent && managed_repository_aliases(labels).is_empty() {
+            None
+        } else {
+            Some(routing.resolve(labels, project_id, project_slug, is_parent))
+        }
     })
 }
 

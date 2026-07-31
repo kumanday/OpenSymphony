@@ -1698,6 +1698,9 @@ fn validate_repository(
 ) -> Result<(), CentralConfigError> {
     required_literal(repository_id, "repositories.id")?;
     required_literal(&repository.remote.provider, "repositories.remote.provider")?;
+    if let Some(provider_id) = repository.remote.provider_id.as_deref() {
+        required_literal(provider_id, "repositories.remote.provider_id")?;
+    }
     required_literal(&repository.remote.locator, "repositories.remote.locator")?;
     required_literal(&repository.remote.clone, "repositories.remote.clone")?;
     required_literal(&repository.target_branch, "repositories.target_branch")?;
@@ -2560,6 +2563,25 @@ scheduler:
                 false,
             ),
             crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_)
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_an_explicitly_blank_provider_id() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source =
+            central_fixture(root.path()).replace("provider_id: repo-42", "provider_id: ' '");
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("an explicitly blank provider id should be rejected");
+
+        assert!(matches!(
+            error,
+            CentralConfigError::EmptyField {
+                field: "repositories.remote.provider_id"
+            }
         ));
     }
 

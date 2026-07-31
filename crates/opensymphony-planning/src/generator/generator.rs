@@ -746,30 +746,13 @@ impl PlanGenerator {
             }
         }
 
-        let repository_aliases = milestones
-            .iter()
-            .flat_map(|milestone| milestone.issues.iter())
-            .flat_map(|issue| {
-                issue.repository.iter().chain(
-                    issue
-                        .sub_issues
-                        .iter()
-                        .filter_map(|sub_issue| sub_issue.repository.as_ref()),
-                )
-            })
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
         let (routing_mode, repository_aliases) = existing
             .map(|manifest| (manifest.routing_mode, manifest.repository_aliases.clone()))
             .unwrap_or_else(|| {
-                let routing_mode = if repository_aliases.is_empty() {
-                    RepositoryRoutingMode::LegacySingle
-                } else {
-                    RepositoryRoutingMode::ProjectSet
-                };
-                (routing_mode, repository_aliases)
+                (
+                    self.session.routing_mode,
+                    self.session.repository_aliases.clone(),
+                )
             });
 
         TaskPackageManifest {
@@ -1111,6 +1094,26 @@ mod tests {
             serde_yaml::from_str(&yaml).expect("escaped frontmatter should parse");
 
         assert_eq!(parsed.get("title").map(String::as_str), Some(raw));
+    }
+
+    #[test]
+    fn fresh_generation_preserves_explicit_repository_routing_metadata() {
+        let session = make_sample_session().with_repository_routing(
+            RepositoryRoutingMode::ProjectSet,
+            vec!["core".to_string(), "web".to_string()],
+        );
+        let mut generator = PlanGenerator::new(session);
+
+        let artifacts = generator.generate().expect("generation should succeed");
+
+        assert_eq!(
+            artifacts.manifest.routing_mode,
+            RepositoryRoutingMode::ProjectSet
+        );
+        assert_eq!(
+            artifacts.manifest.repository_aliases,
+            vec!["core".to_string(), "web".to_string()]
+        );
     }
 
     #[test]
