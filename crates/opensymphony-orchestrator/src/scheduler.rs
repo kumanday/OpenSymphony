@@ -1196,6 +1196,10 @@ where
                             .cloned()
                             .map(RepositoryBindingOutcome::Resolved)
                     });
+                let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+                    normalized.repository_binding.as_ref(),
+                    recovered_binding.as_ref(),
+                );
                 // A legacy configuration is a locator, not proof of the
                 // repository currently on disk. Do not attach an in-flight
                 // worker to the current binding when neither the run nor the
@@ -1228,11 +1232,20 @@ where
                     recovered_workspace = None;
                     recovered_run = None;
                 }
-                let binding_changed = recovered_run.is_some()
-                    && RepositoryBindingOutcome::canonical_identity_changed_opt(
-                        normalized.repository_binding.as_ref(),
-                        recovered_binding.as_ref(),
-                    );
+                // A metadata-only recovery has no run to supersede. If its
+                // recovered issue manifest proves a different repository than
+                // the live tracker binding, discard the old workspace before
+                // restoring the retry so the replacement is materialized by
+                // the normal dispatch path.
+                if recovered_run.is_none() && recovered_workspace.is_some() && binding_changed {
+                    self.workspace
+                        .remove_workspace(&record.workspace)
+                        .await
+                        .map_err(|error| SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        })?;
+                    recovered_workspace = None;
+                }
                 if let Some(run) = recovered_run.as_mut()
                     && !binding_changed
                 {

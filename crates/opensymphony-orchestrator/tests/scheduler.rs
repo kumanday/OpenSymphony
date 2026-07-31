@@ -5089,6 +5089,70 @@ async fn newly_parented_running_issue_is_superseded_without_relaunch() {
 }
 
 #[tokio::test]
+async fn newly_parented_legacy_issue_is_neutralized_before_default_routing() {
+    let mut issue = tracker_issue(
+        "lin-repo-legacy-parent-refresh",
+        "COE-548-LEGACY-PARENT-REFRESH",
+        "In Progress",
+        0,
+    );
+    issue.project_id = Some("project-id".to_string());
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let routing = repository_routing();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(RepositoryRouting {
+        mode: RepositoryRoutingMode::LegacySingle,
+        legacy_repository: Some("one".to_string()),
+        ..routing
+    });
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("legacy issue should initially use its configured default");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+
+    let mut refreshed = tracker_state_snapshot(
+        "lin-repo-legacy-parent-refresh",
+        "COE-548-LEGACY-PARENT-REFRESH",
+        "In Progress",
+        "started",
+        30_000,
+    );
+    refreshed.is_parent = true;
+    scheduler
+        .tracker_mut()
+        .states
+        .insert("lin-repo-legacy-parent-refresh".to_string(), refreshed);
+
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("legacy parenthood change should reconcile");
+
+    let execution = scheduler
+        .execution(
+            &IssueId::new("lin-repo-legacy-parent-refresh").expect("issue id should be valid"),
+        )
+        .expect("neutralized parent should remain observable");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.workspace().removed,
+        vec!["COE-548-LEGACY-PARENT-REFRESH".to_string()]
+    );
+    assert_eq!(execution.status(), SchedulerStatus::Unclaimed);
+    assert!(execution.workspace().is_none());
+    assert_eq!(execution.issue().repository_binding, None);
+}
+
+#[tokio::test]
 async fn binding_supersession_restores_execution_when_abort_fails() {
     let mut issue = tracker_issue("lin-repo-abort", "COE-548-ABORT", "In Progress", 0);
     issue.project_id = Some("project-id".to_string());
@@ -5459,6 +5523,94 @@ async fn external_retry_marker_merges_into_metadata_only_workspace_recovery() {
     assert_eq!(
         scheduler.workspace().cleared_retry_pending,
         vec![issue_id.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn metadata_only_retry_recovery_rematerializes_after_binding_drift() {
+    let issue_id = IssueId::new("lin-retry-drift").expect("issue id should be valid");
+    let recovered_workspace =
+        workspace_record("COE-548-RETRY-DRIFT", "/tmp/recovered/COE-548-RETRY-DRIFT");
+    let routing = repository_routing();
+    let old_binding =
+        match routing.resolve(&["repo:one".to_string()], Some("project-id"), None, false) {
+            RepositoryBindingOutcome::Resolved(binding) => binding,
+            outcome => panic!("expected old retry binding, got {outcome:?}"),
+        };
+    let pending_issue = {
+        let mut issue = normalized_issue(issue_id.as_str(), "COE-548-RETRY-DRIFT", "In Progress");
+        issue.project_id = Some("project-id".to_string());
+        issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(old_binding));
+        issue
+    };
+    let mut tracker_issue =
+        tracker_issue(issue_id.as_str(), "COE-548-RETRY-DRIFT", "In Progress", 0);
+    tracker_issue.project_id = Some("project-id".to_string());
+    tracker_issue.labels = vec!["repo:two".to_string()];
+    let tracker = FakeTracker {
+        active: vec![tracker_issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: pending_issue.clone(),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        retry_pending_recoveries: vec![RetryPendingRecord {
+            issue: pending_issue.clone(),
+            retry: RetryEntry {
+                issue_id: issue_id.clone(),
+                identifier: pending_issue.identifier.clone(),
+                attempt: RetryAttempt::new(1).expect("retry attempt should be valid"),
+                normal_retry_count: 1,
+                scheduled_at: ts(50),
+                due_at: ts(100),
+                reason: RetryReason::Failure,
+                error: Some("binding changed before start_run".to_string()),
+            },
+        }],
+        records: HashMap::from([(issue_id.to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let mut config = scheduler_config();
+    config.repository_routing = Some(routing);
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, FakeWorker::default(), config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("binding-drift retry recovery should rematerialize safely");
+
+    assert_eq!(
+        scheduler.workspace().removed,
+        vec!["COE-548-RETRY-DRIFT".to_string()]
+    );
+    assert_eq!(
+        scheduler.workspace().ensured,
+        vec!["COE-548-RETRY-DRIFT".to_string()]
+    );
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0]
+            .run
+            .repository_binding
+            .as_ref()
+            .map(|binding| binding.alias.as_str()),
+        Some("two")
     );
 }
 

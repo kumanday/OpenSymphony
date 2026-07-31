@@ -164,7 +164,7 @@ impl RepositoryRouting {
         }
 
         let alias = match aliases.as_slice() {
-            [] if self.mode == RepositoryRoutingMode::LegacySingle => {
+            [] if self.mode == RepositoryRoutingMode::LegacySingle && !is_parent => {
                 self.legacy_repository.as_deref().unwrap_or_default()
             }
             [] => return RepositoryBindingOutcome::MissingBinding,
@@ -360,9 +360,8 @@ fn normalize_locator_for_provider(provider: &str, locator: &str) -> String {
 
     if let Some((user, remainder)) = normalized.split_once('@')
         && !user.is_empty()
-        && let Some(path) = remainder
-            .strip_prefix(&slash_prefix)
-            .or_else(|| remainder.strip_prefix(&colon_prefix))
+        && let Some(path) = strip_case_insensitive_prefix(remainder, &slash_prefix)
+            .or_else(|| strip_case_insensitive_prefix(remainder, &colon_prefix))
     {
         return path.to_owned();
     }
@@ -655,6 +654,27 @@ mod tests {
             legacy.resolve(&labels(&[]), None, None, false),
             RepositoryBindingOutcome::Resolved(_)
         ));
+        assert_eq!(
+            legacy.resolve(&labels(&[]), None, None, true),
+            RepositoryBindingOutcome::MissingBinding
+        );
+    }
+
+    #[test]
+    fn equivalent_scp_locators_ignore_authority_case_for_fallback_identity() {
+        let upper = CanonicalRepositoryId::from_remote("github", None, "git@GitHub.com:Owner/Repo")
+            .expect("upper-case SCP locator should be valid");
+        let lower = CanonicalRepositoryId::from_remote("github", None, "git@github.com:Owner/Repo")
+            .expect("lower-case SCP locator should be valid");
+        let upper_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", None, "git@GitHub.com:Owner/Repo")
+                .expect("upper-case SCP fingerprint should be valid");
+        let lower_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", None, "git@github.com:Owner/Repo")
+                .expect("lower-case SCP fingerprint should be valid");
+
+        assert_eq!(upper, lower);
+        assert_eq!(upper_fingerprint, lower_fingerprint);
     }
 
     #[test]
