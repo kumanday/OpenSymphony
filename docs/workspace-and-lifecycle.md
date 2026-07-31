@@ -289,7 +289,12 @@ Current repository note:
 - if a repository supersession removes the old workspace before the replacement
   binding can be materialized, the retry is written under the instance retry
   state root and rehydrated before normal dispatch; the external marker is
-  cleared once replacement workspace metadata is durable
+  cleared once replacement workspace metadata is durable. External pending
+  retry markers use the immutable tracker issue ID as their filename key for
+  both persistence and clearing, independent of the human-facing identifier.
+- queued retry recovery and frequent state reconciliation preserve the binding
+  generation boundary: a changed repository binding removes the old workspace
+  and prevents that retry from launching until the replacement is materialized.
 
 ## 8. Conversation metadata manifest
 

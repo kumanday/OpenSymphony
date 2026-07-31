@@ -27,6 +27,10 @@ repository sets must be identical or central configuration fails as ambiguous.
 The inventory generation hashes the normalized alias-to-identity map, so an
 alias change advances the generation even when the underlying repository
 identities are unchanged.
+Canonical identities normalize the default authority for public providers, so
+equivalent `owner/repository` and provider URL locators resolve to the same
+durable repository identity and safe fingerprint. A Linear project association
+constrains the allowed aliases but never supplies a terminal task's binding.
 Any central-only key such as `instance`, `routing`, `tracker_profiles`, or
 `repositories` selects the strict central parser, even when its discriminator
 is malformed; those files fail closed instead of falling through to legacy
@@ -58,6 +62,11 @@ marker keeps the issue parked across a later run.
 Pending retry manifests also retain their scheduled time, due deadline,
 reason, and redacted error summary, so recovery preserves the original
 backoff instead of redispatching immediately.
+While a retry is queued, the scheduler includes it in the frequent tracker
+state refresh; a binding mutation is therefore reconciled before the retry's
+due time rather than dispatching the old repository generation. Bounded detail
+lookups also recheck configured project membership after hydration, protecting
+against tasks moved out of the selected Linear project between full refreshes.
 If a crash leaves a `Preparing` or `Prepared` run without a conversation
 manifest, recovery consumes that attempt as a reconciliation retry and still
 enforces `scheduler.retry.max_attempts`.

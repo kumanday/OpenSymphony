@@ -49,6 +49,8 @@ pub struct SchedulerConfig {
     pub stall_timeout_ms: Option<u64>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
+    pub tracker_project_id: Option<String>,
+    pub tracker_project_slug: Option<String>,
     pub routing: RoutingConfig,
     pub repository_routing: Option<RepositoryRouting>,
 }
@@ -99,6 +101,8 @@ impl SchedulerConfig {
             stall_timeout_ms: workflow.config.agent.stall_timeout_ms,
             active_states: workflow.config.tracker.active_states.clone(),
             terminal_states: workflow.config.tracker.terminal_states.clone(),
+            tracker_project_id: workflow.config.tracker.project_id.clone(),
+            tracker_project_slug: Some(workflow.config.tracker.project_slug.clone()),
             routing: workflow.config.routing.clone(),
             repository_routing: None,
         })
@@ -654,7 +658,7 @@ where
                 self.last_running_state_refresh_at,
                 RUNNING_STATE_REFRESH_INTERVAL_MS,
                 observed_at,
-            ) && self.has_running_executions()
+            ) && self.has_reconcilable_executions()
             {
                 self.refresh_running_issue_states(observed_at).await?;
             } else if due(
@@ -876,7 +880,9 @@ where
             .filter(|(_, execution)| {
                 matches!(
                     execution.status(),
-                    SchedulerStatus::Claimed | SchedulerStatus::Running
+                    SchedulerStatus::Claimed
+                        | SchedulerStatus::Running
+                        | SchedulerStatus::RetryQueued
                 )
             })
             .map(|(id, _)| id.as_str().to_string())
@@ -2318,11 +2324,11 @@ where
         Ok(())
     }
 
-    fn has_running_executions(&self) -> bool {
+    fn has_reconcilable_executions(&self) -> bool {
         self.executions.values().any(|execution| {
             matches!(
                 execution.status(),
-                SchedulerStatus::Claimed | SchedulerStatus::Running
+                SchedulerStatus::Claimed | SchedulerStatus::Running | SchedulerStatus::RetryQueued
             )
         })
     }
@@ -2390,6 +2396,13 @@ where
                     );
                     continue;
                 };
+                if !tracker_issue_belongs_to_configured_project(&detailed_issue, &self.config) {
+                    warn!(
+                        identifier = %detailed_issue.identifier,
+                        "skipping dispatch candidate outside the configured tracker project"
+                    );
+                    continue;
+                }
                 let normalized = normalize_tracker_issue(&detailed_issue, &self.config)?;
                 if normalized.state.category != IssueStateCategory::Active {
                     warn!(
@@ -3599,6 +3612,34 @@ fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
         .map(HarnessKind::capability)
         .ok_or_else(|| SchedulerError::InvalidConfiguration {
             detail: format!("unknown routing harness `{kind}`"),
+        })
+}
+
+fn tracker_issue_belongs_to_configured_project(
+    issue: &TrackerIssue,
+    config: &SchedulerConfig,
+) -> bool {
+    if config.tracker_project_id.is_none() && config.tracker_project_slug.is_none() {
+        return true;
+    }
+    if let Some(project_id) = config.tracker_project_id.as_deref() {
+        return issue
+            .project_id
+            .as_deref()
+            .is_some_and(|issue_project_id| issue_project_id.trim() == project_id.trim());
+    }
+    config
+        .tracker_project_slug
+        .as_deref()
+        .is_some_and(|project_slug| {
+            issue
+                .project_slug
+                .as_deref()
+                .is_some_and(|issue_project_slug| {
+                    issue_project_slug
+                        .trim()
+                        .eq_ignore_ascii_case(project_slug.trim())
+                })
         })
 }
 

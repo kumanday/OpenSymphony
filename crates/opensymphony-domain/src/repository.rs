@@ -266,10 +266,21 @@ fn normalize_component(value: &str) -> String {
 
 fn provider_identity(provider: &str, locator: &str) -> String {
     let provider = normalize_component(provider);
-    let Some(authority) = remote_authority(locator) else {
+    let Some(authority) =
+        remote_authority(locator).or_else(|| default_provider_authority(&provider))
+    else {
         return provider;
     };
     format!("{provider}:{authority}")
+}
+
+fn default_provider_authority(provider: &str) -> Option<String> {
+    match provider {
+        "github" => Some("github.com".to_owned()),
+        "gitlab" => Some("gitlab.com".to_owned()),
+        "bitbucket" => Some("bitbucket.org".to_owned()),
+        _ => None,
+    }
 }
 
 fn remote_authority(locator: &str) -> Option<String> {
@@ -363,7 +374,31 @@ mod tests {
     fn canonical_identity_prefers_provider_native_id() {
         let id = CanonicalRepositoryId::from_remote("GitHub", Some("Repo-42"), "owner/renamed")
             .expect("identity");
-        assert_eq!(id.as_str(), "github:repository:Repo-42");
+        assert_eq!(id.as_str(), "github:github.com:repository:Repo-42");
+    }
+
+    #[test]
+    fn equivalent_public_provider_locators_share_identity() {
+        let shorthand = CanonicalRepositoryId::from_remote("github", Some("42"), "owner/repo")
+            .expect("shorthand identity should be valid");
+        let url = CanonicalRepositoryId::from_remote(
+            "github",
+            Some("42"),
+            "https://github.com/owner/repo",
+        )
+        .expect("URL identity should be valid");
+        let shorthand_fingerprint =
+            SafeRemoteFingerprint::from_remote("github", Some("42"), "owner/repo")
+                .expect("shorthand fingerprint should be valid");
+        let url_fingerprint = SafeRemoteFingerprint::from_remote(
+            "github",
+            Some("42"),
+            "https://github.com/owner/repo",
+        )
+        .expect("URL fingerprint should be valid");
+
+        assert_eq!(shorthand, url);
+        assert_eq!(shorthand_fingerprint, url_fingerprint);
     }
 
     #[test]

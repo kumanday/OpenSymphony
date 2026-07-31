@@ -5,19 +5,21 @@ use std::{
 };
 
 use crate::opensymphony_domain::{
-    CanonicalRepositoryId, HarnessInterruptCommand, HarnessInterruptReason, HarnessInterruptStatus,
-    RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity, RepositoryInventoryEntry,
-    RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint, TrackerErrorCategory,
+    CanonicalRepositoryId, DurationMs, HarnessInterruptCommand, HarnessInterruptReason,
+    HarnessInterruptStatus, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
+    RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint,
+    TrackerErrorCategory,
 };
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
     IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryAttempt,
     RetryEntry, RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState,
     Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
-    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
-    WorkerAbortReason, WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch,
-    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
-    WorkspaceKey, WorkspaceRecord, decide_issue_route,
+    TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
+    decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -43,6 +45,8 @@ fn scheduler_config() -> SchedulerConfig {
         stall_timeout_ms: Some(100),
         active_states: vec!["In Progress".to_string()],
         terminal_states: vec!["Done".to_string(), "Canceled".to_string()],
+        tracker_project_id: None,
+        tracker_project_slug: None,
         routing: RoutingConfig {
             harness: "openhands_agent_server".into(),
             model: None,
@@ -2616,6 +2620,141 @@ async fn queued_rebind_keeps_retry_when_replacement_workspace_materialization_fa
         1
     );
     assert_eq!(scheduler.worker().launches.len(), 1);
+}
+
+#[tokio::test]
+async fn queued_binding_change_reconciles_before_retry_is_due() {
+    let mut issue = tracker_issue(
+        "lin-repo-retry-poll",
+        "COE-548-RETRY-POLL",
+        "In Progress",
+        0,
+    );
+    issue.project_id = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.retry_policy.failure_base_delay_ms = DurationMs::new(120_000);
+    config.retry_policy.max_backoff_ms = DurationMs::new(120_000);
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial repository-bound run should launch");
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(200),
+                Some("worker failed".to_string()),
+                Some("retry".to_string()),
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("failure should queue retry");
+    let retry = scheduler
+        .execution(&IssueId::new("lin-repo-retry-poll").expect("valid issue id"))
+        .expect("execution should remain tracked")
+        .retry()
+        .expect("retry should exist")
+        .clone();
+    assert!(retry.due_at > ts(30_100));
+
+    let mut refreshed = tracker_state_snapshot(
+        "lin-repo-retry-poll",
+        "COE-548-RETRY-POLL",
+        "In Progress",
+        "started",
+        30_000,
+    );
+    refreshed.labels = vec!["repo:two".to_string()];
+    scheduler
+        .tracker_mut()
+        .states
+        .insert("lin-repo-retry-poll".to_string(), refreshed);
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("queued binding should reconcile on the frequent refresh");
+
+    let execution = scheduler
+        .execution(&IssueId::new("lin-repo-retry-poll").expect("valid issue id"))
+        .expect("execution should remain tracked");
+    assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+    assert_eq!(execution.retry(), Some(&retry));
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.workspace().removed, vec!["COE-548-RETRY-POLL"]);
+    assert_eq!(
+        execution
+            .issue()
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::resolved_binding)
+            .map(|binding| binding.alias.as_str()),
+        Some("two")
+    );
+}
+
+#[tokio::test]
+async fn bounded_dispatch_detail_rejects_issues_outside_configured_project() {
+    let mut issue = tracker_issue("lin-project-move", "COE-548-PROJECT-MOVE", "Todo", 0);
+    issue.project_slug = Some("configured-project".to_string());
+    issue.blocked_by = vec![TrackerIssueBlocker {
+        id: "lin-blocker".to_string(),
+        identifier: "COE-548-BLOCKER".to_string(),
+        title: "Blocking issue".to_string(),
+        state: TrackerIssueState {
+            id: "in-progress".to_string(),
+            name: "In Progress".to_string(),
+            tracker_type: "started".to_string(),
+            kind: TrackerIssueStateKind::Started,
+        },
+    }];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.tracker_project_slug = Some("configured-project".to_string());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial full refresh should complete");
+    scheduler.tracker_mut().active[0].blocked_by.clear();
+    scheduler.tracker_mut().active[0].state = "In Progress".to_string();
+    scheduler.tracker_mut().active[0].state_kind = TrackerIssueStateKind::Started;
+    scheduler.tracker_mut().active[0].project_slug = Some("other-project".to_string());
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("out-of-project detail should be skipped");
+
+    assert_eq!(
+        scheduler.tracker().detail_requests,
+        vec![vec!["COE-548-PROJECT-MOVE".to_string()]]
+    );
+    assert!(scheduler.worker().launches.is_empty());
 }
 
 #[tokio::test]

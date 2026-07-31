@@ -1112,7 +1112,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         issue: &NormalizedIssue,
         retry: &RetryEntry,
     ) -> Result<(), Self::Error> {
-        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue.identifier.as_str())?;
+        let key = crate::opensymphony_workspace::sanitize_workspace_key(issue.id.as_str())?;
         let directory = self.retry_state_root.join("retry-pending");
         fs::create_dir_all(&directory).await.map_err(|error| {
             CliWorkspaceError::RetryState(format!(
@@ -7017,6 +7017,47 @@ mod tests {
         assert_eq!(records[0].normal_retry_count, 4);
         assert!(state_root.join("retry-exhaustion/COE-284.json").is_file());
         assert!(!workspace_root.join("COE-284").exists());
+    }
+
+    #[tokio::test]
+    async fn pending_retry_marker_uses_issue_id_for_persistence_and_clearing() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let state_root = tempdir.path().join("state-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: RetryAttempt::new(1).expect("retry attempt should be valid"),
+            normal_retry_count: 1,
+            scheduled_at: TimestampMs::new(250),
+            due_at: TimestampMs::new(1_200),
+            reason: RetryReason::Failure,
+            error: Some("retry marker".to_owned()),
+        };
+        let mut backend = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
+            workspace_manager,
+            &workflow,
+            false,
+            state_root.clone(),
+        );
+
+        backend
+            .persist_retry_pending_without_workspace(&issue, &retry)
+            .await
+            .expect("pending retry marker should persist");
+        assert!(state_root.join("retry-pending/issue-1.json").is_file());
+        backend
+            .clear_retry_pending(&issue.id)
+            .await
+            .expect("pending retry marker should clear by issue id");
+        assert!(!state_root.join("retry-pending/issue-1.json").exists());
     }
 
     #[tokio::test]

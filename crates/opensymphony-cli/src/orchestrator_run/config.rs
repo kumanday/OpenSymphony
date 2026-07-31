@@ -2470,7 +2470,7 @@ scheduler:
                 .identity
                 .id
                 .as_str(),
-            "github:repository:repo-42"
+            "github:github.com:repository:repo-42"
         );
         assert!(matches!(
             resolved.repository_routing.resolve(
