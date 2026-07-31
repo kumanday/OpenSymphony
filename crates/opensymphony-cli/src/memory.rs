@@ -42,13 +42,13 @@ use crate::{
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
         MemoryReindexReport, MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
         MemoryVisibility, RegisteredMemorySource, SourceFile, archive_blocking_warning_count,
-        brief, code_graph_context, code_graph_workspace_context_overlay, code_index_branch,
-        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
-        migrate_code_repository_identity, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        backfill_legacy_memory_source_scopes, brief, code_graph_context,
+        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
+        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
+        lint_okf_bundle, load_source_file, mark_archived, merge_legacy_memory_index,
+        merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
@@ -1996,19 +1996,18 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             if !root.exists() {
                 continue;
             }
-            if kind == MemorySourceKind::LegacyStore {
-                let same_catalog = match (
+            let same_catalog = if kind == MemorySourceKind::LegacyStore {
+                match (
                     fs::canonicalize(&root),
                     fs::canonicalize(&config.memory_root),
                 ) {
                     (Ok(root), Ok(catalog)) => root == catalog,
                     _ => root == config.memory_root,
-                };
-                if same_catalog {
-                    continue;
                 }
-            }
-            let _source_memory_lock = if kind == MemorySourceKind::LegacyStore {
+            } else {
+                false
+            };
+            let _source_memory_lock = if kind == MemorySourceKind::LegacyStore && !same_catalog {
                 Some(acquire_source_memory_writer_lock(&local_config)?)
             } else {
                 None
@@ -2040,7 +2039,13 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             });
             if !already_imported {
                 register_memory_source(config, &registration)?;
-                let import_result: Result<(), MemoryError> = if matches!(
+                let import_result: Result<(), MemoryError> = if same_catalog {
+                    backfill_legacy_memory_source_scopes(
+                        config,
+                        &source.repository_id,
+                        &registration.source_id,
+                    )
+                } else if matches!(
                     kind,
                     MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
                 ) {
@@ -2084,7 +2089,21 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                         ..registration
                     },
                 )?;
-            } else {
+            } else if same_catalog {
+                if let Err(error) = backfill_legacy_memory_source_scopes(
+                    config,
+                    &source.repository_id,
+                    &registration.source_id,
+                ) {
+                    let _ = register_memory_source(
+                        config,
+                        &RegisteredMemorySource {
+                            status: MemorySourceRegistrationStatus::Failed,
+                            ..registration.clone()
+                        },
+                    );
+                    return Err(error);
+                }
                 register_memory_source(
                     config,
                     &RegisteredMemorySource {

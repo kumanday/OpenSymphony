@@ -239,7 +239,11 @@ pub fn docs_for_area_with_scope(
 }
 
 fn docs_scope_requires_index_check(scope: &MemoryScopeFilter) -> bool {
-    scope.issue.is_some() || scope.milestone.is_some() || scope.repo.is_some()
+    scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.issue.is_some()
+        || scope.milestone.is_some()
+        || scope.repo.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1861,6 +1861,7 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
         endpoint: memory.endpoint.clone(),
         token: memory.token.clone(),
         project: Some(memory.project.clone()),
+        project_set: memory.project_set.clone(),
         execution_repo: Some(memory.execution_repo.clone()),
     }
 }

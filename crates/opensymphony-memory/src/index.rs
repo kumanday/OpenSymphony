@@ -2829,11 +2829,19 @@ pub fn merge_legacy_memory_index(
     }
     for (issue_key, number, title, url, branch, merge_sha, merged_at) in pull_requests.into_iter().filter(|row| owned.contains(&row.0)) {
         transaction.execute(
+            "UPDATE pull_requests SET title = ?, url = ?, branch = ?, merge_sha = ?, merged_at = ? WHERE issue_key = ? AND number = ?",
+            params![title, url, branch, merge_sha, merged_at, issue_key, number],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
             "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ?)",
             params![issue_key, number, title, url, branch, merge_sha, merged_at, issue_key, number],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     for (issue_key, number, path, kind) in changed_files.into_iter().filter(|row| owned.contains(&row.0)) {
+        transaction.execute(
+            "UPDATE changed_files SET change_kind = ? WHERE issue_key = ? AND pr_number = ? AND file_path = ?",
+            params![kind, issue_key, number, path],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
         transaction.execute(
             "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM changed_files WHERE issue_key = ? AND pr_number = ? AND file_path = ?)",
             params![issue_key, number, path, kind, issue_key, number, path],
@@ -2841,15 +2849,140 @@ pub fn merge_legacy_memory_index(
     }
     for (issue_key, number, name, conclusion, completed_at) in checks.into_iter().filter(|row| owned.contains(&row.0)) {
         transaction.execute(
+            "UPDATE checks SET conclusion = ?, completed_at = ? WHERE issue_key = ? AND pr_number = ? AND name = ?",
+            params![conclusion, completed_at, issue_key, number, name],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
             "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM checks WHERE issue_key = ? AND pr_number = ? AND name = ?)",
             params![issue_key, number, name, conclusion, completed_at, issue_key, number, name],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     for (issue_key, number, reviewer, state, submitted_at, disposition) in reviews.into_iter().filter(|row| owned.contains(&row.0)) {
         transaction.execute(
+            "UPDATE reviews SET state = ?, disposition = ? WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ?",
+            params![state, disposition, issue_key, number, reviewer, submitted_at],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
             "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition) SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM reviews WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ?)",
             params![issue_key, number, reviewer, state, submitted_at, disposition, issue_key, number, reviewer, submitted_at],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
+pub fn backfill_legacy_memory_source_scopes(
+    config: &MemoryConfig,
+    repository_id: &str,
+    source_id: &str,
+) -> Result<(), MemoryError> {
+    let project_scope_ids = config
+        .repository_sources
+        .get(repository_id)
+        .map(|source| source.project_scope_ids.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_else(|| config.project_scope_ids.iter().cloned().collect());
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT issue_key, concept_id, scope_refs_json, source_refs_json, source_ids_json FROM issues")
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    };
+    for (issue_key, concept_id, encoded_scopes, encoded_sources, encoded_source_ids) in rows {
+        let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
+        if !source_ids.is_empty() && !source_ids.iter().any(|value| value == source_id) {
+            continue;
+        }
+        if !source_ids.iter().any(|value| value == source_id) {
+            source_ids.push(source_id.to_string());
+        }
+        let mut scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes).unwrap_or_default();
+        let mut add_scope = |kind: KnowledgeScopeKind, id: String| {
+            if !scopes.iter().any(|scope| scope.kind == kind && scope.id == id) {
+                scopes.push(KnowledgeScope { kind, id, label: None });
+            }
+        };
+        add_scope(KnowledgeScopeKind::Repository, repository_id.to_string());
+        if let Some(project_set_id) = config.default_project_set_id.as_deref() {
+            add_scope(KnowledgeScopeKind::ProjectSet, project_set_id.to_string());
+        }
+        for project_id in &project_scope_ids {
+            add_scope(KnowledgeScopeKind::Project, project_id.clone());
+        }
+        let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources).unwrap_or_default();
+        let source_ref = MemorySourceRef {
+            kind: "legacy_store".to_string(),
+            id: source_id.to_string(),
+            url: None,
+            repo_id: Some(repository_id.to_string()),
+            symbol_key: None,
+        };
+        if !source_refs.contains(&source_ref) {
+            source_refs.push(source_ref);
+        }
+        let scopes_json = serde_json::to_string(&scopes)?;
+        transaction
+            .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        for scope in &scopes {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    duckdb::params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        transaction
+            .execute(
+                "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![
+                    serde_json::to_string(&source_ids)?,
+                    scopes_json,
+                    serde_json::to_string(&source_refs)?,
+                    issue_key,
+                ],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
     }
     transaction.commit().map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
@@ -3943,6 +4076,67 @@ mod index_tests {
         };
 
         assert_eq!(issue_log_date(&issue), UNDATED_LOG_DATE);
+    }
+
+    #[test]
+    fn backfill_legacy_source_scopes_migrates_unscoped_rows_in_place() {
+        let repo = tempfile::TempDir::new().expect("repository tempdir");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config = config
+            .with_default_project_set_id("set-alpha")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: "repo-alpha".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: Some("commit-alpha".to_string()),
+                project_scope_ids: BTreeSet::from(["project-alpha".to_string()]),
+                target_branch: Some("develop".to_string()),
+            });
+        let connection = open_index(&config).expect("index should open");
+        migrate_index(&connection).expect("index should migrate");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-550",
+                    "Legacy memory",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-550.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-550",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("legacy issue should insert");
+
+        backfill_legacy_memory_source_scopes(&config, "repo-alpha", "repo-alpha:legacy_store")
+            .expect("legacy scopes should backfill");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues should load")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-550")
+            .expect("backfilled issue should exist");
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == "repo-alpha"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::ProjectSet && scope.id == "set-alpha"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project && scope.id == "project-alpha"
+        }));
+        assert!(issue
+            .source_refs
+            .iter()
+            .any(|source| source.id == "repo-alpha:legacy_store"));
     }
 
     #[test]

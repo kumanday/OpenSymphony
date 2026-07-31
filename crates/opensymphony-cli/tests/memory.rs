@@ -1136,6 +1136,19 @@ fn memory_docs_applies_repo_scope_before_returning_area_doc() {
         String::from_utf8_lossy(&mobile_docs.stderr)
             .contains("no captured memory for area `openhands-runtime`")
     );
+
+    let project_docs = run(
+        repo.path(),
+        [
+            "memory",
+            "docs",
+            "--area",
+            "openhands-runtime",
+            "--project",
+            "unmatched-project",
+        ],
+    );
+    assert_failure(&project_docs, "docs with non-matching project scope");
 }
 
 #[test]
