@@ -2754,7 +2754,17 @@ fn memory_config_for_code_intel_scope(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<MemoryConfig, MemoryError> {
-    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    let mut scope = scope_filter_from_mcp(config, arguments, false)?;
+    if let Some(repository_id) = optional_string_arg(arguments, "repository") {
+        scope.repo = Some(repository_id);
+    }
+    if let Some(repository_id) = scope.repo.as_deref()
+        && !repository_matches_memory_scope(config, repository_id, &scope)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "repository `{repository_id}` is not accessible in the requested memory scope"
+        )));
+    }
     let resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
     if !ast_tools_enabled(&resolved) {
         return Err(MemoryError::InvalidInput(
@@ -2915,10 +2925,12 @@ async fn call_memory_tool_with_workspace(
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {
+                let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+                let code_scope = scope_filter_from_mcp(config, &arguments, true)?;
                 text = append_code_intel_context_blocking(
-                    config.clone(),
+                    code_config,
                     text,
-                    scope_filter_from_mcp(config, &arguments, true)?,
+                    code_scope,
                     options.paths.clone(),
                     options.limit,
                 )
@@ -9920,6 +9932,86 @@ Public memory concept.
         )
         .await
         .expect_err("selected repository policy should disable AST tools");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("AST code-intelligence tools are disabled for the selected repository")));
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_reject_repository_outside_requested_project() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": { "repo": "repo-a", "project": "project-b" }
+            }),
+        )
+        .await
+        .expect_err("AST reads must honor project/repository isolation");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("repository `repo-a` is not accessible")));
+    }
+
+    #[tokio::test]
+    async fn memory_context_code_intel_uses_selected_repository_policy() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "memory.context",
+                "arguments": {
+                    "issue": "COE-550",
+                    "repo": "repo-a",
+                    "includeCodeIntel": true
+                }
+            }),
+        )
+        .await
+        .expect_err("context code intelligence should honor selected policy");
 
         assert!(matches!(error, MemoryError::InvalidInput(message)
             if message.contains("AST code-intelligence tools are disabled for the selected repository")));

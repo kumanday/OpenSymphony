@@ -15,7 +15,22 @@ pub fn brief_with_scope(
             "no capsule found for {issue_key} in the requested scope"
         )));
     }
+    if !scope.all_accessible && has_multiple_repository_owners(&indexed.scope_refs) {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory brief for {issue_key} is ambiguous because the concept has multiple repository owners"
+        )));
+    }
     Ok(render_indexed_brief(config, &indexed))
+}
+
+fn has_multiple_repository_owners(scope_refs: &[KnowledgeScope]) -> bool {
+    scope_refs
+        .iter()
+        .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+        .map(|scope| &scope.id)
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1
 }
 
 fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
