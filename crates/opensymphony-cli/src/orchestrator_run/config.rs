@@ -1382,6 +1382,18 @@ fn reject_checkout_credential_env_reuse(
             "openhands.transport_session_api_key_env",
         );
     }
+    for (field, variable) in [
+        ("routing.harness_env", config.routing.harness_env.as_deref()),
+        ("routing.model_env", config.routing.model_env.as_deref()),
+        (
+            "routing.model_profile_env",
+            config.routing.model_profile_env.as_deref(),
+        ),
+    ] {
+        if let Some(variable) = variable {
+            non_checkout_variables.insert(variable.to_owned(), field);
+        }
+    }
     if let Some(front_matter) = config.openhands.front_matter.as_ref() {
         let value = serde_yaml::to_value(front_matter).map_err(|_| {
             CentralConfigError::InvalidReference {
@@ -2833,6 +2845,38 @@ scheduler:
             CentralConfigError::InvalidReference { field }
                 if field == "tracker_profiles.linear.credential"
         ));
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_routing_selectors() {
+        let selectors = [
+            ("harness_env: TEST_HARNESS", "routing.harness_env"),
+            ("model_env: TEST_MODEL", "routing.model_env"),
+            (
+                "model_profile_env: TEST_MODEL_PROFILE",
+                "routing.model_profile_env",
+            ),
+        ];
+
+        for (selector, field) in selectors {
+            let root = tempfile::tempdir().expect("central config root should exist");
+            std::fs::write(root.path().join("integration.md"), "integration\n")
+                .expect("integration instructions should be written");
+            let source = central_fixture(root.path())
+                .replace(
+                    "  github-ssh:\n    kind: ssh-agent",
+                    "  github-ssh:\n    kind: environment\n    variable: GITHUB_TOKEN",
+                )
+                .replace(selector, &selector.replacen(':', ": GITHUB_TOKEN", 1));
+
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("routing selectors must not reuse checkout credentials");
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field: actual }
+                    if actual == field
+            ));
+        }
     }
 
     #[test]

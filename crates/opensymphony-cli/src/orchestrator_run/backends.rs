@@ -826,7 +826,13 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 .map(recovered_harness_kind_from_manifest);
             let recovered_run = run_manifest
                 .as_ref()
-                .filter(|run| recoverable_run_manifest(run, conversation_manifest.as_ref()))
+                .filter(|run| {
+                    recoverable_run_manifest(
+                        run,
+                        conversation_manifest.as_ref(),
+                        handle.checkout_generation().is_some(),
+                    )
+                })
                 .and_then(|_| {
                     recovered_run_from_manifests(
                         run_manifest.as_ref(),
@@ -1336,22 +1342,21 @@ fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) ->
 fn recoverable_run_manifest(
     run_manifest: &RunManifest,
     conversation_manifest: Option<&IssueConversationManifest>,
+    strict_checkout: bool,
 ) -> bool {
-    let envelope_compatible = run_manifest
-        .runtime_envelope
-        .as_ref()
-        .is_none_or(|expected| {
-            conversation_manifest
-                .and_then(|manifest| manifest.runtime_envelope.as_ref())
-                .is_some_and(|actual| actual == expected)
-        });
+    let envelope_compatible = match run_manifest.runtime_envelope.as_ref() {
+        Some(expected) => conversation_manifest
+            .and_then(|manifest| manifest.runtime_envelope.as_ref())
+            .is_some_and(|actual| actual == expected),
+        None => !strict_checkout,
+    };
     if !envelope_compatible {
         return false;
     }
     let conversation_binding_compatible = conversation_manifest.is_none_or(|manifest| {
-        manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+        manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
             envelope.conversation_binding.as_deref() == Some(manifest.conversation_id.as_str())
-        })
+        }) || (!strict_checkout && manifest.runtime_envelope.is_none())
     });
     if !conversation_binding_compatible {
         return false;
@@ -1754,7 +1759,11 @@ impl RuntimeWorkerBackend {
                         } else {
                             None
                         };
-                        if recoverable_run_manifest(&run_manifest, conversation_manifest.as_ref()) {
+                        if recoverable_run_manifest(
+                            &run_manifest,
+                            conversation_manifest.as_ref(),
+                            ensured.handle.checkout_generation().is_some(),
+                        ) {
                             run_manifest
                         } else {
                             report_launch_failure(
@@ -1797,6 +1806,18 @@ impl RuntimeWorkerBackend {
                     }
                 }
             };
+
+            if recovered
+                && runtime_envelope.as_ref().is_some_and(|expected| {
+                    run_manifest.runtime_envelope.as_ref() != Some(expected)
+                })
+            {
+                report_launch_failure(
+                    &mut launch_tx,
+                    "recovered strict run is missing a compatible runtime envelope".to_owned(),
+                );
+                return;
+            }
 
             if let Some(expected) = runtime_envelope.as_ref() {
                 let verified = match if allow_worker_changes {
@@ -2364,13 +2385,14 @@ async fn try_run_codex_stdio_issue(
         load_codex_conversation_manifest(workspace_manager, workspace, issue)
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    let conversation_binding_mismatch = existing_manifest.as_ref().is_some_and(|manifest| {
-        manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
-            envelope.conversation_binding.as_deref()
-                != Some(manifest.conversation_id.to_string().as_str())
-        })
-    });
-    if (conversation_binding_mismatch
+    let conversation_envelope_untrusted = run_manifest.runtime_envelope.is_some()
+        && existing_manifest.as_ref().is_some_and(|manifest| {
+            manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+                envelope.conversation_binding.as_deref()
+                    != Some(manifest.conversation_id.to_string().as_str())
+            })
+        });
+    if (conversation_envelope_untrusted
         || run_manifest
             .runtime_envelope
             .as_ref()
@@ -2381,7 +2403,7 @@ async fn try_run_codex_stdio_issue(
             }))
         && let Some(mut incompatible) = existing_manifest.take()
     {
-        if conversation_binding_mismatch {
+        if conversation_envelope_untrusted {
             tracing::warn!(
                 conversation_id = %incompatible.conversation_id,
                 "skipping retirement of Codex thread with mismatched runtime envelope binding"
@@ -4905,6 +4927,46 @@ mod tests {
             recovered_harness_kind_from_manifest(&manifest),
             OPENHANDS_AGENT_SERVER_KIND
         );
+    }
+
+    #[test]
+    fn strict_recovery_requires_bound_run_and_conversation_envelopes() {
+        let now = chrono::Utc::now();
+        let run_manifest = RunManifest {
+            run_id: "run-strict-envelope".to_owned(),
+            issue_id: "issue-contract".to_owned(),
+            identifier: "COE-479".to_owned(),
+            sanitized_workspace_key: "COE-479".to_owned(),
+            workspace_path: PathBuf::from("/workspace/COE-479"),
+            repository_binding: None,
+            runtime_envelope: None,
+            attempt: 1,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Prepared,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        let mut conversation_manifest = sample_conversation_manifest("legacy-openhands");
+        conversation_manifest.prepared_run_id = Some(run_manifest.run_id.clone());
+
+        assert!(!recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+        assert!(recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            false,
+        ));
     }
 
     #[test]

@@ -520,6 +520,34 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
             .await,
         Err(WorkspaceError::CheckoutVerification { .. })
     ));
+
+    let renamed_issue = IssueDescriptor {
+        issue_id: issue.issue_id.clone(),
+        identifier: "COE-549/renamed".to_owned(),
+        title: "Issue COE-549/renamed".to_owned(),
+        current_state: issue.current_state.clone(),
+        last_seen_tracker_refresh_at: None,
+        repository_binding: issue.repository_binding.clone(),
+    };
+    let renamed = manager
+        .ensure(&renamed_issue)
+        .await
+        .expect("renamed issue should publish a new generation");
+    assert!(renamed.created);
+    assert_ne!(
+        renamed.handle.workspace_path(),
+        clean_retry.handle.workspace_path()
+    );
+    assert!(!clean_retry.handle.workspace_path().exists());
+    assert!(
+        temp_dir
+            .path()
+            .join("workspaces/.opensymphony-quarantine")
+            .read_dir()
+            .expect("quarantine should exist")
+            .next()
+            .is_some()
+    );
 }
 
 #[tokio::test]

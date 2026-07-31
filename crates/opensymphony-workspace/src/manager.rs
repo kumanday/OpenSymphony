@@ -918,8 +918,15 @@ impl WorkspaceManager {
                 &issue.issue_id,
                 binding.repository_id().as_str(),
             )?;
-            if manifest.identifier != issue.identifier
-                || manifest.sanitized_workspace_key != expected_workspace_key
+            if manifest.identifier != issue.identifier {
+                self.quarantine_checkout(
+                    &handle,
+                    "checkout identifier changed for the same tracker issue".to_owned(),
+                )
+                .await?;
+                continue;
+            }
+            if manifest.sanitized_workspace_key != expected_workspace_key
                 || manifest.workspace_path != handle.workspace_path()
             {
                 continue;
