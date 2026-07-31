@@ -19,6 +19,18 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
         let scope_refs = capture_scope_refs(issue_plan);
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
+        let source_refs = issue_plan
+            .prs
+            .iter()
+            .map(|pr| MemorySourceRef {
+                kind: "github_pr".to_string(),
+                id: pr.number.to_string(),
+                url: pr.url.clone(),
+                repo_id: config.default_repository_id.clone(),
+                symbol_key: None,
+            })
+            .collect::<Vec<_>>();
+        let source_refs_json = serde_json::to_string(&source_refs)?;
         let empty_json = serde_json::to_string(&Vec::<String>::new())?;
         let freshness = MemoryFreshness::Current;
         transaction
@@ -54,7 +66,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     issue_plan.issue.description.clone(),
                     labels_json.clone(),
                     scope_refs_json,
-                    empty_json.clone(),
+                    source_refs_json,
                     empty_json.clone(),
                     empty_json.clone(),
                     freshness.as_str(),
@@ -75,7 +87,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         for scope_ref in &scope_refs {
             transaction
                 .execute(
-                    "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
                     params![
                         format!("issues/{issue_key}"),
                         scope_kind_name(&scope_ref.kind),
@@ -502,8 +514,7 @@ CREATE TABLE IF NOT EXISTS registered_memory_sources (
   source_root TEXT NOT NULL,
   status TEXT NOT NULL,
   generation TEXT NOT NULL,
-  registered_at TEXT NOT NULL,
-  UNIQUE(repository_id, commit_sha, source_kind)
+  registered_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_registered_memory_sources_repository
   ON registered_memory_sources(repository_id, commit_sha);
@@ -855,6 +866,33 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             path: config.index_path.clone(),
             source,
         })?;
+    if !batch.worktree_dirty
+        && !config.repository_sources.is_empty()
+        && let Some(commit_sha) = batch.commit_sha.as_deref()
+    {
+        let registered_commit = match transaction.query_row(
+            "SELECT commit_sha FROM registered_memory_sources WHERE repository_id = ? ORDER BY registered_at DESC LIMIT 1",
+            params![batch.repo_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(commit) => Some(commit),
+            Err(duckdb::Error::QueryReturnedNoRows) => None,
+            Err(source) => {
+                return Err(MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                });
+            }
+        };
+        if let Some(registered_commit) = registered_commit
+            && registered_commit != commit_sha
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "code-intelligence commit `{commit_sha}` does not match registered source generation `{registered_commit}` for `{}`",
+                batch.repo_id
+            )));
+        }
+    }
     let indexed_at = Utc::now().to_rfc3339();
     let mut report = CodeIntelPersistReport {
         parsed_files: batch.documents.len(),
@@ -2518,6 +2556,23 @@ pub fn refresh_memory_index_from_okf(
     config: &MemoryConfig,
     bundle_root: &Path,
 ) -> Result<MemoryReindexReport, MemoryError> {
+    refresh_memory_index_from_okf_inner(config, bundle_root, true, None)
+}
+
+pub fn merge_memory_index_from_okf(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+    repository_id: &str,
+) -> Result<MemoryReindexReport, MemoryError> {
+    refresh_memory_index_from_okf_inner(config, bundle_root, false, Some(repository_id))
+}
+
+fn refresh_memory_index_from_okf_inner(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+    replace_existing: bool,
+    repository_id: Option<&str>,
+) -> Result<MemoryReindexReport, MemoryError> {
     ensure_repo_contained(&config.repo_root, bundle_root)?;
     let bundle_root = canonicalize_existing_path(bundle_root)?;
     let lint = lint_okf_bundle_with_codes(&bundle_root, false)?;
@@ -2568,13 +2623,29 @@ pub fn refresh_memory_index_from_okf(
         }
         let contents = read_to_string(&path)?;
         let concept = parse_okf_concept(&bundle_root, &path, &contents)?;
-        rows.push(OkfIndexRow::from_concept(
+        let mut row = OkfIndexRow::from_concept(
             config,
             path.clone(),
             concept,
             contents,
             warnings_by_path.remove(&path).unwrap_or_default(),
-        )?);
+        )?;
+        if let Some(repository_id) = repository_id {
+            let mut scope_refs =
+                serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+                    .unwrap_or_default();
+            if !scope_refs.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Repository && scope.id == repository_id
+            }) {
+                scope_refs.push(KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: repository_id.to_string(),
+                    label: None,
+                });
+                row.scope_refs_json = serde_json::to_string(&scope_refs)?;
+            }
+        }
+        rows.push(row);
     }
 
     let mut connection = open_index(config)?;
@@ -2588,28 +2659,43 @@ pub fn refresh_memory_index_from_okf(
             path: config.index_path.clone(),
             source,
         })?;
-    for table in [
-        "issues",
-        "scope_refs",
-        "issue_areas",
-        "pull_requests",
-        "changed_files",
-        "checks",
-        "reviews",
-        "areas",
-    ] {
+    if replace_existing {
         transaction
-            .execute(&format!("DELETE FROM {table}"), [])
+            .execute(
+                "DELETE FROM scope_refs WHERE concept_id IN (SELECT concept_id FROM issues)",
+                [],
+            )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
+        for table in [
+            "issues",
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+            "areas",
+        ] {
+            transaction
+                .execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
     }
 
+    let issue_insert = if replace_existing {
+        "INSERT INTO"
+    } else {
+        "INSERT OR IGNORE INTO"
+    };
     for row in &rows {
         transaction
             .execute(
-                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                &format!("{issue_insert} issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
                 params![
                     row.issue_key,
                     row.title,

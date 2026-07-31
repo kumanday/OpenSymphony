@@ -1319,17 +1319,19 @@ fn resolve_memory_sources(
             field: "repositories.remote".to_owned(),
         })?;
         let repository_id = repository_id.to_string();
-        sources.insert(
-            repository_id.clone(),
-            ResolvedMemorySource {
-                repository_id,
-                checkout_path: resolve_central_path(
-                    config_root,
-                    checkout_path,
-                    "repositories.checkout_path",
-                )?,
-            },
-        );
+        let resolved = ResolvedMemorySource {
+            repository_id: repository_id.clone(),
+            checkout_path: resolve_central_path(
+                config_root,
+                checkout_path,
+                "repositories.checkout_path",
+            )?,
+        };
+        if sources.insert(repository_id, resolved).is_some() {
+            return Err(CentralConfigError::InvalidReference {
+                field: "repositories.remote.canonical_id".to_owned(),
+            });
+        }
     }
     Ok(sources)
 }

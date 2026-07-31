@@ -1042,6 +1042,12 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     let mut memory_server = start_runtime_memory_server(&runtime).await?;
+    let execution_repo = runtime
+        .memory_sources
+        .values()
+        .find(|source| source.checkout_path == runtime.target_repo)
+        .map(|source| source.repository_id.clone())
+        .unwrap_or_else(|| runtime.target_repo.display().to_string());
     let memory_env = memory_server.as_ref().map(|server| RuntimeMemoryEnv {
         endpoint: server.endpoint().to_string(),
         token: runtime
@@ -1050,7 +1056,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .as_ref()
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
-        execution_repo: runtime.target_repo.display().to_string(),
+        execution_repo,
     });
     if let Some(env) = &memory_env {
         info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
@@ -1498,9 +1504,16 @@ fn load_runtime_memory_config(
                 commit_sha: None,
             });
     }
-    if runtime.memory_sources.len() == 1
-        && let Some(repository_id) = runtime.memory_sources.keys().next()
-    {
+    let active_repository_id = runtime
+        .memory_sources
+        .values()
+        .find(|source| source.checkout_path == runtime.target_repo)
+        .map(|source| source.repository_id.clone());
+    if let Some(repository_id) = active_repository_id.or_else(|| {
+        (runtime.memory_sources.len() == 1)
+            .then(|| runtime.memory_sources.keys().next().cloned())
+            .flatten()
+    }) {
         config = config.with_default_repository_id(repository_id.clone());
     }
     Ok(config)

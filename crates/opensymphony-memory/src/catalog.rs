@@ -95,6 +95,42 @@ pub fn registered_memory_sources(
     .collect()
 }
 
+pub fn reconcile_memory_sources(
+    config: &MemoryConfig,
+    source_ids: &BTreeSet<String>,
+) -> Result<(), MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|error| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source: error,
+    })?;
+    if source_ids.is_empty() {
+        connection
+            .execute("DELETE FROM registered_memory_sources", [])
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        return Ok(());
+    }
+    let placeholders = std::iter::repeat_n("?", source_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = source_ids.iter().cloned().collect::<Vec<_>>();
+    connection
+        .execute(
+            &format!(
+                "DELETE FROM registered_memory_sources WHERE source_id NOT IN ({placeholders})"
+            ),
+            duckdb::params_from_iter(values),
+        )
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?;
+    Ok(())
+}
+
 pub fn persist_scope_refs(
     config: &MemoryConfig,
     concept_id: &str,

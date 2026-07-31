@@ -758,6 +758,12 @@ fn indexed_issue_matches_scope(
 }
 
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
+    if issue.scope_refs.iter().any(|scope| {
+        scope.kind == KnowledgeScopeKind::Repository
+            && scope.id.eq_ignore_ascii_case(repo)
+    }) {
+        return true;
+    }
     let repo = repo_scope_prefix(config, repo);
     if repo.is_empty() || repo == "." {
         return true;

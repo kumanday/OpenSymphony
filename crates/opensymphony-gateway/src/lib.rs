@@ -1774,6 +1774,7 @@ async fn index_code_repo(
     AxumPath(repo_id): AxumPath<String>,
 ) -> Result<Json<CodeIndexReport>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_code_memory(&state)?.clone();
+    let config = code_memory_for_repository(config, &repo_id)?;
     if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
         let report = index_code_repository_at(&config, &repo_id, None).map_err(code_graph_error)?;
         append_code_index_status_event(&state.journal, &repo_id, &report)
@@ -2435,6 +2436,24 @@ fn configured_code_memory(
             "code graph endpoints require a configured memory catalog",
         )
     })
+}
+
+fn code_memory_for_repository(
+    mut config: MemoryConfig,
+    repo_id: &str,
+) -> Result<MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(source) = config.repository_sources.get(repo_id) {
+        config.repo_root = source.root.clone();
+        return Ok(config);
+    }
+    if !config.repository_sources.is_empty() {
+        return Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "unknown_repository",
+            &format!("unknown canonical repository id `{repo_id}`"),
+        ));
+    }
+    Ok(config)
 }
 
 fn code_graph_error(error: CodeGraphProjectionError) -> (StatusCode, Json<serde_json::Value>) {
