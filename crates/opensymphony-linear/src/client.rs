@@ -320,6 +320,14 @@ impl LinearClient {
         self.issues_by_state_names(&self.config.active_states).await
     }
 
+    pub fn has_multiple_configured_projects(&self) -> bool {
+        self.config
+            .project_ids
+            .len()
+            .max(self.config.project_slugs.len())
+            > 1
+    }
+
     pub async fn candidate_issue_summaries(&self) -> Result<Vec<TrackerIssueSummary>, LinearError> {
         self.issue_summaries_by_state_names(&self.config.active_states)
             .await

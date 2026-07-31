@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -128,6 +128,8 @@ fn resolve_tracker<E: Environment>(
             .collect::<Result<Vec<_>, _>>()?,
         None => vec![project_slug.clone()],
     };
+    reject_duplicate_tracker_values("tracker.project_ids", &project_ids, false)?;
+    reject_duplicate_tracker_values("tracker.project_slugs", &project_slugs, true)?;
     let api_key = resolve_tracker_api_key(tracker, env)?;
 
     Ok(TrackerConfig {
@@ -152,6 +154,28 @@ fn resolve_tracker<E: Environment>(
             "tracker.terminal_states",
         )?,
     })
+}
+
+fn reject_duplicate_tracker_values(
+    field: &'static str,
+    values: &[String],
+    case_insensitive: bool,
+) -> Result<(), WorkflowConfigError> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let key = if case_insensitive {
+            value.to_ascii_lowercase()
+        } else {
+            value.clone()
+        };
+        if !seen.insert(key) {
+            return Err(WorkflowConfigError::InvalidField {
+                field,
+                message: "must not contain duplicate values".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn resolve_tracker_api_key<E: Environment>(

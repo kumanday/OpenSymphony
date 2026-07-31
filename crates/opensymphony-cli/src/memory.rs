@@ -5280,6 +5280,14 @@ async fn update_linear_memory_status(
     issue_keys: &[String],
     warnings: &[String],
 ) -> Result<(), MemoryError> {
+    if client.has_multiple_configured_projects() {
+        tracing::debug!(
+            issue_count = issue_keys.len(),
+            warning_count = warnings.len(),
+            "skipping aggregate Linear memory status for multi-project tracker configuration"
+        );
+        return Ok(());
+    }
     let Some(project) = client
         .project_overview()
         .await

@@ -985,10 +985,16 @@ async fn verify_strict_recovery_envelope(
         .ok_or_else(|| DebugCommandError::StrictRecovery {
             detail: "conversation manifest has no conversation_id".to_owned(),
         })?;
-    let conversation_envelope = raw_manifest_value
-        .get("runtime_envelope")
-        .cloned()
-        .and_then(|envelope| serde_json::from_value::<TerminalRuntimeEnvelope>(envelope).ok());
+    let conversation_envelope = match raw_manifest_value.get("runtime_envelope").cloned() {
+        Some(envelope) => Some(
+            serde_json::from_value::<TerminalRuntimeEnvelope>(envelope).map_err(|error| {
+                DebugCommandError::StrictRecovery {
+                    detail: format!("conversation runtime envelope is malformed: {error}"),
+                }
+            })?,
+        ),
+        None => None,
+    };
     if let (Some(run), Some(conversation)) = (&run_envelope, &conversation_envelope)
         && run != conversation
     {
@@ -1103,7 +1109,11 @@ fn build_debug_client(
     runtime: &DebugRuntimeConfig,
     conversation_store_kind: Option<ConversationStoreKind>,
 ) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), DebugCommandError> {
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
+    let transport_environment = crate::opensymphony_cli::BlockedEnvironment::new(
+        ProcessEnvironment,
+        runtime_checkout_credential_envs(runtime),
+    );
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &transport_environment)?;
     let Some(supervisor_base_url) = transport.managed_local_server_base_url()? else {
         let message = format!(
             "Using configured OpenHands server at {}.",

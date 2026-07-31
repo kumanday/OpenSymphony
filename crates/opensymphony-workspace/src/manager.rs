@@ -212,10 +212,9 @@ impl WorkspaceManager {
             .repository_binding
             .as_ref()
             .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
-            && let Some(repository) = self
-                .checkout_repositories
-                .get(binding.repository_id().as_str())
+            && !self.checkout_repositories.is_empty()
         {
+            let repository = self.checkout_repository_for_binding(binding)?;
             return self
                 .ensure_verified_checkout_for_run(
                     issue,
@@ -239,10 +238,9 @@ impl WorkspaceManager {
             .repository_binding
             .as_ref()
             .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
-            && let Some(repository) = self
-                .checkout_repositories
-                .get(binding.repository_id().as_str())
+            && !self.checkout_repositories.is_empty()
         {
+            let repository = self.checkout_repository_for_binding(binding)?;
             return self
                 .ensure_verified_checkout_for_run(issue, binding, repository, run_id, None)
                 .await;
@@ -355,6 +353,20 @@ impl WorkspaceManager {
             created,
             after_create,
         })
+    }
+
+    fn checkout_repository_for_binding(
+        &self,
+        binding: &RepositoryBinding,
+    ) -> Result<&CheckoutRepository, WorkspaceError> {
+        self.checkout_repositories
+            .get(binding.repository_id().as_str())
+            .ok_or_else(|| {
+                checkout_verification(
+                    &self.config.root,
+                    "resolved repository binding has no configured checkout policy",
+                )
+            })
     }
 
     /// Create or reuse one immutable, verified checkout for a bound issue.

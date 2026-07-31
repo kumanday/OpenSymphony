@@ -2576,7 +2576,7 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment + Clone>(
 }
 
 #[derive(Clone, Debug)]
-struct BlockedEnvironment<E> {
+pub(crate) struct BlockedEnvironment<E> {
     base: E,
     blocked: BTreeSet<String>,
 }
@@ -2588,6 +2588,12 @@ impl<E: Environment> Environment for BlockedEnvironment<E> {
         } else {
             self.base.get(name)
         }
+    }
+}
+
+impl<E> BlockedEnvironment<E> {
+    pub(crate) fn new(base: E, blocked: BTreeSet<String>) -> Self {
+        Self { base, blocked }
     }
 }
 

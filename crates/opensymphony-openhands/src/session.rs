@@ -1929,11 +1929,21 @@ impl IssueSessionRunner {
                     )
                 });
                 if let Some(manifest) = loaded.manifest.as_ref() {
-                    self.retire_conversation(
-                        manifest,
-                        "workflow reuse policy `fresh_each_run` requested a new conversation",
-                    )
-                    .await?;
+                    if manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
+                        envelope.conversation_binding.as_deref()
+                            != Some(manifest.conversation_id.as_str())
+                    }) {
+                        tracing::warn!(
+                            conversation_id = %manifest.conversation_id,
+                            "skipping retirement of fresh_each_run conversation with mismatched runtime envelope binding"
+                        );
+                    } else {
+                        self.retire_conversation(
+                            manifest,
+                            "workflow reuse policy `fresh_each_run` requested a new conversation",
+                        )
+                        .await?;
+                    }
                 }
                 self.create_fresh_session(
                     workspace_manager,

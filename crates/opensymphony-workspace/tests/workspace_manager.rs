@@ -314,6 +314,35 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         instructions_path: "AGENTS.md".into(),
         review_profile: "local".to_owned(),
     };
+    let missing_policy_manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("missing-policy manager should be constructed")
+    .with_repository_checkouts(BTreeMap::from([(
+        "other-repository".to_owned(),
+        repository.clone(),
+    )]));
+    let mut missing_policy_issue = sample_issue("COE-549/missing-policy");
+    missing_policy_issue.repository_binding =
+        Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let missing_policy_error = missing_policy_manager
+        .ensure_with_run_id(&missing_policy_issue, Some("run-missing-policy"))
+        .await
+        .expect_err("resolved bindings without policies must not fall back to legacy workspaces");
+    assert!(matches!(
+        missing_policy_error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
+    ));
+    assert!(
+        !temp_dir
+            .path()
+            .join("workspaces/COE-549-missing-policy")
+            .exists(),
+        "missing checkout policy must not create a legacy workspace"
+    );
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
         HookConfig::default(),

@@ -8,6 +8,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+use crate::opensymphony_cli::BlockedEnvironment;
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
     CodexAppServerSchemaValidator, CodexContractGeneration, CodexJsonRpcSession,
@@ -308,7 +309,11 @@ pub(super) async fn prepare_active_conversation_store(
     let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() else {
         return Ok(ManagedLocalPreparation::default());
     };
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
+    let transport_environment = BlockedEnvironment::new(
+        ProcessEnvironment,
+        runtime_checkout_credential_envs(runtime),
+    );
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &transport_environment)?;
     let supervised = transport.managed_local_server_base_url()?.is_some()
         && runtime.workflow.extensions.openhands.local_server.enabled;
     if !supervised {
@@ -541,7 +546,11 @@ pub(super) async fn build_runtime_transport(
     memory_env: Option<&RuntimeMemoryEnv>,
     worker_env: &BTreeMap<String, String>,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
+    let transport_environment = BlockedEnvironment::new(
+        ProcessEnvironment,
+        runtime_checkout_credential_envs(runtime),
+    );
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &transport_environment)?;
     let local_server = &runtime.workflow.extensions.openhands.local_server;
     let supervisor_base_url = transport.managed_local_server_base_url()?;
     let supervised = supervisor_base_url.is_some() && local_server.enabled;
@@ -605,6 +614,16 @@ pub(super) async fn build_runtime_transport(
     let status = supervisor.start()?;
     let transport = TransportConfig::new(status.base_url).with_auth(transport.auth().clone());
     Ok((transport, Some(supervisor)))
+}
+
+fn runtime_checkout_credential_envs(runtime: &RunRuntimeConfig) -> BTreeSet<String> {
+    runtime
+        .repository_checkouts
+        .as_ref()
+        .into_iter()
+        .flat_map(|checkouts| checkouts.values())
+        .filter_map(|checkout| checkout.credential_env.clone())
+        .collect()
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {

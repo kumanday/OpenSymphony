@@ -148,6 +148,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_tracker_project_id_and_slug_vectors() {
+        for (field, values) in [
+            ("project_ids", "[project-a, project-a]"),
+            ("project_slugs", "[sample-project, SAMPLE-PROJECT]"),
+        ] {
+            let source = format!(
+                "---\ntracker:\n  kind: linear\n  project_slug: sample-project\n  {field}: {values}\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nPrompt\n"
+            );
+            let workflow =
+                WorkflowDefinition::parse(&source).expect("duplicate-vector workflow parses");
+            let error = workflow
+                .resolve(
+                    Path::new("/repo"),
+                    &env([("LINEAR_API_KEY", "linear-token")]),
+                )
+                .expect_err("duplicate tracker project identities must be rejected");
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField { field: actual, .. } if actual == format!("tracker.{field}")
+            ));
+        }
+    }
+
+    #[test]
     fn parses_workflow_without_front_matter() {
         let workflow = WorkflowDefinition::parse("\n\nPrompt only\n")
             .expect("prompt-only workflow should parse");
