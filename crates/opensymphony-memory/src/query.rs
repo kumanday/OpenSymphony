@@ -238,12 +238,26 @@ pub fn docs_for_area_with_scope(
         let mut scoped = scope.clone();
         scoped.area = Some(area.slug.clone());
         let issues = load_indexed_issues(config)?;
-        if !issues
+        let area_issues = issues
+            .iter()
+            .filter(|issue| issue.areas().iter().any(|candidate| candidate == &area.slug))
+            .collect::<Vec<_>>();
+        if !area_issues
             .iter()
             .any(|issue| indexed_issue_matches_scope(config, issue, &scoped))
         {
             return Err(MemoryError::InvalidInput(format!(
                 "no captured memory for area `{}` in the requested docs scope",
+                area.slug
+            )));
+        }
+        if (scope.project.is_some() || scope.project_set.is_some())
+            && area_issues
+                .iter()
+                .any(|issue| !indexed_issue_matches_scope(config, issue, &scoped))
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "topic doc for area `{}` contains memory outside the requested project scope",
                 area.slug
             )));
         }

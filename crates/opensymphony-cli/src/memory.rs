@@ -1874,7 +1874,12 @@ async fn start_memory_server_with_auth(
                 memory_migration_lock_path(&coordination_root).display()
             ))
         })?;
-    register_configured_memory_sources(&config)?;
+    let registration_config = config.clone();
+    tokio::task::spawn_blocking(move || register_configured_memory_sources(&registration_config))
+        .await
+        .map_err(|error| {
+            MemoryError::InvalidInput(format!("memory source registration task failed: {error}"))
+        })??;
     fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
         path: config.memory_root.clone(),
         source,

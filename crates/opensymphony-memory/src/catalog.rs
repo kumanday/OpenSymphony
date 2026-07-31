@@ -288,13 +288,6 @@ pub fn withdraw_memory_source_records(
                 source: error,
             })?
     };
-    let active_project_scopes = config
-        .repository_sources
-        .values()
-        .flat_map(|source| source.project_scope_ids.iter())
-        .chain(config.project_scope_ids.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
             .unwrap_or_default();
@@ -341,9 +334,16 @@ pub fn withdraw_memory_source_records(
                         .is_some_and(|owner| owner == repository_id)
             });
             if !has_other_source {
+                let remaining_project_scopes = source_ids
+                    .iter()
+                    .filter_map(|candidate| registered_source_repositories.get(candidate))
+                    .filter_map(|repository_id| config.repository_sources.get(repository_id))
+                    .flat_map(|source| source.project_scope_ids.iter())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
                 scopes.retain(|scope| match &scope.kind {
                     KnowledgeScopeKind::Repository => scope.id != repository_id,
-                    KnowledgeScopeKind::Project => active_project_scopes.contains(&scope.id),
+                    KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
                     KnowledgeScopeKind::ProjectSet => config
                         .default_project_set_id
                         .as_deref()
@@ -426,11 +426,32 @@ pub fn withdraw_memory_repository_records(
         path: config.index_path.clone(),
         source: error,
     })?;
-    let active_project_scopes = config
-        .repository_sources
+    let registered_source_repositories = {
+        let mut statement = transaction
+            .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?
+    };
+    let remaining_project_scopes = registered_source_repositories
         .values()
+        .filter(|candidate| candidate.as_str() != repository_id)
+        .filter_map(|candidate| config.repository_sources.get(candidate))
         .flat_map(|source| source.project_scope_ids.iter())
-        .chain(config.project_scope_ids.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, scopes_json, sources_json) in rows {
@@ -439,7 +460,7 @@ pub fn withdraw_memory_repository_records(
             .into_iter()
             .filter(|scope| match &scope.kind {
                 KnowledgeScopeKind::Repository => scope.id != repository_id,
-                KnowledgeScopeKind::Project => active_project_scopes.contains(&scope.id),
+                KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
                 KnowledgeScopeKind::ProjectSet => config
                     .default_project_set_id
                     .as_deref()
