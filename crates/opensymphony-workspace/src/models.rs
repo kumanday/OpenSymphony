@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
     time::Duration,
@@ -30,6 +31,8 @@ pub struct InstructionProvenance {
     pub source: String,
     #[serde(default)]
     pub native_discovery_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub native_discovery_hashes: BTreeMap<PathBuf, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

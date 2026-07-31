@@ -20,6 +20,7 @@ use tokio::{
     process::Command,
     time::{Instant, timeout},
 };
+use url::Url;
 use uuid::Uuid;
 
 use super::{
@@ -562,6 +563,26 @@ impl WorkspaceManager {
             if manifest.issue_id != issue.issue_id {
                 continue;
             }
+            let expected_workspace_key = checkout_workspace_key(
+                &issue.identifier,
+                &issue.issue_id,
+                binding.repository_id().as_str(),
+            )?;
+            if manifest.identifier != issue.identifier
+                || manifest.sanitized_workspace_key != expected_workspace_key
+                || manifest.workspace_path != handle.workspace_path()
+                || checkout.issue_id != issue.issue_id
+                || checkout.identifier != issue.identifier
+                || checkout.sanitized_workspace_key != expected_workspace_key
+                || checkout.workspace_path != handle.workspace_path()
+            {
+                self.quarantine_checkout(
+                    &handle,
+                    "checkout ownership manifest does not match the requested issue".to_owned(),
+                )
+                .await?;
+                continue;
+            }
             let entry_name = entry.file_name();
             let expected_generation = entry_name
                 .to_str()
@@ -585,10 +606,16 @@ impl WorkspaceManager {
                 .await?;
                 continue;
             }
-            let allow_worker_changes = self
-                .load_run_manifest(&handle)
-                .await?
-                .is_some_and(|run| run.pending_retry || run.status == RunStatus::Running);
+            let allow_worker_changes = self.load_run_manifest(&handle).await?.is_some_and(|run| {
+                run.pending_retry
+                    || matches!(
+                        run.status,
+                        RunStatus::Running
+                            | RunStatus::Succeeded
+                            | RunStatus::Failed
+                            | RunStatus::Cancelled
+                    )
+            });
             match self
                 .verify_checkout_with_worker_changes(&handle, allow_worker_changes)
                 .await
@@ -755,6 +782,14 @@ impl WorkspaceManager {
             return Err(checkout_verification(checkout, "not a Git worktree"));
         }
         let remote = self.git(checkout, &["remote", "get-url", "origin"]).await?;
+        if Url::parse(&remote)
+            .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+        {
+            return Err(checkout_verification(
+                checkout,
+                "observed remote contains credentials",
+            ));
+        }
         let expected = SafeRemoteFingerprint::from_remote(
             &repository.provider,
             repository.provider_id.as_deref(),
@@ -863,6 +898,8 @@ impl WorkspaceManager {
             if !enabled {
                 continue;
             }
+            self.reject_symlinked_path_components(checkout, &relative)
+                .await?;
             let path = resolve_path_within_root(checkout, &relative)?;
             let metadata = match fs::symlink_metadata(&path).await {
                 Ok(metadata) => metadata,
@@ -878,6 +915,7 @@ impl WorkspaceManager {
             }
         }
         let agents = discover_agents(checkout).await?;
+        let native_discovery_hashes = self.hash_discovered_instructions(checkout, &agents).await?;
         let Some((relative, path, source)) = selected else {
             return Ok(InstructionProvenance {
                 path: PathBuf::new(),
@@ -885,6 +923,7 @@ impl WorkspaceManager {
                 source_commit: source_commit.to_owned(),
                 source: "none".to_owned(),
                 native_discovery_paths: agents,
+                native_discovery_hashes,
             });
         };
         let mut content =
@@ -903,7 +942,30 @@ impl WorkspaceManager {
             source_commit: source_commit.to_owned(),
             source: source.to_owned(),
             native_discovery_paths: agents,
+            native_discovery_hashes,
         })
+    }
+
+    async fn hash_discovered_instructions(
+        &self,
+        checkout: &Path,
+        paths: &[PathBuf],
+    ) -> Result<BTreeMap<PathBuf, String>, WorkspaceError> {
+        let mut hashes = BTreeMap::new();
+        for relative in paths {
+            self.reject_symlinked_path_components(checkout, relative)
+                .await?;
+            let path = resolve_path_within_root(checkout, relative)?;
+            let content =
+                fs::read(&path)
+                    .await
+                    .map_err(|source| WorkspaceError::ReadManagedFile {
+                        path: path.clone(),
+                        source,
+                    })?;
+            hashes.insert(relative.clone(), hash_bytes(&content));
+        }
+        Ok(hashes)
     }
 
     async fn update_checkout_run_id(
@@ -1861,6 +1923,34 @@ impl WorkspaceManager {
                 source: error,
             }),
         }
+    }
+
+    async fn reject_symlinked_path_components(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            let std::path::Component::Normal(component) = component else {
+                continue;
+            };
+            current.push(component);
+            match fs::symlink_metadata(&current).await {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(WorkspaceError::InstructionPathEscape { path: current });
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(source) => {
+                    return Err(WorkspaceError::ReadManagedFile {
+                        path: current,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn load_manifest<T>(
