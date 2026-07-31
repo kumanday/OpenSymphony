@@ -259,6 +259,8 @@ mod tests {
                     id: milestone.id.clone(),
                     file: "docs/tasks/m9.md".to_string(),
                 }],
+                routing_mode: crate::opensymphony_domain::RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: Default::default(),

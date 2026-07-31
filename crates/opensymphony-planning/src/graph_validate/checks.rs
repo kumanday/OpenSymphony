@@ -463,6 +463,8 @@ mod tests {
                 tasks_dir: "docs/tasks".to_string(),
                 milestones: milestones.iter().map(|m| m.name.clone()).collect(),
                 tasks: manifest_tasks,
+                routing_mode: crate::opensymphony_domain::RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: Default::default(),

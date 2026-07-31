@@ -171,7 +171,7 @@ impl PlanGenerator {
         self.validate_session()?;
 
         let milestones = self.generate_milestones();
-        let manifest = self.generate_manifest(&milestones);
+        let manifest = self.generate_manifest(&milestones, None);
         let milestone_index = self.render_milestone_index(&milestones);
         let task_files = self.generate_task_files(&milestones);
 
@@ -214,7 +214,7 @@ impl PlanGenerator {
         };
 
         let manifest = if scope.includes_manifest() {
-            self.generate_manifest(&milestones)
+            self.generate_manifest(&milestones, Some(&existing.manifest))
         } else {
             existing.manifest.clone()
         };
@@ -716,7 +716,11 @@ impl PlanGenerator {
         sub_issues
     }
 
-    fn generate_manifest(&self, milestones: &[PlannedMilestone]) -> TaskPackageManifest {
+    fn generate_manifest(
+        &self,
+        milestones: &[PlannedMilestone],
+        existing: Option<&TaskPackageManifest>,
+    ) -> TaskPackageManifest {
         let mut tasks = Vec::new();
         let mut milestone_names = Vec::new();
 
@@ -742,11 +746,39 @@ impl PlanGenerator {
             }
         }
 
+        let repository_aliases = milestones
+            .iter()
+            .flat_map(|milestone| milestone.issues.iter())
+            .flat_map(|issue| {
+                issue.repository.iter().chain(
+                    issue
+                        .sub_issues
+                        .iter()
+                        .filter_map(|sub_issue| sub_issue.repository.as_ref()),
+                )
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let (routing_mode, repository_aliases) = existing
+            .map(|manifest| (manifest.routing_mode, manifest.repository_aliases.clone()))
+            .unwrap_or_else(|| {
+                let routing_mode = if repository_aliases.is_empty() {
+                    RepositoryRoutingMode::LegacySingle
+                } else {
+                    RepositoryRoutingMode::ProjectSet
+                };
+                (routing_mode, repository_aliases)
+            });
+
         TaskPackageManifest {
             planning_wave: self.session.intake.planning_wave.clone(),
             tasks_dir: self.session.tasks_dir.clone(),
             milestones: milestone_names,
             tasks,
+            routing_mode,
+            repository_aliases,
         }
     }
 
@@ -1254,6 +1286,8 @@ mod tests {
         issue.repository = None;
         issue.sub_issues[0].repository = Some("core".to_string());
         issue.sub_issues[1].repository = Some("web".to_string());
+        original.manifest.routing_mode = RepositoryRoutingMode::ProjectSet;
+        original.manifest.repository_aliases = vec!["core".to_string(), "web".to_string()];
 
         let regenerated = generator
             .regenerate(
@@ -1273,6 +1307,14 @@ mod tests {
                 .map(|sub_issue| sub_issue.repository.as_deref())
                 .collect::<Vec<_>>(),
             vec![Some("core"), Some("web")]
+        );
+        assert_eq!(
+            regenerated.manifest.routing_mode,
+            RepositoryRoutingMode::ProjectSet
+        );
+        assert_eq!(
+            regenerated.manifest.repository_aliases,
+            vec!["core".to_string(), "web".to_string()]
         );
     }
 
@@ -1523,6 +1565,8 @@ mod tests {
                         file: "docs/tasks/c.md".to_string(),
                     },
                 ],
+                routing_mode: RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: BTreeMap::new(),
@@ -1637,6 +1681,8 @@ mod tests {
                         file: "docs/tasks/c.md".to_string(),
                     },
                 ],
+                routing_mode: RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: BTreeMap::new(),
@@ -1739,6 +1785,8 @@ mod tests {
                 tasks_dir: "docs/tasks".to_string(),
                 milestones: vec!["M1: Test".to_string()],
                 tasks: vec![],
+                routing_mode: RepositoryRoutingMode::LegacySingle,
+                repository_aliases: vec![],
             },
             milestone_index: String::new(),
             task_files: BTreeMap::new(),

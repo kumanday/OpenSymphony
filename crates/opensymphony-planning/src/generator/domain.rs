@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub use crate::opensymphony_domain::RepositoryRoutingMode;
+
 /// Unique identifier for a generated task.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct TaskId(pub String);
@@ -166,6 +168,18 @@ pub struct TaskPackageManifest {
     pub milestones: Vec<String>,
     /// Complete list of task file references.
     pub tasks: Vec<ManifestTask>,
+    /// Routing mode selected by the planning context, independent of the
+    /// bindings currently present on generated terminal tasks.
+    #[serde(default = "default_repository_routing_mode")]
+    pub routing_mode: RepositoryRoutingMode,
+    /// Trusted repository alias inventory supplied by the planning context.
+    /// This remains available when a malformed plan has no task bindings.
+    #[serde(default)]
+    pub repository_aliases: Vec<String>,
+}
+
+fn default_repository_routing_mode() -> RepositoryRoutingMode {
+    RepositoryRoutingMode::LegacySingle
 }
 
 /// Complete set of generated artifacts from a planning session.
