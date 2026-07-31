@@ -56,7 +56,8 @@ Linear API quota:
 - running issue state and managed repository labels are refreshed with the
   lightweight by-ID state query every 30s, so a binding mutation fences the
   claimed generation without waiting for the hourly full-detail pass; nested
-  label pages are walked per issue before the binding is resolved
+  label pages are walked per issue before the binding is resolved, and archived
+  children are included so parent neutrality is preserved during reconciliation
 - dispatch discovery uses a lightweight active-issue summary query every 60s
 - terminal cleanup reads run at startup and then every 5 minutes
 - full-detail active issue reads run at startup, for selected dispatches, and

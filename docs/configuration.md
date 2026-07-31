@@ -70,6 +70,11 @@ against tasks moved out of the selected Linear project between full refreshes.
 The instance-level retry marker remains until the replacement `start_run`
 metadata is durable, even when replacement workspace materialization succeeds;
 this closes the crash window between workspace preparation and run ownership.
+If recovery finds both that metadata-only workspace and the instance retry
+marker, it merges the marker into the workspace recovery instead of discarding
+the retry budget. An external retry marker is restored only when the current
+project-filtered active snapshot proves the issue is still dispatchable;
+otherwise the stale marker is cleared.
 The same frequent refresh reads current child presence, so a running task that
 becomes a parent is made repository-neutral and its old worker generation is
 superseded before another turn can continue.

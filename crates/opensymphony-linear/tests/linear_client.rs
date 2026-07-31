@@ -706,6 +706,12 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
             .expect("query should be a string")
             .contains("includeArchived: true")
     );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("children(includeArchived: true, first: 1)")
+    );
     assert_eq!(
         requests[0].body["variables"]["issueIds"],
         serde_json::json!(["issue-260", "issue-264"])

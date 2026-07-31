@@ -345,17 +345,17 @@ fn normalize_locator_for_provider(provider: &str, locator: &str) -> String {
     };
 
     let slash_prefix = format!("{authority}/");
-    if normalized.len() > slash_prefix.len()
-        && normalized[..slash_prefix.len()].eq_ignore_ascii_case(&slash_prefix)
+    if let Some(path) =
+        strip_case_insensitive_prefix(&normalized, &slash_prefix).filter(|path| !path.is_empty())
     {
-        return normalized[slash_prefix.len()..].to_owned();
+        return path.to_owned();
     }
 
     let colon_prefix = format!("{authority}:");
-    if normalized.len() > colon_prefix.len()
-        && normalized[..colon_prefix.len()].eq_ignore_ascii_case(&colon_prefix)
+    if let Some(path) =
+        strip_case_insensitive_prefix(&normalized, &colon_prefix).filter(|path| !path.is_empty())
     {
-        return normalized[colon_prefix.len()..].to_owned();
+        return path.to_owned();
     }
 
     if let Some((user, remainder)) = normalized.split_once('@')
@@ -368,6 +368,13 @@ fn normalize_locator_for_provider(provider: &str, locator: &str) -> String {
     }
 
     normalized
+}
+
+fn strip_case_insensitive_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .and_then(|_| value.get(prefix.len()..))
 }
 
 #[cfg(test)]
@@ -562,6 +569,20 @@ mod tests {
 
         assert_ne!(upper, lower);
         assert_ne!(upper_fingerprint, lower_fingerprint);
+    }
+
+    #[test]
+    fn unicode_locator_fallback_does_not_panic_on_authority_prefix_probe() {
+        let result = std::panic::catch_unwind(|| {
+            CanonicalRepositoryId::from_remote("github", None, "éééééé")
+        });
+
+        assert!(result.is_ok(), "locator normalization must not panic");
+        assert!(
+            result
+                .expect("locator normalization must not panic")
+                .is_ok()
+        );
     }
 
     #[test]

@@ -341,7 +341,7 @@ query IssueStatesByIds(
           endCursor
         }
       }
-      children(first: 1) {
+      children(includeArchived: true, first: 1) {
         nodes {
           id
         }

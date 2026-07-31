@@ -1041,20 +1041,58 @@ where
             return Ok(());
         };
 
-        let recovered_issue_ids = records
-            .iter()
-            .map(|record| record.issue.id.clone())
-            .collect::<HashSet<_>>();
-        for pending in self.pending_retry_recovery.take().unwrap_or_default() {
-            if recovered_issue_ids.contains(&pending.issue.id) {
-                self.workspace
-                    .clear_retry_pending(&pending.issue.id)
-                    .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
-                continue;
+        let mut pending_retry_by_issue = self
+            .pending_retry_recovery
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pending| (pending.issue.id.clone(), pending))
+            .collect::<HashMap<_, _>>();
+        let mut records = records;
+        for record in &mut records {
+            let issue_id = record.issue.id.clone();
+            if let Some(pending) = pending_retry_by_issue.remove(&issue_id) {
+                let has_durable_workspace_retry = record.pending_retry
+                    || record.had_in_flight_run
+                    || record.successful_run
+                    || record.cancelled_run
+                    || record.completed_run;
+                if has_durable_workspace_retry {
+                    // A run manifest is authoritative when it exists. The
+                    // external marker is a duplicate from the pre-start
+                    // window and can be removed safely.
+                    self.workspace
+                        .clear_retry_pending(&issue_id)
+                        .await
+                        .map_err(|error| SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        })?;
+                } else if tracker_snapshot.active_issue(&issue_id).is_some() {
+                    // The workspace has only its issue metadata: start_run
+                    // never became durable. Merge the still-authoritative
+                    // external RetryEntry into this recovery record so the
+                    // workspace is retained and its retry budget survives.
+                    record.pending_retry = true;
+                    record.normal_retry_count = pending.retry.normal_retry_count.saturating_sub(1);
+                    record.retry_scheduled_at = Some(pending.retry.scheduled_at);
+                    record.retry_due_at = Some(pending.retry.due_at);
+                    record.retry_reason = Some(pending.retry.reason);
+                    record.retry_error = pending.retry.error;
+                } else {
+                    // Do not restore a retry from stale local state when the
+                    // current project-filtered tracker snapshot cannot prove
+                    // that the issue is still active and in scope.
+                    self.workspace
+                        .clear_retry_pending(&issue_id)
+                        .await
+                        .map_err(|error| SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        })?;
+                }
             }
+        }
+
+        for pending in pending_retry_by_issue.into_values() {
             if tracker_snapshot.contains_terminal(pending.issue.id.as_str()) {
                 self.workspace
                     .clear_retry_pending(&pending.issue.id)
@@ -1065,14 +1103,18 @@ where
                 continue;
             }
 
-            let mut issue = pending.issue.clone();
-            if let Some(active_issue) = tracker_snapshot.active_issue(&pending.issue.id) {
-                issue = normalize_tracker_issue(active_issue, &self.config)?;
-            } else if let Some(snapshot) =
-                tracker_snapshot.state_by_id.get(pending.issue.id.as_str())
-            {
-                issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
-            }
+            let Some(active_issue) = tracker_snapshot.active_issue(&pending.issue.id) else {
+                // The project-filtered active snapshot is the required live
+                // proof for externally persisted retry state.
+                self.workspace
+                    .clear_retry_pending(&pending.issue.id)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?;
+                continue;
+            };
+            let issue = normalize_tracker_issue(active_issue, &self.config)?;
             let execution = IssueExecution::new(issue.clone(), observed_at);
             if self.retry_count_exceeds_limit(pending.retry.normal_retry_count) {
                 self.insert_execution(issue.id.clone(), execution);
@@ -2617,6 +2659,7 @@ where
             )
             .await;
 
+        let mut first_error = None;
         for ((issue_id, mut execution, claimed_run, start_request), result) in
             pending_launches.into_iter().zip(start_results)
         {
@@ -2636,12 +2679,14 @@ where
                         ),
                     );
                     if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
-                        self.insert_execution(issue_id.clone(), execution);
-                        return Err(SchedulerError::Workspace {
-                            detail: error.to_string(),
-                        });
+                        if first_error.is_none() {
+                            first_error = Some(SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            });
+                        }
+                    } else {
+                        debug!(issue_id = %issue_id, "dispatched scheduler worker");
                     }
-                    debug!(issue_id = %issue_id, "dispatched scheduler worker");
                 }
                 Err(error) => {
                     let detail = error.to_string();
@@ -2660,10 +2705,14 @@ where
             }
 
             self.insert_execution(issue_id.clone(), execution);
-            self.persist_retry_if_queued(&issue_id).await?;
+            if let Err(error) = self.persist_retry_if_queued(&issue_id).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
         }
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn apply_worker_updates(
