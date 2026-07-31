@@ -1346,6 +1346,29 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
             path: config.index_path.clone(),
             source,
         })?;
+    if !config.repository_sources.is_empty() {
+        let registered_commit = match transaction.query_row(
+            "SELECT commit_sha FROM registered_memory_sources WHERE repository_id = ? ORDER BY registered_at DESC LIMIT 1",
+            params![repo_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(commit) => Some(commit),
+            Err(duckdb::Error::QueryReturnedNoRows) => None,
+            Err(source) => {
+                return Err(MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                });
+            }
+        };
+        if let Some(registered_commit) = registered_commit
+            && registered_commit != commit_sha
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "code-intelligence commit `{commit_sha}` does not match registered source generation `{registered_commit}` for `{repo_id}`"
+            )));
+        }
+    }
     let indexed_at = Utc::now().to_rfc3339();
     for skipped in skipped_files {
         let path = skipped.path.to_string_lossy().to_string();
@@ -2701,9 +2724,37 @@ fn refresh_memory_index_from_okf_inner(
     let issue_insert = if replace_existing {
         "INSERT INTO"
     } else {
-        "INSERT OR IGNORE INTO"
+        "INSERT OR REPLACE INTO"
     };
     for row in &rows {
+        if !replace_existing {
+            transaction
+                .execute(
+                    "DELETE FROM scope_refs WHERE concept_id = ?",
+                    params![row.concept_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ?"),
+                        params![row.issue_key],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
         transaction
             .execute(
                 &format!("{issue_insert} issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),

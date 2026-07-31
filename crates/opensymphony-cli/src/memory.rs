@@ -2019,7 +2019,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
 }
 
 fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
-    let metadata = fs::symlink_metadata(root).map_err(|source| MemoryError::ReadFile {
+    let metadata = fs::metadata(root).map_err(|source| MemoryError::ReadFile {
         path: root.to_path_buf(),
         source,
     })?;
@@ -4406,6 +4406,12 @@ fn memory_config_for_repository(
         .filter(|value| !value.trim().is_empty())
         .or(config.default_repository_id.as_deref());
     let Some(repository_id) = repository_id else {
+        if !config.repository_sources.is_empty() {
+            return Err(MemoryError::InvalidInput(
+                "a canonical repository id is required when multiple repository sources are registered"
+                    .to_string(),
+            ));
+        }
         return Ok(config.clone());
     };
     let Some(source) = config.repository_sources.get(repository_id) else {
@@ -4571,6 +4577,12 @@ fn resolve_code_intel_repo(
     repo: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let Some(repo) = repo.and_then(non_empty) else {
+        if !config.repository_sources.is_empty() && config.default_repository_id.is_none() {
+            return Err(MemoryError::InvalidInput(
+                "a canonical repository id is required when multiple repository sources are registered"
+                    .to_string(),
+            ));
+        }
         return config
             .default_repository_id
             .as_deref()
