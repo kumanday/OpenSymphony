@@ -34,9 +34,11 @@ repository identity. If the requested binding differs from the manifest's
 identity, workspace ensuring fails before the manifest is rewritten; checkout
 replacement remains an explicit lifecycle operation rather than an implicit
 reuse side effect. A legacy manifest with no stored binding may be backfilled
-from the current resolved binding once; this records the configured identity
-without treating an unknown existing checkout as belonging to a different
-repository.
+from the current resolved binding once only when the workspace manager has a
+proven configured legacy repository identity and it matches that binding. If
+the existing checkout is unbound and no such legacy identity is configured,
+reuse fails rather than claiming that an unknown checkout belongs to the
+requested repository.
 
 ## 3. Hard safety invariants
 

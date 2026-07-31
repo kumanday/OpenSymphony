@@ -26,6 +26,7 @@ use super::{
 
 pub struct WorkspaceManager {
     config: WorkspaceManagerConfig,
+    legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
 }
 
 struct HookFailure {
@@ -68,7 +69,18 @@ enum HookCommandOutput {
 impl WorkspaceManager {
     pub fn new(mut config: WorkspaceManagerConfig) -> Result<Self, WorkspaceError> {
         config.root = normalize_absolute_path(&config.root)?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            legacy_repository: None,
+        })
+    }
+
+    pub fn with_legacy_repository(
+        mut self,
+        legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
+    ) -> Self {
+        self.legacy_repository = legacy_repository;
+        self
     }
 
     pub fn config(&self) -> &WorkspaceManagerConfig {
@@ -134,7 +146,12 @@ impl WorkspaceManager {
                 .as_ref()
                 .and_then(|binding| binding.repository_id().cloned())
                 .map(|repository| repository.to_string());
-            if existing_repository.is_some() && existing_repository != requested_repository {
+            let configured_legacy_repository =
+                self.legacy_repository.as_ref().map(ToString::to_string);
+            if existing_repository != requested_repository
+                && (existing_repository.is_some()
+                    || configured_legacy_repository != requested_repository)
+            {
                 return Err(WorkspaceError::RepositoryBindingMismatch {
                     workspace: handle.workspace_path().to_path_buf(),
                     existing_repository,

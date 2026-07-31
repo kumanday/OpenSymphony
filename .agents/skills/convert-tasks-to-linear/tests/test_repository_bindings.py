@@ -77,6 +77,7 @@ class RepositoryBindingTests(unittest.TestCase):
             source,
             [
                 {"id": "unmanaged-label", "name": "area:orchestrator"},
+                {"id": "customer-label", "name": "customer"},
                 {"id": "old-repository-label", "name": "repo:old"},
             ],
             {"orchestrator": "area-label"},
@@ -85,8 +86,48 @@ class RepositoryBindingTests(unittest.TestCase):
 
         self.assertEqual(
             label_ids,
-            ["unmanaged-label", "area-label", "repository-label"],
+            ["customer-label", "area-label", "repository-label"],
         )
+
+    def test_linear_conversion_paginates_existing_issue_labels(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, query_name, variables):
+                self.calls.append((query_name, variables))
+                if len(self.calls) == 1:
+                    return {
+                        "data": {
+                            "issue": {
+                                "id": variables["id"],
+                                "labels": {
+                                    "nodes": [{"id": "customer-1", "name": "customer-1"}],
+                                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                                },
+                            }
+                        }
+                    }
+                return {
+                    "data": {
+                        "issue": {
+                            "id": variables["id"],
+                            "labels": {
+                                "nodes": [{"id": "customer-2", "name": "customer-2"}],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            },
+                        }
+                    }
+                }
+
+        client = FakeClient()
+        issue = CONVERTER.fetch_issue_for_label_merge(client, "issue-42")
+
+        self.assertEqual(
+            [label["id"] for label in issue["labels"]["nodes"]],
+            ["customer-1", "customer-2"],
+        )
+        self.assertEqual(client.calls[1][1], {"id": "issue-42", "labelsAfter": "cursor-1"})
 
     def test_linear_conversion_can_clear_the_last_managed_label(self):
         source = task("PARENT", [])

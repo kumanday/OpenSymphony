@@ -1,4 +1,4 @@
-query IssueDetails($id: String!) {
+query IssueDetails($id: String!, $labelsAfter: String) {
   issue(id: $id) {
     id
     identifier
@@ -11,7 +11,11 @@ query IssueDetails($id: String!) {
       name
       type
     }
-    labels {
+    labels(first: 100, after: $labelsAfter) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         id
         name

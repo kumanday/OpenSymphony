@@ -584,12 +584,6 @@ async fn start_run_executes_before_run_in_workspace_and_persists_manifest() {
 #[tokio::test]
 async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
-    let manager = WorkspaceManager::new(manager_config(
-        &temp_dir.path().join("workspaces"),
-        HookConfig::default(),
-        CleanupConfig::default(),
-    ))
-    .expect("manager should build");
     let binding = RepositoryBinding {
         alias: "core".to_string(),
         repository: RepositoryIdentity {
@@ -604,6 +598,13 @@ async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
         config_generation: "config-1".to_string(),
         inventory_generation: "inventory-1".to_string(),
     };
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_legacy_repository(Some(binding.repository.id.clone()));
     let mut issue = sample_issue("COE-548");
     issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
     let ensured = manager
@@ -673,6 +674,49 @@ async fn existing_workspace_rejects_a_changed_repository_identity() {
 #[tokio::test]
 async fn legacy_workspace_backfills_a_new_repository_identity() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
+    let binding = RepositoryBinding {
+        alias: "core".to_string(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::new("github:repository:core").expect("repository id"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                Some("core"),
+                "owner/repository",
+            )
+            .expect("fingerprint"),
+        },
+        config_generation: "config-1".to_string(),
+        inventory_generation: "inventory-1".to_string(),
+    };
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_legacy_repository(Some(binding.repository.id.clone()));
+    let legacy_issue = sample_issue("COE-548-legacy");
+    manager
+        .ensure(&legacy_issue)
+        .await
+        .expect("legacy workspace should exist");
+
+    let mut upgraded_issue = legacy_issue;
+    upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let ensured = manager
+        .ensure(&upgraded_issue)
+        .await
+        .expect("legacy workspace should accept a safe repository backfill");
+
+    assert_eq!(
+        ensured.issue_manifest.repository_binding,
+        Some(RepositoryBindingOutcome::Resolved(binding))
+    );
+}
+
+#[tokio::test]
+async fn legacy_workspace_rejects_unproven_repository_backfill() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
         HookConfig::default(),
@@ -693,23 +737,23 @@ async fn legacy_workspace_backfills_a_new_repository_identity() {
         config_generation: "config-1".to_string(),
         inventory_generation: "inventory-1".to_string(),
     };
-    let legacy_issue = sample_issue("COE-548-legacy");
+    let legacy_issue = sample_issue("COE-548-unproven-legacy");
     manager
         .ensure(&legacy_issue)
         .await
         .expect("legacy workspace should exist");
 
     let mut upgraded_issue = legacy_issue;
-    upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
-    let ensured = manager
+    upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding));
+    let error = manager
         .ensure(&upgraded_issue)
         .await
-        .expect("legacy workspace should accept a safe repository backfill");
+        .expect_err("unproven legacy repository must not be backfilled");
 
-    assert_eq!(
-        ensured.issue_manifest.repository_binding,
-        Some(RepositoryBindingOutcome::Resolved(binding))
-    );
+    assert!(matches!(
+        error,
+        WorkspaceError::RepositoryBindingMismatch { .. }
+    ));
 }
 
 #[tokio::test]

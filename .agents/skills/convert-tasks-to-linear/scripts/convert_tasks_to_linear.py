@@ -790,6 +790,8 @@ def ensure_issues(
             }
             if task.parent:
                 input_data["parentId"] = issue_map[task.parent]["id"]
+            if existing and issue_labels_need_pagination(existing):
+                existing = fetch_issue_for_label_merge(client, existing["id"])
             existing_labels = (
                 [
                     label
@@ -823,7 +825,29 @@ def fetch_issue_for_label_merge(client: LinearClient, issue_id: str) -> dict[str
     issue = data.get("data", {}).get("issue")
     if not isinstance(issue, dict):
         raise LinearError(f"mapped Linear issue not found: {issue_id}")
-    return issue.copy()
+    issue = issue.copy()
+    labels = list(issue.get("labels", {}).get("nodes", []))
+    page_info = issue.get("labels", {}).get("pageInfo", {})
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            raise LinearError(f"Linear label pagination returned no cursor: {issue_id}")
+        data = client.call(
+            "issue_details.graphql",
+            {"id": issue_id, "labelsAfter": cursor},
+        )
+        next_issue = data.get("data", {}).get("issue")
+        if not isinstance(next_issue, dict):
+            raise LinearError(f"mapped Linear issue not found: {issue_id}")
+        labels.extend(next_issue.get("labels", {}).get("nodes", []))
+        page_info = next_issue.get("labels", {}).get("pageInfo", {})
+    issue["labels"] = {"nodes": labels, "pageInfo": {"hasNextPage": False, "endCursor": None}}
+    return issue
+
+
+def issue_labels_need_pagination(issue: dict[str, Any]) -> bool:
+    page_info = issue.get("labels", {}).get("pageInfo", {})
+    return bool(page_info.get("hasNextPage"))
 
 
 def ensure_area_labels(client: LinearClient, package: Package, team: dict[str, Any]) -> dict[str, str]:
@@ -892,7 +916,7 @@ def merge_issue_label_ids(
         label["id"]
         for label in existing_labels
         if label.get("id")
-        and not str(label.get("name", "")).strip().lower().startswith("repo:")
+        and not str(label.get("name", "")).strip().lower().startswith(("repo:", "area:"))
     ]
     label_ids = unmanaged_label_ids + [
         area_label_ids[area] for area in task.areas if area in area_label_ids

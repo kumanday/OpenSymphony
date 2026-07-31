@@ -110,12 +110,15 @@ Important normalization rules:
   aliases are propagated through planning and conversion without storing
   remotes or workspace paths in Linear. Conversion removes stale managed
   `repo:*` labels before adding the current binding, while preserving unrelated
-  labels. When the final managed binding is removed from an existing issue, the
-  conversion mutation explicitly sends an empty label list. Strict project-set
-  packages must declare a non-empty alias inventory. If a publish mapping points
-  to an issue outside the paged project snapshot, conversion fetches that
-  issue's labels before replacing the managed subset so unrelated labels are
-  not lost.
+  labels; the converter-managed `area:*` namespace is replaced in the same
+  operation so stale area labels do not accumulate. Label connections are
+  paged before replacement, both for project snapshots and mapped issue
+  lookups. When the final managed binding is removed from an existing issue,
+  the conversion mutation explicitly sends an empty label list. Strict
+  project-set packages must declare a non-empty alias inventory. If a publish
+  mapping points to an issue outside the paged project snapshot, conversion
+  fetches that issue's labels before replacing the managed subset so unrelated
+  labels are not lost.
 
 ## 3. Agent-side Linear access
 

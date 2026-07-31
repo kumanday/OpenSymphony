@@ -980,13 +980,23 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     );
 
     let mut tracker = build_tracker_backend(&runtime.workflow)?;
-    let workspace_manager = Arc::new(crate::opensymphony_workspace::WorkspaceManager::new(
-        build_workspace_manager_config_with_retention(
-            &runtime.workflow,
-            runtime.retain_failed,
-            runtime.preserve_terminal_workspaces,
-        ),
-    )?);
+    let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
+        routing
+            .legacy_repository
+            .as_deref()
+            .and_then(|alias| routing.inventory.get(alias))
+            .map(|entry| entry.identity.id.clone())
+    });
+    let workspace_manager = Arc::new(
+        crate::opensymphony_workspace::WorkspaceManager::new(
+            build_workspace_manager_config_with_retention(
+                &runtime.workflow,
+                runtime.retain_failed,
+                runtime.preserve_terminal_workspaces,
+            ),
+        )?
+        .with_legacy_repository(legacy_repository),
+    );
     let retry_state_root = runtime.state_root.clone().unwrap_or_else(|| {
         workspace_manager
             .config()

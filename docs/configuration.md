@@ -126,7 +126,9 @@ children while clearing it from the new parent; when the parent is neutral,
 existing child bindings are retained by child position during regeneration.
 Task-package `routingMode` must be a scalar `legacy_single` or `project_set`
 value; malformed YAML types are reported as ordinary package validation
-errors.
+errors. The planning compiler emits `project_set` plus the sorted
+`repositoryAliases` inventory whenever terminal bindings are present, so
+compiled task packages retain strict routing validation through publication.
 
 ## Configuration migration
 

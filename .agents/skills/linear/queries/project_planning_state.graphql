@@ -42,7 +42,11 @@ query ProjectPlanningState($slug: String!) {
             name
             type
           }
-          labels {
+          labels(first: 100) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
             nodes {
               id
               name
