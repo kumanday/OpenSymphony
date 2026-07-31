@@ -2938,10 +2938,27 @@ async fn call_memory_tool_with_workspace(
             let sources = registered_memory_sources(config)?
                 .into_iter()
                 .filter(|source| {
-                    scope
+                    let repo_matches = scope
                         .repo
                         .as_deref()
-                        .is_none_or(|repository_id| source.repository_id == repository_id)
+                        .is_none_or(|repository_id| source.repository_id == repository_id);
+                    let project_matches =
+                        scope
+                            .project
+                            .as_deref()
+                            .and_then(non_empty)
+                            .is_none_or(|project_id| {
+                                config
+                                    .repository_sources
+                                    .get(&source.repository_id)
+                                    .map(|repository| {
+                                        repository.project_scope_ids.contains(&project_id)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        config.project_scope_ids.contains(&project_id)
+                                    })
+                            });
+                    repo_matches && project_matches
                 })
                 .collect::<Vec<_>>();
             Ok(json!({
@@ -3391,7 +3408,7 @@ async fn call_code_ast_context_tool(
     let paths = ast_path_args(arguments)?;
     let limit = ast_limit(config, arguments);
     let symbol_kinds = normalized_string_set_args(arguments, &["symbols"]);
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
     let artifacts = code_intel_artifacts_with_symbol_kinds_blocking(
         repo_root,
@@ -3462,7 +3479,7 @@ where
 
 fn ast_documents(config: &MemoryConfig, arguments: &Value) -> Result<AstDocuments, MemoryError> {
     let scope = scope_filter_from_mcp(config, arguments, false)?;
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
     let paths = ast_path_args(arguments)?;
     let mut files = Vec::new();
     let mut warnings = Vec::new();
@@ -3940,7 +3957,7 @@ async fn call_memory_ingest_code_intel_tool(
         .await?;
         (artifacts, Some(report))
     } else {
-        let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+        let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
         let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
         (artifacts, None)
     };
@@ -4013,7 +4030,7 @@ async fn code_intel_persist_artifacts_blocking(
     MemoryError,
 > {
     tokio::task::spawn_blocking(move || {
-        let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+        let repo_root = resolve_code_intel_repo_for_scope(&request.config, &request.scope)?;
         let plan = code_intel_documents_for_persistence(&request)?;
         let repo_id = repo_id_for_code_intel(&request.config, &request.scope);
         let commit_sha = git_commit_sha_for_repo(&repo_root);
@@ -4049,7 +4066,7 @@ async fn code_intel_persist_artifacts_blocking(
 fn code_intel_documents_for_persistence(
     request: &CodeIntelPersistRequest,
 ) -> Result<CodeIntelPersistencePlan, MemoryError> {
-    let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(&request.config, &request.scope)?;
     let repo_id = repo_id_for_code_intel(&request.config, &request.scope);
     let mut artifacts = Vec::new();
     let mut documents = Vec::new();
@@ -4780,7 +4797,7 @@ fn append_code_intel_context(
     paths: &[PathBuf],
     limit: usize,
 ) -> Result<(), MemoryError> {
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(config, scope)?;
     let scope_refs = scope_refs_for_context(scope, paths);
     let artifacts =
         CompositeCodeIntelProvider::new(repo_root).code_context(paths, &scope_refs, limit)?;
@@ -4795,7 +4812,7 @@ async fn append_code_intel_context_blocking(
     paths: Vec<PathBuf>,
     limit: usize,
 ) -> Result<String, MemoryError> {
-    let repo_root = resolve_code_intel_repo(&config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(&config, &scope)?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
     let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
     append_code_intel_artifacts(&config, &mut output, artifacts);
@@ -4909,6 +4926,31 @@ fn resolve_code_intel_repo(
         )));
     }
     Ok(resolved)
+}
+
+fn resolve_code_intel_repo_for_scope(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+) -> Result<PathBuf, MemoryError> {
+    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    if scope.all_accessible {
+        return Ok(repo_root);
+    }
+    let Some(project_id) = scope.project.as_deref().and_then(non_empty) else {
+        return Ok(repo_root);
+    };
+    let Some(repository_id) = scope.repo.as_deref() else {
+        return Ok(repo_root);
+    };
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        return Ok(repo_root);
+    };
+    if !source.project_scope_ids.contains(&project_id) {
+        return Err(MemoryError::InvalidInput(format!(
+            "repository `{repository_id}` is not associated with project `{project_id}`"
+        )));
+    }
+    Ok(repo_root)
 }
 
 fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<CodeIntelScope> {

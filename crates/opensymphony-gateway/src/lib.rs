@@ -2076,9 +2076,11 @@ async fn get_run_code_outline(
     let relative_path = validate_workspace_relative_path(raw_path)?;
     let file_path = contained_workspace_path(&workspace_path, &relative_path)?;
     let file_path = resolve_contained_workspace_file(&workspace_path, &file_path).await?;
-    let repo_id = params
-        .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path, state.memory_config.as_ref()));
+    let repo_id = run_repository_id(
+        params.repo_id,
+        &workspace_path,
+        state.memory_config.as_ref(),
+    )?;
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), state.memory_config.clone()) {
         let comparison_bases = state.comparison_bases.clone();
@@ -2152,16 +2154,18 @@ async fn get_run_code_diff_overlay(
             "run workspace is not available",
         )
     })?;
-    let repo_id = params
-        .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path, state.memory_config.as_ref()))
-        .ok_or_else(|| {
-            code_graph_response(
-                StatusCode::BAD_REQUEST,
-                "repo_id_required",
-                "run code diff overlay requires a repo id",
-            )
-        })?;
+    let repo_id = run_repository_id(
+        params.repo_id,
+        &workspace_path,
+        state.memory_config.as_ref(),
+    )?
+    .ok_or_else(|| {
+        code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "repo_id_required",
+            "run code diff overlay requires a repo id",
+        )
+    })?;
     let comparison_bases = state.comparison_bases.clone();
     let config = config.clone();
     let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
@@ -2210,16 +2214,18 @@ async fn get_run_code_graph(
             "run workspace is not available",
         )
     })?;
-    let repo_id = params
-        .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path, state.memory_config.as_ref()))
-        .ok_or_else(|| {
-            code_graph_response(
-                StatusCode::BAD_REQUEST,
-                "repo_id_required",
-                "run code graph requires a repo id",
-            )
-        })?;
+    let repo_id = run_repository_id(
+        params.repo_id,
+        &workspace_path,
+        state.memory_config.as_ref(),
+    )?
+    .ok_or_else(|| {
+        code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "repo_id_required",
+            "run code graph requires a repo id",
+        )
+    })?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -2407,12 +2413,6 @@ fn code_repo_id_for_workspace(
     config: Option<&MemoryConfig>,
 ) -> Option<String> {
     if let Some(config) = config {
-        if let Some(repository_id) = config.default_repository_id.clone() {
-            return Some(repository_id);
-        }
-        if config.repository_sources.len() == 1 {
-            return config.repository_sources.keys().next().cloned();
-        }
         let workspace_remote =
             command_single_line(workspace_path, "git", &["remote", "get-url", "origin"])
                 .ok()
@@ -2428,6 +2428,15 @@ fn code_repo_id_for_workspace(
                 return Some(repository_id.clone());
             }
         }
+        if config.repository_sources.len() == 1 {
+            return config.repository_sources.keys().next().cloned();
+        }
+        if let Some(repository_id) = config.default_repository_id.clone() {
+            return Some(repository_id);
+        }
+        if !config.repository_sources.is_empty() {
+            return None;
+        }
     }
     command_single_line(workspace_path, "git", &["remote", "get-url", "origin"])
         .ok()
@@ -2440,6 +2449,25 @@ fn code_repo_id_for_workspace(
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
         })
+}
+
+fn run_repository_id(
+    requested: Option<String>,
+    workspace_path: &StdPath,
+    config: Option<&MemoryConfig>,
+) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
+    let bound = code_repo_id_for_workspace(workspace_path, config);
+    if config.is_some_and(|config| !config.repository_sources.is_empty())
+        && let (Some(requested), Some(bound)) = (requested.as_deref(), bound.as_deref())
+        && requested != bound
+    {
+        return Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "repo_binding_mismatch",
+            "requested repository does not match the run workspace repository",
+        ));
+    }
+    Ok(requested.or(bound))
 }
 
 fn normalize_git_remote(remote: &str) -> String {

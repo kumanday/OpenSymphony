@@ -299,7 +299,34 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
             });
         }
     }
-    if let Some(repository_id) = config.default_repository_id.as_deref()
+    let issue_projects = [plan.issue.project_id.as_ref(), plan.issue.project_slug.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    let routed_repository_id = config
+        .default_repository_id
+        .clone()
+        .or_else(|| {
+            let candidates = config
+                .repository_sources
+                .values()
+                .filter(|source| {
+                    !issue_projects.is_empty()
+                        && source
+                            .project_scope_ids
+                            .iter()
+                            .any(|project| issue_projects.contains(project))
+                })
+                .map(|source| source.repository_id.clone())
+                .collect::<BTreeSet<_>>();
+            (candidates.len() == 1).then(|| candidates.into_iter().next()).flatten()
+        })
+        .or_else(|| {
+            (config.repository_sources.len() == 1)
+                .then(|| config.repository_sources.keys().next().cloned())
+                .flatten()
+        });
+    if let Some(repository_id) = routed_repository_id.as_deref()
         && !refs
             .iter()
             .any(|scope| scope.kind == KnowledgeScopeKind::Repository)
@@ -527,6 +554,10 @@ CREATE TABLE IF NOT EXISTS reviews (
   submitted_at TEXT,
   disposition TEXT
 );
+ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE changed_files ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE checks ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS source_id TEXT;
 CREATE TABLE IF NOT EXISTS areas (
   area TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -536,6 +567,7 @@ CREATE TABLE IF NOT EXISTS issue_areas (
   issue_key TEXT NOT NULL,
   area TEXT NOT NULL
 );
+ALTER TABLE issue_areas ADD COLUMN IF NOT EXISTS source_id TEXT;
 CREATE TABLE IF NOT EXISTS scope_refs (
   concept_id TEXT NOT NULL,
   scope_kind TEXT NOT NULL,
@@ -2810,17 +2842,99 @@ pub fn merge_legacy_memory_index(
                 serde_json::from_str::<Vec<String>>(&encoded)
                     .ok()
                     .filter(|ids| ids.iter().any(|id| id == source_id))
-                    .map(|ids| {
-                        (
-                            issue_key,
-                            ids.iter().all(|id| id == source_id),
-                        )
-                    })
+                    .map(|ids| (issue_key, ids))
             })
             .collect::<BTreeMap<_, _>>()
     };
-    for (issue_key, source_only) in &owned {
-        if *source_only {
+    for (issue_key, source_ids) in &owned {
+        if source_ids.len() <= 1 {
+            continue;
+        }
+        let source_ids = source_ids
+            .iter()
+            .filter(|owner| source_id_belongs_to_configured_repository(config, owner))
+            .collect::<Vec<_>>();
+        for owner in source_ids {
+            transaction
+                .execute(
+                    "INSERT INTO issue_areas (issue_key, area, source_id) SELECT issue_key, area, ? FROM issue_areas WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM issue_areas AS existing WHERE existing.issue_key = issue_areas.issue_key AND existing.area = issue_areas.area AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) SELECT issue_key, number, title, url, branch, merge_sha, merged_at, ? FROM pull_requests WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM pull_requests AS existing WHERE existing.issue_key = pull_requests.issue_key AND existing.number = pull_requests.number AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind, source_id) SELECT issue_key, pr_number, file_path, change_kind, ? FROM changed_files WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM changed_files AS existing WHERE existing.issue_key = changed_files.issue_key AND existing.pr_number = changed_files.pr_number AND existing.file_path = changed_files.file_path AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at, source_id) SELECT issue_key, pr_number, name, conclusion, completed_at, ? FROM checks WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM checks AS existing WHERE existing.issue_key = checks.issue_key AND existing.pr_number = checks.pr_number AND existing.name = checks.name AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition, source_id) SELECT issue_key, pr_number, reviewer, state, submitted_at, disposition, ? FROM reviews WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM reviews AS existing WHERE existing.issue_key = reviews.issue_key AND existing.pr_number = reviews.pr_number AND existing.reviewer IS NOT DISTINCT FROM reviews.reviewer AND existing.submitted_at IS NOT DISTINCT FROM reviews.submitted_at AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
+                    [issue_key],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+    }
+    for table in [
+        "issue_areas",
+        "pull_requests",
+        "changed_files",
+        "checks",
+        "reviews",
+    ] {
+        transaction
+            .execute(&format!("DELETE FROM {table} WHERE source_id = ?"), [source_id])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    for (issue_key, source_ids) in &owned {
+        if source_ids.len() == 1 {
             for table in [
                 "issue_areas",
                 "pull_requests",
@@ -2839,48 +2953,48 @@ pub fn merge_legacy_memory_index(
     }
     for (issue_key, area) in areas.into_iter().filter(|(key, _)| owned.contains_key(key)) {
         transaction.execute(
-            "INSERT INTO issue_areas (issue_key, area) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ?)",
-            params![issue_key, area, issue_key, area],
+            "INSERT INTO issue_areas (issue_key, area, source_id) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ? AND source_id IS NOT DISTINCT FROM ?)",
+            params![issue_key, area, source_id, issue_key, area, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     for (issue_key, number, title, url, branch, merge_sha, merged_at) in pull_requests.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
-            "UPDATE pull_requests SET title = ?, url = ?, branch = ?, merge_sha = ?, merged_at = ? WHERE issue_key = ? AND number = ?",
-            params![title, url, branch, merge_sha, merged_at, issue_key, number],
+            "UPDATE pull_requests SET title = ?, url = ?, branch = ?, merge_sha = ?, merged_at = ? WHERE issue_key = ? AND number = ? AND source_id = ?",
+            params![title, url, branch, merge_sha, merged_at, issue_key, number, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
         transaction.execute(
-            "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ?)",
-            params![issue_key, number, title, url, branch, merge_sha, merged_at, issue_key, number],
+            "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ? AND source_id = ?)",
+            params![issue_key, number, title, url, branch, merge_sha, merged_at, source_id, issue_key, number, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     for (issue_key, number, path, kind) in changed_files.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
-            "UPDATE changed_files SET change_kind = ? WHERE issue_key = ? AND pr_number = ? AND file_path = ?",
-            params![kind, issue_key, number, path],
+            "UPDATE changed_files SET change_kind = ? WHERE issue_key = ? AND pr_number = ? AND file_path = ? AND source_id = ?",
+            params![kind, issue_key, number, path, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
         transaction.execute(
-            "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM changed_files WHERE issue_key = ? AND pr_number = ? AND file_path = ?)",
-            params![issue_key, number, path, kind, issue_key, number, path],
+            "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind, source_id) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM changed_files WHERE issue_key = ? AND pr_number = ? AND file_path = ? AND source_id = ?)",
+            params![issue_key, number, path, kind, source_id, issue_key, number, path, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     for (issue_key, number, name, conclusion, completed_at) in checks.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
-            "UPDATE checks SET conclusion = ?, completed_at = ? WHERE issue_key = ? AND pr_number = ? AND name = ?",
-            params![conclusion, completed_at, issue_key, number, name],
+            "UPDATE checks SET conclusion = ?, completed_at = ? WHERE issue_key = ? AND pr_number = ? AND name = ? AND source_id = ?",
+            params![conclusion, completed_at, issue_key, number, name, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
         transaction.execute(
-            "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM checks WHERE issue_key = ? AND pr_number = ? AND name = ?)",
-            params![issue_key, number, name, conclusion, completed_at, issue_key, number, name],
+            "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at, source_id) SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM checks WHERE issue_key = ? AND pr_number = ? AND name = ? AND source_id = ?)",
+            params![issue_key, number, name, conclusion, completed_at, source_id, issue_key, number, name, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     for (issue_key, number, reviewer, state, submitted_at, disposition) in reviews.into_iter().filter(|row| owned.contains_key(&row.0)) {
         transaction.execute(
-            "UPDATE reviews SET state = ?, disposition = ? WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ?",
-            params![state, disposition, issue_key, number, reviewer, submitted_at],
+            "UPDATE reviews SET state = ?, disposition = ? WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ? AND source_id = ?",
+            params![state, disposition, issue_key, number, reviewer, submitted_at, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
         transaction.execute(
-            "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition) SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM reviews WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ?)",
-            params![issue_key, number, reviewer, state, submitted_at, disposition, issue_key, number, reviewer, submitted_at],
+            "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition, source_id) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM reviews WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ? AND source_id = ?)",
+            params![issue_key, number, reviewer, state, submitted_at, disposition, source_id, issue_key, number, reviewer, submitted_at, source_id],
         ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
     }
     transaction.commit().map_err(|source| MemoryError::DuckDb {
@@ -3006,6 +3120,22 @@ pub fn backfill_legacy_memory_source_scopes(
     })
 }
 
+fn project_scope_ids_for_source(config: &MemoryConfig, source_id: &str) -> BTreeSet<String> {
+    config
+        .repository_sources
+        .values()
+        .find(|source| source_id.starts_with(&format!("{}:", source.repository_id)))
+        .map(|source| source.project_scope_ids.iter().cloned().collect())
+        .unwrap_or_else(|| config.project_scope_ids.iter().cloned().collect())
+}
+
+fn source_id_belongs_to_configured_repository(config: &MemoryConfig, source_id: &str) -> bool {
+    config
+        .repository_sources
+        .values()
+        .any(|source| source_id.starts_with(&format!("{}:", source.repository_id)))
+}
+
 fn refresh_memory_index_from_okf_inner(
     config: &MemoryConfig,
     bundle_root: &Path,
@@ -3063,6 +3193,7 @@ fn refresh_memory_index_from_okf_inner(
         }
         let contents = read_to_string(&path)?;
         let concept = parse_okf_concept(&bundle_root, &path, &contents)?;
+        let has_work_item_identity = okf_has_work_item_identity(&concept, &concept.frontmatter.opensymphony);
         let mut row = OkfIndexRow::from_concept(
             config,
             relative.clone(),
@@ -3070,6 +3201,12 @@ fn refresh_memory_index_from_okf_inner(
             contents,
             warnings_by_path.remove(&path).unwrap_or_default(),
         )?;
+        if let Some(source_id) = source_id
+            && !has_work_item_identity
+        {
+            row.issue_key = format!("{source_id}:{}", row.issue_key);
+            row.concept_id = format!("{source_id}:{}", row.concept_id);
+        }
         if let Some(repository_id) = repository_id {
             let mut scope_refs =
                 serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
@@ -3132,6 +3269,22 @@ fn refresh_memory_index_from_okf_inner(
             path: config.index_path.clone(),
             source,
         })?;
+    if let Some(source_id) = source_id {
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            transaction
+                .execute(&format!("DELETE FROM {table} WHERE source_id = ?"), [source_id])
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+    }
     if replace_existing {
         transaction
             .execute(
@@ -3280,11 +3433,19 @@ fn refresh_memory_index_from_okf_inner(
                         .and_then(|repository_id| config.repository_sources.get(repository_id))
                         .map(|source| &source.project_scope_ids)
                         .unwrap_or(&config.project_scope_ids);
-                    let active_project_scopes = config
-                        .repository_sources
-                        .values()
-                        .flat_map(|source| source.project_scope_ids.iter())
-                        .chain(config.project_scope_ids.iter())
+                    let remaining_owner_ids = existing_source_ids
+                        .iter()
+                        .filter(|existing_source_id| {
+                            source_id.is_none_or(|source_id| *existing_source_id != source_id)
+                        })
+                        .cloned()
+                        .chain(source_id.into_iter().map(str::to_string))
+                        .collect::<Vec<_>>();
+                    let owner_project_scopes = remaining_owner_ids
+                        .iter()
+                        .flat_map(|existing_source_id| {
+                            project_scope_ids_for_source(config, existing_source_id)
+                        })
                         .collect::<BTreeSet<_>>();
                     for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
                         .unwrap_or_default()
@@ -3306,7 +3467,7 @@ fn refresh_memory_index_from_okf_inner(
                                 || (scope.kind == KnowledgeScopeKind::Project
                                     && refreshed_project_scopes.contains(&scope.id)));
                         let stale_project_scope = scope.kind == KnowledgeScopeKind::Project
-                            && !active_project_scopes.contains(&scope.id)
+                            && !owner_project_scopes.contains(&scope.id)
                             && !scope_refs.contains(&scope);
                         if replaced_scope || stale_project_scope {
                             continue;
@@ -3410,10 +3571,10 @@ fn refresh_memory_index_from_okf_inner(
                     path: config.index_path.clone(),
                     source,
                 })?;
-                transaction
-                    .execute(
-                        "INSERT INTO issue_areas (issue_key, area) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ?)",
-                        params![row.issue_key, area, row.issue_key, area],
+            transaction
+                .execute(
+                    "INSERT INTO issue_areas (issue_key, area, source_id) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ? AND source_id IS NOT DISTINCT FROM ?)",
+                    params![row.issue_key, area, source_id, row.issue_key, area, source_id],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -3421,20 +3582,22 @@ fn refresh_memory_index_from_okf_inner(
                 })?;
         }
         for pr in &row.prs {
-                transaction
-                    .execute(
-                        "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ?)",
-                        params![
-                            row.issue_key,
-                            pr.number as i64,
+            transaction
+                .execute(
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ? AND source_id IS NOT DISTINCT FROM ?)",
+                    params![
+                        row.issue_key,
+                        pr.number as i64,
                         pr.title.clone(),
                         pr.url.clone(),
-                            pr.branch.clone(),
-                            pr.merge_sha.clone(),
-                            pr.merged_at.map(|value| value.to_rfc3339()),
-                            row.issue_key,
-                            pr.number as i64,
-                        ],
+                        pr.branch.clone(),
+                        pr.merge_sha.clone(),
+                        pr.merged_at.map(|value| value.to_rfc3339()),
+                        source_id,
+                        row.issue_key,
+                        pr.number as i64,
+                        source_id,
+                    ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -3594,6 +3757,25 @@ fn okf_issue_key(
                 .map(|source| normalize_issue_key(&source.id))
         })
         .unwrap_or_else(|| normalize_issue_key(&concept.id))
+}
+
+fn okf_has_work_item_identity(
+    concept: &OkfConcept,
+    metadata: &Option<OpenSymphonyOkfMetadata>,
+) -> bool {
+    metadata
+        .as_ref()
+        .is_some_and(|metadata| {
+            metadata
+                .scope_refs
+                .iter()
+                .any(|scope| scope.kind == KnowledgeScopeKind::WorkItem)
+                || metadata
+                    .source_refs
+                    .iter()
+                    .any(|source| source.kind == "linear_issue")
+        })
+        || string_extra(&concept.frontmatter, "issue").is_some()
 }
 
 fn okf_index_concept_type(concept_type: &str) -> String {
