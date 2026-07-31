@@ -715,6 +715,37 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
 }
 
 #[tokio::test]
+async fn issue_states_by_ids_paginates_nested_labels() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(include_str!("fixtures/issue_states_with_label_paging.json")),
+        QueuedResponse::json(include_str!("fixtures/issue_states_labels_page_2.json")),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let snapshots = client
+        .issue_states_by_ids(&["issue-260".to_string()])
+        .await
+        .expect("issue state label pages should succeed");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].labels, vec!["repo:core", "repo:tail"]);
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["variables"]["labelAfter"], Value::Null);
+    assert_eq!(
+        requests[1].body["variables"]["labelAfter"],
+        Value::String("labels-cursor-1".to_string())
+    );
+    assert_eq!(
+        requests[1].body["variables"]["issueIds"],
+        serde_json::json!(["issue-260"])
+    );
+}
+
+#[tokio::test]
 async fn issue_states_by_ids_omits_missing_ids_for_cross_project_recovery() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
         "fixtures/issue_states_missing_id.json"

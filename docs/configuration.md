@@ -124,6 +124,8 @@ Generated planning front matter quotes repository aliases as YAML strings, and
 sub-issue regeneration moves a parent's binding to the generated terminal
 children while clearing it from the new parent; when the parent is neutral,
 existing child bindings are retained by child position during regeneration.
+Task-package conversion rejects explicitly blank repository aliases in every
+routing mode while continuing to accept unlabelled tasks in `legacy_single`.
 Task-package `routingMode` must be a scalar `legacy_single` or `project_set`
 value; malformed YAML types are reported as ordinary package validation
 errors. The planning compiler emits `project_set` plus the sorted

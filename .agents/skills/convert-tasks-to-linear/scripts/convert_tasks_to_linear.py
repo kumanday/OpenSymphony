@@ -496,11 +496,11 @@ def validate_repository_bindings(
             errors.append(f"parent task {task.id} must not declare a repository binding")
         if mode == "project_set" and task.id not in parent_ids and len(aliases) != 1:
             errors.append(f"terminal task {task.id} must declare exactly one repository binding")
-        if mode == "project_set" or configured_aliases:
-            for alias in aliases:
-                if not alias:
-                    errors.append(f"task {task.id} repository alias must be non-empty")
-                    continue
+        for alias in aliases:
+            if not alias:
+                errors.append(f"task {task.id} repository alias must be non-empty")
+                continue
+            if mode == "project_set" or configured_aliases:
                 if alias not in configured_aliases:
                     errors.append(f"task {task.id} references unknown repository alias {alias}")
 

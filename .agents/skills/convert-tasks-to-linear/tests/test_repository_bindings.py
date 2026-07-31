@@ -95,6 +95,15 @@ class RepositoryBindingTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
 
+    def test_legacy_single_rejects_blank_repository_alias(self):
+        errors: list[str] = []
+
+        CONVERTER.validate_repository_bindings(
+            {"TASK": task("TASK", [""])}, "legacy_single", set(), errors
+        )
+
+        self.assertIn("task TASK repository alias must be non-empty", errors)
+
     def test_linear_conversion_preserves_unmanaged_labels(self):
         source = task("TASK", ["core"])
         source.areas = ["orchestrator"]

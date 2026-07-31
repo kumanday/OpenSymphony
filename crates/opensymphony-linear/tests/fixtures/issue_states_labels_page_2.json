@@ -1,0 +1,29 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "issue-260",
+          "identifier": "COE-260",
+          "updatedAt": "2026-03-21T16:00:00Z",
+          "state": {
+            "id": "state-started",
+            "name": "In Progress",
+            "type": "started"
+          },
+          "labels": {
+            "nodes": [{ "name": "repo:tail" }],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
+    }
+  }
+}

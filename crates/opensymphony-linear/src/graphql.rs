@@ -306,7 +306,14 @@ query IssueInverseRelationsPage($issueId: String!, $first: Int!, $after: String)
 "#;
 
 pub(super) const ISSUE_STATES_BY_IDS_QUERY: &str = r#"
-query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $after: String) {
+query IssueStatesByIds(
+  $projectSlug: String!
+  $issueIds: [ID!]
+  $first: Int!
+  $after: String
+  $labelFirst: Int!
+  $labelAfter: String
+) {
   issues(
     filter: {
       id: { in: $issueIds }
@@ -325,9 +332,13 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $a
         name
         type
       }
-      labels(first: 100) {
+      labels(first: $labelFirst, after: $labelAfter) {
         nodes {
           name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
     }
@@ -717,6 +728,8 @@ pub(super) struct IssueStatesByIdsVariables {
     pub issue_ids: Vec<String>,
     pub first: usize,
     pub after: Option<String>,
+    pub label_first: usize,
+    pub label_after: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -668,13 +668,55 @@ impl LinearClient {
                 issue_ids: issue_ids.clone(),
                 first: self.config.page_size,
                 after: after.clone(),
+                label_first: self.config.page_size,
+                label_after: None,
             };
             let response: IssueStatesByIdsData = self
                 .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(variables))
                 .await?;
 
             let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
+            for mut node in response.issues.nodes {
+                let mut labels = std::mem::take(&mut node.labels.nodes);
+                let label_page_info = std::mem::take(&mut node.labels.page_info);
+                let mut label_after = next_page_cursor(
+                    label_page_info.has_next_page,
+                    label_page_info.end_cursor,
+                    "Linear issue-state label page",
+                )?;
+                while let Some(label_after_cursor) = label_after {
+                    let label_variables = IssueStatesByIdsVariables {
+                        project_slug: project_slug.clone(),
+                        issue_ids: vec![node.id.clone()],
+                        first: 1,
+                        after: None,
+                        label_first: self.config.page_size,
+                        label_after: Some(label_after_cursor),
+                    };
+                    let label_response: IssueStatesByIdsData = self
+                        .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(label_variables))
+                        .await?;
+                    let mut label_nodes = label_response.issues.nodes;
+                    let label_node = label_nodes.pop().ok_or_else(|| {
+                        LinearError::InvalidResponse(format!(
+                            "Linear issue-state label page returned no issue for {}",
+                            node.id
+                        ))
+                    })?;
+                    if !label_nodes.is_empty() || label_node.id != node.id {
+                        return Err(LinearError::InvalidResponse(format!(
+                            "Linear issue-state label page returned an unexpected issue for {}",
+                            node.id
+                        )));
+                    }
+                    labels.extend(label_node.labels.nodes);
+                    label_after = next_page_cursor(
+                        label_node.labels.page_info.has_next_page,
+                        label_node.labels.page_info.end_cursor,
+                        "Linear issue-state label page",
+                    )?;
+                }
+                node.labels.nodes = labels;
                 snapshots.push(normalize_issue_state(node));
             }
 
@@ -1346,6 +1388,24 @@ fn header_value(
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
+}
+
+fn next_page_cursor(
+    has_next_page: bool,
+    end_cursor: Option<String>,
+    page_context: &str,
+) -> Result<Option<String>, LinearError> {
+    if !has_next_page {
+        return Ok(None);
+    }
+
+    end_cursor
+        .ok_or_else(|| {
+            LinearError::InvalidResponse(format!(
+                "{page_context} indicated a next page without an end cursor"
+            ))
+        })
+        .map(Some)
 }
 
 fn normalize_strings<S>(values: &[S]) -> Vec<String>
