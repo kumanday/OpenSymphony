@@ -23,6 +23,7 @@ use crate::opensymphony_control::{
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
     WorkerOutcome,
 };
+use crate::opensymphony_domain::{RepositoryRouting, RepositoryRoutingMode};
 use crate::opensymphony_openhands::{
     ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
     SupervisedServerConfig, SupervisorConfig, TransportConfig,
@@ -214,8 +215,14 @@ struct DoctorRuntimeConfig {
 struct RehydrateRuntimeConfig {
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
+    repository_routing: Option<RepositoryRouting>,
     repository_checkouts:
         Option<BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>>,
+}
+
+fn strict_recovery_enabled(repository_routing: Option<&RepositoryRouting>) -> bool {
+    repository_routing
+        .is_some_and(|routing| matches!(routing.mode, RepositoryRoutingMode::ProjectSet))
 }
 
 struct DoctorWorkflowEnvironment {
@@ -2217,10 +2224,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
     let runtime = resolve_rehydrate_runtime(&current_dir, args.config.as_deref()).await?;
-    let strict_recovery = runtime
-        .repository_checkouts
-        .as_ref()
-        .is_some_and(|checkouts| !checkouts.is_empty());
+    let strict_recovery = strict_recovery_enabled(runtime.repository_routing.as_ref());
     let workflow = runtime.workflow;
 
     // Setup workspace manager
@@ -2259,11 +2263,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         serde_json::from_str(&manifest_content)
             .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
 
-    if runtime
-        .repository_checkouts
-        .as_ref()
-        .is_some_and(|checkouts| !checkouts.is_empty())
-    {
+    if strict_recovery_enabled(runtime.repository_routing.as_ref()) {
         let envelope = old_manifest.runtime_envelope.as_ref().ok_or_else(|| {
             format!(
                 "strict workspace {} has no persisted runtime envelope",
@@ -2419,7 +2419,7 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
             .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
     let mut central_instruction_path = None;
-    let (target_repo, tool_dir, central_front_matter, repository_checkouts) =
+    let (target_repo, tool_dir, central_front_matter, repository_routing, repository_checkouts) =
         if config_path.is_file() {
             let raw = fs::read_to_string(&config_path)
                 .await
@@ -2435,6 +2435,7 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
                     }),
                     central.tool_dir(),
                     Some(central.workflow_front_matter.clone()),
+                    Some(central.repository_routing),
                     Some(central.repository_checkouts),
                 )
             } else {
@@ -2463,10 +2464,10 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
                     .tool_dir
                     .as_deref()
                     .map(|value| resolve_path(config_root, value));
-                (target_repo, tool_dir, None, None)
+                (target_repo, tool_dir, None, None, None)
             }
         } else {
-            (current_dir.to_path_buf(), None, None, None)
+            (current_dir.to_path_buf(), None, None, None, None)
         };
 
     let central_instruction_configured = central_instruction_path.is_some();
@@ -2508,6 +2509,7 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
     Ok(RehydrateRuntimeConfig {
         workflow,
         tool_dir,
+        repository_routing,
         repository_checkouts,
     })
 }
@@ -2619,10 +2621,16 @@ fn build_rehydrate_client(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        path::PathBuf,
+        time::Duration,
+    };
 
     use crate::opensymphony_domain::{
         ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+        RepositoryRouting, RepositoryRoutingMode,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use clap::{Parser, error::ErrorKind};
@@ -2658,6 +2666,24 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn strict_recovery_requires_project_set_routing() {
+        let mut routing = RepositoryRouting {
+            mode: RepositoryRoutingMode::LegacySingle,
+            inventory: BTreeMap::new(),
+            project_repositories: BTreeMap::new(),
+            active_projects: BTreeSet::new(),
+            legacy_repository: Some("repo".to_owned()),
+            config_generation: "config".to_owned(),
+            inventory_generation: "inventory".to_owned(),
+        };
+
+        assert!(!super::strict_recovery_enabled(Some(&routing)));
+        routing.mode = RepositoryRoutingMode::ProjectSet;
+        assert!(super::strict_recovery_enabled(Some(&routing)));
+        assert!(!super::strict_recovery_enabled(None));
     }
 
     #[test]
@@ -2976,7 +3002,7 @@ openhands:
             &runtime.workflow,
             &transport,
             None,
-            &std::collections::BTreeSet::new(),
+            &BTreeSet::new(),
         ) {
             Err(error) => error,
             Ok(_) => panic!("managed-local rehydration should require tool_dir"),
@@ -3005,7 +3031,7 @@ openhands:
             &runtime.workflow,
             &transport,
             Some(&tool_dir),
-            &std::collections::BTreeSet::new(),
+            &BTreeSet::new(),
         ) {
             Err(error) => error,
             Ok(_) => panic!("invalid managed-local tooling should be reported"),

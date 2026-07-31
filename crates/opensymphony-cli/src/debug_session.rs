@@ -80,6 +80,7 @@ struct DebugRuntimeConfig {
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
     conversation_store: Option<OpenHandsConversationStorePaths>,
+    repository_routing: Option<crate::opensymphony_domain::RepositoryRouting>,
     repository_checkouts: Option<BTreeMap<String, CheckoutRepository>>,
 }
 
@@ -367,10 +368,7 @@ pub async fn run_command(args: DebugArgs) -> ExitCode {
 
 async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     let runtime = resolve_runtime_config(&args).await?;
-    let strict_recovery = runtime
-        .repository_checkouts
-        .as_ref()
-        .is_some_and(|checkouts| !checkouts.is_empty());
+    let strict_recovery = super::strict_recovery_enabled(runtime.repository_routing.as_ref());
     let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
     let workspace = if strict_recovery {
@@ -875,6 +873,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         configured_tool_dir,
         central_front_matter,
         central_instruction_path,
+        repository_routing,
         repository_checkouts,
     ) = if let Some(path) = config_path.as_ref() {
         let raw =
@@ -894,6 +893,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
                 central.tool_dir(),
                 Some(central.workflow_front_matter.clone()),
                 central.repository_instruction_path,
+                Some(central.repository_routing),
                 Some(central.repository_checkouts),
             )
         } else {
@@ -916,10 +916,10 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
                 .as_deref()
                 .map(|value| resolve_config_path(path, config_root, value))
                 .transpose()?;
-            (target_repo, tool_dir, None, None, None)
+            (target_repo, tool_dir, None, None, None, None)
         }
     } else {
-        (default_target_repo, None, None, None, None)
+        (default_target_repo, None, None, None, None, None)
     };
 
     let central_instruction_configured = central_instruction_path.is_some();
@@ -955,6 +955,7 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         workflow,
         tool_dir: configured_tool_dir,
         conversation_store,
+        repository_routing,
         repository_checkouts,
     })
 }
@@ -2200,6 +2201,7 @@ openhands:
             workflow,
             tool_dir,
             conversation_store: None,
+            repository_routing: None,
             repository_checkouts: None,
         }
     }

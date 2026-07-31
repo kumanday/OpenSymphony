@@ -222,6 +222,37 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
 }
 
 #[tokio::test]
+async fn checkout_timeout_does_not_override_legacy_hook_timeout() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig {
+            after_create: Some(HookDefinition::shell(timeout_command())),
+            timeout: Duration::from_millis(200),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+
+    let error = manager
+        .ensure_with_checkout_timeout(
+            &sample_issue("COE-549-hook-timeout"),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("legacy hook should use its configured timeout");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::HookTimedOut {
+            hook: HookKind::AfterCreate,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let source = temp_dir.path().join("source");

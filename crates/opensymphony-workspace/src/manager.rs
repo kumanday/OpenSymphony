@@ -168,6 +168,33 @@ impl WorkspaceManager {
         self.ensure_with_run_id(issue, None).await
     }
 
+    pub async fn ensure_with_checkout_timeout(
+        &self,
+        issue: &IssueDescriptor,
+        checkout_timeout: std::time::Duration,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
+        if let Some(binding) = issue
+            .repository_binding
+            .as_ref()
+            .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
+            && let Some(repository) = self
+                .checkout_repositories
+                .get(binding.repository_id().as_str())
+        {
+            return self
+                .ensure_verified_checkout_for_run(
+                    issue,
+                    binding,
+                    repository,
+                    None,
+                    Some(checkout_timeout),
+                )
+                .await;
+        }
+
+        self.ensure(issue).await
+    }
+
     pub async fn ensure_with_run_id(
         &self,
         issue: &IssueDescriptor,
@@ -182,7 +209,7 @@ impl WorkspaceManager {
                 .get(binding.repository_id().as_str())
         {
             return self
-                .ensure_verified_checkout_for_run(issue, binding, repository, run_id)
+                .ensure_verified_checkout_for_run(issue, binding, repository, run_id, None)
                 .await;
         }
 
@@ -302,7 +329,7 @@ impl WorkspaceManager {
         binding: &RepositoryBinding,
         repository: &CheckoutRepository,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        self.ensure_verified_checkout_for_run(issue, binding, repository, None)
+        self.ensure_verified_checkout_for_run(issue, binding, repository, None, None)
             .await
     }
 
@@ -312,6 +339,7 @@ impl WorkspaceManager {
         binding: &RepositoryBinding,
         repository: &CheckoutRepository,
         run_id: Option<&str>,
+        checkout_timeout: Option<std::time::Duration>,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
         let workspace_key = checkout_workspace_key(
@@ -342,9 +370,25 @@ impl WorkspaceManager {
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
         self.reject_symlinked_workspace_root(&staging_path).await?;
         let mut staging_cleanup = StagingCleanupGuard::new(staging_path.clone());
-        let clone_result = self
-            .run_git_clone(repository, &staging_path, &mut staging_cleanup)
-            .await;
+        let clone_result = match checkout_timeout {
+            Some(timeout_duration) => match timeout(
+                timeout_duration,
+                self.run_git_clone(repository, &staging_path, &mut staging_cleanup),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(WorkspaceError::CheckoutOperation {
+                    operation: "acquire verified checkout".to_owned(),
+                    path: staging_path.clone(),
+                    detail: format!("checkout acquisition timed out after {timeout_duration:?}"),
+                }),
+            },
+            None => {
+                self.run_git_clone(repository, &staging_path, &mut staging_cleanup)
+                    .await
+            }
+        };
         if clone_result.is_err() {
             let _ = fs::remove_dir_all(&staging_path).await;
         }
