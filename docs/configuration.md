@@ -164,6 +164,12 @@ malformed strict plan has not yet assigned bindings to its terminal tasks; the
 converter then rejects the missing bindings instead of downgrading the package
 to legacy dispatch.
 Every configured and task-level alias must remain non-empty after trimming.
+The Rust manifest validator applies the same strict cardinality and inventory
+checks, including rejecting multi-alias list forms before a package can be
+accepted. During publication, existing Linear child presence is checked before
+adding a repository label so removed package children cannot leave a bound
+parent behind. Gateway task-graph and run-detail blockers preserve the typed
+repository-binding reason for operators.
 An explicitly configured but blank `remote.provider_id` is rejected rather
 than falling back to the mutable repository locator for canonical identity.
 Issue regeneration retains terminal-child bindings by position and keeps the

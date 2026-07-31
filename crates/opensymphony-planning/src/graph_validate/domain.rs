@@ -203,6 +203,11 @@ pub struct ManifestValidationResult {
     pub creation_order_cycles: Vec<Vec<TaskId>>,
     pub self_blocks: Vec<SelfBlock>,
     pub duplicate_task_ids: Vec<TaskId>,
+    /// Repository bindings that do not satisfy the task-package routing
+    /// contract. This includes malformed inventories and terminal tasks with
+    /// zero, blank, multiple, or unknown aliases.
+    #[serde(default)]
+    pub invalid_repository_bindings: Vec<InvalidRepositoryBinding>,
 }
 
 impl ManifestValidationResult {
@@ -215,6 +220,7 @@ impl ManifestValidationResult {
             && self.creation_order_cycles.is_empty()
             && self.self_blocks.is_empty()
             && self.duplicate_task_ids.is_empty()
+            && self.invalid_repository_bindings.is_empty()
     }
 
     /// Total error finding count. Useful for test assertions.
@@ -230,7 +236,17 @@ impl ManifestValidationResult {
                 .sum::<usize>()
             + self.self_blocks.len()
             + self.duplicate_task_ids.len()
+            + self.invalid_repository_bindings.len()
     }
+}
+
+/// A task-package repository binding validation finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvalidRepositoryBinding {
+    /// `None` identifies a manifest-level inventory or routing-mode error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<TaskId>,
+    pub reason: String,
 }
 
 /// One entry per task file that the manifest references but is missing

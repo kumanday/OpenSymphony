@@ -797,6 +797,12 @@ def ensure_issues(
             }
             if task.parent:
                 input_data["parentId"] = issue_map[task.parent]["id"]
+            if existing and task.repository_aliases and issue_has_children(existing):
+                identifier = existing.get("identifier") or existing["id"]
+                raise LinearError(
+                    f"task {task.id} cannot receive a repository binding because "
+                    f"existing Linear issue {identifier} has children"
+                )
             if existing and issue_labels_need_pagination(existing):
                 existing = fetch_issue_for_label_merge(client, existing["id"])
             existing_labels = (
@@ -855,6 +861,11 @@ def fetch_issue_for_label_merge(client: LinearClient, issue_id: str) -> dict[str
 def issue_labels_need_pagination(issue: dict[str, Any]) -> bool:
     page_info = issue.get("labels", {}).get("pageInfo", {})
     return bool(page_info.get("hasNextPage"))
+
+
+def issue_has_children(issue: dict[str, Any]) -> bool:
+    children = issue.get("children", {})
+    return bool(children.get("nodes")) if isinstance(children, dict) else False
 
 
 def ensure_area_labels(client: LinearClient, package: Package, team: dict[str, Any]) -> dict[str, str]:

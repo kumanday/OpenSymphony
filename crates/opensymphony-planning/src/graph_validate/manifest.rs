@@ -11,6 +11,7 @@
 //! - creation-order cycles (Kahn-style topological check)
 //! - self-blocks (a task declaring itself in `blockedBy`)
 //! - duplicate task IDs in the manifest
+//! - invalid canonical repository bindings in strict task packages
 //!
 //! Findings are surfaced as separate vector fields so the planning-session
 //! API can render each class in its own section. The result supports
@@ -25,10 +26,12 @@ use serde::Deserialize;
 use crate::opensymphony_planning::generator::domain::TaskId;
 
 use super::domain::{
-    InvalidTaskFile, ManifestValidationResult, MissingTaskFile, SelfBlock, UnknownDependency,
-    UnknownMilestone,
+    InvalidRepositoryBinding, InvalidTaskFile, ManifestValidationResult, MissingTaskFile,
+    SelfBlock, UnknownDependency, UnknownMilestone,
 };
-use super::frontmatter::{TaskFrontmatter, TaskFrontmatterError, parse_task_file};
+use super::frontmatter::{
+    RepositoryFrontmatter, TaskFrontmatter, TaskFrontmatterError, parse_task_file,
+};
 
 /// Raw representation of `docs/tasks/task-package.yaml`.
 ///
@@ -44,7 +47,15 @@ pub struct TaskPackageManifestFile {
     pub tasks_dir: String,
     #[serde(default)]
     pub milestones: Vec<String>,
+    #[serde(rename = "routingMode", default = "default_routing_mode")]
+    pub routing_mode: String,
+    #[serde(rename = "repositoryAliases", default)]
+    pub repository_aliases: Vec<String>,
     pub tasks: Vec<ManifestTaskEntry>,
+}
+
+fn default_routing_mode() -> String {
+    "legacy_single".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +133,7 @@ impl ManifestValidator {
             creation_order_cycles: Vec::new(),
             self_blocks: Vec::new(),
             duplicate_task_ids: Vec::new(),
+            invalid_repository_bindings: Vec::new(),
         };
 
         let mut seen_ids: BTreeSet<TaskId> = BTreeSet::new();
@@ -192,6 +204,8 @@ impl ManifestValidator {
             }
         }
 
+        validate_repository_bindings(manifest, &entries, &mut result);
+
         result.creation_order_cycles = creation_order_cycles(&adjacency, &id_set);
         // Stable order keeps the artefact diff-friendly for tests.
         result
@@ -207,7 +221,122 @@ impl ManifestValidator {
             .unknown_dependencies
             .sort_by(|a, b| a.from_task_id.cmp(&b.from_task_id));
         result.self_blocks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        result.invalid_repository_bindings.sort_by(|left, right| {
+            left.task_id
+                .cmp(&right.task_id)
+                .then_with(|| left.reason.cmp(&right.reason))
+        });
         result
+    }
+}
+
+fn validate_repository_bindings(
+    manifest: &TaskPackageManifestFile,
+    entries: &[(TaskId, TaskFrontmatter)],
+    result: &mut ManifestValidationResult,
+) {
+    let routing_mode = manifest.routing_mode.trim();
+    let is_project_set = routing_mode == "project_set";
+    if !matches!(routing_mode, "legacy_single" | "project_set") {
+        result.invalid_repository_bindings.push(InvalidRepositoryBinding {
+            task_id: None,
+            reason: format!(
+                "manifest routingMode must be legacy_single or project_set, got `{routing_mode}`"
+            ),
+        });
+    }
+
+    let mut configured_aliases = BTreeSet::new();
+    for alias in &manifest.repository_aliases {
+        let normalized = alias.trim();
+        if normalized.is_empty() {
+            result
+                .invalid_repository_bindings
+                .push(InvalidRepositoryBinding {
+                    task_id: None,
+                    reason: "manifest repositoryAliases entries must be non-empty after trimming"
+                        .to_owned(),
+                });
+        } else {
+            configured_aliases.insert(normalized.to_owned());
+        }
+    }
+    if is_project_set && configured_aliases.is_empty() {
+        result
+            .invalid_repository_bindings
+            .push(InvalidRepositoryBinding {
+                task_id: None,
+                reason: "project_set packages must declare a non-empty repositoryAliases inventory"
+                    .to_owned(),
+            });
+    }
+
+    let parent_ids: BTreeSet<TaskId> = entries
+        .iter()
+        .filter_map(|(_, frontmatter)| frontmatter.parent.as_deref())
+        .map(|parent| TaskId::new(parent.trim().to_owned()))
+        .collect();
+
+    for (task_id, frontmatter) in entries {
+        let aliases = repository_aliases(frontmatter);
+        if aliases.iter().any(String::is_empty) {
+            result
+                .invalid_repository_bindings
+                .push(InvalidRepositoryBinding {
+                    task_id: Some(task_id.clone()),
+                    reason: "repository alias must be non-empty after trimming".to_owned(),
+                });
+        }
+        if aliases.len() > 1 {
+            result
+                .invalid_repository_bindings
+                .push(InvalidRepositoryBinding {
+                    task_id: Some(task_id.clone()),
+                    reason: format!(
+                        "task declares multiple managed repository bindings: {}",
+                        aliases.join(", ")
+                    ),
+                });
+        }
+        if parent_ids.contains(task_id) && !aliases.is_empty() {
+            result
+                .invalid_repository_bindings
+                .push(InvalidRepositoryBinding {
+                    task_id: Some(task_id.clone()),
+                    reason: "parent task must not declare a repository binding".to_owned(),
+                });
+        }
+        if is_project_set && !parent_ids.contains(task_id) && aliases.len() != 1 {
+            result
+                .invalid_repository_bindings
+                .push(InvalidRepositoryBinding {
+                    task_id: Some(task_id.clone()),
+                    reason: "terminal task must declare exactly one repository binding".to_owned(),
+                });
+        }
+        for alias in aliases.into_iter().filter(|alias| !alias.is_empty()) {
+            if (is_project_set || !configured_aliases.is_empty())
+                && !configured_aliases.contains(&alias)
+            {
+                result
+                    .invalid_repository_bindings
+                    .push(InvalidRepositoryBinding {
+                        task_id: Some(task_id.clone()),
+                        reason: format!("unknown repository alias `{alias}`"),
+                    });
+            }
+        }
+    }
+}
+
+fn repository_aliases(frontmatter: &TaskFrontmatter) -> Vec<String> {
+    match frontmatter.repository.as_ref() {
+        None => Vec::new(),
+        Some(RepositoryFrontmatter::String(alias)) => vec![alias.trim().to_owned()],
+        Some(RepositoryFrontmatter::List(aliases)) => aliases
+            .iter()
+            .map(|alias| alias.trim().to_owned())
+            .collect(),
     }
 }
 
@@ -361,6 +490,52 @@ mod tests {
         let result = ManifestValidator::validate_against_repo_root(&manifest, tmp.path());
         assert!(result.is_ok(), "unexpected findings: {result:?}");
         assert_eq!(result.error_count(), 0);
+    }
+
+    #[test]
+    fn rejects_multiple_repository_aliases_in_strict_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = fixture_with_manifest(
+            tmp.path(),
+            "planningWave: test\ntasksDir: docs/tasks\nroutingMode: project_set\nrepositoryAliases: [core, web]\nmilestones: [M1]\ntasks:\n  - id: TASK-A\n    file: docs/tasks/a.md\n",
+            vec![
+                (
+                    "docs/tasks/a.md".to_string(),
+                    "---\nid: TASK-A\ntitle: TASK-A\nmilestone: M1\nrepository: [core, web]\n---\n# Test\n"
+                        .to_string(),
+                ),
+            ],
+        );
+
+        let result = ManifestValidator::validate_against_repo_root(&manifest, tmp.path());
+        assert!(!result.is_ok());
+        assert!(result.invalid_repository_bindings.iter().any(|finding| {
+            finding.task_id == Some(TaskId::new("TASK-A"))
+                && finding
+                    .reason
+                    .contains("multiple managed repository bindings")
+        }));
+    }
+
+    #[test]
+    fn validates_strict_repository_alias_against_manifest_inventory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = fixture_with_manifest(
+            tmp.path(),
+            "planningWave: test\ntasksDir: docs/tasks\nroutingMode: project_set\nrepositoryAliases: [core]\nmilestones: [M1]\ntasks:\n  - id: TASK-A\n    file: docs/tasks/a.md\n",
+            vec![(
+                "docs/tasks/a.md".to_string(),
+                "---\nid: TASK-A\ntitle: TASK-A\nmilestone: M1\nrepository: web\n---\n# Test\n"
+                    .to_string(),
+            )],
+        );
+
+        let result = ManifestValidator::validate_against_repo_root(&manifest, tmp.path());
+        assert!(!result.is_ok());
+        assert!(result.invalid_repository_bindings.iter().any(|finding| {
+            finding.task_id == Some(TaskId::new("TASK-A"))
+                && finding.reason.contains("unknown repository alias `web`")
+        }));
     }
 
     #[test]

@@ -124,7 +124,12 @@ Important normalization rules:
   fetches that issue's labels before replacing the managed subset so unrelated
   labels are not lost. Lightweight running-state snapshots also include a
   current child-presence bit, allowing the scheduler to neutralize a running
-  task immediately when it becomes a parent.
+  task immediately when it becomes a parent. The planning-state and mapped
+  issue detail queries also inspect existing child presence before the
+  converter adds a repository label, so a stale Linear child cannot turn a
+  formerly terminal issue into a repository-bound parent. Gateway task-graph
+  and run-detail blockers retain the typed repository-binding diagnostic
+  instead of collapsing every routing failure into a dependency message.
 
 ## 3. Agent-side Linear access
 

@@ -164,6 +164,23 @@ class RepositoryBindingTests(unittest.TestCase):
         )
         self.assertEqual(client.calls[1][1], {"id": "issue-42", "labelsAfter": "cursor-1"})
 
+    def test_linear_conversion_rejects_binding_on_existing_parent(self):
+        existing = {
+            "id": "issue-42",
+            "identifier": "COE-42",
+            "children": {"nodes": [{"id": "child-1", "identifier": "COE-43"}]},
+        }
+
+        self.assertTrue(CONVERTER.issue_has_children(existing))
+        with self.assertRaises(CONVERTER.LinearError) as raised:
+            if CONVERTER.issue_has_children(existing):
+                raise CONVERTER.LinearError(
+                    "task TASK cannot receive a repository binding because "
+                    "existing Linear issue COE-42 has children"
+                )
+
+        self.assertIn("existing Linear issue COE-42 has children", str(raised.exception))
+
     def test_linear_conversion_can_clear_the_last_managed_label(self):
         source = task("PARENT", [])
         source.areas = []

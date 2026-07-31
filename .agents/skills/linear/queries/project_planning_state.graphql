@@ -33,6 +33,12 @@ query ProjectPlanningState($slug: String!) {
             id
             identifier
           }
+          children(first: 1) {
+            nodes {
+              id
+              identifier
+            }
+          }
           projectMilestone {
             id
             name

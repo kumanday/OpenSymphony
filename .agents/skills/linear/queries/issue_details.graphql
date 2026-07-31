@@ -32,6 +32,12 @@ query IssueDetails($id: String!, $labelsAfter: String) {
       slugId
       url
     }
+    children(first: 1) {
+      nodes {
+        id
+        identifier
+      }
+    }
     attachments {
       nodes {
         id

@@ -33,8 +33,8 @@ use tokio::{net::TcpListener, sync::broadcast, task::JoinHandle};
 use tokio_util::io::ReaderStream;
 
 use crate::opensymphony_domain::{
-    EventStream, InMemoryEventJournal, StreamBroker, TerminalLogStore, TimelineBuilder,
-    TrackerIssue, TrackerIssueStateKind, belongs_to_run,
+    EventStream, InMemoryEventJournal, RepositoryBindingOutcome, StreamBroker, TerminalLogStore,
+    TimelineBuilder, TrackerIssue, TrackerIssueStateKind, belongs_to_run,
 };
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
@@ -4307,6 +4307,16 @@ fn build_runtime_overlay(
                 ControlPlaneIssueRuntimeState::RetryQueued
             ));
 
+    let blocker_summary = if issue.blocked {
+        issue
+            .repository_binding
+            .as_ref()
+            .map(repository_binding_diagnostic)
+            .or_else(|| Some("Blocked by dependency".into()))
+    } else {
+        None
+    };
+
     TaskGraphRuntimeOverlay {
         eligible: is_eligible,
         queued: is_queued,
@@ -4323,11 +4333,33 @@ fn build_runtime_overlay(
         last_event_at: (issue.last_event_at.timestamp() != 0).then_some(issue.last_event_at),
         diff_summary,
         validation_status: None,
-        blocker_summary: if issue.blocked {
-            Some("Blocked by dependency".into())
-        } else {
-            None
-        },
+        blocker_summary,
+    }
+}
+
+fn repository_binding_diagnostic(outcome: &RepositoryBindingOutcome) -> String {
+    match outcome {
+        RepositoryBindingOutcome::Resolved(_) => "Repository binding resolved".to_owned(),
+        RepositoryBindingOutcome::MissingBinding => "Repository binding missing".to_owned(),
+        RepositoryBindingOutcome::UnknownAlias(alias) => {
+            format!("Unknown repository alias: {alias}")
+        }
+        RepositoryBindingOutcome::MultipleBindings(aliases) => {
+            format!("Multiple repository bindings: {}", aliases.join(", "))
+        }
+        RepositoryBindingOutcome::RepositoryNotAllowedForProject(repository, project) => {
+            format!("Repository {repository} is not allowed for project {project}")
+        }
+        RepositoryBindingOutcome::ParentBindingNotAllowed => {
+            "Parent tasks cannot have repository bindings".to_owned()
+        }
+        RepositoryBindingOutcome::ProjectOutsideActiveSet(project) => {
+            if project.is_empty() {
+                "Issue project is outside the active project set".to_owned()
+            } else {
+                format!("Issue project is outside the active project set: {project}")
+            }
+        }
     }
 }
 
@@ -4521,7 +4553,13 @@ async fn get_run_detail(
             },
             codex_thread_id: issue.codex_thread_id.clone(),
             summary: None,
-            blocker: issue.blocked.then(|| "Blocked by dependency".into()),
+            blocker: issue.blocked.then(|| {
+                issue
+                    .repository_binding
+                    .as_ref()
+                    .map(repository_binding_diagnostic)
+                    .unwrap_or_else(|| "Blocked by dependency".into())
+            }),
             error: None,
             allowed_actions: allowed_actions_for_issue(issue, dispatchable),
             liveness: Some(build_liveness(issue)),
@@ -5852,6 +5890,22 @@ exit 2
         assert!(
             !safe.detach,
             "detach must be unsafe on a healthy running issue"
+        );
+    }
+
+    #[test]
+    fn repository_binding_blocker_keeps_typed_diagnostic_in_gateway_overlay() {
+        let mut issue = test_issue(
+            ControlPlaneIssueRuntimeState::Idle,
+            TestIssueFlags::default(),
+        );
+        issue.blocked = true;
+        issue.repository_binding = Some(RepositoryBindingOutcome::MissingBinding);
+
+        let overlay = build_runtime_overlay(&issue, true);
+        assert_eq!(
+            overlay.blocker_summary.as_deref(),
+            Some("Repository binding missing")
         );
     }
 

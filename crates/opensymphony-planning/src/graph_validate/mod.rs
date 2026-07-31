@@ -27,8 +27,9 @@ pub mod manifest;
 pub use checks::{PlanQualityChecker, build_blocker_inverse, creation_order_waves};
 pub use domain::{
     DependencyGraph, GraphEdge, GraphEdgeReason, GraphNode, GraphNodeKind,
-    ManifestValidationResult, MissingTaskFile, PlanCheckCategory, PlanCheckFinding,
-    PlanCheckSeverity, PlanValidationReport, SelfBlock, UnknownDependency, UnknownMilestone,
+    InvalidRepositoryBinding, ManifestValidationResult, MissingTaskFile, PlanCheckCategory,
+    PlanCheckFinding, PlanCheckSeverity, PlanValidationReport, SelfBlock, UnknownDependency,
+    UnknownMilestone,
 };
 pub use frontmatter::{
     ParsedTaskFile, RepositoryFrontmatter, TaskFrontmatter, TaskFrontmatterError, parse_task_file,
