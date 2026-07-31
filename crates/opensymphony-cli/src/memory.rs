@@ -3546,6 +3546,7 @@ async fn call_code_ast_context_tool(
         scope_refs,
         limit,
         symbol_kinds,
+        config.code_intel.ast.max_file_bytes,
     )
     .await?;
     let trace = artifacts
@@ -5008,14 +5009,11 @@ async fn code_intel_artifacts_with_symbol_kinds_blocking(
     scope_refs: Vec<CodeIntelScope>,
     limit: usize,
     symbol_kinds: BTreeSet<String>,
+    max_file_bytes: u64,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
-        CompositeCodeIntelProvider::new(repo_root).code_context_with_symbol_kinds(
-            &paths,
-            &scope_refs,
-            limit,
-            &symbol_kinds,
-        )
+        CompositeCodeIntelProvider::with_max_file_bytes(repo_root, max_file_bytes)
+            .code_context_with_symbol_kinds(&paths, &scope_refs, limit, &symbol_kinds)
     })
     .await
     .map_err(|error| {
@@ -10085,6 +10083,51 @@ Public memory concept.
 
         assert!(matches!(error, MemoryError::InvalidInput(message)
             if message.contains("AST code-intelligence tools are disabled for the selected repository")));
+    }
+
+    #[tokio::test]
+    async fn code_ast_context_honors_selected_repository_file_limit() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n",
+        )
+        .expect("repository config");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let context = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.context",
+                "arguments": { "repo": "repo-a", "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect("context");
+
+        assert!(
+            context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("src/lib.rs exceeds max AST file size of 1 bytes")
+        );
     }
 
     #[tokio::test]
