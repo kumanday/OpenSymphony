@@ -2620,9 +2620,17 @@ async fn memory_server_mcp(
             "serverInfo": { "name": "opensymphony-memory", "version": env!("CARGO_PKG_VERSION") },
             "capabilities": { "tools": {} }
         })),
-        "tools/list" => Ok(json!({
-            "tools": memory_tool_descriptors(&state.config, &state.auth)
-        })),
+        "tools/list" => {
+            let config = state.config.clone();
+            let auth = state.auth.clone();
+            match tokio::task::spawn_blocking(move || memory_tool_descriptors(&config, &auth)).await
+            {
+                Ok(tools) => Ok(json!({ "tools": tools })),
+                Err(error) => Err(MemoryError::InvalidInput(format!(
+                    "memory tool discovery task failed: {error}"
+                ))),
+            }
+        }
         "tools/call" => match tokio::time::timeout(
             MEMORY_MCP_TOOL_TIMEOUT,
             call_memory_tool_with_workspace(
@@ -2791,6 +2799,19 @@ fn memory_config_for_code_intel_scope(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<MemoryConfig, MemoryError> {
+    let (_, resolved) = resolve_memory_config_for_code_intel_scope(config, arguments)?;
+    if !ast_tools_enabled(&resolved) {
+        return Err(MemoryError::InvalidInput(
+            "AST code-intelligence tools are disabled for the selected repository".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
+fn resolve_memory_config_for_code_intel_scope(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<(MemoryScopeFilter, MemoryConfig), MemoryError> {
     let mut scope = scope_filter_from_mcp(config, arguments, false)?;
     if let Some(repository_id) = optional_string_arg(arguments, "repository") {
         scope.repo = Some(repository_id);
@@ -2805,13 +2826,11 @@ fn memory_config_for_code_intel_scope(
             "repository `{repository_id}` is not accessible in the requested memory scope"
         )));
     }
-    let resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
-    if !ast_tools_enabled(&resolved) {
-        return Err(MemoryError::InvalidInput(
-            "AST code-intelligence tools are disabled for the selected repository".to_string(),
-        ));
+    let mut resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if let Some(repository_id) = scope.repo.clone() {
+        resolved.default_repository_id = Some(repository_id);
     }
-    Ok(resolved)
+    Ok((scope, resolved))
 }
 
 fn memory_config_for_code_graph_scope(
@@ -4065,7 +4084,7 @@ async fn call_memory_ingest_code_intel_tool(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
-    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    let (scope, resolved_config) = resolve_memory_config_for_code_intel_scope(config, arguments)?;
     let paths = string_list_arg(arguments, "paths")
         .into_iter()
         .map(PathBuf::from)
@@ -4073,6 +4092,11 @@ async fn call_memory_ingest_code_intel_tool(
     let limit = usize_arg(arguments, "limit", 10);
     let scope_refs = scope_refs_for_context(&scope, &paths);
     let persist = bool_arg(arguments, "persist");
+    if !resolved_config.enabled || !resolved_config.code_intel.enabled {
+        return Err(MemoryError::InvalidInput(
+            "code-intelligence ingestion is disabled for the selected repository".to_string(),
+        ));
+    }
     let (artifacts, persist_report) = if persist {
         let languages = normalized_string_set_args(arguments, &["languages"]);
         let symbols = normalized_string_set_args(arguments, &["symbols"]);
@@ -4080,7 +4104,6 @@ async fn call_memory_ingest_code_intel_tool(
             arguments,
             &["queryPack", "queryPacks", "query_pack", "query_packs"],
         );
-        let resolved_config = memory_config_for_repository(config, scope.repo.as_deref())?;
         let (artifacts, report) = code_intel_persist_artifacts_blocking(CodeIntelPersistRequest {
             config: resolved_config,
             scope: scope.clone(),
@@ -8054,6 +8077,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_ingest_code_intel_honors_selected_repository_policy_without_persistence() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "enabled: false\ncode_intel:\n  enabled: true\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "repo": "repo-a",
+                "paths": ["src/lib.rs"]
+            }),
+        )
+        .await
+        .expect_err("non-persistent ingest should honor selected repository policy");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("code-intelligence ingestion is disabled")));
+    }
+
+    #[tokio::test]
     async fn memory_ingest_code_intel_limit_does_not_cap_persisted_symbols() {
         let repo = TempDir::new().expect("temp repo");
         std::fs::create_dir_all(repo.path().join("src")).expect("src dir");
@@ -10222,6 +10280,58 @@ Public memory concept.
         .expect("project-only AST scope should select its repository");
 
         assert_eq!(result["available"], true);
+    }
+
+    #[tokio::test]
+    async fn code_ast_path_tools_use_project_selected_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let first_root = first.path().canonicalize().expect("first root");
+        let second_root = second.path().canonicalize().expect("second root");
+        std::fs::create_dir_all(second_root.join("src")).expect("source directory");
+        std::fs::write(
+            second_root.join("src/lib.rs"),
+            "pub fn selected_answer() -> u8 { 42 }\n",
+        )
+        .expect("selected source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first_root,
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second_root,
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "project": "project-b", "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect("project-only AST path should select its repository");
+
+        assert_eq!(result["documents"][0]["path"], "src/lib.rs");
+        assert_eq!(
+            result["documents"][0]["symbols"][0]["name"],
+            "selected_answer"
+        );
     }
 
     #[test]
