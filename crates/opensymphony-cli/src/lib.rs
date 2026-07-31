@@ -514,16 +514,6 @@ pub async fn run_doctor_command(
     } else {
         None
     };
-    if central_config.as_ref().is_some_and(|central| {
-        project_set_doctor_mutation_blocked(&central.mode, live_openhands, rehydrate)
-    }) {
-        checks.push(CheckResult::fail(
-            "config",
-            "doctor is disabled for project_set central routing until strict routing is enabled",
-        ));
-        print_checks(&checks);
-        return ExitCode::from(1);
-    }
     let config = match central_config.as_ref() {
         Some(central) => {
             checks.push(CheckResult::pass(
@@ -773,17 +763,6 @@ pub async fn run_doctor_command(
     } else {
         ExitCode::SUCCESS
     }
-}
-
-fn project_set_doctor_mutation_blocked(
-    mode: &orchestrator_run::config::CentralRoutingMode,
-    _live_openhands: bool,
-    _rehydrate: bool,
-) -> bool {
-    matches!(
-        mode,
-        orchestrator_run::config::CentralRoutingMode::ProjectSet
-    )
 }
 
 fn central_doctor_probe_settings(
@@ -2658,34 +2637,10 @@ mod tests {
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
         central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
-        executable_suffixes, find_cargo_workspace_root, project_set_doctor_mutation_blocked,
-        resolve_doctor_runtime, resolve_doctor_workflow, resolve_rehydrate_runtime,
+        executable_suffixes, find_cargo_workspace_root, resolve_doctor_runtime,
+        resolve_doctor_workflow, resolve_rehydrate_runtime,
         resolve_rehydrate_runtime_with_environment, sample_snapshot, spawn_demo_updates,
     };
-
-    #[test]
-    fn project_set_doctor_mutations_are_blocked_before_checkout_resolution() {
-        assert!(project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
-            true,
-            false,
-        ));
-        assert!(project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
-            false,
-            true,
-        ));
-        assert!(project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
-            false,
-            false,
-        ));
-        assert!(!project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::LegacySingle,
-            true,
-            true,
-        ));
-    }
 
     #[test]
     fn strict_recovery_requires_project_set_routing() {

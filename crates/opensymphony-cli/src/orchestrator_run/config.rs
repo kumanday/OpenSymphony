@@ -1488,7 +1488,9 @@ fn central_workflow_front_matter(
                         }
                     })?;
                     let (candidate_id, project_slug) = project_front_matter_identity(project);
-                    project_ids.push(project.provider_project_id.clone());
+                    if let Some(candidate_id) = candidate_id.as_ref() {
+                        project_ids.push(candidate_id.clone());
+                    }
                     if project_key == first_project_id {
                         project_id = candidate_id;
                     }

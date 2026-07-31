@@ -723,6 +723,7 @@ impl RuntimeWorkspaceBackend {
                             &handle,
                             &mut manifest,
                             &self.codex_bin,
+                            self.manager.checkout_credential_envs(),
                         )
                         .await
                         {
@@ -2278,8 +2279,12 @@ async fn try_run_codex_stdio_issue(
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
-    let schema_validator =
-        cached_installed_codex_schema_validator(codex_schema_validators, codex_bin).await?;
+    let schema_validator = cached_installed_codex_schema_validator(
+        codex_schema_validators,
+        codex_bin,
+        checkout_credential_envs,
+    )
+    .await?;
     let (program, args) = adapter.launch().to_command();
     let mut command = Command::new(&program);
     command
@@ -2290,9 +2295,7 @@ async fn try_run_codex_stdio_issue(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    for variable in checkout_credential_envs {
-        command.env_remove(variable);
-    }
+    scrub_checkout_credentials(&mut command, checkout_credential_envs);
     let mut child = command
         .spawn()
         .map_err(|source| {
@@ -2363,21 +2366,28 @@ async fn try_run_codex_stdio_issue(
                 "skipping retirement of Codex thread with mismatched runtime envelope binding"
             );
         } else {
-            ensure_codex_thread_active(workspace_manager, workspace, &mut incompatible, codex_bin)
-                .await
-                .map_err(|error| {
-                    codex_lifecycle_error(
-                        issue,
-                        Some(&incompatible.conversation_id.to_string()),
-                        "supersede incompatible conversation",
-                        error,
-                    )
-                })?;
+            ensure_codex_thread_active(
+                workspace_manager,
+                workspace,
+                &mut incompatible,
+                codex_bin,
+                checkout_credential_envs,
+            )
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&incompatible.conversation_id.to_string()),
+                    "supersede incompatible conversation",
+                    error,
+                )
+            })?;
             archive_terminal_codex_thread(
                 workspace_manager,
                 workspace,
                 &mut incompatible,
                 codex_bin,
+                checkout_credential_envs,
             )
             .await
             .map_err(|error| {
@@ -2391,16 +2401,22 @@ async fn try_run_codex_stdio_issue(
         }
     }
     if let Some(manifest) = existing_manifest.as_mut() {
-        ensure_codex_thread_active(workspace_manager, workspace, manifest, codex_bin)
-            .await
-            .map_err(|error| {
-                codex_lifecycle_error(
-                    issue,
-                    Some(manifest.conversation_id.as_str()),
-                    "archive recovery",
-                    error,
-                )
-            })?;
+        ensure_codex_thread_active(
+            workspace_manager,
+            workspace,
+            manifest,
+            codex_bin,
+            checkout_credential_envs,
+        )
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(manifest.conversation_id.as_str()),
+                "archive recovery",
+                error,
+            )
+        })?;
     }
     if recovered
         && run_manifest.status == RunStatus::Prepared
@@ -2874,16 +2890,24 @@ async fn try_run_codex_stdio_issue(
     ))
 }
 
+fn scrub_checkout_credentials(command: &mut Command, checkout_credential_envs: &BTreeSet<String>) {
+    for variable in checkout_credential_envs {
+        command.env_remove(variable);
+    }
+}
+
 async fn cached_installed_codex_schema_validator(
     cache: &CodexSchemaValidatorCache,
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexAppServerSchemaValidator, String> {
     let key = codex_schema_cache_key(codex_bin).await;
     if let Some(validator) = cache.lock().await.get(&key).cloned() {
         return Ok(validator);
     }
 
-    let validator = load_installed_codex_schema_validator(codex_bin).await?;
+    let validator =
+        load_installed_codex_schema_validator(codex_bin, checkout_credential_envs).await?;
     let mut validators = cache.lock().await;
     let validator = validators.entry(key).or_insert(validator);
     Ok(validator.clone())
@@ -2942,6 +2966,7 @@ fn resolve_executable_path(program: &str) -> Option<PathBuf> {
 
 async fn load_installed_codex_schema_validator(
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexAppServerSchemaValidator, String> {
     let schema_dir = tempfile::tempdir()
         .map_err(|source| format!("failed to create Codex schema tempdir: {source}"))?;
@@ -2951,6 +2976,7 @@ async fn load_installed_codex_schema_validator(
     let output = timeout(CODEX_SCHEMA_GENERATION_TIMEOUT, async {
         let mut command = Command::new(&program);
         command.args(&args).kill_on_drop(true);
+        scrub_checkout_credentials(&mut command, checkout_credential_envs);
         command.output().await
     })
     .await
@@ -3006,21 +3032,29 @@ struct CodexLifecycleSession {
 }
 
 impl CodexLifecycleSession {
-    async fn start(codex_bin: &str, cwd: &Path) -> Result<Self, String> {
+    async fn start(
+        codex_bin: &str,
+        cwd: &Path,
+        checkout_credential_envs: &BTreeSet<String>,
+    ) -> Result<Self, String> {
         let adapter = CodexAppServerAdapter::local_stdio(
             codex_bin,
             "opensymphony",
             env!("CARGO_PKG_VERSION"),
         );
-        let validator = load_installed_codex_schema_validator(codex_bin).await?;
+        let validator =
+            load_installed_codex_schema_validator(codex_bin, checkout_credential_envs).await?;
         let (program, args) = adapter.launch().to_command();
-        let mut child = Command::new(&program)
+        let mut command = Command::new(&program);
+        command
             .args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        scrub_checkout_credentials(&mut command, checkout_credential_envs);
+        let mut child = command
             .spawn()
             .map_err(|source| format!("failed to launch Codex lifecycle app-server: {source}"))?;
         let mut stdin = child.stdin.take().ok_or("Codex lifecycle stdin missing")?;
@@ -3071,6 +3105,7 @@ impl CodexLifecycleSession {
 async fn send_codex_lifecycle_request<F>(
     codex_bin: &str,
     cwd: &Path,
+    checkout_credential_envs: &BTreeSet<String>,
     operation: &str,
     build: F,
 ) -> Result<serde_json::Value, String>
@@ -3080,7 +3115,8 @@ where
         &mut CodexJsonRpcSession,
     ) -> Result<crate::opensymphony_codex::CodexHarnessRequest, serde_json::Error>,
 {
-    let mut session = CodexLifecycleSession::start(codex_bin, cwd).await?;
+    let mut session =
+        CodexLifecycleSession::start(codex_bin, cwd, checkout_credential_envs).await?;
     let response = session.request(operation, build).await;
     session.stop().await;
     response
@@ -3135,8 +3171,14 @@ async fn inspect_codex_archive_state(
     codex_bin: &str,
     workspace: &WorkspaceHandle,
     thread_id: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexArchiveState, String> {
-    let mut session = CodexLifecycleSession::start(codex_bin, workspace.workspace_path()).await?;
+    let mut session = CodexLifecycleSession::start(
+        codex_bin,
+        workspace.workspace_path(),
+        checkout_credential_envs,
+    )
+    .await?;
     let result: Result<CodexArchiveState, String> = async {
         for archived in [true, false] {
             let mut cursor = None;
@@ -3199,9 +3241,12 @@ async fn ensure_codex_thread_active(
     workspace: &WorkspaceHandle,
     manifest: &mut IssueConversationManifest,
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), String> {
     let thread_id = manifest.conversation_id.to_string();
-    match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id, checkout_credential_envs)
+        .await?
+    {
         CodexArchiveState::Active if manifest.codex_archive_state.as_deref() == Some("active") => {
             Ok(())
         }
@@ -3213,6 +3258,7 @@ async fn ensure_codex_thread_active(
             send_codex_lifecycle_request(
                 codex_bin,
                 workspace.workspace_path(),
+                checkout_credential_envs,
                 "thread/unarchive",
                 |adapter, session| {
                     adapter.unarchive_issue_thread_request(session, thread_id.clone())
@@ -3232,9 +3278,12 @@ async fn archive_terminal_codex_thread(
     workspace: &WorkspaceHandle,
     manifest: &mut IssueConversationManifest,
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), String> {
     let thread_id = manifest.conversation_id.to_string();
-    match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id, checkout_credential_envs)
+        .await?
+    {
         CodexArchiveState::Archived => {
             if manifest.codex_archive_state.as_deref() == Some("archived") {
                 Ok(())
@@ -3247,6 +3296,7 @@ async fn archive_terminal_codex_thread(
             send_codex_lifecycle_request(
                 codex_bin,
                 workspace.workspace_path(),
+                checkout_credential_envs,
                 "thread/archive",
                 |adapter, session| adapter.archive_issue_thread_request(session, thread_id.clone()),
             )
@@ -6567,10 +6617,10 @@ mod tests {
             .to_str()
             .expect("fake codex schema path should be utf-8");
 
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("first schema load should compile");
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("second schema load should use cache");
 
@@ -6602,12 +6652,12 @@ mod tests {
             .to_str()
             .expect("fake codex schema path should be utf-8");
 
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("first schema load should compile");
         fs::remove_file(&fake_codex).expect("fake codex symlink should be removable");
         symlink(&second_codex, &fake_codex).expect("second fake codex symlink should be created");
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("changed binary should force a second schema load");
 

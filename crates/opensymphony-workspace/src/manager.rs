@@ -188,6 +188,10 @@ impl WorkspaceManager {
         &self.config
     }
 
+    pub fn checkout_credential_envs(&self) -> &BTreeSet<String> {
+        &self.checkout_credential_envs
+    }
+
     pub fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf, WorkspaceError> {
         super::workspace_path_for_root(&self.config.root, issue_identifier)
     }
