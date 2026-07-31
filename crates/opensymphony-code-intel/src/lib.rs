@@ -555,9 +555,13 @@ pub struct AstCodeIntelProvider {
 
 impl AstCodeIntelProvider {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_max_file_bytes(root, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    pub fn with_max_file_bytes(root: impl Into<PathBuf>, max_file_bytes: u64) -> Self {
         Self {
             root: root.into(),
-            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_file_bytes,
         }
     }
 
@@ -846,9 +850,13 @@ pub struct CompositeCodeIntelProvider {
 
 impl CompositeCodeIntelProvider {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_max_file_bytes(root, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    pub fn with_max_file_bytes(root: impl Into<PathBuf>, max_file_bytes: u64) -> Self {
         let root = root.into();
         Self {
-            ast: AstCodeIntelProvider::new(&root),
+            ast: AstCodeIntelProvider::with_max_file_bytes(&root, max_file_bytes),
             fallback: CodebaseAnalyzer::new(root),
         }
     }

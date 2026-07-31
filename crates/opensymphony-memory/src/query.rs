@@ -299,7 +299,26 @@ pub fn docs_for_area_with_scope(
             .iter()
             .filter(|issue| issue.areas().iter().any(|candidate| candidate == &area.slug))
             .collect::<Vec<_>>();
-        if !area_issues
+        let selected_repository = config
+            .repository_sources
+            .values()
+            .find(|source| source.root == config.repo_root)
+            .map(|source| source.repository_id.clone());
+        let scoped_area_issues = selected_repository
+            .as_deref()
+            .map(|repository_id| {
+                area_issues
+                    .iter()
+                    .copied()
+                    .filter(|issue| {
+                        let mut repository_scope = scoped.clone();
+                        repository_scope.repo = Some(repository_id.to_string());
+                        indexed_issue_matches_scope(config, issue, &repository_scope)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| area_issues.clone());
+        if !scoped_area_issues
             .iter()
             .any(|issue| indexed_issue_matches_scope(config, issue, &scoped))
         {
@@ -309,7 +328,7 @@ pub fn docs_for_area_with_scope(
             )));
         }
         if (scope.project.is_some() || scope.project_set.is_some())
-            && area_issues
+            && scoped_area_issues
                 .iter()
                 .any(|issue| !indexed_issue_matches_scope(config, issue, &scoped))
         {
@@ -579,6 +598,12 @@ pub fn context_for_issue_with_options(
             };
             if !indexed_issue_matches_scope(config, indexed, &options.scope) {
                 continue;
+            }
+            if !options.scope.all_accessible && has_multiple_repository_owners(&indexed.scope_refs) {
+                return Err(MemoryError::InvalidInput(format!(
+                    "memory context for {} is ambiguous because the concept has multiple repository owners",
+                    indexed.issue_key
+                )));
             }
             let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(config, indexed));
             documentation_paths.extend(docs);

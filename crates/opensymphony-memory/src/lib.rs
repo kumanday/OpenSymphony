@@ -3288,6 +3288,213 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn scoped_context_rejects_merged_multi_repository_payloads() {
+        let repo = TempDir::new().expect("temp repo");
+        let first = TempDir::new().expect("first source repo");
+        let second = TempDir::new().expect("second source repo");
+        let mut config = config_for(repo.path());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let source = sample_source();
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("write capture");
+
+        let merged_scopes = serde_json::to_string(&vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-a".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-b".to_string(),
+                label: None,
+            },
+        ])
+        .expect("scope refs");
+        let connection = Connection::open(&config.index_path).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![merged_scopes, "COE-123"],
+            )
+            .expect("merge scope refs");
+
+        let context_source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-200".to_string(),
+                title: "Scoped context request".to_string(),
+                labels: vec!["area:openhands-runtime".to_string()],
+                children: vec![IssueLinkEvidence {
+                    identifier: "COE-123".to_string(),
+                    state: Some("Done".to_string()),
+                    ..IssueLinkEvidence::default()
+                }],
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let error = context_for_issue_with_options(
+            &config,
+            &context_source,
+            &MemoryContextOptions {
+                issue: "COE-200".to_string(),
+                explicit_includes: Vec::new(),
+                paths: Vec::new(),
+                limit: 20,
+                scope: MemoryScopeFilter {
+                    repo: Some("repo-a".to_string()),
+                    ..MemoryScopeFilter::default()
+                },
+            },
+        )
+        .expect_err("scoped context must reject merged repository payloads");
+
+        assert!(error.to_string().contains("multiple repository owners"));
+    }
+
+    #[test]
+    fn scoped_docs_ignore_other_repository_area_records() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let first = TempDir::new().expect("first source repo");
+        let second = TempDir::new().expect("second source repo");
+        let mut config = config_for(catalog.path());
+        fs::create_dir_all(first.path().join("docs")).expect("docs");
+        fs::write(
+            first.path().join("docs/openhands-runtime.md"),
+            "# OpenHands Runtime\n",
+        )
+        .expect("topic doc");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let mut source = sample_source();
+        source.issues.push(IssueEvidence {
+            identifier: "COE-124".to_string(),
+            title: "Other repository runtime record".to_string(),
+            labels: vec!["runtime".to_string()],
+            ..IssueEvidence::default()
+        });
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string(), "COE-124".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("write capture");
+
+        let repo_a_scopes = serde_json::to_string(&vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-a".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-a".to_string(),
+                label: None,
+            },
+        ])
+        .expect("repo-a scopes");
+        let repo_b_scopes = serde_json::to_string(&vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-b".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-b".to_string(),
+                label: None,
+            },
+        ])
+        .expect("repo-b scopes");
+        let connection = Connection::open(&config.index_path).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![repo_a_scopes, "COE-123"],
+            )
+            .expect("repo-a scope refs");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![repo_b_scopes, "COE-124"],
+            )
+            .expect("repo-b scope refs");
+
+        let mut selected_config = config.clone();
+        selected_config.repo_root = first.path().to_path_buf();
+        selected_config.docs.public_root = first.path().join("docs");
+        selected_config
+            .areas
+            .get_mut("openhands-runtime")
+            .expect("runtime area")
+            .docs_target = first.path().join("docs/openhands-runtime.md");
+        let docs = docs_for_area_with_scope(
+            &selected_config,
+            "openhands-runtime",
+            &MemoryScopeFilter {
+                project: Some("project-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("repository-local docs should ignore other repository records");
+
+        assert!(docs.contains("# OpenHands Runtime"));
+    }
+
+    #[test]
     fn capture_evolves_memory_config_and_keeps_changed_files_index_only() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("default config");

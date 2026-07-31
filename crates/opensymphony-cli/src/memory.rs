@@ -1274,12 +1274,18 @@ async fn run_context(
         limit: args.limit,
         scope: MemoryScopeFilter::default(),
     };
-    let scope = scope_filter(
+    let mut scope = scope_filter(
         &args.scope,
         Some(options.issue.as_str()),
         args.milestone.as_deref(),
         args.area.as_deref(),
     );
+    if args.include_code_intel
+        && scope.repo.is_none()
+        && (scope.project.is_some() || scope.project_set.is_some())
+    {
+        scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+    }
     let mut context_scope = scope.clone();
     context_scope.issue = None;
     options.scope = context_scope;
@@ -1288,7 +1294,14 @@ async fn run_context(
     }
     let mut context = context_for_issue_with_options(config, &source, &options)?;
     if args.include_code_intel {
-        append_code_intel_context(config, &mut context, &scope, &options.paths, options.limit)?;
+        let code_config = memory_config_for_repository(config, scope.repo.as_deref())?;
+        append_code_intel_context(
+            &code_config,
+            &mut context,
+            &scope,
+            &options.paths,
+            options.limit,
+        )?;
     }
     println!("{context}");
     Ok(())
@@ -2758,6 +2771,9 @@ fn memory_config_for_code_intel_scope(
     if let Some(repository_id) = optional_string_arg(arguments, "repository") {
         scope.repo = Some(repository_id);
     }
+    if scope.repo.is_none() && (scope.project.is_some() || scope.project_set.is_some()) {
+        scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+    }
     if let Some(repository_id) = scope.repo.as_deref()
         && !repository_matches_memory_scope(config, repository_id, &scope)
     {
@@ -2926,7 +2942,13 @@ async fn call_memory_tool_with_workspace(
                 || bool_arg(&arguments, "include_code_intel")
             {
                 let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
-                let code_scope = scope_filter_from_mcp(config, &arguments, true)?;
+                let mut code_scope = scope_filter_from_mcp(config, &arguments, true)?;
+                if code_scope.repo.is_none()
+                    && (code_scope.project.is_some() || code_scope.project_set.is_some())
+                {
+                    code_scope.repo =
+                        Some(unique_repository_for_memory_scope(config, &code_scope)?);
+                }
                 text = append_code_intel_context_blocking(
                     code_config,
                     text,
@@ -4037,7 +4059,14 @@ async fn call_memory_ingest_code_intel_tool(
         (artifacts, Some(report))
     } else {
         let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
-        let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+        let artifacts = code_intel_artifacts_blocking(
+            repo_root,
+            paths,
+            scope_refs,
+            limit.min(config.code_intel.ast.max_matches_per_request),
+            config.code_intel.ast.max_file_bytes,
+        )
+        .await?;
         (artifacts, None)
     };
     let (parsed_files, persisted_rows, stale_rows, skipped_files, diagnostics) =
@@ -4879,9 +4908,21 @@ fn append_code_intel_context(
     limit: usize,
 ) -> Result<(), MemoryError> {
     let repo_root = resolve_code_intel_repo_for_scope(config, scope)?;
-    let scope_refs = scope_refs_for_context(scope, paths);
-    let artifacts =
-        CompositeCodeIntelProvider::new(repo_root).code_context(paths, &scope_refs, limit)?;
+    let paths = paths
+        .iter()
+        .take(config.code_intel.ast.max_files_per_request)
+        .cloned()
+        .collect::<Vec<_>>();
+    let scope_refs = scope_refs_for_context(scope, &paths);
+    let artifacts = CompositeCodeIntelProvider::with_max_file_bytes(
+        repo_root,
+        config.code_intel.ast.max_file_bytes,
+    )
+    .code_context(
+        &paths,
+        &scope_refs,
+        limit.min(config.code_intel.ast.max_matches_per_request),
+    )?;
     append_code_intel_artifacts(config, output, artifacts);
     Ok(())
 }
@@ -4894,8 +4935,19 @@ async fn append_code_intel_context_blocking(
     limit: usize,
 ) -> Result<String, MemoryError> {
     let repo_root = resolve_code_intel_repo_for_scope(&config, &scope)?;
+    let paths = paths
+        .into_iter()
+        .take(config.code_intel.ast.max_files_per_request)
+        .collect::<Vec<_>>();
     let scope_refs = scope_refs_for_context(&scope, &paths);
-    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    let artifacts = code_intel_artifacts_blocking(
+        repo_root,
+        paths,
+        scope_refs,
+        limit.min(config.code_intel.ast.max_matches_per_request),
+        config.code_intel.ast.max_file_bytes,
+    )
+    .await?;
     append_code_intel_artifacts(&config, &mut output, artifacts);
     Ok(output)
 }
@@ -4905,9 +4957,14 @@ async fn code_intel_artifacts_blocking(
     paths: Vec<PathBuf>,
     scope_refs: Vec<CodeIntelScope>,
     limit: usize,
+    max_file_bytes: u64,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
-        CompositeCodeIntelProvider::new(repo_root).code_context(&paths, &scope_refs, limit)
+        CompositeCodeIntelProvider::with_max_file_bytes(repo_root, max_file_bytes).code_context(
+            &paths,
+            &scope_refs,
+            limit,
+        )
     })
     .await
     .map_err(|error| {
@@ -5074,6 +5131,28 @@ fn repository_matches_memory_scope(
         .as_deref()
         .and_then(non_empty)
         .is_none_or(|project_id| source.project_scope_ids.contains(&project_id))
+}
+
+fn unique_repository_for_memory_scope(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
+    let candidates = config
+        .repository_sources
+        .values()
+        .filter(|source| repository_matches_memory_scope(config, &source.repository_id, scope))
+        .map(|source| source.repository_id.as_str())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [repository_id] => Ok((*repository_id).to_string()),
+        [] => Err(MemoryError::InvalidInput(
+            "no repository source matches the requested memory scope".to_string(),
+        )),
+        _ => Err(MemoryError::InvalidInput(
+            "a canonical repository id is required when the requested memory scope matches multiple repository sources"
+                .to_string(),
+        )),
+    }
 }
 
 fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<CodeIntelScope> {
@@ -6564,7 +6643,7 @@ fn print_search_results(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
 
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
@@ -9979,6 +10058,51 @@ Public memory concept.
     }
 
     #[tokio::test]
+    async fn code_ast_tools_resolve_project_only_scope_to_unique_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        std::fs::write(
+            first.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    enabled: false\n",
+        )
+        .expect("first repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": { "project": "project-b" }
+            }),
+        )
+        .await
+        .expect("project-only AST scope should select its repository");
+
+        assert_eq!(result["available"], true);
+    }
+
+    #[tokio::test]
     async fn memory_context_code_intel_uses_selected_repository_policy() {
         let catalog = TempDir::new().expect("catalog temp repo");
         let repository = TempDir::new().expect("repository temp repo");
@@ -10015,6 +10139,50 @@ Public memory concept.
 
         assert!(matches!(error, MemoryError::InvalidInput(message)
             if message.contains("AST code-intelligence tools are disabled for the selected repository")));
+    }
+
+    #[test]
+    fn memory_context_code_intel_uses_selected_repository_limits() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n    max_files_per_request: 1\n    max_matches_per_request: 1\n",
+        )
+        .expect("repository config");
+        std::fs::write(repository.path().join("src/one.rs"), "pub fn one() {}\n")
+            .expect("first source");
+        std::fs::write(repository.path().join("src/two.rs"), "pub fn two() {}\n")
+            .expect("second source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let selected = super::memory_config_for_repository(&config, Some("repo-a"))
+            .expect("selected repository config");
+        let mut output = String::new();
+        super::append_code_intel_context(
+            &selected,
+            &mut output,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+            &[PathBuf::from("src/one.rs"), PathBuf::from("src/two.rs")],
+            50,
+        )
+        .expect("code context");
+
+        assert!(output.contains("max AST file size of 1 bytes"));
+        assert!(!output.contains("src/two.rs"));
     }
 
     #[tokio::test]
