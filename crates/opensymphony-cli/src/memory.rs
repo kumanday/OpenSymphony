@@ -38,17 +38,16 @@ use crate::{
     opensymphony_memory::{
         ArchivePlan, CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput,
-        CodeWorkspaceOverlay, CommentEvidence, DEFAULT_PRIVATE_MEMORY_CONFIG_FILE, DocsSyncPlan,
-        IssueEvidence, IssueLinkEvidence, IssueSelection, LintSeverity, MemoryConfig,
-        MemoryContextOptions, MemoryError, MemoryReindexReport, MemoryScopeFilter,
-        MemorySourceKind, MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource,
-        SourceFile, archive_blocking_warning_count, brief, code_graph_context,
-        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_source_file, mark_archived, merge_memory_index_from_okf,
-        migrate_code_repository_identity, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
+        IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
+        MemoryReindexReport, MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
+        MemoryVisibility, RegisteredMemorySource, SourceFile, archive_blocking_warning_count,
+        brief, code_graph_context, code_graph_workspace_context_overlay, code_index_branch,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
@@ -1972,10 +1971,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
         let mut roots = vec![
-            (
-                MemorySourceKind::Policy,
-                source.root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE),
-            ),
+            (MemorySourceKind::Policy, local_config.config_path.clone()),
             (
                 MemorySourceKind::PublicDocs,
                 local_config.docs.public_root.clone(),
@@ -2037,6 +2033,14 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                         &registration.source_id,
                     )?;
                 }
+                register_memory_source(
+                    config,
+                    &RegisteredMemorySource {
+                        status: MemorySourceRegistrationStatus::Registered,
+                        ..registration
+                    },
+                )?;
+            } else {
                 register_memory_source(
                     config,
                     &RegisteredMemorySource {

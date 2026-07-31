@@ -1841,10 +1841,12 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
         "OPENSYMPHONY_MEMORY_PROJECT".to_string(),
         memory.project.clone(),
     );
-    env.insert(
-        "OPENSYMPHONY_MEMORY_PROJECT_SET".to_string(),
-        memory.project.clone(),
-    );
+    if let Some(project_set) = &memory.project_set {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_PROJECT_SET".to_string(),
+            project_set.clone(),
+        );
+    }
     env.insert(
         "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
         memory.execution_repo.clone(),
@@ -6479,6 +6481,7 @@ mod tests {
             endpoint: "http://127.0.0.1:8765/mcp".to_string(),
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
+            project_set: None,
             execution_repo: "/tmp/project-alpha/services/api".to_string(),
         };
         let mut env = BTreeMap::new();
@@ -6500,7 +6503,7 @@ mod tests {
         assert_eq!(
             env.get("OPENSYMPHONY_MEMORY_PROJECT_SET")
                 .map(String::as_str),
-            Some("project-alpha")
+            None
         );
         assert_eq!(
             env.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")

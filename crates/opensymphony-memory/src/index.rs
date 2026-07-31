@@ -2722,6 +2722,31 @@ fn refresh_memory_index_from_okf_inner(
                 row.scope_refs_json = serde_json::to_string(&scope_refs)?;
             }
         }
+        let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+            .unwrap_or_default();
+        if let Some(project_set_id) = config.default_project_set_id.as_deref()
+            && !scope_refs.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::ProjectSet && scope.id == project_set_id
+            })
+        {
+            scope_refs.push(KnowledgeScope {
+                kind: KnowledgeScopeKind::ProjectSet,
+                id: project_set_id.to_string(),
+                label: None,
+            });
+        }
+        for project_id in &config.project_scope_ids {
+            if !scope_refs.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Project && scope.id == *project_id
+            }) {
+                scope_refs.push(KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: project_id.clone(),
+                    label: None,
+                });
+            }
+        }
+        row.scope_refs_json = serde_json::to_string(&scope_refs)?;
         if let Some(source_id) = source_id {
             row.source_ids_json = serde_json::to_string(&vec![source_id])?;
         }

@@ -2078,7 +2078,7 @@ async fn get_run_code_outline(
     let file_path = resolve_contained_workspace_file(&workspace_path, &file_path).await?;
     let repo_id = params
         .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path));
+        .or_else(|| code_repo_id_for_workspace(&workspace_path, state.memory_config.as_ref()));
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), state.memory_config.clone()) {
         let comparison_bases = state.comparison_bases.clone();
@@ -2154,7 +2154,7 @@ async fn get_run_code_diff_overlay(
     })?;
     let repo_id = params
         .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path))
+        .or_else(|| code_repo_id_for_workspace(&workspace_path, state.memory_config.as_ref()))
         .ok_or_else(|| {
             code_graph_response(
                 StatusCode::BAD_REQUEST,
@@ -2212,7 +2212,7 @@ async fn get_run_code_graph(
     })?;
     let repo_id = params
         .repo_id
-        .or_else(|| code_repo_id_for_workspace(&workspace_path))
+        .or_else(|| code_repo_id_for_workspace(&workspace_path, state.memory_config.as_ref()))
         .ok_or_else(|| {
             code_graph_response(
                 StatusCode::BAD_REQUEST,
@@ -2402,7 +2402,18 @@ async fn resolve_contained_workspace_file(
     }
 }
 
-fn code_repo_id_for_workspace(workspace_path: &StdPath) -> Option<String> {
+fn code_repo_id_for_workspace(
+    workspace_path: &StdPath,
+    config: Option<&MemoryConfig>,
+) -> Option<String> {
+    if let Some(config) = config {
+        if let Some(repository_id) = config.default_repository_id.clone() {
+            return Some(repository_id);
+        }
+        if config.repository_sources.len() == 1 {
+            return config.repository_sources.keys().next().cloned();
+        }
+    }
     command_single_line(workspace_path, "git", &["remote", "get-url", "origin"])
         .ok()
         .as_deref()

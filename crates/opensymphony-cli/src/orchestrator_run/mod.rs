@@ -1056,6 +1056,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .as_ref()
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
+        project_set: runtime.project_set_id.clone(),
         execution_repo,
     });
     if let Some(env) = &memory_env {
@@ -1463,6 +1464,7 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) endpoint: String,
     pub(super) token: Option<String>,
     pub(super) project: String,
+    pub(super) project_set: Option<String>,
     pub(super) execution_repo: String,
 }
 
