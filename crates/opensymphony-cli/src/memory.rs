@@ -2037,6 +2037,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                         kind,
                         &commit_sha,
                         config,
+                        &local_config,
                     )?,
                 );
             }
@@ -2132,6 +2133,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                     kind,
                     &commit_sha,
                     config,
+                    &local_config,
                 )?,
             };
             let already_imported = registered_memory_sources(config)?.iter().any(|existing| {
@@ -2308,6 +2310,7 @@ fn memory_source_registration_generation(
     kind: MemorySourceKind,
     commit_sha: &str,
     config: &MemoryConfig,
+    local_config: &MemoryConfig,
 ) -> Result<String, MemoryError> {
     let content_generation = if kind == MemorySourceKind::Repository {
         format!("commit:{commit_sha}")
@@ -2324,11 +2327,19 @@ fn memory_source_registration_generation(
         config.default_project_set_id.as_deref(),
         source.project_scope_ids.iter().collect::<Vec<_>>(),
     ))?;
+    let policy_generation = if kind == MemorySourceKind::Repository {
+        String::new()
+    } else if local_config.config_path.is_file() {
+        memory_source_generation(&local_config.config_path)?
+    } else {
+        "absent".to_string()
+    };
     Ok(sha256_hex(&format!(
-        "source-registration-v3\0{}\0{}\0{}\0{}",
+        "source-registration-v4\0{}\0{}\0{}\0{}\0{}",
         kind.as_str(),
         commit_sha,
         content_generation,
+        policy_generation,
         routing_scopes
     )))
 }
@@ -2739,6 +2750,20 @@ fn ast_tools_enabled(config: &MemoryConfig) -> bool {
     config.code_intel.enabled && config.code_intel.ast.enabled
 }
 
+fn memory_config_for_code_intel_scope(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryConfig, MemoryError> {
+    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    let resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if !ast_tools_enabled(&resolved) {
+        return Err(MemoryError::InvalidInput(
+            "AST code-intelligence tools are disabled for the selected repository".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
 fn authorize_memory_request(
     headers: &axum::http::HeaderMap,
     auth: &MemoryServerAuth,
@@ -2990,16 +3015,33 @@ async fn call_memory_tool_with_workspace(
             )
             .await
         }
-        "code.ast.status" => call_code_ast_status_tool(config),
-        "code.ast.outline" => call_code_ast_outline_tool(config.clone(), arguments.clone()).await,
-        "code.ast.symbols" => call_code_ast_symbols_tool(config.clone(), arguments.clone()).await,
-        "code.ast.references" => {
-            call_code_ast_references_tool(config.clone(), arguments.clone()).await
+        "code.ast.status" => {
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_status_tool(&code_config)
         }
-        "code.ast.query" => call_code_ast_query_tool(config.clone(), arguments.clone()).await,
-        "code.ast.context" => call_code_ast_context_tool(config, &arguments).await,
+        "code.ast.outline" => {
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_outline_tool(code_config, arguments.clone()).await
+        }
+        "code.ast.symbols" => {
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_symbols_tool(code_config, arguments.clone()).await
+        }
+        "code.ast.references" => {
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_references_tool(code_config, arguments.clone()).await
+        }
+        "code.ast.query" => {
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_query_tool(code_config, arguments.clone()).await
+        }
+        "code.ast.context" => {
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_context_tool(&code_config, &arguments).await
+        }
         "code.ast.diagnostics" => {
-            call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_diagnostics_tool(code_config, arguments.clone()).await
         }
         "memory.capture" => {
             call_memory_capture_tool(config, &arguments, central_config_path, resolved_workflow)
@@ -9833,6 +9875,41 @@ Public memory concept.
 
         assert!(matches!(error, MemoryError::InvalidInput(message)
             if message.contains("AST code-intelligence tools are disabled")));
+    }
+
+    #[tokio::test]
+    async fn code_ast_tool_calls_honor_selected_repository_policy() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    enabled: false\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": { "repo": "repo-a" }
+            }),
+        )
+        .await
+        .expect_err("selected repository policy should disable AST tools");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("AST code-intelligence tools are disabled for the selected repository")));
     }
 
     #[test]
