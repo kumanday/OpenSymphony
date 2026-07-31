@@ -2713,6 +2713,105 @@ async fn queued_binding_change_reconciles_before_retry_is_due() {
             .map(|binding| binding.alias.as_str()),
         Some("two")
     );
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("running retry reconciliation must not starve discovery");
+    assert_eq!(scheduler.tracker().summary_requests, 1);
+}
+
+#[tokio::test]
+async fn same_repository_recovery_retains_persisted_binding_generations() {
+    let recovered_worker_id =
+        WorkerId::new("worker-same-repository-generation").expect("worker id should be valid");
+    let recovered_workspace = workspace_record(
+        "COE-548-SAME-REPOSITORY-GENERATION",
+        "/tmp/recovered/COE-548-SAME-REPOSITORY-GENERATION",
+    );
+    let mut persisted_binding = match repository_routing().resolve(
+        &["repo:one".to_string()],
+        Some("project-id"),
+        None,
+        false,
+    ) {
+        RepositoryBindingOutcome::Resolved(binding) => binding,
+        outcome => panic!("expected persisted binding, got {outcome:?}"),
+    };
+    persisted_binding.config_generation = "config-before-restart".to_string();
+    persisted_binding.inventory_generation = "inventory-before-restart".to_string();
+    let tracker = FakeTracker {
+        active: vec![{
+            let mut issue = tracker_issue(
+                "lin-same-repository-generation",
+                "COE-548-SAME-REPOSITORY-GENERATION",
+                "In Progress",
+                0,
+            );
+            issue.project_id = Some("project-id".to_string());
+            issue.labels = vec!["repo:one".to_string()];
+            issue
+        }],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue(
+                "lin-same-repository-generation",
+                "COE-548-SAME-REPOSITORY-GENERATION",
+                "In Progress",
+            ),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("openhands_agent_server".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: Some(persisted_binding.clone()),
+            }),
+        }],
+        records: HashMap::from([(
+            "lin-same-repository-generation".to_string(),
+            recovered_workspace,
+        )]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("same-repository recovery should reuse the persisted run");
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    let run = &scheduler.worker().launches[0].run;
+    assert_eq!(
+        run.repository_binding
+            .as_ref()
+            .map(|binding| binding.config_generation.as_str()),
+        Some("config-before-restart")
+    );
+    assert_eq!(
+        run.repository_binding
+            .as_ref()
+            .map(|binding| binding.inventory_generation.as_str()),
+        Some("inventory-before-restart")
+    );
 }
 
 #[tokio::test]

@@ -656,14 +656,16 @@ where
                 observed_at,
             ) {
                 self.refresh_terminal_issues(observed_at).await?;
-            } else if due(
+            }
+            if due(
                 self.last_running_state_refresh_at,
                 RUNNING_STATE_REFRESH_INTERVAL_MS,
                 observed_at,
             ) && self.has_reconcilable_executions()
             {
                 self.refresh_running_issue_states(observed_at).await?;
-            } else if due(
+            }
+            if due(
                 self.last_dispatch_discovery_at,
                 DISPATCH_DISCOVERY_INTERVAL_MS,
                 observed_at,
@@ -1245,16 +1247,6 @@ where
                             detail: error.to_string(),
                         })?;
                     recovered_workspace = None;
-                }
-                if let Some(run) = recovered_run.as_mut()
-                    && !binding_changed
-                {
-                    run.repository_binding = normalized
-                        .repository_binding
-                        .as_ref()
-                        .and_then(RepositoryBindingOutcome::resolved_binding)
-                        .cloned()
-                        .or_else(|| run.repository_binding.clone());
                 }
                 self.upsert_active_execution(normalized.clone(), observed_at, recovered_workspace)?;
                 if record.had_in_flight_run {
@@ -2200,17 +2192,13 @@ where
             .repository_binding
             .clone()
             .map(RepositoryBindingOutcome::Resolved);
-        let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
-            current_execution.issue().repository_binding.as_ref(),
-            recovered_binding.as_ref(),
-        );
         let mut recovery_issue = current_execution.issue().clone();
-        if binding_changed {
+        if recovered_binding.is_some() {
             // The persisted run owns the old generation. Attach that binding
-            // before claim so config/inventory drift cannot reject recovery;
-            // bootstrap reconciliation supersedes it against the fresh issue
-            // binding immediately after reattachment.
-            recovery_issue.repository_binding = recovered_binding;
+            // before claim so config/inventory drift cannot reject recovery.
+            // Bootstrap reconciliation supersedes it against the fresh issue
+            // binding when the canonical identity actually changed.
+            recovery_issue.repository_binding = recovered_binding.clone();
         }
         let mut execution = current_execution.clone();
         if execution.issue() != &recovery_issue {
@@ -2231,16 +2219,13 @@ where
             self.config.max_turns,
         )
         .with_normal_retry_count(recovered_run.normal_retry_count)
-        .with_repository_binding(if binding_changed {
-            recovered_run.repository_binding.clone()
-        } else {
+        .with_repository_binding(recovered_run.repository_binding.clone().or_else(|| {
             recovery_issue
                 .repository_binding
                 .as_ref()
                 .and_then(RepositoryBindingOutcome::resolved_binding)
                 .cloned()
-                .or_else(|| recovered_run.repository_binding.clone())
-        });
+        }));
         let route = recovered_route(
             decide_issue_route(&recovery_issue, &self.config)?,
             harness_kind.as_deref(),

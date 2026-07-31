@@ -78,7 +78,11 @@ otherwise the stale marker is cleared. If the recovered issue manifest proves
 a different canonical repository than the live binding, recovery removes the
 old workspace before restoring the retry so normal dispatch rematerializes it
 safely. Legacy-single routing also never applies its default repository to a
-parent task.
+parent task. When a recovered run still points at the same canonical
+repository, its persisted config and inventory generations remain attached to
+that run; a formatting-only locator change cannot relabel an in-flight attempt
+as a newer configuration generation. Scheme-default authority ports are
+normalized for repository identity, while non-default ports remain distinct.
 The same frequent refresh reads current child presence, so a running task that
 becomes a parent is made repository-neutral and its old worker generation is
 superseded before another turn can continue.

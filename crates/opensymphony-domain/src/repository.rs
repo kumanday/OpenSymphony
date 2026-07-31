@@ -289,9 +289,11 @@ fn remote_authority(locator: &str) -> Option<String> {
         return None;
     }
 
-    let (has_scheme, without_scheme) = raw
+    let (scheme, has_scheme, without_scheme) = raw
         .split_once("://")
-        .map_or((false, raw), |(_, remainder)| (true, remainder));
+        .map_or((None, false, raw), |(scheme, remainder)| {
+            (Some(scheme), true, remainder)
+        });
     let authority = if has_scheme {
         without_scheme.split('/').next().unwrap_or_default()
     } else if let Some(remainder) = raw
@@ -314,21 +316,77 @@ fn remote_authority(locator: &str) -> Option<String> {
     {
         return None;
     }
-    Some(normalize_component(authority))
+    let authority = normalize_component(authority);
+    let default_port = if has_scheme {
+        match scheme.map(normalize_component).as_deref() {
+            Some("http") => Some("80"),
+            Some("https") => Some("443"),
+            Some("ssh") => Some("22"),
+            _ => None,
+        }
+    } else if raw.starts_with("git@") || raw.starts_with("ssh@") {
+        Some("22")
+    } else {
+        None
+    };
+    Some(normalize_default_port(&authority, default_port))
+}
+
+fn normalize_default_port(authority: &str, default_port: Option<&str>) -> String {
+    let Some(default_port) = default_port else {
+        return authority.to_owned();
+    };
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return authority.to_owned();
+    };
+    if host.is_empty() || port != default_port {
+        authority.to_owned()
+    } else {
+        host.to_owned()
+    }
 }
 
 fn normalize_locator(value: &str) -> String {
     let mut value = value.trim().to_owned();
+    let mut default_port = None;
     if let Some((scheme, without_scheme)) = value.split_once("://")
         && matches!(
             scheme.to_ascii_lowercase().as_str(),
             "http" | "https" | "ssh" | "git"
         )
     {
+        default_port = match scheme.to_ascii_lowercase().as_str() {
+            "http" => Some("80"),
+            "https" => Some("443"),
+            "ssh" => Some("22"),
+            _ => None,
+        };
         value = without_scheme.to_owned();
+    }
+    if let Some(default_port) = default_port {
+        value = normalize_locator_default_port(&value, default_port);
     }
     value = value.trim_end_matches('/').to_owned();
     value.strip_suffix(".git").unwrap_or(&value).to_owned()
+}
+
+fn normalize_locator_default_port(value: &str, default_port: &str) -> String {
+    let Some((authority, path)) = value.split_once('/') else {
+        return value.to_owned();
+    };
+    let normalized_authority = if let Some((user, host)) = authority.rsplit_once('@') {
+        format!(
+            "{user}@{}",
+            normalize_default_port(host, Some(default_port))
+        )
+    } else {
+        normalize_default_port(authority, Some(default_port))
+    };
+    if normalized_authority == authority {
+        value.to_owned()
+    } else {
+        format!("{normalized_authority}/{path}")
+    }
 }
 
 fn normalize_locator_for_provider(provider: &str, locator: &str) -> String {
@@ -675,6 +733,59 @@ mod tests {
 
         assert_eq!(upper, lower);
         assert_eq!(upper_fingerprint, lower_fingerprint);
+    }
+
+    #[test]
+    fn equivalent_default_ports_share_fallback_identity() {
+        let https = CanonicalRepositoryId::from_remote(
+            "github",
+            None,
+            "https://github.com/owner/repository",
+        )
+        .expect("HTTPS identity should be valid");
+        let https_default = CanonicalRepositoryId::from_remote(
+            "github",
+            None,
+            "https://github.com:443/owner/repository",
+        )
+        .expect("explicit HTTPS default-port identity should be valid");
+        let ssh = CanonicalRepositoryId::from_remote(
+            "github",
+            None,
+            "ssh://git@github.com/owner/repository",
+        )
+        .expect("SSH identity should be valid");
+        let ssh_default = CanonicalRepositoryId::from_remote(
+            "github",
+            None,
+            "ssh://git@github.com:22/owner/repository",
+        )
+        .expect("explicit SSH default-port identity should be valid");
+        let non_default = CanonicalRepositoryId::from_remote(
+            "github",
+            None,
+            "https://github.com:8443/owner/repository",
+        )
+        .expect("non-default HTTPS identity should be valid");
+
+        assert_eq!(https, https_default);
+        assert_eq!(https, ssh);
+        assert_eq!(ssh, ssh_default);
+        assert_ne!(https, non_default);
+        assert_eq!(
+            SafeRemoteFingerprint::from_remote(
+                "github",
+                None,
+                "https://github.com/owner/repository",
+            )
+            .expect("HTTPS fingerprint should be valid"),
+            SafeRemoteFingerprint::from_remote(
+                "github",
+                None,
+                "https://github.com:443/owner/repository",
+            )
+            .expect("explicit HTTPS default-port fingerprint should be valid")
+        );
     }
 
     #[test]
