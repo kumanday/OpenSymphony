@@ -19,8 +19,6 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
         let scope_refs = capture_scope_refs(issue_plan);
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
-        let source_refs = capture_source_refs(issue_plan);
-        let source_refs_json = serde_json::to_string(&source_refs)?;
         let empty_json = serde_json::to_string(&Vec::<String>::new())?;
         let freshness = MemoryFreshness::Current;
         transaction
@@ -56,7 +54,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     issue_plan.issue.description.clone(),
                     labels_json.clone(),
                     scope_refs_json,
-                    source_refs_json,
+                    empty_json.clone(),
                     empty_json.clone(),
                     empty_json.clone(),
                     freshness.as_str(),
@@ -266,24 +264,6 @@ fn capture_scope_refs(plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
         kind: KnowledgeScopeKind::Area,
         id: area.clone(),
         label: None,
-    }));
-    refs
-}
-
-fn capture_source_refs(plan: &CaptureIssuePlan) -> Vec<MemorySourceRef> {
-    let mut refs = vec![MemorySourceRef {
-        kind: "linear_issue".to_string(),
-        id: normalize_issue_key(&plan.issue.identifier),
-        url: plan.issue.url.clone(),
-        repo_id: None,
-        symbol_key: None,
-    }];
-    refs.extend(plan.prs.iter().map(|pr| MemorySourceRef {
-        kind: "github_pr".to_string(),
-        id: pr.number.to_string(),
-        url: pr.url.clone(),
-        repo_id: None,
-        symbol_key: None,
     }));
     refs
 }
