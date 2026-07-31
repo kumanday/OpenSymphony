@@ -2570,6 +2570,13 @@ impl IssueSessionRunner {
         manifest.llm_config_fingerprint =
             Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
         manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+        if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+        }
+        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        workspace_manager
+            .write_run_manifest(workspace, run_manifest)
+            .await?;
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());

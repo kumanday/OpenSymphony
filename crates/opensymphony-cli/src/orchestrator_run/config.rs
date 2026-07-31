@@ -501,7 +501,7 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.state_root),
                     central.workspace_root,
                     Some(central.retain_failed),
-                    Some(central.mode == CentralRoutingMode::LegacySingle),
+                    Some(true),
                     central.memory_catalog_root,
                     central.repository_instruction_path,
                     Some(central.workflow_front_matter),
@@ -1272,6 +1272,11 @@ fn resolve_central_config(
     )?;
     let repository_checkouts = build_repository_checkouts(&config)?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
+    let repository_instruction_path = legacy_repository_instruction_path.or_else(|| {
+        integration_instructions
+            .as_ref()
+            .map(|instructions| instructions.path.clone())
+    });
     Ok(ResolvedCentralConfig {
         instance_id,
         state_root,
@@ -1281,7 +1286,7 @@ fn resolve_central_config(
         mode,
         repository: config.routing.repository,
         integration_instructions,
-        repository_instruction_path: legacy_repository_instruction_path,
+        repository_instruction_path,
         generation,
         repository_routing,
         repository_checkouts,

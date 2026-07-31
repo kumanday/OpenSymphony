@@ -118,6 +118,14 @@ impl WorkspaceManager {
         &self,
         issue: &IssueDescriptor,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
+        self.ensure_with_run_id(issue, None).await
+    }
+
+    pub async fn ensure_with_run_id(
+        &self,
+        issue: &IssueDescriptor,
+        run_id: Option<&str>,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         if let Some(binding) = issue
             .repository_binding
             .as_ref()
@@ -127,7 +135,7 @@ impl WorkspaceManager {
                 .get(binding.repository_id().as_str())
         {
             return self
-                .ensure_verified_checkout(issue, binding, repository)
+                .ensure_verified_checkout_for_run(issue, binding, repository, run_id)
                 .await;
         }
 
@@ -247,6 +255,17 @@ impl WorkspaceManager {
         binding: &RepositoryBinding,
         repository: &CheckoutRepository,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
+        self.ensure_verified_checkout_for_run(issue, binding, repository, None)
+            .await
+    }
+
+    async fn ensure_verified_checkout_for_run(
+        &self,
+        issue: &IssueDescriptor,
+        binding: &RepositoryBinding,
+        repository: &CheckoutRepository,
+        run_id: Option<&str>,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
         let workspace_key = checkout_workspace_key(
             &issue.identifier,
@@ -264,8 +283,15 @@ impl WorkspaceManager {
             .root
             .join(format!("{workspace_key}--{generation}"));
         let staging_root = self.config.root.join(".opensymphony-staging");
+        self.reject_symlinked_workspace_root(&staging_root).await?;
         self.create_directory(&staging_root).await?;
+        let canonical_staging_root = self.canonicalize_path(&staging_root).await?;
+        ensure_descendant(
+            &self.canonicalize_path(&self.config.root).await?,
+            &canonical_staging_root,
+        )?;
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
+        self.reject_symlinked_workspace_root(&staging_path).await?;
         let clone_result = self
             .run_git_clone(repository, &staging_path)
             .await
@@ -275,7 +301,7 @@ impl WorkspaceManager {
         clone_result?;
 
         let facts = self
-            .verify_git_checkout(&staging_path, binding, repository)
+            .verify_git_checkout(&staging_path, binding, repository, true)
             .await?;
         let instruction = self
             .load_instruction_provenance(&staging_path, repository, &facts.head)
@@ -305,7 +331,7 @@ impl WorkspaceManager {
             generation,
             issue_id: issue.issue_id.clone(),
             identifier: issue.identifier.clone(),
-            run_id: issue.issue_id.clone(),
+            run_id: run_id.unwrap_or(&issue.issue_id).to_owned(),
             sanitized_workspace_key: workspace.workspace_key().to_owned(),
             workspace_path: workspace.workspace_path().to_path_buf(),
             repository_binding: binding.clone(),
@@ -355,6 +381,15 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<CheckoutManifest, WorkspaceError> {
+        self.verify_checkout_with_worker_changes(workspace, false)
+            .await
+    }
+
+    async fn verify_checkout_with_worker_changes(
+        &self,
+        workspace: &WorkspaceHandle,
+        allow_worker_changes: bool,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
         let manifest = self
             .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
@@ -390,12 +425,13 @@ impl WorkspaceManager {
                 workspace.workspace_path(),
                 &manifest.repository_binding,
                 repository,
+                !allow_worker_changes,
             )
             .await?;
-        if facts.head != manifest.head
+        if (!allow_worker_changes && facts.head != manifest.head)
             || facts.branch != manifest.current_branch
             || facts.shallow != manifest.shallow
-            || !facts.clean
+            || (!allow_worker_changes && !facts.clean)
         {
             return Err(WorkspaceError::CheckoutVerification {
                 path: workspace.workspace_path().to_path_buf(),
@@ -420,7 +456,34 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<Option<String>, WorkspaceError> {
-        let manifest = self.verify_checkout(workspace).await?;
+        self.read_checkout_instructions_with_worker_changes(workspace, false)
+            .await
+    }
+
+    pub async fn verify_checkout_for_retry(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
+        self.verify_checkout_with_worker_changes(workspace, true)
+            .await
+    }
+
+    pub async fn read_checkout_instructions_for_retry(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<Option<String>, WorkspaceError> {
+        self.read_checkout_instructions_with_worker_changes(workspace, true)
+            .await
+    }
+
+    async fn read_checkout_instructions_with_worker_changes(
+        &self,
+        workspace: &WorkspaceHandle,
+        allow_worker_changes: bool,
+    ) -> Result<Option<String>, WorkspaceError> {
+        let manifest = self
+            .verify_checkout_with_worker_changes(workspace, allow_worker_changes)
+            .await?;
         if manifest.instruction.path.as_os_str().is_empty() {
             return Ok(None);
         }
@@ -487,12 +550,25 @@ impl WorkspaceManager {
             else {
                 continue;
             };
-            if manifest.issue_id != issue.issue_id
-                || checkout.repository_binding.repository_id() != binding.repository_id()
-            {
+            if manifest.issue_id != issue.issue_id {
                 continue;
             }
-            match self.verify_checkout(&handle).await {
+            if checkout.repository_binding != *binding {
+                self.quarantine_checkout(
+                    &handle,
+                    "repository binding or policy generation mismatch".to_owned(),
+                )
+                .await?;
+                continue;
+            }
+            let allow_worker_changes = self
+                .load_run_manifest(&handle)
+                .await?
+                .is_some_and(|run| run.pending_retry);
+            match self
+                .verify_checkout_with_worker_changes(&handle, allow_worker_changes)
+                .await
+            {
                 Ok(_) => {
                     let issue_manifest =
                         self.load_issue_manifest(&handle).await?.unwrap_or(manifest);
@@ -543,6 +619,38 @@ impl WorkspaceManager {
         repository: &CheckoutRepository,
         destination: &Path,
     ) -> Result<(), WorkspaceError> {
+        let askpass_path = if let Some(variable) = repository.credential_env.as_deref()
+            && std::env::var_os(variable).is_some()
+        {
+            let path = destination
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(format!(".opensymphony-askpass-{}", Uuid::new_v4().simple()));
+            fs::write(
+                &path,
+                b"#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ;;\nesac\n",
+            )
+            .await
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "prepare Git credential helper".to_owned(),
+                path: path.clone(),
+                detail: source.to_string(),
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                    .await
+                    .map_err(|source| WorkspaceError::CheckoutOperation {
+                        operation: "prepare Git credential helper".to_owned(),
+                        path: path.clone(),
+                        detail: source.to_string(),
+                    })?;
+            }
+            Some(path)
+        } else {
+            None
+        };
         let mut command = Command::new("git");
         command
             .arg("clone")
@@ -556,15 +664,27 @@ impl WorkspaceManager {
         {
             command.env("OPENSYMPHONY_CHECKOUT_CREDENTIAL", value);
         }
-        let output =
+        if let Some(path) = askpass_path.as_ref() {
             command
-                .output()
-                .await
-                .map_err(|source| WorkspaceError::CheckoutOperation {
+                .env("GIT_ASKPASS", path)
+                .env("GIT_TERMINAL_PROMPT", "0");
+        }
+        let output = match command.output().await {
+            Ok(output) => output,
+            Err(source) => {
+                if let Some(path) = askpass_path {
+                    let _ = fs::remove_file(path).await;
+                }
+                return Err(WorkspaceError::CheckoutOperation {
                     operation: "clone repository".to_owned(),
                     path: destination.to_path_buf(),
                     detail: source.to_string(),
-                })?;
+                });
+            }
+        };
+        if let Some(path) = askpass_path {
+            let _ = fs::remove_file(path).await;
+        }
         if output.status.success() {
             return Ok(());
         }
@@ -580,6 +700,7 @@ impl WorkspaceManager {
         checkout: &Path,
         binding: &RepositoryBinding,
         repository: &CheckoutRepository,
+        enforce_worktree_state: bool,
     ) -> Result<GitFacts, WorkspaceError> {
         let inside = self
             .git(checkout, &["rev-parse", "--is-inside-work-tree"])
@@ -600,7 +721,16 @@ impl WorkspaceManager {
             &remote,
         )
         .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
-        if actual != expected || actual != binding.repository.safe_remote_fingerprint {
+        let expected_locator =
+            SafeRemoteFingerprint::from_remote(&repository.provider, None, &repository.remote)
+                .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        let actual_locator =
+            SafeRemoteFingerprint::from_remote(&repository.provider, None, &remote)
+                .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        if actual != expected
+            || actual != binding.repository.safe_remote_fingerprint
+            || actual_locator != expected_locator
+        {
             return Err(checkout_verification(
                 checkout,
                 "remote fingerprint mismatch",
@@ -630,7 +760,7 @@ impl WorkspaceManager {
                 &["status", "--porcelain", "--untracked-files=all"],
             )
             .await?;
-        if !status.is_empty() {
+        if enforce_worktree_state && !status.is_empty() {
             return Err(checkout_verification(checkout, "worktree is dirty"));
         }
         self.git(checkout, &["fsck", "--no-dangling"])
@@ -737,11 +867,20 @@ impl WorkspaceManager {
                 source,
             }
         })?;
-        if !contents.lines().any(|line| line.trim() == ".opensymphony/") {
+        let required = [".opensymphony/", ".opensymphony.after_create.json"];
+        let missing = required
+            .iter()
+            .filter(|entry| !contents.lines().any(|line| line.trim() == **entry))
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
             if !contents.ends_with('\n') {
                 contents.push('\n');
             }
-            contents.push_str(".opensymphony/\n");
+            for entry in missing {
+                contents.push_str(entry);
+                contents.push('\n');
+            }
             fs::write(&exclude, contents).await.map_err(|source| {
                 WorkspaceError::WriteArtifact {
                     path: exclude,
@@ -1374,6 +1513,14 @@ impl WorkspaceManager {
         if !issue_manifest_claims_workspace(&handle, &manifest) {
             return Ok(None);
         }
+
+        let handle = match self
+            .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
+            .await?
+        {
+            Some(checkout) => handle.with_checkout_generation(checkout.generation),
+            None => handle,
+        };
 
         Ok(Some((handle, manifest)))
     }

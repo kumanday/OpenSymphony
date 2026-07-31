@@ -1491,7 +1491,11 @@ impl RuntimeWorkerBackend {
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
-            let ensured = match workspace_manager.ensure(&issue_descriptor(&issue)).await {
+            let run_id = run.worker_id.to_string();
+            let ensured = match workspace_manager
+                .ensure_with_run_id(&issue_descriptor(&issue), Some(&run_id))
+                .await
+            {
                 Ok(ensured) => ensured,
                 Err(error) => {
                     report_launch_failure(
@@ -1501,9 +1505,26 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
+            let allow_worker_changes =
+                match workspace_manager.load_run_manifest(&ensured.handle).await {
+                    Ok(manifest) => manifest.is_some_and(|manifest| manifest.pending_retry),
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to read prior checkout run state: {error}"),
+                        );
+                        return;
+                    }
+                };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
-                match workspace_manager.verify_checkout(&ensured.handle).await {
+                match if allow_worker_changes {
+                    workspace_manager
+                        .verify_checkout_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager.verify_checkout(&ensured.handle).await
+                } {
                     Ok(checkout) => Some(TerminalRuntimeEnvelope {
                         repository_binding: checkout.repository_binding.clone(),
                         config_generation: checkout.repository_binding.config_generation.clone(),
@@ -1539,10 +1560,16 @@ impl RuntimeWorkerBackend {
                 None
             };
             let repository_instructions = if ensured.handle.checkout_generation().is_some() {
-                match workspace_manager
-                    .read_checkout_instructions(&ensured.handle)
-                    .await
-                {
+                let result = if allow_worker_changes {
+                    workspace_manager
+                        .read_checkout_instructions_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager
+                        .read_checkout_instructions(&ensured.handle)
+                        .await
+                };
+                match result {
                     Ok(instructions) => {
                         runner = runner.with_repository_instructions(instructions.clone());
                         instructions
@@ -1561,7 +1588,7 @@ impl RuntimeWorkerBackend {
             let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
-                .with_runtime_envelope(runtime_envelope);
+                .with_runtime_envelope(runtime_envelope.clone());
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
@@ -1645,6 +1672,48 @@ impl RuntimeWorkerBackend {
                     }
                 }
             };
+
+            if let Some(expected) = runtime_envelope.as_ref() {
+                let verified = match if allow_worker_changes {
+                    workspace_manager
+                        .verify_checkout_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager.verify_checkout(&ensured.handle).await
+                } {
+                    Ok(checkout) => checkout,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("verified checkout changed before harness attach: {error}"),
+                        );
+                        return;
+                    }
+                };
+                if verified.generation != expected.checkout_generation
+                    || verified.instruction != expected.instruction
+                    || repository_instructions
+                        != if allow_worker_changes {
+                            workspace_manager
+                                .read_checkout_instructions_for_retry(&ensured.handle)
+                                .await
+                                .ok()
+                                .flatten()
+                        } else {
+                            workspace_manager
+                                .read_checkout_instructions(&ensured.handle)
+                                .await
+                                .ok()
+                                .flatten()
+                        }
+                {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        "verified checkout envelope changed before harness attach".to_owned(),
+                    );
+                    return;
+                }
+            }
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
@@ -2151,16 +2220,28 @@ async fn try_run_codex_stdio_issue(
         && existing_manifest
             .as_ref()
             .is_some_and(|manifest| manifest.runtime_envelope.as_ref() != Some(expected))
+        && let Some(mut incompatible) = existing_manifest.take()
     {
-        return Err(codex_lifecycle_error(
-            issue,
-            existing_manifest
-                .as_ref()
-                .map(|manifest| manifest.conversation_id.to_string())
-                .as_deref(),
-            "conversation compatibility",
-            "persisted Codex conversation runtime envelope does not match the verified checkout",
-        ));
+        ensure_codex_thread_active(workspace_manager, workspace, &mut incompatible, codex_bin)
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&incompatible.conversation_id.to_string()),
+                    "supersede incompatible conversation",
+                    error,
+                )
+            })?;
+        archive_terminal_codex_thread(workspace_manager, workspace, &mut incompatible, codex_bin)
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(&incompatible.conversation_id.to_string()),
+                    "supersede incompatible conversation",
+                    error,
+                )
+            })?;
     }
     if let Some(manifest) = existing_manifest.as_mut() {
         ensure_codex_thread_active(workspace_manager, workspace, manifest, codex_bin)
@@ -2408,6 +2489,20 @@ async fn try_run_codex_stdio_issue(
                     ));
                 }
             };
+            if manifest.runtime_envelope.is_some() {
+                run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+                workspace_manager
+                    .write_run_manifest(workspace, run_manifest)
+                    .await
+                    .map_err(|error| {
+                        codex_lifecycle_error(
+                            issue,
+                            Some(&conversation_id),
+                            "runtime envelope persistence",
+                            error,
+                        )
+                    })?;
+            }
             (
                 conversation_id,
                 manifest,
@@ -3709,7 +3804,7 @@ async fn write_codex_conversation_manifest(
     let now = chrono::Utc::now();
     let conversation_id = ConversationId::new(thread_id.to_string())
         .map_err(|error| format!("invalid Codex thread id for conversation manifest: {error}"))?;
-    let manifest = IssueConversationManifest {
+    let mut manifest = IssueConversationManifest {
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         conversation_id,
@@ -3748,6 +3843,9 @@ async fn write_codex_conversation_manifest(
         cache_read_tokens: 0,
         last_token_accumulation_at: None,
     };
+    if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
     workspace_manager
         .write_json_artifact(
             workspace,
