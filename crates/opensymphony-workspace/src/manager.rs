@@ -176,10 +176,8 @@ impl WorkspaceManager {
         mut self,
         repositories: BTreeMap<String, CheckoutRepository>,
     ) -> Self {
-        self.checkout_credential_envs = repositories
-            .values()
-            .filter_map(|repository| repository.credential_env.clone())
-            .collect();
+        self.checkout_credential_envs =
+            super::checkout_credential_environment_variables(&repositories);
         self.checkout_repositories = repositories;
         self
     }
@@ -1726,7 +1724,21 @@ impl WorkspaceManager {
                 continue;
             }
             match self.verify_checkout_for_retry(&handle).await {
-                Ok(_) => return Ok(Some(handle)),
+                Ok(checkout)
+                    if checkout.issue_id == manifest.issue_id
+                        && checkout.identifier == manifest.identifier
+                        && checkout.sanitized_workspace_key == manifest.sanitized_workspace_key
+                        && checkout.workspace_path == handle.workspace_path()
+                        && issue_manifest_binding_matches_checkout(&manifest, &checkout) =>
+                {
+                    return Ok(Some(handle));
+                }
+                Ok(_) => {
+                    verification_error.get_or_insert(checkout_verification(
+                        handle.workspace_path(),
+                        "checkout ownership manifest does not match the issue manifest",
+                    ));
+                }
                 Err(error) => {
                     verification_error.get_or_insert(error);
                 }
@@ -2785,6 +2797,7 @@ fn workflow_body(bytes: &[u8]) -> Vec<u8> {
 async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
     let mut pending = vec![root.to_path_buf()];
     let mut paths = Vec::new();
+    let mut scanned_entries = 0;
     while let Some(directory) = pending.pop() {
         let mut entries =
             fs::read_dir(&directory)
@@ -2802,6 +2815,13 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                     source,
                 })?
         {
+            scanned_entries += 1;
+            if scanned_entries > 10_000 {
+                return Err(checkout_verification(
+                    root,
+                    "instruction discovery exceeded the entry limit",
+                ));
+            }
             let path = entry.path();
             let file_type =
                 entry
@@ -3008,6 +3028,17 @@ fn ownership_claim_from_after_create_receipt(
 
 fn workspace_matches_issue_reference(manifest: &IssueManifest, issue_reference: &str) -> bool {
     manifest.identifier == issue_reference || manifest.issue_id == issue_reference
+}
+
+fn issue_manifest_binding_matches_checkout(
+    manifest: &IssueManifest,
+    checkout: &CheckoutManifest,
+) -> bool {
+    manifest
+        .repository_binding
+        .as_ref()
+        .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
+        .is_some_and(|binding| binding == &checkout.repository_binding)
 }
 
 fn ensure_descendant(root: &Path, candidate: &Path) -> Result<(), WorkspaceError> {

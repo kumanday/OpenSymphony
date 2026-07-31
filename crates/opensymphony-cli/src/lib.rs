@@ -600,11 +600,9 @@ pub async fn run_doctor_command(
         central_config
             .as_ref()
             .map(|central| {
-                central
-                    .repository_checkouts
-                    .values()
-                    .filter_map(|checkout| checkout.credential_env.clone())
-                    .collect()
+                crate::opensymphony_workspace::checkout_credential_environment_variables(
+                    &central.repository_checkouts,
+                )
             })
             .unwrap_or_default(),
     );
@@ -2327,7 +2325,23 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         ));
     }
 
-    if strict_recovery_enabled(runtime.repository_routing.as_ref()) {
+    let persisted_runtime_envelope = if strict_recovery {
+        let persisted_run = workspace_manager
+            .load_run_manifest(&workspace)
+            .await
+            .map_err(|e| format!("failed to read persisted run manifest: {e}"))?
+            .ok_or_else(|| {
+                format!(
+                    "strict workspace {} has no persisted run manifest",
+                    workspace.identifier()
+                )
+            })?;
+        let run_envelope = persisted_run.runtime_envelope.ok_or_else(|| {
+            format!(
+                "strict workspace {} has no persisted run runtime envelope",
+                workspace.identifier()
+            )
+        })?;
         let envelope = old_manifest.runtime_envelope.as_ref().ok_or_else(|| {
             format!(
                 "strict workspace {} has no persisted runtime envelope",
@@ -2340,11 +2354,20 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
                 old_manifest.conversation_id
             ));
         }
+        if envelope != &run_envelope {
+            return Err(format!(
+                "strict conversation {} runtime envelope does not match its run manifest",
+                old_manifest.conversation_id
+            ));
+        }
         workspace_manager
             .verify_runtime_envelope_for_retry(&workspace, envelope)
             .await
             .map_err(|error| format!("strict recovery verification failed: {error}"))?;
-    }
+        Some(run_envelope)
+    } else {
+        old_manifest.runtime_envelope.clone()
+    };
 
     println!(
         "Found existing conversation: {}",
@@ -2356,10 +2379,8 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let checkout_credential_envs = runtime
         .repository_checkouts
         .as_ref()
-        .into_iter()
-        .flat_map(|checkouts| checkouts.values())
-        .filter_map(|checkout| checkout.credential_env.clone())
-        .collect::<BTreeSet<_>>();
+        .map(crate::opensymphony_workspace::checkout_credential_environment_variables)
+        .unwrap_or_default();
     let environment = BlockedEnvironment {
         base: ProcessEnvironment,
         blocked: checkout_credential_envs.clone(),
@@ -2385,7 +2406,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     use crate::opensymphony_workspace::RunDescriptor;
     let run_descriptor = RunDescriptor::new("rehydrate", 1);
     let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
-    run_manifest.runtime_envelope = old_manifest.runtime_envelope.clone();
+    run_manifest.runtime_envelope = persisted_runtime_envelope;
 
     // Create a minimal RunAttempt for the rehydration
     use crate::opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
@@ -2548,10 +2569,8 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment + Clone>(
     let central_instruction_configured = central_instruction_path.is_some();
     let checkout_credential_envs = repository_checkouts
         .as_ref()
-        .into_iter()
-        .flat_map(|checkouts| checkouts.values())
-        .filter_map(|checkout| checkout.credential_env.clone())
-        .collect::<BTreeSet<_>>();
+        .map(crate::opensymphony_workspace::checkout_credential_environment_variables)
+        .unwrap_or_default();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     if central_front_matter.is_none() && !workflow_path.exists() {
         return Err(format!(

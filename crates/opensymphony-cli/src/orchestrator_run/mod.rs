@@ -37,7 +37,7 @@ use crate::opensymphony_orchestrator::{
     TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
 use crate::opensymphony_workflow::ProcessEnvironment;
-use crate::opensymphony_workspace::WorkspaceError;
+use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde::Deserialize;
@@ -1095,10 +1095,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         runtime
             .repository_checkouts
             .as_ref()
-            .into_iter()
-            .flat_map(|checkouts| checkouts.values())
-            .filter_map(|checkout| checkout.credential_env.clone())
-            .collect(),
+            .map(checkout_credential_environment_variables)
+            .unwrap_or_default(),
     );
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;

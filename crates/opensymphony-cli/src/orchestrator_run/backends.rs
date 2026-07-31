@@ -40,7 +40,8 @@ use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWork
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
     RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, WorkspaceManagerConfig, compose_terminal_prompt,
+    WorkspaceManager, WorkspaceManagerConfig, checkout_credential_environment_variables,
+    compose_terminal_prompt,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -593,10 +594,8 @@ pub(super) async fn build_runtime_transport(
     config.env_remove = runtime
         .repository_checkouts
         .as_ref()
-        .into_iter()
-        .flat_map(|checkouts| checkouts.values())
-        .filter_map(|checkout| checkout.credential_env.clone())
-        .collect();
+        .map(checkout_credential_environment_variables)
+        .unwrap_or_default();
     if let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() {
         conversation_store.ensure_active_and_archived()?;
         config.extra_env.insert(
@@ -621,10 +620,8 @@ fn runtime_checkout_credential_envs(runtime: &RunRuntimeConfig) -> BTreeSet<Stri
     runtime
         .repository_checkouts
         .as_ref()
-        .into_iter()
-        .flat_map(|checkouts| checkouts.values())
-        .filter_map(|checkout| checkout.credential_env.clone())
-        .collect()
+        .map(checkout_credential_environment_variables)
+        .unwrap_or_default()
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
@@ -738,22 +735,47 @@ impl RuntimeWorkspaceBackend {
             {
                 match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
-                        if let Err(error) = archive_terminal_codex_thread(
-                            &self.manager,
-                            &handle,
-                            &mut manifest,
-                            &self.codex_bin,
-                            self.manager.checkout_credential_envs(),
-                        )
-                        .await
-                        {
+                        let envelope_compatible = if handle.checkout_generation().is_some() {
+                            self.manager
+                                .load_run_manifest(&handle)
+                                .await?
+                                .and_then(|run| run.runtime_envelope)
+                                .is_some_and(|expected| {
+                                    manifest.runtime_envelope.as_ref().is_some_and(|actual| {
+                                        actual == &expected
+                                            && actual.conversation_binding.as_deref()
+                                                == Some(
+                                                    manifest.conversation_id.to_string().as_str(),
+                                                )
+                                    })
+                                })
+                        } else {
+                            true
+                        };
+                        if envelope_compatible {
+                            if let Err(error) = archive_terminal_codex_thread(
+                                &self.manager,
+                                &handle,
+                                &mut manifest,
+                                &self.codex_bin,
+                                self.manager.checkout_credential_envs(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    issue = %handle.identifier(),
+                                    thread_id = %manifest.conversation_id,
+                                    %error,
+                                    "preserving terminal Codex workspace for archive retry"
+                                );
+                                return Err(CliWorkspaceError::CodexLifecycle(error));
+                            }
+                        } else {
                             tracing::warn!(
                                 issue = %handle.identifier(),
                                 thread_id = %manifest.conversation_id,
-                                %error,
-                                "preserving terminal Codex workspace for archive retry"
+                                "skipping terminal Codex archive for an untrusted runtime envelope"
                             );
-                            return Err(CliWorkspaceError::CodexLifecycle(error));
                         }
                     }
                     Ok(_) => {}

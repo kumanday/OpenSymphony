@@ -23,7 +23,7 @@ use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow, Workflo
 use crate::opensymphony_workspace::{
     CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueManifest,
     TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle, WorkspaceManager,
-    WorkspaceManagerConfig,
+    WorkspaceManagerConfig, checkout_credential_environment_variables,
 };
 use clap::Args;
 use crossterm::{
@@ -697,10 +697,8 @@ fn runtime_checkout_credential_envs(runtime: &DebugRuntimeConfig) -> BTreeSet<St
     runtime
         .repository_checkouts
         .as_ref()
-        .into_iter()
-        .flat_map(|checkouts| checkouts.values())
-        .filter_map(|checkout| checkout.credential_env.clone())
-        .collect()
+        .map(checkout_credential_environment_variables)
+        .unwrap_or_default()
 }
 
 async fn write_debug_codex_request(
@@ -1145,10 +1143,8 @@ fn build_debug_client(
     config.env_remove = runtime
         .repository_checkouts
         .as_ref()
-        .into_iter()
-        .flat_map(|checkouts| checkouts.values())
-        .filter_map(|checkout| checkout.credential_env.clone())
-        .collect();
+        .map(checkout_credential_environment_variables)
+        .unwrap_or_default();
     let conversation_store_path = conversation_store_kind.and_then(|kind| {
         runtime
             .conversation_store

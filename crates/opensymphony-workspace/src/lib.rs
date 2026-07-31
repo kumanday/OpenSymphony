@@ -10,8 +10,9 @@ pub use models::{
     ConversationManifest, EnsureWorkspaceResult, HookConfig, HookDefinition, HookExecutionRecord,
     HookExecutionStatus, HookKind, InstructionProvenance, IssueContextArtifact, IssueDescriptor,
     IssueLifecycleState, IssueManifest, PromptCaptureDescriptor, PromptCaptureManifest, PromptKind,
-    RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, TerminalRuntimeEnvelope,
-    WorkspaceHandle, WorkspaceManagerConfig, redact_runtime_diagnostic,
+    RunDescriptor, RunManifest, RunStatus, SSH_AUTH_SOCK_ENV, SessionContextArtifact,
+    TerminalRuntimeEnvelope, WorkspaceHandle, WorkspaceManagerConfig,
+    checkout_credential_environment_variables, redact_runtime_diagnostic,
 };
 pub use paths::{
     checkout_workspace_key, resolve_path_within_root, sanitize_workspace_key,

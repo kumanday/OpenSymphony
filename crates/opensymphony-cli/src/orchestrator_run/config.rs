@@ -1394,6 +1394,13 @@ fn reject_checkout_credential_env_reuse(
             non_checkout_variables.insert(variable.to_owned(), field);
         }
     }
+    if let Some(variable) = config
+        .memory
+        .as_ref()
+        .and_then(|memory| memory.token_env.as_deref())
+    {
+        non_checkout_variables.insert(variable.to_owned(), "memory.token_env");
+    }
     if let Some(front_matter) = config.openhands.front_matter.as_ref() {
         let value = serde_yaml::to_value(front_matter).map_err(|_| {
             CentralConfigError::InvalidReference {
@@ -2877,6 +2884,33 @@ scheduler:
                     if actual == field
             ));
         }
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_memory_token() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "  github-ssh:\n    kind: ssh-agent",
+                "  github-ssh:\n    kind: environment\n    variable: GITHUB_TOKEN",
+            )
+            .replace(
+                &format!("  catalog_root: {}/state/memory", root.path().display()),
+                &format!(
+                    "  catalog_root: {}/state/memory\n  token_env: GITHUB_TOKEN",
+                    root.path().display()
+                ),
+            );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("memory token must not reuse checkout credentials");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "memory.token_env"
+        ));
     }
 
     #[test]

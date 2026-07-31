@@ -27,6 +27,23 @@ pub struct CheckoutRepository {
     pub review_profile: String,
 }
 
+pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";
+
+pub fn checkout_credential_environment_variables(
+    repositories: &BTreeMap<String, CheckoutRepository>,
+) -> std::collections::BTreeSet<String> {
+    let mut variables = std::collections::BTreeSet::new();
+    for repository in repositories.values() {
+        if let Some(variable) = repository.credential_env.as_ref() {
+            variables.insert(variable.clone());
+        }
+        if repository.credential_kind == "ssh-agent" {
+            variables.insert(SSH_AUTH_SOCK_ENV.to_owned());
+        }
+    }
+    variables
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionProvenance {
     pub path: PathBuf,
