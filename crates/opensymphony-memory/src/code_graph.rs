@@ -3975,6 +3975,72 @@ pub fn migrate_code_repository_identity(
             )?;
     }
 
+    // Remove semantically duplicate rows already indexed under the canonical
+    // repository. A legacy basename-keyed snapshot may coexist with a
+    // canonical snapshot after a partial retry; re-keying both would leave
+    // duplicate symbols, edges, or diagnostics in the read model.
+    for (table, id_column, identity_columns) in [
+        (
+            "code_symbols",
+            "symbol_id",
+            "symbol_key, commit_sha, worktree_dirty, path, language, kind, name, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_edges",
+            "edge_id",
+            "commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_edge_revisions",
+            "edge_id",
+            "commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_key, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_diagnostics",
+            "diagnostic_id",
+            "commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_diagnostic_revisions",
+            "diagnostic_id",
+            "commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+    ] {
+        let predicates = identity_columns
+            .split(", ")
+            .map(|column| format!("legacy.{column} IS NOT DISTINCT FROM canonical.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let duplicate_ids = transaction
+            .prepare(&format!(
+                "SELECT DISTINCT legacy.{id_column} FROM {table} AS legacy JOIN {table} AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.{id_column} <> canonical.{id_column} AND {predicates}"
+            ))?
+            .query_map(params![canonical_repo_id, legacy_repo_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for duplicate_id in duplicate_ids {
+            if table == "code_symbols" {
+                transaction.execute(
+                    "UPDATE code_symbols SET container_symbol_id = (SELECT canonical.symbol_id FROM code_symbols AS legacy JOIN code_symbols AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.symbol_id = ? WHERE canonical.symbol_key = legacy.symbol_key AND canonical.commit_sha IS NOT DISTINCT FROM legacy.commit_sha AND canonical.path = legacy.path AND canonical.start_line = legacy.start_line AND canonical.start_col = legacy.start_col LIMIT 1) WHERE repo_id = ? AND container_symbol_id = ?",
+                    params![canonical_repo_id, legacy_repo_id, duplicate_id, legacy_repo_id, duplicate_id],
+                )?;
+                for column in ["source_symbol_id", "target_symbol_id"] {
+                    transaction.execute(
+                        &format!("UPDATE code_edges SET {column} = (SELECT canonical.symbol_id FROM code_symbols AS legacy JOIN code_symbols AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.symbol_id = ? WHERE canonical.symbol_key = legacy.symbol_key AND canonical.commit_sha IS NOT DISTINCT FROM legacy.commit_sha AND canonical.path = legacy.path AND canonical.start_line = legacy.start_line AND canonical.start_col = legacy.start_col LIMIT 1) WHERE repo_id = ? AND {column} = ?"),
+                        params![canonical_repo_id, legacy_repo_id, duplicate_id, legacy_repo_id, duplicate_id],
+                    )?;
+                    transaction.execute(
+                        &format!("UPDATE code_edge_revisions SET {column} = (SELECT canonical.symbol_id FROM code_symbols AS legacy JOIN code_symbols AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.symbol_id = ? WHERE canonical.symbol_key = legacy.symbol_key AND canonical.commit_sha IS NOT DISTINCT FROM legacy.commit_sha AND canonical.path = legacy.path AND canonical.start_line = legacy.start_line AND canonical.start_col = legacy.start_col LIMIT 1) WHERE repo_id = ? AND {column} = ?"),
+                        params![canonical_repo_id, legacy_repo_id, duplicate_id, legacy_repo_id, duplicate_id],
+                    )?;
+                }
+            }
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE repo_id = ? AND {id_column} = ?"),
+                params![legacy_repo_id, duplicate_id],
+            )?;
+        }
+    }
+
     // Rewrite the primary identifiers and every persisted reference before
     // changing repository ownership. The migration namespace is deterministic
     // and avoids collisions with IDs generated by normal canonical indexing.
@@ -9969,5 +10035,34 @@ mod code_graph_tests {
         assert_eq!(edge.0, "canonical-repo");
         assert_ne!(edge.1, "legacy-edge");
         assert_eq!(edge.2, symbol.1);
+    }
+
+    #[test]
+    fn repository_identity_migration_deduplicates_existing_canonical_symbols() {
+        let repository = TempDir::new().expect("repository");
+        let config = MemoryConfig::load(repository.path(), None).expect("config");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("schema");
+        for (symbol_id, repo_id) in [("legacy-symbol", "legacy-repo"), ("canonical-symbol", "canonical-repo")] {
+            connection
+                .execute(
+                    "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, 'shared-key', ?, 'abc', false, 'src/lib.rs', 'rust', 'function', 'main', NULL, '', NULL, 1, 0, 1, 10, 0, 10, 1, 1, 'content', 'snippet', 'parser', 'query-pack', 'now', 'current')",
+                    [symbol_id, repo_id],
+                )
+                .expect("symbol");
+        }
+        drop(connection);
+
+        migrate_code_repository_identity(&config, "legacy-repo", "canonical-repo")
+            .expect("identity migration");
+        let connection = open_index(&config).expect("index reopened");
+        let rows = connection
+            .query_row(
+                "SELECT COUNT(*), MIN(repo_id) FROM code_symbols",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("deduplicated symbols");
+        assert_eq!(rows, (1, "canonical-repo".to_string()));
     }
 }

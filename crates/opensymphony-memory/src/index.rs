@@ -2522,7 +2522,7 @@ fn load_pull_requests_by_issue(
         let entries = by_issue.entry(issue_key).or_default();
         // Source ownership is retained in DuckDB, but identical evidence from
         // two owners is one logical read-model item.
-        if !entries.iter().any(|existing| existing.number == pr.number) {
+        if !entries.iter().any(|existing| existing == &pr) {
             entries.push(pr);
         }
     }

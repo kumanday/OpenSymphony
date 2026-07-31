@@ -2917,7 +2917,7 @@ async fn call_memory_tool_with_workspace(
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
             let scope = scope_filter_from_mcp(config, &arguments, false)?;
-            let docs_config = memory_config_for_docs_scope(config, &scope)?;
+            let docs_config = memory_config_for_docs_scope(config, &scope, &area)?;
             Ok(mcp_text(docs_for_area_with_scope(
                 &docs_config,
                 &area,
@@ -2938,27 +2938,7 @@ async fn call_memory_tool_with_workspace(
             let sources = registered_memory_sources(config)?
                 .into_iter()
                 .filter(|source| {
-                    let repo_matches = scope
-                        .repo
-                        .as_deref()
-                        .is_none_or(|repository_id| source.repository_id == repository_id);
-                    let project_matches =
-                        scope
-                            .project
-                            .as_deref()
-                            .and_then(non_empty)
-                            .is_none_or(|project_id| {
-                                config
-                                    .repository_sources
-                                    .get(&source.repository_id)
-                                    .map(|repository| {
-                                        repository.project_scope_ids.contains(&project_id)
-                                    })
-                                    .unwrap_or_else(|| {
-                                        config.project_scope_ids.contains(&project_id)
-                                    })
-                            });
-                    repo_matches && project_matches
+                    repository_matches_memory_scope(config, &source.repository_id, &scope)
                 })
                 .collect::<Vec<_>>();
             Ok(json!({
@@ -3025,6 +3005,7 @@ async fn call_code_graph_context_tool(
     arguments: Value,
     workspace_root: Option<PathBuf>,
 ) -> Result<Value, MemoryError> {
+    let mut scope = scope_filter_from_mcp(&config, &arguments, true)?;
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = optional_string_arg(&arguments, "repository")
             .or_else(|| optional_string_arg(&arguments, "repo"))
@@ -3037,6 +3018,10 @@ async fn call_code_graph_context_tool(
                     .unwrap_or("repo")
                     .to_string()
             });
+        scope.repo = Some(repo_id.clone());
+        if !config.repository_sources.is_empty() {
+            resolve_code_intel_repo_for_scope(&config, &scope)?;
+        }
         let context_query = CodeGraphContextQuery {
             repo_id: repo_id.clone(),
             query: optional_string_arg(&arguments, "query"),
@@ -4936,21 +4921,63 @@ fn resolve_code_intel_repo_for_scope(
     if scope.all_accessible {
         return Ok(repo_root);
     }
-    let Some(project_id) = scope.project.as_deref().and_then(non_empty) else {
-        return Ok(repo_root);
-    };
     let Some(repository_id) = scope.repo.as_deref() else {
         return Ok(repo_root);
     };
-    let Some(source) = config.repository_sources.get(repository_id) else {
-        return Ok(repo_root);
-    };
-    if !source.project_scope_ids.contains(&project_id) {
+    if !repository_matches_memory_scope(config, repository_id, scope) {
+        if let Some(project_set_id) = scope.project_set.as_deref().and_then(non_empty) {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository `{repository_id}` is not associated with project set `{project_set_id}`"
+            )));
+        }
+        if let Some(project_id) = scope.project.as_deref().and_then(non_empty) {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository `{repository_id}` is not associated with project `{project_id}`"
+            )));
+        }
         return Err(MemoryError::InvalidInput(format!(
-            "repository `{repository_id}` is not associated with project `{project_id}`"
+            "repository `{repository_id}` is not accessible in the requested memory scope"
         )));
     }
     Ok(repo_root)
+}
+
+fn repository_matches_memory_scope(
+    config: &MemoryConfig,
+    repository_id: &str,
+    scope: &MemoryScopeFilter,
+) -> bool {
+    if scope.all_accessible {
+        return true;
+    }
+    if scope
+        .repo
+        .as_deref()
+        .and_then(non_empty)
+        .is_some_and(|requested| requested != repository_id)
+    {
+        return false;
+    }
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        return config.repository_sources.is_empty();
+    };
+    if let Some(project_set_id) = scope.project_set.as_deref().and_then(non_empty) {
+        if config.default_project_set_id.as_deref() != Some(project_set_id.as_str()) {
+            return false;
+        }
+        if !config.project_scope_ids.is_empty()
+            && source
+                .project_scope_ids
+                .is_disjoint(&config.project_scope_ids)
+        {
+            return false;
+        }
+    }
+    scope
+        .project
+        .as_deref()
+        .and_then(non_empty)
+        .is_none_or(|project_id| source.project_scope_ids.contains(&project_id))
 }
 
 fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<CodeIntelScope> {
@@ -5093,32 +5120,47 @@ fn brief_scope_filter(
 fn memory_config_for_docs_scope(
     config: &MemoryConfig,
     scope: &MemoryScopeFilter,
+    area: &str,
 ) -> Result<MemoryConfig, MemoryError> {
     let repository_id = match scope.repo.as_deref() {
-        Some(repository_id) => Some(repository_id),
+        Some(repository_id) if repository_matches_memory_scope(config, repository_id, scope) => {
+            Some(repository_id)
+        }
+        Some(repository_id) => {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository `{repository_id}` is not accessible in the requested memory scope"
+            )));
+        }
+        None if scope.project.is_none() && scope.project_set.is_none() => return Ok(config.clone()),
         None => {
-            let Some(project_id) = scope.project.as_deref().and_then(non_empty) else {
-                return Ok(config.clone());
-            };
             let candidates = config
                 .repository_sources
                 .values()
-                .filter(|source| source.project_scope_ids.contains(&project_id))
+                .filter(|source| {
+                    repository_matches_memory_scope(config, &source.repository_id, scope)
+                })
+                .filter(|source| {
+                    if scope.project_set.is_none() {
+                        return true;
+                    }
+                    let Ok(local_config) = MemoryConfig::load(&source.root, None) else {
+                        return false;
+                    };
+                    let area = area.trim().to_ascii_lowercase();
+                    local_config.areas.contains_key(&area)
+                        || local_config.area_or_default(&area).docs_target.is_file()
+                })
                 .map(|source| source.repository_id.as_str())
                 .collect::<Vec<_>>();
             match candidates.as_slice() {
                 [repository_id] => Some(*repository_id),
                 [] if config.repository_sources.is_empty() => return Ok(config.clone()),
-                [] => {
-                    return Err(MemoryError::InvalidInput(format!(
-                        "no repository source is associated with project `{project_id}`"
-                    )));
-                }
-                _ => {
-                    return Err(MemoryError::InvalidInput(format!(
-                        "a canonical repository id is required when project `{project_id}` matches multiple repository sources"
-                    )));
-                }
+                [] => return Err(MemoryError::InvalidInput(
+                    "no repository source contains the requested docs scope".to_string(),
+                )),
+                _ => return Err(MemoryError::InvalidInput(
+                    "a canonical repository id is required when the requested docs scope matches multiple repository sources".to_string(),
+                )),
             }
         }
     };
@@ -6479,6 +6521,7 @@ mod tests {
                 project: Some("project-a".to_string()),
                 ..MemoryScopeFilter::default()
             },
+            "ops",
         )
         .expect("project should resolve to its unique repository");
         assert_eq!(
@@ -6516,12 +6559,75 @@ mod tests {
                 project: Some("shared-project".to_string()),
                 ..MemoryScopeFilter::default()
             },
+            "ops",
         )
         .expect_err("ambiguous project docs should require a repository");
         assert!(
             error
                 .to_string()
                 .contains("matches multiple repository sources")
+        );
+    }
+
+    #[test]
+    fn project_set_scoped_docs_resolve_the_unique_active_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let active = TempDir::new().expect("active repository temp repo");
+        let inactive = TempDir::new().expect("inactive repository temp repo");
+        std::fs::create_dir_all(active.path().join(".opensymphony/memory"))
+            .expect("active memory directory");
+        std::fs::write(
+            active.path().join(".opensymphony/memory/memory.yaml"),
+            "areas:\n  ops:\n    docs_target: docs/ops.md\n",
+        )
+        .expect("active memory config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.default_project_set_id = Some("set-alpha".to_string());
+        config.project_scope_ids = BTreeSet::from(["project-a".to_string()]);
+        config.repository_sources.insert(
+            "repo-active".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-active".to_string(),
+                root: active.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-inactive".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-inactive".to_string(),
+                root: inactive.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let scope = MemoryScopeFilter {
+            project_set: Some("set-alpha".to_string()),
+            ..MemoryScopeFilter::default()
+        };
+        assert!(super::repository_matches_memory_scope(
+            &config,
+            "repo-active",
+            &scope
+        ));
+        assert!(!super::repository_matches_memory_scope(
+            &config,
+            "repo-inactive",
+            &scope
+        ));
+        let resolved = super::memory_config_for_docs_scope(&config, &scope, "ops")
+            .expect("project set should resolve to its unique active repository");
+        assert_eq!(
+            resolved
+                .areas
+                .get("ops")
+                .expect("active repository area")
+                .docs_target,
+            active.path().join("docs/ops.md")
         );
     }
 

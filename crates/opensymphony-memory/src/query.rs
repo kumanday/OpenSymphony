@@ -472,7 +472,12 @@ pub fn context_for_issue_with_options(
     }
 
     if !options.paths.is_empty() {
-        for result in related_by_paths(config, &options.paths, ContextBucket::PathMatches.cap())? {
+        for result in related_by_paths_with_scope(
+            config,
+            &options.paths,
+            ContextBucket::PathMatches.cap(),
+            &options.scope,
+        )? {
             add_context_candidate(
                 &mut candidates,
                 ContextBucket::PathMatches,
