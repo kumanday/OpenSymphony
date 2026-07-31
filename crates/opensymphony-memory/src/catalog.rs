@@ -249,6 +249,24 @@ pub fn withdraw_memory_source_records(
         path: config.index_path.clone(),
         source: error,
     })?;
+    // Relation rows carry source ownership independently of the logical issue.
+    // Remove this source's evidence even when another source still owns the
+    // shared issue; otherwise withdrawn repositories leak stale areas, PRs,
+    // files, checks, and reviews through the surviving row.
+    for table in [
+        "issue_areas",
+        "pull_requests",
+        "changed_files",
+        "checks",
+        "reviews",
+    ] {
+        transaction
+            .execute(&format!("DELETE FROM {table} WHERE source_id = ?"), [source_id])
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+    }
     let registered_source_repositories = {
         let mut statement = transaction
             .prepare("SELECT source_id, repository_id FROM registered_memory_sources")

@@ -2483,7 +2483,7 @@ fn load_pull_requests_by_issue(
     let connection = open_index_read_only(config)?;
     let mut statement = connection
         .prepare(
-            "SELECT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests ORDER BY issue_key, number",
+            "SELECT DISTINCT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests ORDER BY issue_key, number, merged_at NULLS LAST",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -2519,7 +2519,12 @@ fn load_pull_requests_by_issue(
             path: config.index_path.clone(),
             source,
         })?;
-        by_issue.entry(issue_key).or_default().push(pr);
+        let entries = by_issue.entry(issue_key).or_default();
+        // Source ownership is retained in DuckDB, but identical evidence from
+        // two owners is one logical read-model item.
+        if !entries.iter().any(|existing| existing.number == pr.number) {
+            entries.push(pr);
+        }
     }
     Ok(by_issue)
 }
@@ -2529,7 +2534,7 @@ fn load_issue_areas(
     issue_key: &str,
 ) -> Result<Vec<String>, duckdb::Error> {
     let mut statement =
-        connection.prepare("SELECT area FROM issue_areas WHERE issue_key = ? ORDER BY area")?;
+        connection.prepare("SELECT DISTINCT area FROM issue_areas WHERE issue_key = ? ORDER BY area")?;
     let rows = statement.query_map(params![issue_key], |row| row.get::<_, String>(0))?;
     let mut areas = Vec::new();
     for row in rows {
@@ -2543,7 +2548,7 @@ fn load_issue_changed_files(
     issue_key: &str,
 ) -> Result<Vec<PathBuf>, duckdb::Error> {
     let mut statement = connection
-        .prepare("SELECT file_path FROM changed_files WHERE issue_key = ? ORDER BY file_path")?;
+        .prepare("SELECT DISTINCT file_path FROM changed_files WHERE issue_key = ? ORDER BY file_path")?;
     let rows = statement.query_map(params![issue_key], |row| {
         Ok(PathBuf::from(row.get::<_, String>(0)?))
     })?;
@@ -3402,6 +3407,17 @@ fn refresh_memory_index_from_okf_inner(
             .unwrap_or_default();
         let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&row.source_refs_json)
             .unwrap_or_default();
+        if let Some(repository_id) = repository_id {
+            // OKF frontmatter historically omitted repository provenance from
+            // source refs. Stamp newly imported refs so a later refresh can
+            // replace this source's references without retaining withdrawn
+            // URLs or IDs.
+            for source_ref in &mut source_refs {
+                if source_ref.repo_id.is_none() {
+                    source_ref.repo_id = Some(repository_id.to_string());
+                }
+            }
+        }
         let mut source_ids = serde_json::from_str::<Vec<String>>(&row.source_ids_json)
             .unwrap_or_default();
         if !replace_existing {
@@ -3480,6 +3496,11 @@ fn refresh_memory_index_from_okf_inner(
                 for source in serde_json::from_str::<Vec<MemorySourceRef>>(&existing_sources)
                     .unwrap_or_default()
                 {
+                    if repository_id.is_some_and(|repository_id| {
+                        source.repo_id.as_deref() == Some(repository_id)
+                    }) {
+                        continue;
+                    }
                     if !source_refs.contains(&source) {
                         source_refs.push(source);
                     }
