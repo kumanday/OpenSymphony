@@ -188,6 +188,8 @@ pub struct MemorySourceRef {
     pub repo_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +387,7 @@ impl From<CodeIntelSourceRef> for MemorySourceRef {
             url: source_ref.url,
             repo_id: source_ref.repo_id,
             symbol_key: source_ref.symbol_key,
+            registration_source_id: None,
         }
     }
 }
@@ -1239,6 +1242,7 @@ mod tests {
                 url: None,
                 repo_id: Some("opensymphony".to_string()),
                 symbol_key: Some("memory-source-ref".to_string()),
+                registration_source_id: None,
             }]
         );
     }

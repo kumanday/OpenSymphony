@@ -28,6 +28,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 url: pr.url.clone(),
                 repo_id: config.default_repository_id.clone(),
                 symbol_key: None,
+                registration_source_id: None,
             })
             .collect::<Vec<_>>();
         let source_refs_json = serde_json::to_string(&source_refs)?;
@@ -3098,6 +3099,7 @@ pub fn backfill_legacy_memory_source_scopes(
             url: None,
             repo_id: Some(repository_id.to_string()),
             symbol_key: None,
+            registration_source_id: Some(source_id.to_string()),
         };
         if !source_refs.contains(&source_ref) {
             source_refs.push(source_ref);
@@ -3243,6 +3245,16 @@ fn refresh_memory_index_from_okf_inner(
                 row.scope_refs_json = serde_json::to_string(&scope_refs)?;
             }
         }
+        if let Some(source_id) = source_id {
+            let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(
+                &row.source_refs_json,
+            )
+            .unwrap_or_default();
+            for source_ref in &mut source_refs {
+                source_ref.registration_source_id = Some(source_id.to_string());
+            }
+            row.source_refs_json = serde_json::to_string(&source_refs)?;
+        }
         let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
             .unwrap_or_default();
         if let Some(project_set_id) = config.default_project_set_id.as_deref()
@@ -3340,13 +3352,34 @@ fn refresh_memory_index_from_okf_inner(
         "INSERT OR REPLACE INTO"
     };
     if let Some(source_id) = source_id {
+        let registered_source_repositories = {
+            let mut statement = transaction
+                .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
         let incoming = rows
             .iter()
             .map(|row| row.concept_id.as_str())
             .collect::<BTreeSet<_>>();
         let stale = {
             let mut statement = transaction
-                .prepare("SELECT issue_key, concept_id, source_ids_json FROM issues")
+                .prepare("SELECT issue_key, concept_id, source_ids_json, scope_refs_json, source_refs_json FROM issues")
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
                     source,
@@ -3357,6 +3390,8 @@ fn refresh_memory_index_from_okf_inner(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 })
                 .map_err(|source| MemoryError::DuckDb {
@@ -3369,7 +3404,7 @@ fn refresh_memory_index_from_okf_inner(
                     source,
                 })?
         };
-        for (issue_key, concept_id, encoded_source_ids) in stale {
+        for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in stale {
             let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
                 .unwrap_or_default();
             if incoming.contains(concept_id.as_str())
@@ -3406,10 +3441,67 @@ fn refresh_memory_index_from_okf_inner(
                         })?;
                 }
             } else {
+                let remaining_project_scopes = source_ids
+                    .iter()
+                    .filter_map(|owner| registered_source_repositories.get(owner))
+                    .filter_map(|repository_id| config.repository_sources.get(repository_id))
+                    .flat_map(|source| source.project_scope_ids.iter())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|scope| match &scope.kind {
+                        KnowledgeScopeKind::Repository => source_ids.iter().any(|owner| {
+                            registered_source_repositories
+                                .get(owner)
+                                .is_some_and(|repository_id| repository_id == &scope.id)
+                        }),
+                        KnowledgeScopeKind::Project => {
+                            remaining_project_scopes.contains(&scope.id)
+                        }
+                        KnowledgeScopeKind::ProjectSet => config
+                            .default_project_set_id
+                            .as_deref()
+                            .is_some_and(|id| id == scope.id),
+                        _ => true,
+                    })
+                    .collect::<Vec<_>>();
+                let sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|source| {
+                        source.registration_source_id.as_deref() != Some(source_id)
+                            && !(source.registration_source_id.is_none()
+                                && source.id == source_id)
+                    })
+                    .collect::<Vec<_>>();
+                transaction
+                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                for scope in &scopes {
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                            params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                }
                 transaction
                     .execute(
-                        "UPDATE issues SET source_ids_json = ? WHERE issue_key = ?",
-                        params![serde_json::to_string(&source_ids)?, issue_key],
+                        "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = ?",
+                        params![
+                            serde_json::to_string(&source_ids)?,
+                            serde_json::to_string(&scopes)?,
+                            serde_json::to_string(&sources)?,
+                            issue_key
+                        ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
                         path: config.index_path.clone(),
@@ -3513,8 +3605,8 @@ fn refresh_memory_index_from_okf_inner(
                 for source in serde_json::from_str::<Vec<MemorySourceRef>>(&existing_sources)
                     .unwrap_or_default()
                 {
-                    if repository_id.is_some_and(|repository_id| {
-                        source.repo_id.as_deref() == Some(repository_id)
+                    if source_id.is_some_and(|source_id| {
+                        source.registration_source_id.as_deref() == Some(source_id)
                     }) {
                         continue;
                     }

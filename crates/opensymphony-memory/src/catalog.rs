@@ -333,7 +333,10 @@ pub fn withdraw_memory_source_records(
                         .get(candidate)
                         .is_some_and(|owner| owner == repository_id)
             });
-            sources.retain(|source| source.id != source_id);
+            sources.retain(|source| {
+                source.registration_source_id.as_deref() != Some(source_id)
+                    && !(source.registration_source_id.is_none() && source.id == source_id)
+            });
             if !has_other_source {
                 let remaining_project_scopes = source_ids
                     .iter()
@@ -672,5 +675,75 @@ mod catalog_tests {
             )
             .expect("scope refs");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn withdraws_only_source_refs_owned_by_the_registration() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let public_source = RegisteredMemorySource {
+            source_id: "github:repository:123:okf-public".to_string(),
+            repository_id: "github:repository:123".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::OkfBundle,
+            root: root.path().join("okf-public"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:public".to_string(),
+        };
+        let private_source = RegisteredMemorySource {
+            source_id: "github:repository:123:okf-private".to_string(),
+            generation: "sha256:private".to_string(),
+            root: root.path().join("okf-private"),
+            ..public_source.clone()
+        };
+        register_memory_source(&config, &public_source).expect("public source");
+        register_memory_source(&config, &private_source).expect("private source");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-550",
+                    "Shared concept",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-550.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-550",
+                    r#"[{"kind":"repository","id":"github:repository:123"}]"#,
+                    r#"[{"kind":"github_pr","id":"42","repo_id":"github:repository:123","registration_source_id":"github:repository:123:okf-public"},{"kind":"github_pr","id":"42","repo_id":"github:repository:123","registration_source_id":"github:repository:123:okf-private"}]"#,
+                    r#"["github:repository:123:okf-public","github:repository:123:okf-private"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-550', 'repository', 'github:repository:123', NULL)",
+                [],
+            )
+            .expect("normalized scope");
+
+        withdraw_memory_source_records(
+            &config,
+            &public_source.source_id,
+            "github:repository:123",
+        )
+            .expect("source withdrawal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-550")
+            .expect("shared issue remains");
+        assert_eq!(issue.source_refs.len(), 1);
+        assert_eq!(
+            issue.source_refs[0].registration_source_id.as_deref(),
+            Some(private_source.source_id.as_str())
+        );
     }
 }

@@ -2764,6 +2764,23 @@ fn memory_config_for_code_intel_scope(
     Ok(resolved)
 }
 
+fn memory_config_for_code_graph_scope(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryConfig, MemoryError> {
+    let mut scope = scope_filter_from_mcp(config, arguments, true)?;
+    if let Some(repository_id) = optional_string_arg(arguments, "repository") {
+        scope.repo = Some(repository_id);
+    }
+    let resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if !resolved.code_intel.enabled {
+        return Err(MemoryError::InvalidInput(
+            "indexed code graph tools are disabled for the selected repository".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
 fn authorize_memory_request(
     headers: &axum::http::HeaderMap,
     auth: &MemoryServerAuth,
@@ -2874,11 +2891,6 @@ async fn call_memory_tool_with_workspace(
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
         return Err(MemoryError::InvalidInput(
             "AST code-intelligence tools are disabled".to_string(),
-        ));
-    }
-    if name == "code.graph.context" && !config.code_intel.enabled {
-        return Err(MemoryError::InvalidInput(
-            "indexed code graph tools are disabled".to_string(),
         ));
     }
     match name {
@@ -3008,8 +3020,9 @@ async fn call_memory_tool_with_workspace(
             }))
         }
         "code.graph.context" => {
+            let graph_config = memory_config_for_code_graph_scope(config, &arguments)?;
             call_code_graph_context_tool(
-                config.clone(),
+                graph_config,
                 arguments.clone(),
                 workspace_root.map(Path::to_path_buf),
             )
@@ -9910,6 +9923,41 @@ Public memory concept.
 
         assert!(matches!(error, MemoryError::InvalidInput(message)
             if message.contains("AST code-intelligence tools are disabled for the selected repository")));
+    }
+
+    #[tokio::test]
+    async fn code_graph_tool_calls_honor_selected_repository_policy() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": "repo-a", "symbol": "answer" }
+            }),
+        )
+        .await
+        .expect_err("selected repository policy should disable graph tools");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("indexed code graph tools are disabled for the selected repository")));
     }
 
     #[test]
