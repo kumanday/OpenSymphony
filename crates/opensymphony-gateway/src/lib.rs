@@ -2080,6 +2080,7 @@ async fn get_run_code_outline(
         params.repo_id,
         &workspace_path,
         state.memory_config.as_ref(),
+        issue.repository_binding.as_ref(),
     )?;
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), state.memory_config.clone()) {
@@ -2158,6 +2159,7 @@ async fn get_run_code_diff_overlay(
         params.repo_id,
         &workspace_path,
         state.memory_config.as_ref(),
+        issue.repository_binding.as_ref(),
     )?
     .ok_or_else(|| {
         code_graph_response(
@@ -2218,6 +2220,7 @@ async fn get_run_code_graph(
         params.repo_id,
         &workspace_path,
         state.memory_config.as_ref(),
+        issue.repository_binding.as_ref(),
     )?
     .ok_or_else(|| {
         code_graph_response(
@@ -2455,8 +2458,12 @@ fn run_repository_id(
     requested: Option<String>,
     workspace_path: &StdPath,
     config: Option<&MemoryConfig>,
+    binding: Option<&RepositoryBindingOutcome>,
 ) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
-    let bound = code_repo_id_for_workspace(workspace_path, config);
+    let bound = binding
+        .and_then(|binding| binding.repository_id())
+        .map(|repository_id| repository_id.as_str().to_owned())
+        .or_else(|| code_repo_id_for_workspace(workspace_path, config));
     if config.is_some_and(|config| !config.repository_sources.is_empty())
         && let (Some(requested), Some(bound)) = (requested.as_deref(), bound.as_deref())
         && requested != bound
@@ -2475,7 +2482,7 @@ fn normalize_git_remote(remote: &str) -> String {
         .trim()
         .trim_end_matches('/')
         .trim_end_matches(".git")
-        .to_ascii_lowercase()
+        .to_string()
 }
 
 fn repo_id_from_remote_url(url: &str) -> Option<String> {
@@ -2507,6 +2514,9 @@ fn code_memory_for_repository(
     if let Some(source) = config.repository_sources.get(repo_id) {
         config.repo_root = source.root.clone();
         config.code_index_target_branch = source.target_branch.clone();
+        let local_config =
+            MemoryConfig::load(&source.root, None).map_err(code_graph_memory_error)?;
+        config.code_intel = local_config.code_intel;
         return Ok(config);
     }
     if !config.repository_sources.is_empty() {

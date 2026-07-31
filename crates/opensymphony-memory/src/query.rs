@@ -23,7 +23,7 @@ fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String
     output.push_str(&format!("# {}: {}\n\n", indexed.issue_key, indexed.title));
     output.push_str(&format!(
         "- Capsule: {}\n",
-        display_path(&config.repo_root, &indexed.capsule_path)
+        display_capsule_path(config, indexed)
     ));
     output.push_str(&format!("- Visibility: {}\n", indexed.visibility));
     if !indexed.areas().is_empty() {
@@ -32,6 +32,48 @@ fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String
     output.push('\n');
     output.push_str(&compact_capsule_body(&indexed.body));
     output
+}
+
+fn display_capsule_path(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
+    let repository_id = indexed
+        .source_refs
+        .iter()
+        .filter_map(|source| source.repo_id.as_deref())
+        .find(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .or_else(|| {
+            indexed
+                .scope_refs
+                .iter()
+                .find(|scope| {
+                    scope.kind == KnowledgeScopeKind::Repository
+                        && config.repository_sources.contains_key(&scope.id)
+                })
+                .map(|scope| scope.id.as_str())
+        });
+    let bundle_relative_path = repository_id
+        .and_then(|repository_id| config.repository_sources.get(repository_id))
+        .and_then(|source| indexed.capsule_path.strip_prefix(&source.root).ok())
+        .or_else(|| indexed.capsule_path.strip_prefix(&config.memory_root).ok())
+        .or_else(|| indexed.capsule_path.strip_prefix(&config.repo_root).ok())
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            indexed
+                .capsule_path
+                .is_relative()
+                .then(|| indexed.capsule_path.display().to_string())
+        })
+        .or_else(|| {
+            indexed
+                .capsule_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "memory-capsule".to_string());
+
+    repository_id
+        .map(|repository_id| format!("{repository_id}:{bundle_relative_path}"))
+        .unwrap_or(bundle_relative_path)
 }
 
 pub fn search(
@@ -78,7 +120,7 @@ pub fn search_with_scope(
                 SearchResult {
                     issue_key: indexed.issue_key.clone(),
                     title: indexed.title.clone(),
-                    capsule_path: indexed.capsule_path.clone(),
+                    capsule_path: PathBuf::from(display_capsule_path(config, &indexed)),
                     areas: indexed.areas(),
                     snippet: snippet_for_terms(&indexed.body, &terms),
                 },
@@ -135,7 +177,7 @@ pub fn related_by_issue_with_scope(
                 SearchResult {
                     issue_key: candidate.issue_key.clone(),
                     title: candidate.title.clone(),
-                    capsule_path: candidate.capsule_path.clone(),
+                    capsule_path: PathBuf::from(display_capsule_path(config, &candidate)),
                     areas: candidate_areas,
                     snippet: first_interesting_line(&candidate.body),
                 },
@@ -180,7 +222,7 @@ pub fn related_by_area_with_scope(
             results.push(SearchResult {
                 issue_key: candidate.issue_key.clone(),
                 title: candidate.title.clone(),
-                capsule_path: candidate.capsule_path.clone(),
+                capsule_path: PathBuf::from(display_capsule_path(config, &candidate)),
                 areas,
                 snippet: first_interesting_line(&candidate.body),
             });
@@ -748,12 +790,13 @@ pub fn status_with_scope(
         .into_iter()
         .map(|issue| {
             let areas = issue.areas();
+            let capsule_path = PathBuf::from(display_capsule_path(config, &issue));
             StatusIssue {
                 issue_key: issue.issue_key,
                 title: issue.title,
                 state: issue.state,
                 milestone: issue.milestone,
-                capsule_path: issue.capsule_path,
+                capsule_path,
                 visibility: issue.visibility,
                 areas,
                 docs_sync_status: issue.docs_sync_status,

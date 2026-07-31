@@ -333,6 +333,7 @@ pub fn withdraw_memory_source_records(
                         .get(candidate)
                         .is_some_and(|owner| owner == repository_id)
             });
+            sources.retain(|source| source.id != source_id);
             if !has_other_source {
                 let remaining_project_scopes = source_ids
                     .iter()

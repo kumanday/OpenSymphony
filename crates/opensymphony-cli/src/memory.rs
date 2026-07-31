@@ -4755,6 +4755,8 @@ fn memory_config_for_repository(
     };
     let mut resolved = config.clone();
     resolved.repo_root = source.root.clone();
+    let local_config = MemoryConfig::load(&source.root, None)?;
+    resolved.code_intel = local_config.code_intel;
     Ok(resolved)
 }
 
