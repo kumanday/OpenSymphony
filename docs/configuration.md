@@ -129,6 +129,9 @@ value; malformed YAML types are reported as ordinary package validation
 errors. The planning compiler emits `project_set` plus the sorted
 `repositoryAliases` inventory whenever terminal bindings are present, so
 compiled task packages retain strict routing validation through publication.
+Every configured and task-level alias must remain non-empty after trimming.
+Issue regeneration retains terminal-child bindings by position and keeps the
+regenerated parent repository-neutral.
 
 ## Configuration migration
 

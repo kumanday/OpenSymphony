@@ -292,7 +292,36 @@ impl PlanGenerator {
                         open_questions: self.session.intake.open_questions.clone(),
                         reference_docs: self.session.intake.reference_docs.clone(),
                     };
-                    let issues = self.generate_issues_for_milestone(&intake);
+                    let generated_issues = self.generate_issues_for_milestone(&intake);
+                    let issues = generated_issues
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, mut issue)| {
+                            let existing_issue = milestone.issues.get(index);
+                            let inherited_repository =
+                                existing_issue.and_then(|issue| issue.repository.clone());
+                            let existing_child_repositories = existing_issue
+                                .map(|issue| {
+                                    issue
+                                        .sub_issues
+                                        .iter()
+                                        .map(|sub_issue| sub_issue.repository.clone())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            for (child_index, sub_issue) in issue.sub_issues.iter_mut().enumerate()
+                            {
+                                sub_issue.repository = inherited_repository.clone().or_else(|| {
+                                    existing_child_repositories
+                                        .get(child_index)
+                                        .cloned()
+                                        .flatten()
+                                });
+                            }
+                            issue.repository = None;
+                            issue
+                        })
+                        .collect();
                     PlannedMilestone {
                         id: milestone.id.clone(),
                         name: milestone.name.clone(),
@@ -1214,6 +1243,37 @@ mod tests {
         assert_ne!(original.milestone_index, regenerated.milestone_index);
         assert!(regenerated.task_files.contains_key(&milestone.issues[0].id));
         assert_ne!(milestone.id, milestone.issues[0].id);
+    }
+
+    #[test]
+    fn issue_regeneration_preserves_terminal_child_repository_bindings() {
+        let session = make_sample_session();
+        let mut generator = PlanGenerator::new(session);
+        let mut original = generator.generate().expect("generation should succeed");
+        let issue = &mut original.milestones[0].issues[0];
+        issue.repository = None;
+        issue.sub_issues[0].repository = Some("core".to_string());
+        issue.sub_issues[1].repository = Some("web".to_string());
+
+        let regenerated = generator
+            .regenerate(
+                &original,
+                &RegenerationScope::Issues {
+                    milestone_ids: None,
+                },
+            )
+            .expect("issue regeneration should succeed");
+        let issue = &regenerated.milestones[0].issues[0];
+
+        assert_eq!(issue.repository, None);
+        assert_eq!(
+            issue
+                .sub_issues
+                .iter()
+                .map(|sub_issue| sub_issue.repository.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("core"), Some("web")]
+        );
     }
 
     #[test]

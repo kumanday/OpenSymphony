@@ -59,6 +59,32 @@ class RepositoryBindingTests(unittest.TestCase):
         )
         self.assertIn("task TASK references unknown repository alias core", errors)
 
+    def test_project_set_rejects_blank_repository_aliases(self):
+        errors: list[str] = []
+
+        CONVERTER.validate_repository_bindings(
+            {"TASK": task("TASK", [""])}, "project_set", {"core"}, errors
+        )
+
+        self.assertIn("task TASK repository alias must be non-empty", errors)
+
+    def test_manifest_rejects_blank_repository_alias_inventory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "task-package.yaml"
+            manifest.write_text(
+                "planningWave: wave\ntasksDir: tasks\nroutingMode: project_set\nrepositoryAliases: [' ']\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(CONVERTER.ValidationError) as raised:
+                CONVERTER.load_package(root, manifest)
+
+        self.assertIn(
+            "manifest field repositoryAliases entries must be non-empty after trimming",
+            str(raised.exception),
+        )
+
 
     def test_legacy_single_allows_unlabelled_task(self):
         errors: list[str] = []

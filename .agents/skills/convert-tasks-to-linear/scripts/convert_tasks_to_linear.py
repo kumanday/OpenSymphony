@@ -184,9 +184,13 @@ def load_package(repo_root: Path, manifest_path: Path) -> Package:
         errors.append("manifest field routingMode must be legacy_single or project_set")
         repository_mode = "legacy_single"
     configured_repository_aliases = manifest.get("repositoryAliases", [])
-    if not is_string_list(configured_repository_aliases) and configured_repository_aliases != []:
+    if not isinstance(configured_repository_aliases, list) or not all(
+        isinstance(alias, str) for alias in configured_repository_aliases
+    ):
         errors.append("manifest field repositoryAliases must be a list of strings")
         configured_repository_aliases = []
+    elif any(not alias.strip() for alias in configured_repository_aliases):
+        errors.append("manifest field repositoryAliases entries must be non-empty after trimming")
 
     tasks: dict[str, Task] = {}
     for manifest_task in manifest_tasks:
@@ -494,6 +498,9 @@ def validate_repository_bindings(
             errors.append(f"terminal task {task.id} must declare exactly one repository binding")
         if mode == "project_set" or configured_aliases:
             for alias in aliases:
+                if not alias:
+                    errors.append(f"task {task.id} repository alias must be non-empty")
+                    continue
                 if alias not in configured_aliases:
                     errors.append(f"task {task.id} references unknown repository alias {alias}")
 
