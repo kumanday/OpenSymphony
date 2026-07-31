@@ -1046,8 +1046,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         .memory_sources
         .values()
         .find(|source| source.checkout_path == runtime.target_repo)
-        .map(|source| source.repository_id.clone())
-        .unwrap_or_else(|| runtime.target_repo.display().to_string());
+        .map(|source| source.repository_id.clone());
     let memory_env = memory_server.as_ref().map(|server| RuntimeMemoryEnv {
         endpoint: server.endpoint().to_string(),
         token: runtime
@@ -1465,7 +1464,7 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) token: Option<String>,
     pub(super) project: String,
     pub(super) project_set: Option<String>,
-    pub(super) execution_repo: String,
+    pub(super) execution_repo: Option<String>,
 }
 
 async fn start_runtime_memory_server(

@@ -284,13 +284,6 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
             label: None,
         });
     }
-    for project_id in &config.project_scope_ids {
-        refs.push(KnowledgeScope {
-            kind: KnowledgeScopeKind::Project,
-            id: project_id.clone(),
-            label: None,
-        });
-    }
     for project_id in [plan.issue.project_id.as_ref(), plan.issue.project_slug.as_ref()]
         .into_iter()
         .flatten()
@@ -3276,11 +3269,50 @@ fn refresh_memory_index_from_okf_inner(
                     source,
                 })?;
             if let Some((existing_scopes, existing_sources, existing_source_ids)) = existing {
-                for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
-                    .unwrap_or_default()
-                {
-                    if !scope_refs.contains(&scope) {
-                        scope_refs.push(scope);
+                let existing_source_ids = serde_json::from_str::<Vec<String>>(&existing_source_ids)
+                    .unwrap_or_default();
+                let source_only = source_id.is_some_and(|source_id| {
+                    existing_source_ids.iter().all(|id| id == source_id)
+                });
+                if !source_only {
+                    let refreshed_project_scopes = repository_id
+                        .and_then(|repository_id| config.repository_sources.get(repository_id))
+                        .map(|source| &source.project_scope_ids)
+                        .unwrap_or(&config.project_scope_ids);
+                    let active_project_scopes = config
+                        .repository_sources
+                        .values()
+                        .flat_map(|source| source.project_scope_ids.iter())
+                        .chain(config.project_scope_ids.iter())
+                        .collect::<BTreeSet<_>>();
+                    for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
+                        .unwrap_or_default()
+                    {
+                        let source_scope = source_id.is_some_and(|source_id| {
+                            existing_source_ids.iter().any(|id| id == source_id)
+                        });
+                        let replaced_scope = source_scope
+                            && ((repository_id.is_some_and(|repository_id| {
+                                scope.kind == KnowledgeScopeKind::Repository
+                                    && scope.id == repository_id
+                            }))
+                                || (config.default_project_set_id.as_deref().is_some_and(
+                                    |project_set_id| {
+                                        scope.kind == KnowledgeScopeKind::ProjectSet
+                                            && scope.id == project_set_id
+                                    },
+                                ))
+                                || (scope.kind == KnowledgeScopeKind::Project
+                                    && refreshed_project_scopes.contains(&scope.id)));
+                        let stale_project_scope = scope.kind == KnowledgeScopeKind::Project
+                            && !active_project_scopes.contains(&scope.id)
+                            && !scope_refs.contains(&scope);
+                        if replaced_scope || stale_project_scope {
+                            continue;
+                        }
+                        if !scope_refs.contains(&scope) {
+                            scope_refs.push(scope);
+                        }
                     }
                 }
                 for source in serde_json::from_str::<Vec<MemorySourceRef>>(&existing_sources)
@@ -3290,9 +3322,7 @@ fn refresh_memory_index_from_okf_inner(
                         source_refs.push(source);
                     }
                 }
-                for existing_source_id in serde_json::from_str::<Vec<String>>(&existing_source_ids)
-                    .unwrap_or_default()
-                {
+                for existing_source_id in existing_source_ids {
                     if !source_ids.contains(&existing_source_id) {
                         source_ids.push(existing_source_id);
                     }

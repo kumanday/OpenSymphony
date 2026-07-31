@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -43,13 +43,13 @@ use crate::{
         MemoryReindexReport, MemoryRepositorySource, MemoryScopeFilter, MemorySourceKind,
         MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource, SourceFile,
         archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief,
-        code_graph_context, code_graph_workspace_context_overlay, code_index_branch,
-        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
-        migrate_code_repository_identity, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        brief_with_scope, code_graph_context, code_graph_workspace_context_overlay,
+        code_index_branch, code_repository_has_rows, context_for_issue_with_options,
+        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
+        lint_okf_bundle, load_source_file, mark_archived, merge_legacy_memory_index,
+        merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
@@ -1957,14 +1957,23 @@ async fn start_memory_server_with_auth(
 
 fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
     let mut source_ids = BTreeSet::new();
-    let mut legacy_repository_names = BTreeSet::new();
+    let mut legacy_repository_names = BTreeMap::<String, usize>::new();
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
-            if !legacy_repository_names.insert(legacy_repo_id.to_string()) {
-                return Err(MemoryError::InvalidInput(format!(
-                    "ambiguous legacy repository basename `{legacy_repo_id}`; canonical migration requires unique checkout names"
-                )));
-            }
+            *legacy_repository_names
+                .entry(legacy_repo_id.to_string())
+                .or_default() += 1;
+        }
+    }
+    for (legacy_repo_id, count) in &legacy_repository_names {
+        if *count > 1 && code_repository_has_rows(config, legacy_repo_id)? {
+            return Err(MemoryError::InvalidInput(format!(
+                "ambiguous legacy repository basename `{legacy_repo_id}`; canonical migration requires unique checkout names"
+            )));
+        }
+    }
+    for source in config.repository_sources.values() {
+        if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
             migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
         }
         let commit_sha = source
@@ -2157,6 +2166,13 @@ fn acquire_source_memory_writer_lock(
 }
 
 fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
+    memory_source_generation_with_excluded_index(root, None)
+}
+
+fn memory_source_generation_with_excluded_index(
+    root: &Path,
+    excluded_index: Option<&Path>,
+) -> Result<String, MemoryError> {
     let metadata = fs::metadata(root).map_err(|source| MemoryError::ReadFile {
         path: root.to_path_buf(),
         source,
@@ -2170,7 +2186,7 @@ fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
             root.to_path_buf(),
         ));
     } else if metadata.file_type().is_dir() {
-        collect_memory_source_entries(root, root, &mut entries)?;
+        collect_memory_source_entries(root, root, &mut entries, excluded_index)?;
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
@@ -2208,7 +2224,13 @@ fn memory_source_registration_generation(
     let content_generation = if kind == MemorySourceKind::Repository {
         format!("commit:{commit_sha}")
     } else {
-        memory_source_generation(root)?
+        if kind == MemorySourceKind::LegacyStore
+            && fs::canonicalize(root).ok() == fs::canonicalize(&config.memory_root).ok()
+        {
+            memory_source_generation_with_excluded_index(root, Some(&config.index_path))?
+        } else {
+            memory_source_generation(root)?
+        }
     };
     let routing_scopes = serde_json::to_string(&(
         config.default_project_set_id.as_deref(),
@@ -2226,6 +2248,7 @@ fn collect_memory_source_entries(
     root: &Path,
     current: &Path,
     entries: &mut Vec<(Vec<u8>, PathBuf)>,
+    excluded_index: Option<&Path>,
 ) -> Result<(), MemoryError> {
     for entry in fs::read_dir(current).map_err(|source| MemoryError::ReadFile {
         path: current.to_path_buf(),
@@ -2241,8 +2264,20 @@ fn collect_memory_source_entries(
             source,
         })?;
         if file_type.is_dir() {
-            collect_memory_source_entries(root, &path, entries)?;
+            collect_memory_source_entries(root, &path, entries, excluded_index)?;
         } else if file_type.is_file() {
+            if excluded_index.is_some_and(|index| {
+                path == index
+                    || path
+                        .file_name()
+                        .zip(index.file_name())
+                        .is_some_and(|(path, index)| {
+                            path.to_string_lossy()
+                                .starts_with(&format!("{}.", index.to_string_lossy()))
+                        })
+            }) {
+                continue;
+            }
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
@@ -2795,7 +2830,8 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.brief" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            Ok(mcp_text(brief(config, &issue)?))
+            let scope = brief_scope_filter(config, &arguments)?;
+            Ok(mcp_text(brief_with_scope(config, &issue, &scope)?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
@@ -4888,6 +4924,30 @@ fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeF
     }
 }
 
+fn brief_scope_filter(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let mut scope = scope_filter_from_mcp(arguments, false);
+    if scope.all_accessible
+        || scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.repo.is_some()
+    {
+        return Ok(scope);
+    }
+    if let Some(project_set_id) = &config.default_project_set_id {
+        scope.project_set = Some(project_set_id.clone());
+    } else if let Some(repository_id) = &config.default_repository_id {
+        scope.repo = Some(repository_id.clone());
+    } else {
+        return Err(MemoryError::InvalidInput(
+            "memory.brief requires a projectSet, project, or repo scope".to_string(),
+        ));
+    }
+    Ok(scope)
+}
+
 fn path_for_json(config: &MemoryConfig, path: &Path) -> String {
     path.strip_prefix(&config.repo_root)
         .unwrap_or(path)
@@ -6178,12 +6238,12 @@ mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
-        authorize_memory_request, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
-        call_memory_tool, context_source_from_mcp, load_memory_config, memory_server_health,
-        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
-        trim_auto_memory_status_log,
+        authorize_memory_request, brief_scope_filter, call_code_graph_context_tool,
+        call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
+        load_memory_config, memory_server_health, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -6197,6 +6257,23 @@ mod tests {
     use duckdb::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn mcp_brief_requires_or_derives_a_catalog_scope() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let error = brief_scope_filter(&config, &json!({}))
+            .expect_err("unscoped brief must not expose the central catalog");
+        assert!(error.to_string().contains("requires a projectSet"));
+
+        let config = config.with_default_project_set_id("project-set");
+        let scope = brief_scope_filter(&config, &json!({})).expect("default scope");
+        assert_eq!(scope.project_set.as_deref(), Some("project-set"));
+
+        let scope = brief_scope_filter(&config, &json!({"allAccessible": true}))
+            .expect("explicit broad scope");
+        assert!(scope.all_accessible);
+    }
 
     #[test]
     fn mcp_tool_list_exposes_context_admin_and_ast_tools_when_enabled() {

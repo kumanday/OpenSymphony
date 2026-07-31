@@ -1316,6 +1316,19 @@ fn resolve_memory_sources(
     config_root: &Path,
     repository_routing: &RepositoryRouting,
 ) -> Result<BTreeMap<String, ResolvedMemorySource>, CentralConfigError> {
+    let active_repository_ids = match repository_routing.mode {
+        RepositoryRoutingMode::LegacySingle => repository_routing
+            .legacy_repository
+            .as_deref()
+            .and_then(|alias| repository_routing.inventory.get(alias))
+            .map(|entry| BTreeSet::from([entry.identity.id.clone()]))
+            .unwrap_or_default(),
+        RepositoryRoutingMode::ProjectSet => repository_routing
+            .project_repositories
+            .values()
+            .flat_map(|repositories| repositories.iter().cloned())
+            .collect::<BTreeSet<_>>(),
+    };
     let mut sources = BTreeMap::new();
     for (repository_key, repository) in &config.repositories {
         let Some(checkout_path) = repository.checkout_path.as_deref() else {
@@ -1330,6 +1343,12 @@ fn resolve_memory_sources(
             field: "repositories.remote".to_owned(),
         })?;
         let repository_id = repository_id.to_string();
+        if !active_repository_ids
+            .iter()
+            .any(|active| active.to_string() == repository_id)
+        {
+            continue;
+        }
         let resolved = ResolvedMemorySource {
             repository_id: repository_id.clone(),
             checkout_path: resolve_central_path(

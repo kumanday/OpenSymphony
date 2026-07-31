@@ -1,7 +1,20 @@
 pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryError> {
+    brief_with_scope(config, issue_key, &MemoryScopeFilter::default())
+}
+
+pub fn brief_with_scope(
+    config: &MemoryConfig,
+    issue_key: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    if !indexed_issue_matches_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested scope"
+        )));
+    }
     Ok(render_indexed_brief(config, &indexed))
 }
 
