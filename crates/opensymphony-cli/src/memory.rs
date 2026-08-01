@@ -42,15 +42,14 @@ use crate::{
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
         MemoryReindexReport, MemoryRepositorySource, MemoryScopeFilter, MemorySourceKind,
         MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource, SourceFile,
-        archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief,
-        brief_with_scope, code_graph_context, code_graph_workspace_context_overlay,
-        code_index_branch_for_config, code_repository_has_commit, code_repository_has_rows,
-        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_issue_capsule,
-        load_source_file, mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
-        migrate_code_repository_identity, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief_with_scope,
+        code_graph_context, code_graph_workspace_context_overlay, code_index_branch_for_config,
+        code_repository_has_commit, code_repository_has_rows, context_for_issue_with_options,
+        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
+        lint_okf_bundle, load_issue_capsule, load_source_file, mark_archived,
+        merge_legacy_memory_index, merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_hex,
@@ -1338,12 +1337,13 @@ fn run_sync_docs(config: &MemoryConfig, args: SyncDocsArgs) -> Result<(), Memory
 }
 
 fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     let report = status_with_scope(
         config,
         &IssueSelection {
@@ -1377,29 +1377,32 @@ fn run_show(config: &MemoryConfig, args: ShowArgs) -> Result<(), MemoryError> {
 }
 
 fn run_brief(config: &MemoryConfig, args: BriefArgs) -> Result<(), MemoryError> {
-    println!("{}", brief(config, &args.issue)?);
+    let scope = direct_scope_filter(config, &args.scope, Some(&args.issue), None, None)?;
+    println!("{}", brief_with_scope(config, &args.issue, &scope)?);
     Ok(())
 }
 
 fn run_search(config: &MemoryConfig, args: SearchArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     let results = search_with_scope(config, &args.query, args.limit, &scope)?;
     print_search_results(config, &results);
     Ok(())
 }
 
 fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         None,
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     let results = if let Some(issue) = args.issue {
         related_by_issue_with_scope(config, &issue, args.limit, &scope)?
     } else if let Some(area) = args.area {
@@ -1416,12 +1419,13 @@ fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryErr
 }
 
 fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
-    let mut scope = scope_filter(
+    let mut scope = direct_scope_filter(
+        config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         Some(args.area.as_str()),
-    );
+    )?;
     if let Some(requested_repo) = scope.repo.clone()
         && !config.repository_sources.contains_key(&requested_repo)
         && !config.repository_sources.is_empty()
@@ -1471,12 +1475,13 @@ async fn run_context(
         limit: args.limit,
         scope: MemoryScopeFilter::default(),
     };
-    let mut scope = scope_filter(
+    let mut scope = direct_scope_filter(
+        config,
         &args.scope,
         Some(options.issue.as_str()),
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     if args.include_code_intel
         && scope.repo.is_none()
         && (scope.project.is_some() || scope.project_set.is_some())
@@ -5103,15 +5108,13 @@ fn canonical_repository_host(repository_id: &str) -> Option<String> {
 }
 
 fn normalize_git_remote_locator(value: &str) -> String {
-    let mut value = value
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("ssh://")
-        .trim_start_matches("git://")
-        .to_string();
+    let mut value = value.trim().trim_end_matches('/').to_string();
+    for scheme in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(stripped) = value.strip_prefix(scheme) {
+            value = stripped.to_string();
+            break;
+        }
+    }
     if let Some(stripped) = value.strip_prefix("git@").map(str::to_string) {
         if let Some((host, path)) = stripped.split_once(':') {
             value = format!("{host}/{path}");
@@ -5119,7 +5122,14 @@ fn normalize_git_remote_locator(value: &str) -> String {
             value = format!("{host}/{path}");
         }
     }
-    value.to_ascii_lowercase()
+    let Some((host, path)) = value.split_once('/') else {
+        return value.to_ascii_lowercase();
+    };
+    let path = match path.get(path.len().saturating_sub(4)..) {
+        Some(suffix) if suffix.eq_ignore_ascii_case(".git") => &path[..path.len() - 4],
+        _ => path,
+    };
+    format!("{}/{path}", host.to_ascii_lowercase())
 }
 
 fn git_remote_url(repo_root: &Path) -> Option<String> {
@@ -5795,6 +5805,36 @@ fn scope_filter(
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
     }
+}
+
+fn direct_scope_filter(
+    config: &MemoryConfig,
+    scope: &ScopeArgs,
+    issue: Option<&str>,
+    milestone: Option<&str>,
+    area: Option<&str>,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let mut scope = scope_filter(scope, issue, milestone, area);
+    if scope.all_accessible
+        || scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.repo.is_some()
+    {
+        return Ok(scope);
+    }
+    if let Some(project_set_id) = &config.default_project_set_id {
+        scope.project_set = Some(project_set_id.clone());
+    } else if let Some(repository_id) = &config.default_repository_id {
+        scope.repo = Some(repository_id.clone());
+    } else if config.repository_sources.len() == 1 {
+        scope.repo = config.repository_sources.keys().next().cloned();
+    } else if config.repository_sources.len() > 1 {
+        return Err(MemoryError::InvalidInput(
+            "a projectSet, project, or repo scope is required when multiple repository sources are registered"
+                .to_string(),
+        ));
+    }
+    Ok(scope)
 }
 
 fn env_scope_value(name: &str) -> Option<String> {
@@ -7465,6 +7505,58 @@ mod tests {
         let scope = brief_scope_filter(&config, &json!({"allAccessible": true}))
             .expect("explicit broad scope");
         assert!(scope.all_accessible);
+    }
+
+    #[test]
+    fn direct_reads_use_configured_scope_defaults_and_explicit_repository() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.default_project_set_id = Some("project-set".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo.path().join("repo-a"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repo.path().join("repo-b"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let default_scope = super::direct_scope_filter(
+            &config,
+            &super::ScopeArgs::default(),
+            Some("COE-550"),
+            None,
+            None,
+        )
+        .expect("configured project-set scope");
+        assert_eq!(default_scope.project_set.as_deref(), Some("project-set"));
+        assert_eq!(default_scope.issue.as_deref(), Some("COE-550"));
+
+        let explicit_scope = super::direct_scope_filter(
+            &config,
+            &super::ScopeArgs {
+                repo: Some("repo-b".to_string()),
+                ..Default::default()
+            },
+            Some("COE-550"),
+            None,
+            None,
+        )
+        .expect("explicit repository scope");
+        assert_eq!(explicit_scope.repo.as_deref(), Some("repo-b"));
+        assert!(explicit_scope.project_set.is_none());
     }
 
     #[test]
@@ -11473,6 +11565,10 @@ Public memory concept.
         assert_eq!(
             super::normalize_git_remote_locator("ssh://git@github.com/org/repo.git"),
             "github.com/org/repo"
+        );
+        assert_ne!(
+            super::normalize_git_remote_locator("https://github.com/Team/Repo.git"),
+            super::normalize_git_remote_locator("https://github.com/team/repo.git")
         );
 
         let unrelated_repository = TempDir::new().expect("unrelated repository");
