@@ -3925,6 +3925,20 @@ opensymphony:
         assert!(scope_refs_json.contains("set-a"));
         assert!(!scope_refs_json.contains("project-b"));
         assert!(!scope_refs_json.contains("wrong-set"));
+        let mut source_scopes = connection
+            .prepare(
+                "SELECT scope_id FROM source_scope_refs WHERE concept_id = 'issues/COE-550' AND source_id = 'repo-a:okf' ORDER BY scope_id",
+            )
+            .expect("source scopes");
+        let source_scopes = source_scopes
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("source scope rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("source scope values");
+        assert_eq!(
+            source_scopes,
+            vec!["COE-550", "project-a", "repo-a", "set-a"]
+        );
     }
 
     fn config_for(repo_root: &Path) -> MemoryConfig {

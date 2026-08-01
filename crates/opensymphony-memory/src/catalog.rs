@@ -346,27 +346,33 @@ pub fn withdraw_memory_source_records(
                 source.registration_source_id.as_deref() != Some(source_id)
                     && !(source.registration_source_id.is_none() && source.id == source_id)
             });
-            if !has_other_source {
-                let mut scope_statement = transaction
-                    .prepare(
-                        "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
-                    )
+            let mut scope_statement = transaction
+                .prepare(
+                    "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
+                )
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            let mut remaining_project_scopes = scope_statement
+                .query_map([&concept_id], |row| row.get(0))
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?
+                .collect::<Result<BTreeSet<String>, _>>()
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            if remaining_project_scopes.is_empty() {
+                let provenance_count: i64 = transaction
+                    .query_row("SELECT COUNT(*) FROM source_scope_refs", [], |row| row.get(0))
                     .map_err(|error| MemoryError::DuckDb {
                         path: config.index_path.clone(),
                         source: error,
                     })?;
-                let mut remaining_project_scopes = scope_statement
-                    .query_map([&concept_id], |row| row.get(0))
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?
-                    .collect::<Result<BTreeSet<String>, _>>()
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?;
-                if remaining_project_scopes.is_empty() {
+                if provenance_count == 0 {
                     remaining_project_scopes = source_ids
                         .iter()
                         .filter_map(|candidate| registered_source_repositories.get(candidate))
@@ -375,33 +381,35 @@ pub fn withdraw_memory_source_records(
                         .cloned()
                         .collect::<BTreeSet<_>>();
                 }
-                scopes.retain(|scope| match &scope.kind {
-                    KnowledgeScopeKind::Repository => scope.id != repository_id,
-                    KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
-                    KnowledgeScopeKind::ProjectSet => config
-                        .default_project_set_id
-                        .as_deref()
-                        .is_some_and(|id| scope.id == id),
-                    _ => true,
-                });
+            }
+            scopes.retain(|scope| match &scope.kind {
+                KnowledgeScopeKind::Repository => !has_other_source && scope.id != repository_id,
+                KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
+                KnowledgeScopeKind::ProjectSet => config
+                    .default_project_set_id
+                    .as_deref()
+                    .is_some_and(|id| scope.id == id),
+                _ => true,
+            });
+            if !has_other_source {
                 sources.retain(|source| source.repo_id.as_deref() != Some(repository_id));
+            }
+            transaction
+                .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            for scope in &scopes {
                 transaction
-                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                    .execute(
+                        "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                        duckdb::params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                    )
                     .map_err(|error| MemoryError::DuckDb {
                         path: config.index_path.clone(),
                         source: error,
                     })?;
-                for scope in &scopes {
-                    transaction
-                        .execute(
-                            "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
-                            duckdb::params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
-                        )
-                        .map_err(|error| MemoryError::DuckDb {
-                            path: config.index_path.clone(),
-                            source: error,
-                        })?;
-                }
             }
             transaction
                 .execute(
@@ -481,7 +489,16 @@ pub fn withdraw_memory_repository_records(
                 source: error,
             })?
     };
-    let remaining_project_scopes = registered_source_repositories
+    transaction
+        .execute(
+            "DELETE FROM source_scope_refs WHERE source_id IN (SELECT source_id FROM registered_memory_sources WHERE repository_id = ?)",
+            [repository_id],
+        )
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?;
+    let configured_remaining_project_scopes = registered_source_repositories
         .values()
         .filter(|candidate| candidate.as_str() != repository_id)
         .filter_map(|candidate| config.repository_sources.get(candidate))
@@ -489,6 +506,36 @@ pub fn withdraw_memory_repository_records(
         .cloned()
         .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, scopes_json, sources_json) in rows {
+        let mut scope_statement = transaction
+            .prepare(
+                "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
+            )
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        let mut remaining_project_scopes = scope_statement
+            .query_map([&concept_id], |row| row.get(0))
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?
+            .collect::<Result<BTreeSet<String>, _>>()
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        if remaining_project_scopes.is_empty() {
+            let provenance_count: i64 = transaction
+                .query_row("SELECT COUNT(*) FROM source_scope_refs", [], |row| row.get(0))
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            if provenance_count == 0 {
+                remaining_project_scopes = configured_remaining_project_scopes.clone();
+            }
+        }
         let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&scopes_json)
             .unwrap_or_default()
             .into_iter()
@@ -775,5 +822,164 @@ mod catalog_tests {
             issue.source_refs[0].registration_source_id.as_deref(),
             Some(private_source.source_id.as_str())
         );
+    }
+
+    #[test]
+    fn withdraws_project_scopes_from_same_repository_source_provenance() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let public_source = RegisteredMemorySource {
+            source_id: "github:repository:123:okf-public".to_string(),
+            repository_id: "github:repository:123".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::OkfBundle,
+            root: root.path().join("okf-public"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:public".to_string(),
+        };
+        let private_source = RegisteredMemorySource {
+            source_id: "github:repository:123:okf-private".to_string(),
+            generation: "sha256:private".to_string(),
+            root: root.path().join("okf-private"),
+            ..public_source.clone()
+        };
+        register_memory_source(&config, &public_source).expect("public source");
+        register_memory_source(&config, &private_source).expect("private source");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-551",
+                    "Shared concept",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-551.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-551",
+                    r#"[{"kind":"repository","id":"github:repository:123"},{"kind":"project","id":"project-public"},{"kind":"project","id":"project-private"}]"#,
+                    "[]",
+                    r#"["github:repository:123:okf-public","github:repository:123:okf-private"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-551', 'repository', 'github:repository:123', NULL), ('issues/COE-551', 'project', 'project-public', NULL), ('issues/COE-551', 'project', 'project-private', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-551', 'github:repository:123:okf-public', 'project', 'project-public', NULL), ('issues/COE-551', 'github:repository:123:okf-private', 'project', 'project-private', NULL)",
+                [],
+            )
+            .expect("source scopes");
+
+        withdraw_memory_source_records(
+            &config,
+            &public_source.source_id,
+            &public_source.repository_id,
+        )
+        .expect("source withdrawal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-551")
+            .expect("shared issue remains");
+        assert!(!issue
+            .scope_refs
+            .iter()
+            .any(|scope| scope.id == "project-public"));
+        assert!(issue
+            .scope_refs
+            .iter()
+            .any(|scope| scope.id == "project-private"));
+        let private_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-551' AND source_id = 'github:repository:123:okf-private'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("remaining source scopes");
+        assert_eq!(private_scope_count, 1);
+    }
+
+    #[test]
+    fn withdraws_repository_using_surviving_source_scope_provenance() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let source_a = RegisteredMemorySource {
+            source_id: "github:repository:a:okf".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::OkfBundle,
+            root: root.path().join("okf-a"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:a".to_string(),
+        };
+        let mut source_b = source_a.clone();
+        source_b.source_id = "github:repository:b:okf".to_string();
+        source_b.repository_id = "github:repository:b".to_string();
+        source_b.root = root.path().join("okf-b");
+        source_b.generation = "sha256:b".to_string();
+        register_memory_source(&config, &source_a).expect("source a");
+        register_memory_source(&config, &source_b).expect("source b");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-552",
+                    "Cross repository concept",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-552.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-552",
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"repository","id":"github:repository:b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"a","repo_id":"github:repository:a"},{"kind":"legacy_store","id":"b","repo_id":"github:repository:b"}]"#,
+                    r#"["github:repository:a:okf","github:repository:b:okf"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-552', 'repository', 'github:repository:a', NULL), ('issues/COE-552', 'repository', 'github:repository:b', NULL), ('issues/COE-552', 'project', 'project-a', NULL), ('issues/COE-552', 'project', 'project-b', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-552', 'github:repository:a:okf', 'project', 'project-a', NULL), ('issues/COE-552', 'github:repository:b:okf', 'project', 'project-b', NULL)",
+                [],
+            )
+            .expect("source scopes");
+
+        withdraw_memory_repository_records(&config, &source_a.repository_id)
+            .expect("repository withdrawal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-552")
+            .expect("remaining issue");
+        assert!(!issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project && scope.id == "project-a"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project && scope.id == "project-b"
+        }));
     }
 }

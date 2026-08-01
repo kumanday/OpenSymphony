@@ -3036,6 +3036,15 @@ pub fn backfill_legacy_memory_source_scopes(
         path: config.index_path.clone(),
         source,
     })?;
+    transaction
+        .execute(
+            "DELETE FROM source_scope_refs WHERE source_id = ?",
+            [source_id],
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     let rows = {
         let mut statement = transaction
             .prepare("SELECT issue_key, concept_id, scope_refs_json, source_refs_json, source_ids_json FROM issues")
@@ -3084,6 +3093,19 @@ pub fn backfill_legacy_memory_source_scopes(
         for project_id in &project_scope_ids {
             add_scope(KnowledgeScopeKind::Project, project_id.clone());
         }
+        let source_scopes = scopes
+            .iter()
+            .filter(|scope| match &scope.kind {
+                KnowledgeScopeKind::Repository => scope.id == repository_id,
+                KnowledgeScopeKind::ProjectSet => config
+                    .default_project_set_id
+                    .as_deref()
+                    .is_some_and(|id| id == scope.id),
+                KnowledgeScopeKind::Project => project_scope_ids.iter().any(|id| id == &scope.id),
+                _ => false,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources).unwrap_or_default();
         let source_ref = MemorySourceRef {
             kind: "legacy_store".to_string(),
@@ -3108,6 +3130,23 @@ pub fn backfill_legacy_memory_source_scopes(
                 .execute(
                     "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
                     duckdb::params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for scope in &source_scopes {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
+                    duckdb::params![
+                        concept_id,
+                        source_id,
+                        scope_kind_name(&scope.kind),
+                        scope.id,
+                        scope.label,
+                    ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -3526,6 +3565,7 @@ fn refresh_memory_index_from_okf_inner(
     for row in &rows {
         let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
             .unwrap_or_default();
+        let incoming_source_scopes = scope_refs.clone();
         let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&row.source_refs_json)
             .unwrap_or_default();
         if let Some(repository_id) = repository_id {
@@ -3647,7 +3687,7 @@ fn refresh_memory_index_from_okf_inner(
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
         let source_refs_json = serde_json::to_string(&source_refs)?;
         if let Some(source_id) = source_id {
-            for scope_ref in &scope_refs {
+            for scope_ref in &incoming_source_scopes {
                 transaction
                     .execute(
                         "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
@@ -4544,6 +4584,17 @@ mod index_tests {
             .source_refs
             .iter()
             .any(|source| source.id == "repo-alpha:legacy_store"));
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index should exist");
+        let source_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-550' AND source_id = 'repo-alpha:legacy_store'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source scope refs");
+        assert_eq!(source_scope_count, 3);
     }
 
     #[test]
