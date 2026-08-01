@@ -165,6 +165,7 @@ pub fn reconcile_memory_sources(
     drop(connection);
     for repository_id in &withdrawn_repository_ids {
         withdraw_code_repository(config, repository_id)?;
+        withdraw_memory_repository_records(config, repository_id)?;
     }
     for (source_id, repository_id) in withdrawn_source_ids {
         withdraw_memory_source_records(config, &source_id, &repository_id)?;
@@ -385,10 +386,15 @@ pub fn withdraw_memory_source_records(
             scopes.retain(|scope| match &scope.kind {
                 KnowledgeScopeKind::Repository => has_other_source || scope.id != repository_id,
                 KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
-                KnowledgeScopeKind::ProjectSet => config
-                    .default_project_set_id
-                    .as_deref()
-                    .is_some_and(|id| scope.id == id),
+                KnowledgeScopeKind::ProjectSet => {
+                    !registered_source_repositories
+                        .values()
+                        .all(|candidate| candidate == repository_id)
+                        && config
+                            .default_project_set_id
+                            .as_deref()
+                            .is_some_and(|id| scope.id == id)
+                }
                 _ => true,
             });
             if !has_other_source {
@@ -988,5 +994,58 @@ mod catalog_tests {
         assert!(issue.scope_refs.iter().any(|scope| {
             scope.kind == KnowledgeScopeKind::Project && scope.id == "project-b"
         }));
+    }
+
+    #[test]
+    fn withdraws_live_capture_without_source_registration_ownership() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let source = RegisteredMemorySource {
+            source_id: "github:repository:a:repository".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::Repository,
+            root: root.path().join("repo-a"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:repo".to_string(),
+        };
+        register_memory_source(&config, &source).expect("repository source");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-553",
+                    "Live capture",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-553.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-553",
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project","id":"project-a"},{"kind":"project_set","id":"set-a"}]"#,
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("live capture");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-553', 'repository', 'github:repository:a', NULL), ('issues/COE-553', 'project', 'project-a', NULL), ('issues/COE-553', 'project_set', 'set-a', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+
+        withdraw_memory_repository_records(&config, "github:repository:a")
+            .expect("repository withdrawal");
+
+        assert!(load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .all(|issue| issue.issue_key != "COE-553"));
     }
 }

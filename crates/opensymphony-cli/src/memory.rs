@@ -44,17 +44,18 @@ use crate::{
         MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource, SourceFile,
         archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief,
         brief_with_scope, code_graph_context, code_graph_workspace_context_overlay,
-        code_index_branch_for_config, code_repository_has_rows, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_source_file, mark_archived, merge_legacy_memory_index,
-        merge_memory_index_from_okf, migrate_code_repository_identity,
-        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        code_index_branch_for_config, code_repository_has_commit, code_repository_has_rows,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
+        migrate_code_repository_identity, persist_code_intel_documents,
+        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
-        sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
-        write_memory_init_plan,
+        sha256_hex, status_with_scope, withdraw_code_repository, write_capture_plan,
+        write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -533,7 +534,8 @@ pub(crate) async fn auto_capture_terminal(
         identifiers,
         ..IssueSelection::default()
     };
-    let mut capture_plan = plan_capture(&config, &source, &selection, true, true)?;
+    let capture_config = resolve_auto_capture_repository_config(&config, &source, &selection);
+    let mut capture_plan = plan_capture(&capture_config, &source, &selection, true, true)?;
     let issue_keys = capture_plan
         .selected
         .iter()
@@ -697,6 +699,57 @@ pub(crate) async fn auto_capture_terminal(
         archive_completed,
         warnings,
     })
+}
+
+fn resolve_auto_capture_repository_config(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    selection: &IssueSelection,
+) -> MemoryConfig {
+    let issue_ids = selection
+        .identifiers
+        .iter()
+        .map(|identifier| identifier.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let candidate_repositories = source
+        .issues
+        .iter()
+        .filter(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()))
+        .flat_map(|issue| {
+            [issue.project_id.as_ref(), issue.project_slug.as_ref()]
+                .into_iter()
+                .flatten()
+                .collect::<BTreeSet<_>>()
+        })
+        .flat_map(|project_id| {
+            config
+                .repository_sources
+                .values()
+                .filter(move |repository| repository.project_scope_ids.contains(project_id))
+                .map(|repository| repository.repository_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let repository_id = if candidate_repositories.len() == 1 {
+        candidate_repositories.into_iter().next()
+    } else if candidate_repositories.is_empty() {
+        config.default_repository_id.clone().or_else(|| {
+            (config.repository_sources.len() == 1)
+                .then(|| config.repository_sources.keys().next().cloned())
+                .flatten()
+        })
+    } else {
+        None
+    };
+    let Some(repository_id) = repository_id else {
+        return config.clone();
+    };
+    let Some(repository) = config.repository_sources.get(&repository_id) else {
+        return config.clone();
+    };
+    let mut routed = config.clone();
+    routed.repo_root = repository.root.clone();
+    routed.default_repository_id = Some(repository_id);
+    routed
 }
 
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
@@ -2121,8 +2174,31 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
         },
     );
     for source in config.repository_sources.values() {
-        if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
-            migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
+        if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str())
+            && code_repository_has_rows(config, legacy_repo_id)?
+        {
+            let commit_sha = source
+                .commit_sha
+                .clone()
+                .or_else(|| git_commit_sha_for_repo(&source.root))
+                .ok_or_else(|| {
+                    MemoryError::InvalidInput(format!(
+                        "cannot resolve an exact Git commit for configured repository `{}` at {}",
+                        source.repository_id,
+                        source.root.display()
+                    ))
+                })?;
+            if legacy_code_repository_matches_source(
+                config,
+                legacy_repo_id,
+                &source.root,
+                &source.repository_id,
+                &commit_sha,
+            )? {
+                migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
+            } else {
+                withdraw_code_repository(config, legacy_repo_id)?;
+            }
         }
         let commit_sha = source
             .commit_sha
@@ -4756,6 +4832,41 @@ fn git_commit_sha_for_repo(repo_root: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn legacy_code_repository_matches_source(
+    config: &MemoryConfig,
+    legacy_repository_id: &str,
+    repository_root: &Path,
+    canonical_repository_id: &str,
+    commit_sha: &str,
+) -> Result<bool, MemoryError> {
+    if code_repository_has_commit(config, legacy_repository_id, commit_sha)? {
+        return Ok(true);
+    }
+    Ok(
+        git_remote_repository_slug(repository_root).is_some_and(|remote_repository_id| {
+            remote_repository_id == legacy_repository_id
+                || remote_repository_id == canonical_repository_id
+        }),
+    )
+}
+
+fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
+    let output = process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote_output = String::from_utf8_lossy(&output.stdout);
+    let remote = remote_output
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    remote.rsplit(['/', ':']).next().map(str::to_string)
+}
+
 fn git_worktree_dirty(repo_root: &Path) -> bool {
     process::Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=no"])
@@ -6819,9 +6930,9 @@ mod tests {
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
-        MemoryConfig, MemoryError, MemoryRepositorySource, MemoryScopeFilter, code_symbol_detail,
-        code_symbol_neighborhood, code_symbols_containing_span, compare_code_symbols,
-        persist_code_intel_documents,
+        IssueEvidence, IssueSelection, MemoryConfig, MemoryError, MemoryRepositorySource,
+        MemoryScopeFilter, SourceFile, code_symbol_detail, code_symbol_neighborhood,
+        code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
     };
     use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -6871,6 +6982,52 @@ mod tests {
             repository.path().join("docs/ops.md")
         );
         assert_eq!(resolved.repo_root, repository.path());
+    }
+
+    #[test]
+    fn auto_capture_routes_github_discovery_to_issue_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.default_repository_id = Some("repo-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: catalog.path().join("repo-a"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-550".to_string(),
+                project_id: Some("project-b".to_string()),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let routed = super::resolve_auto_capture_repository_config(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-550".to_string()],
+                ..IssueSelection::default()
+            },
+        );
+        assert_eq!(routed.default_repository_id.as_deref(), Some("repo-b"));
+        assert_eq!(routed.repo_root, repository.path());
     }
 
     #[test]

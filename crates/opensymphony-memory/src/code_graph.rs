@@ -3916,6 +3916,48 @@ pub fn code_repository_has_rows(
     Ok(false)
 }
 
+pub fn code_repository_has_commit(
+    config: &MemoryConfig,
+    repository_id: &str,
+    commit_sha: &str,
+) -> Result<bool, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repo_id = ? AND commit_sha = ?"),
+                params![repository_id, commit_sha],
+                |row| row.get(0),
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        if count > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn migrate_code_repository_identity(
     config: &MemoryConfig,
     legacy_repo_id: &str,
