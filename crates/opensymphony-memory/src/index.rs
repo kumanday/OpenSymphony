@@ -2679,11 +2679,9 @@ pub fn merge_legacy_memory_index(
     source_config: &MemoryConfig,
     source_id: &str,
 ) -> Result<(), MemoryError> {
-    let source_connection = open_index(source_config)?;
-    migrate_index(&source_connection).map_err(|source| MemoryError::DuckDb {
-        path: source_config.index_path.clone(),
-        source,
-    })?;
+    let Some(source_connection) = open_existing_index_read_only(source_config)? else {
+        return Ok(());
+    };
     let areas = {
         let mut statement = source_connection
             .prepare("SELECT issue_key, area FROM issue_areas")

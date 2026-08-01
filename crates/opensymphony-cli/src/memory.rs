@@ -1880,19 +1880,22 @@ async fn start_memory_server_with_auth(
 ) -> Result<MemoryServerHandle, MemoryError> {
     let activity_marker = memory_activity_marker_path(&config.memory_root);
     let coordination_root = memory_coordination_root(&config);
-    let coordination_lock =
-        acquire_memory_coordination_lock(&coordination_root).map_err(|source| {
-            MemoryError::InvalidInput(format!(
-                "memory migration or server activity is already active at {}; {source}",
-                memory_migration_lock_path(&coordination_root).display()
-            ))
-        })?;
     let registration_config = config.clone();
-    tokio::task::spawn_blocking(move || register_configured_memory_sources(&registration_config))
-        .await
-        .map_err(|error| {
-            MemoryError::InvalidInput(format!("memory source registration task failed: {error}"))
-        })??;
+    let coordination_lock = tokio::task::spawn_blocking(move || {
+        let coordination_lock =
+            acquire_memory_coordination_lock(&coordination_root).map_err(|source| {
+                MemoryError::InvalidInput(format!(
+                    "memory migration or server activity is already active at {}; {source}",
+                    memory_migration_lock_path(&coordination_root).display()
+                ))
+            })?;
+        register_configured_memory_sources(&registration_config)?;
+        Ok::<_, MemoryError>(coordination_lock)
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("memory source registration task failed: {error}"))
+    })??;
     fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
         path: config.memory_root.clone(),
         source,
@@ -4117,13 +4120,17 @@ async fn call_memory_ingest_code_intel_tool(
         .await?;
         (artifacts, Some(report))
     } else {
-        let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
+        let repo_root = resolve_code_intel_repo_for_scope(&resolved_config, &scope)?;
+        let paths = paths
+            .into_iter()
+            .take(resolved_config.code_intel.ast.max_files_per_request)
+            .collect();
         let artifacts = code_intel_artifacts_blocking(
             repo_root,
             paths,
             scope_refs,
-            limit.min(config.code_intel.ast.max_matches_per_request),
-            config.code_intel.ast.max_file_bytes,
+            limit.min(resolved_config.code_intel.ast.max_matches_per_request),
+            resolved_config.code_intel.ast.max_file_bytes,
         )
         .await?;
         (artifacts, None)
@@ -8109,6 +8116,54 @@ mod tests {
 
         assert!(matches!(error, MemoryError::InvalidInput(message)
             if message.contains("code-intelligence ingestion is disabled")));
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_uses_selected_repository_limits_without_persistence() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n    max_files_per_request: 1\n    max_matches_per_request: 1\n",
+        )
+        .expect("repository config");
+        std::fs::write(
+            repository.path().join("src/lib.rs"),
+            "pub fn selected_answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "repo": "repo-a",
+                "paths": ["src/lib.rs"]
+            }),
+        )
+        .await
+        .expect("non-persistent ingest should use selected limits");
+
+        assert!(
+            result["artifacts"]
+                .as_array()
+                .expect("artifacts")
+                .iter()
+                .any(|artifact| artifact["summary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.contains("max AST file size of 1 bytes")))
+        );
     }
 
     #[tokio::test]
