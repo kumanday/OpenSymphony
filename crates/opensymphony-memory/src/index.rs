@@ -62,7 +62,53 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 )
             })
             .unwrap_or_default();
+        let concept_id = format!("issues/{issue_key}");
+        let previous_source_scopes = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT source_id, scope_kind, scope_id FROM source_scope_refs WHERE concept_id = ?",
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map(params![&concept_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
         let live_scope_refs = capture_scope_refs(config, issue_plan);
+        let other_source_scopes = previous_source_scopes
+            .iter()
+            .filter(|(source_id, _, _)| {
+                source_id != &live_owner && source_id != LIVE_CAPTURE_OWNER
+            })
+            .map(|(_, scope_kind, scope_id)| (scope_kind.as_str(), scope_id.as_str()))
+            .collect::<Vec<_>>();
+        let current_live_scopes = previous_source_scopes
+            .iter()
+            .filter(|(source_id, _, _)| {
+                source_id == &live_owner || source_id == LIVE_CAPTURE_OWNER
+            })
+            .map(|(_, scope_kind, scope_id)| (scope_kind.as_str(), scope_id.as_str()))
+            .collect::<Vec<_>>();
+        scope_refs.retain(|scope| {
+            let key = (scope_kind_name(&scope.kind), scope.id.as_str());
+            !current_live_scopes.contains(&key) || other_source_scopes.contains(&key)
+        });
         for scope_ref in &live_scope_refs {
             if !scope_refs.contains(scope_ref) {
                 scope_refs.push(scope_ref.clone());
@@ -169,8 +215,8 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         }
         transaction
             .execute(
-                "DELETE FROM source_scope_refs WHERE source_id = ?",
-                params![live_owner.clone()],
+                "DELETE FROM source_scope_refs WHERE concept_id = ? AND source_id = ?",
+                params![&concept_id, live_owner.clone()],
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
@@ -179,8 +225,8 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         if had_legacy_live_owner {
             transaction
                 .execute(
-                    "DELETE FROM source_scope_refs WHERE source_id = ?",
-                    params![LIVE_CAPTURE_OWNER],
+                    "DELETE FROM source_scope_refs WHERE concept_id = ? AND source_id = ?",
+                    params![&concept_id, LIVE_CAPTURE_OWNER],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),

@@ -5217,6 +5217,10 @@ fn memory_config_for_repository(
     let local_config = MemoryConfig::load(&source.root, None)?;
     resolved.enabled = local_config.enabled;
     resolved.code_intel = local_config.code_intel;
+    resolved.code_index_target_branch = source
+        .target_branch
+        .clone()
+        .or(resolved.code_index_target_branch);
     Ok(resolved)
 }
 
@@ -10899,7 +10903,7 @@ Public memory concept.
                 root: second.path().to_path_buf(),
                 commit_sha: None,
                 project_scope_ids: BTreeSet::from(["project-b".to_string()]),
-                target_branch: None,
+                target_branch: Some("repo-b-target".to_string()),
             },
         );
 
@@ -10908,6 +10912,10 @@ Public memory concept.
                 .expect("project-only graph scope should select its repository");
         assert_eq!(resolved.default_repository_id.as_deref(), Some("repo-b"));
         assert_eq!(resolved.repo_root, second.path());
+        assert_eq!(
+            resolved.code_index_target_branch.as_deref(),
+            Some("repo-b-target")
+        );
     }
 
     #[test]

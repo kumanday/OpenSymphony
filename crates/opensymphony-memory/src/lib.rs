@@ -3711,7 +3711,8 @@ Reviews are triggered when you open a pull request for review.
         let repo = TempDir::new().expect("temp repo");
         let mut config = config_for(repo.path());
         config.default_repository_id = Some("repo-a".to_string());
-        let source = sample_source();
+        let mut source = sample_source();
+        source.issues[0].project_id = Some("project-a".to_string());
         let selection = IssueSelection {
             identifiers: vec!["COE-123".to_string()],
             ..IssueSelection::default()
@@ -3725,7 +3726,7 @@ Reviews are triggered when you open a pull request for review.
                 "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = 'COE-123'",
                 params![
                     r#"["__live_capture__:repo-a","github:repository:b:okf"]"#,
-                    r#"[{"kind":"work_item","id":"COE-123"},{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-b"}]"#,
+                    r#"[{"kind":"work_item","id":"COE-123"},{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-registered"}]"#,
                     r#"[{"kind":"legacy_store","id":"b","repo_id":"repo-b","registration_source_id":"github:repository:b:okf"}]"#,
                 ],
             )
@@ -3736,9 +3737,24 @@ Reviews are triggered when you open a pull request for review.
                 [],
             )
             .expect("registered relation");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-123', 'github:repository:b:okf', 'project', 'project-registered', NULL)",
+                [],
+            )
+            .expect("registered scope provenance");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-999', '__live_capture__:repo-a', 'project', 'project-other-issue', NULL)",
+                [],
+            )
+            .expect("other concept live scope provenance");
         drop(connection);
 
-        write_capture_plan(&config, &plan, false).expect("refresh capture");
+        source.issues[0].project_id = Some("project-live-new".to_string());
+        let refreshed_plan = plan_capture(&config, &source, &selection, true, false)
+            .expect("refreshed capture plan");
+        write_capture_plan(&config, &refreshed_plan, false).expect("refresh capture");
 
         let issue = load_indexed_issues(&config)
             .expect("indexed issues")
@@ -3752,7 +3768,19 @@ Reviews are triggered when you open a pull request for review.
                 .any(|source| source.registration_source_id.as_deref()
                     == Some("github:repository:b:okf"))
         );
-        assert!(issue.scope_refs.iter().any(|scope| scope.id == "project-b"));
+        assert!(!issue.scope_refs.iter().any(|scope| scope.id == "project-a"));
+        assert!(
+            issue
+                .scope_refs
+                .iter()
+                .any(|scope| scope.id == "project-live-new")
+        );
+        assert!(
+            issue
+                .scope_refs
+                .iter()
+                .any(|scope| scope.id == "project-registered")
+        );
         let connection = open_existing_index_read_only(&config)
             .expect("index should reopen")
             .expect("index exists");
@@ -3765,6 +3793,14 @@ Reviews are triggered when you open a pull request for review.
             .expect("source ownership");
         assert!(source_ids.contains("__live_capture__:repo-a"));
         assert!(source_ids.contains("github:repository:b:okf"));
+        let other_concept_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-999' AND source_id = '__live_capture__:repo-a' AND scope_id = 'project-other-issue'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("other concept scope provenance");
+        assert_eq!(other_concept_scope_count, 1);
         let registered_relation_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-123' AND source_id = 'github:repository:b:okf'",
