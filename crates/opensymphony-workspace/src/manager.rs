@@ -993,16 +993,9 @@ impl WorkspaceManager {
                 .await?;
                 continue;
             }
-            let allow_worker_changes = self.load_run_manifest(&handle).await?.is_some_and(|run| {
-                run.pending_retry
-                    || matches!(
-                        run.status,
-                        RunStatus::Running
-                            | RunStatus::Succeeded
-                            | RunStatus::Failed
-                            | RunStatus::Cancelled
-                    )
-            });
+            let allow_worker_changes = self
+                .retained_checkout_allows_worker_changes(&handle)
+                .await?;
             match self
                 .verify_checkout_with_worker_changes_timeout(
                     &handle,
@@ -1044,6 +1037,53 @@ impl WorkspaceManager {
             }
         }
         Ok(None)
+    }
+
+    async fn retained_checkout_allows_worker_changes(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<bool, WorkspaceError> {
+        let Some(run) = self.load_run_manifest(workspace).await? else {
+            return Ok(false);
+        };
+        if run.pending_retry
+            || matches!(
+                run.status,
+                RunStatus::Running
+                    | RunStatus::Succeeded
+                    | RunStatus::Failed
+                    | RunStatus::Cancelled
+            )
+        {
+            return Ok(true);
+        }
+        if run.status != RunStatus::Prepared {
+            return Ok(false);
+        }
+
+        // OpenHands persists active_run_id and trigger_pending_run_id before
+        // the run manifest advances from Prepared to Running. A crash in that
+        // window may leave legitimate worker edits in the checkout, so treat
+        // this exact marker pair as worker-active during recovery. Parse only
+        // the marker fields here to keep the workspace crate independent of
+        // the harness-specific conversation manifest type.
+        let Some(raw_manifest) = self
+            .read_text_artifact(workspace, &workspace.conversation_manifest_path())
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw_manifest) else {
+            return Ok(false);
+        };
+        Ok(manifest
+            .get("active_run_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(run.run_id.as_str())
+            && manifest
+                .get("trigger_pending_run_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(run.run_id.as_str()))
     }
 
     async fn quarantine_checkout(

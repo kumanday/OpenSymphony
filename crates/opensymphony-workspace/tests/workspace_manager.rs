@@ -449,12 +449,32 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         "dirty\n",
     )
     .expect("dirty marker should be written");
+    let mut prepared_run = RunManifest::new(
+        &repaired.handle,
+        &RunDescriptor::new("run-prepared-trigger-pending", 1),
+    );
+    prepared_run.status = RunStatus::Prepared;
+    manager
+        .write_run_manifest(&repaired.handle, &prepared_run)
+        .await
+        .expect("prepared run manifest should be written");
+    manager
+        .write_json_artifact(
+            &repaired.handle,
+            &repaired.handle.conversation_manifest_path(),
+            &json!({
+                "active_run_id": "run-prepared-trigger-pending",
+                "trigger_pending_run_id": "run-prepared-trigger-pending"
+            }),
+        )
+        .await
+        .expect("trigger-pending conversation markers should be written");
     let clean_retry = manager
         .ensure(&issue)
         .await
-        .expect("dirty checkout should retry");
-    assert!(clean_retry.created);
-    assert_ne!(
+        .expect("prepared trigger-pending checkout should be retained");
+    assert!(!clean_retry.created);
+    assert_eq!(
         clean_retry.handle.workspace_path(),
         repaired.handle.workspace_path()
     );
