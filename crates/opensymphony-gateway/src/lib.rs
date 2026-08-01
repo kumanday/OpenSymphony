@@ -2550,11 +2550,16 @@ fn normalize_git_remote(remote: &str) -> String {
             value = format!("{host}/{path}");
         }
     }
-    value
+    let value = value
         .trim_end_matches('/')
         .trim_end_matches(".git")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
+        .trim_end_matches('/');
+    let (host, path) = value.split_once('/').unwrap_or((value, ""));
+    if path.is_empty() {
+        host.to_ascii_lowercase()
+    } else {
+        format!("{}/{}", host.to_ascii_lowercase(), path)
+    }
 }
 
 fn repo_id_from_remote_url(url: &str) -> Option<String> {
@@ -5730,6 +5735,10 @@ mod tests {
         assert_eq!(
             normalize_git_remote("ssh://git@github.com/org/repo.git"),
             normalize_git_remote("https://github.com/org/repo"),
+        );
+        assert_ne!(
+            normalize_git_remote("https://github.com/Team/Repo.git"),
+            normalize_git_remote("https://github.com/team/repo.git"),
         );
     }
 

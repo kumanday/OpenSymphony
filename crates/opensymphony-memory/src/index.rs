@@ -2835,6 +2835,363 @@ pub fn merge_memory_index_from_okf(
     )
 }
 
+pub fn merge_legacy_code_index(
+    config: &MemoryConfig,
+    source_config: &MemoryConfig,
+    legacy_repo_id: &str,
+    canonical_repo_id: &str,
+) -> Result<(), MemoryError> {
+    if source_config.index_path == config.index_path {
+        return Ok(());
+    }
+    let Some(source_connection) = open_existing_index_read_only(source_config)? else {
+        return Ok(());
+    };
+    let tables: &[(&str, &[&str])] = &[
+        (
+            "code_documents",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_id",
+                "parser_version",
+                "query_pack_version",
+                "byte_len",
+                "line_count",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_documents_staging",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_id",
+                "parser_version",
+                "query_pack_version",
+                "byte_len",
+                "line_count",
+                "indexed_at",
+            ],
+        ),
+        (
+            "code_document_revisions",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_id",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_symbols",
+            &[
+                "symbol_id",
+                "symbol_key",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "kind",
+                "name",
+                "container_symbol_id",
+                "container_chain",
+                "signature",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "selection_start_line",
+                "selection_end_line",
+                "content_sha256",
+                "snippet_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_edges",
+            &[
+                "edge_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "edge_kind",
+                "source_symbol_id",
+                "source_symbol_key",
+                "target_symbol_id",
+                "target_symbol_key",
+                "target_hint",
+                "confidence",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_edge_revisions",
+            &[
+                "edge_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "edge_kind",
+                "source_symbol_id",
+                "source_symbol_key",
+                "target_symbol_id",
+                "target_symbol_key",
+                "target_hint",
+                "confidence",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_skipped_files",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "reason",
+                "content_sha256",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_skipped_files_staging",
+            &[
+                "repo_id",
+                "commit_sha",
+                "path",
+                "reason",
+                "content_sha256",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_diagnostics",
+            &[
+                "diagnostic_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "kind",
+                "severity",
+                "message",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_diagnostic_revisions",
+            &[
+                "diagnostic_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "kind",
+                "severity",
+                "message",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_index_snapshots",
+            &[
+                "repo_id",
+                "commit_sha",
+                "target_branch",
+                "status",
+                "total_files",
+                "parsed_files",
+                "skipped_files",
+                "deleted_files",
+                "config_fingerprint",
+                "indexed_at",
+            ],
+        ),
+        (
+            "code_snapshot_membership",
+            &[
+                "repo_id",
+                "commit_sha",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "analyzed",
+                "skip_reason",
+            ],
+        ),
+        (
+            "code_snapshot_membership_staging",
+            &[
+                "run_id",
+                "repo_id",
+                "commit_sha",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "analyzed",
+                "skip_reason",
+            ],
+        ),
+    ];
+    let mut tables_to_copy = Vec::new();
+    for (table, columns) in tables {
+        if !table_has_columns(&source_connection, &source_config.index_path, table, &["repo_id"])? {
+            continue;
+        }
+        let count: i64 = source_connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repo_id = ?"),
+                [legacy_repo_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        if count == 0 {
+            continue;
+        }
+        if !table_has_columns(&source_connection, &source_config.index_path, table, columns)? {
+            return Err(MemoryError::InvalidInput(format!(
+                "legacy code index `{}` has an unsupported `{table}` schema",
+                source_config.index_path.display()
+            )));
+        }
+        tables_to_copy.push((*table, columns.join(", ")));
+    }
+    if tables_to_copy.is_empty() {
+        return Ok(());
+    }
+
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let escaped_source_path = source_config
+        .index_path
+        .to_string_lossy()
+        .replace('\'', "''");
+    connection
+        .execute_batch(&format!(
+            "ATTACH '{}' AS legacy_memory_source (READ_ONLY)",
+            escaped_source_path
+        ))
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let copy_result = (|| {
+        let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+        for (table, columns) in &tables_to_copy {
+            transaction
+                .execute(
+                    &format!(
+                        "INSERT OR IGNORE INTO {table} ({columns}) SELECT {columns} FROM legacy_memory_source.{table} WHERE repo_id = ?"
+                    ),
+                    [legacy_repo_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        transaction.commit().map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })
+    })();
+    let detach_result = connection
+        .execute_batch("DETACH legacy_memory_source")
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        });
+    copy_result?;
+    detach_result?;
+    drop(source_connection);
+    drop(connection);
+    migrate_code_repository_identity(config, legacy_repo_id, canonical_repo_id)
+}
+
 pub fn merge_legacy_memory_index(
     config: &MemoryConfig,
     source_config: &MemoryConfig,
@@ -4162,7 +4519,9 @@ fn preflight_merge_conflicts(
         };
         let existing_source_ids =
             serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
-        if existing_source_ids.iter().any(|existing| existing == source_id) {
+        if existing_source_ids.len() <= 1
+            && existing_source_ids.iter().any(|existing| existing == source_id)
+        {
             continue;
         }
         let payload_matches = concept_id == row.concept_id
@@ -5025,6 +5384,78 @@ mod index_tests {
     }
 
     #[test]
+    fn merge_legacy_code_index_imports_and_rekeys_code_rows() {
+        let catalog_root = tempfile::TempDir::new().expect("catalog root");
+        let source_root = tempfile::TempDir::new().expect("source root");
+        let config = MemoryConfig::load(catalog_root.path(), None).expect("catalog config");
+        let source_config = MemoryConfig::load(source_root.path(), None).expect("source config");
+        let legacy_repo_id = source_root
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("source repo id")
+            .to_string();
+
+        let mut document = test_code_document_with_edges_and_diagnostics(
+            "src/lib.rs",
+            "legacy-content",
+        );
+        document.symbols.push(CodeIntelSymbolInput {
+            kind: "function".to_string(),
+            name: "main".to_string(),
+            container_chain: Vec::new(),
+            signature: Some("fn main()".to_string()),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 10,
+            start_byte: 0,
+            end_byte: 9,
+            selection_start_line: 1,
+            selection_end_line: 1,
+            snippet_sha256: "legacy-snippet".to_string(),
+        });
+        persist_code_intel_documents(
+            &source_config,
+            CodeIntelPersistBatch {
+                repo_id: legacy_repo_id.clone(),
+                commit_sha: Some("legacy-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("legacy code index");
+
+        merge_legacy_code_index(
+            &config,
+            &source_config,
+            &legacy_repo_id,
+            "github.com/team/repo",
+        )
+        .expect("legacy code import");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("catalog index should reopen")
+            .expect("catalog index exists");
+        let document_repo: String = connection
+            .query_row(
+                "SELECT repo_id FROM code_documents WHERE path = 'src/lib.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported code document");
+        assert_eq!(document_repo, "github.com/team/repo");
+        let symbol_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = 'github.com/team/repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported code symbols");
+        assert!(symbol_count > 0);
+    }
+
+    #[test]
     fn stale_registered_source_drops_payload_before_surviving_live_owner_reads_it() {
         let root = tempfile::TempDir::new().expect("catalog root");
         let mut config = MemoryConfig::load(root.path(), None).expect("catalog config");
@@ -5123,6 +5554,44 @@ mod index_tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].title, "COE-550: Source A");
         assert_eq!(issues[0].body, "# COE-550: Source A\n\nBody from source A.\n");
+    }
+
+    #[test]
+    fn merge_rejects_changed_payload_from_one_of_multiple_owners() {
+        let root = tempfile::TempDir::new().expect("catalog root");
+        let config = MemoryConfig::load(root.path(), None).expect("catalog config");
+        let bundle_a = root.path().join("bundle-a");
+        let bundle_b = root.path().join("bundle-b");
+        for bundle in [&bundle_a, &bundle_b] {
+            fs::create_dir_all(bundle.join("issues")).expect("bundle issues");
+            fs::write(
+                bundle.join("index.md"),
+                "---\nokf_version: \"0.1\"\n---\n\n# Index\n",
+            )
+            .expect("bundle index");
+            fs::write(
+                bundle.join("issues/COE-550.md"),
+                "---\ntype: issue-capsule\ntitle: \"COE-550: Shared\"\nopensymphony:\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: Shared\n\nShared body.\n",
+            )
+            .expect("bundle issue");
+        }
+
+        merge_memory_index_from_okf(&config, &bundle_a, "repo-a", "repo-a:okf")
+            .expect("first source import");
+        merge_memory_index_from_okf(&config, &bundle_b, "repo-b", "repo-b:okf")
+            .expect("second identical source import");
+        fs::write(
+            bundle_a.join("issues/COE-550.md"),
+            "---\ntype: issue-capsule\ntitle: \"COE-550: Changed\"\nopensymphony:\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: Changed\n\nChanged body.\n",
+        )
+        .expect("changed source issue");
+
+        let error = merge_memory_index_from_okf(&config, &bundle_a, "repo-a", "repo-a:okf")
+            .expect_err("one shared owner cannot replace another owner's payload");
+        assert!(matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting memory source")));
+        let issues = load_indexed_issues(&config).expect("catalog issues");
+        assert_eq!(issues[0].title, "COE-550: Shared");
+        assert_eq!(issues[0].body, "# COE-550: Shared\n\nShared body.\n");
     }
 
     #[test]
