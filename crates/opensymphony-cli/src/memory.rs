@@ -2062,17 +2062,15 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             }
         }
     }
-    let source_reimport_pending = registered_sources.iter().any(|existing| {
-        if !matches!(
-            existing.kind,
-            MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
-        ) {
-            return false;
-        }
+    let source_reimport_pending =
         configured_source_generations
-            .get(&existing.source_id)
-            .is_none_or(|generation| generation != &existing.generation)
-    });
+            .iter()
+            .any(|(source_id, generation)| {
+                registered_sources
+                    .iter()
+                    .find(|existing| existing.source_id == *source_id)
+                    .is_none_or(|existing| existing.generation != *generation)
+            });
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
             migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;

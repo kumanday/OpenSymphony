@@ -3554,16 +3554,11 @@ fn refresh_memory_index_from_okf_inner(
                         .and_then(|repository_id| config.repository_sources.get(repository_id))
                         .map(|source| &source.project_scope_ids)
                         .unwrap_or(&config.project_scope_ids);
-                    let remaining_owner_ids = existing_source_ids
+                    let other_owner_project_scopes = existing_source_ids
                         .iter()
                         .filter(|existing_source_id| {
-                            source_id.is_none_or(|source_id| *existing_source_id != source_id)
+                            source_id.is_none_or(|source_id| existing_source_id.as_str() != source_id)
                         })
-                        .cloned()
-                        .chain(source_id.into_iter().map(str::to_string))
-                        .collect::<Vec<_>>();
-                    let owner_project_scopes = remaining_owner_ids
-                        .iter()
                         .flat_map(|existing_source_id| {
                             project_scope_ids_for_source(config, existing_source_id)
                         })
@@ -3587,9 +3582,10 @@ fn refresh_memory_index_from_okf_inner(
                                 || (scope.kind == KnowledgeScopeKind::ProjectSet
                                     && !incoming_project_set_ids.contains(&scope.id))
                                 || (scope.kind == KnowledgeScopeKind::Project
-                                    && refreshed_project_scopes.contains(&scope.id)));
+                                    && refreshed_project_scopes.contains(&scope.id)
+                                    && !other_owner_project_scopes.contains(&scope.id)));
                         let stale_project_scope = scope.kind == KnowledgeScopeKind::Project
-                            && !owner_project_scopes.contains(&scope.id)
+                            && !other_owner_project_scopes.contains(&scope.id)
                             && !scope_refs.contains(&scope);
                         if replaced_scope || stale_project_scope {
                             continue;

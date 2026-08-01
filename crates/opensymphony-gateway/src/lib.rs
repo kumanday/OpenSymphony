@@ -1718,7 +1718,7 @@ async fn get_code_graph(
     AxumPath(repo_id): AxumPath<String>,
     Query(params): Query<CodeGraphQuery>,
 ) -> Result<Json<CodeGraphSnapshot>, (StatusCode, Json<serde_json::Value>)> {
-    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id)?;
+    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id).await?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -1737,7 +1737,7 @@ async fn get_code_symbol_detail(
     AxumPath((repo_id, symbol_key)): AxumPath<(String, String)>,
     Query(params): Query<CodeSymbolQuery>,
 ) -> Result<Json<CodeSymbolDetail>, (StatusCode, Json<serde_json::Value>)> {
-    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id)?;
+    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id).await?;
     let access = memory_graph_access(params.visibility.as_deref())?;
     code_graph_symbol_detail(
         &config,
@@ -1755,7 +1755,7 @@ async fn get_code_diff_overlay(
     AxumPath(repo_id): AxumPath<String>,
     Query(params): Query<CodeDiffQuery>,
 ) -> Result<Json<CodeDiffOverlay>, (StatusCode, Json<serde_json::Value>)> {
-    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id)?;
+    let config = code_memory_for_graph_read(configured_code_memory(&state)?, &repo_id).await?;
     let base_revision = revision_param(params.base_revision, params.base, "base_revision")?;
     let head_revision = revision_param(params.head_revision, params.head, "head_revision")?;
     code_graph_diff_overlay(
@@ -1774,7 +1774,7 @@ async fn index_code_repo(
     AxumPath(repo_id): AxumPath<String>,
 ) -> Result<Json<CodeIndexReport>, (StatusCode, Json<serde_json::Value>)> {
     let config = configured_code_memory(&state)?.clone();
-    let config = code_memory_for_repository(config, &repo_id)?;
+    let config = code_memory_for_repository(config, &repo_id).await?;
     if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
         let report = index_code_repository_at(&config, &repo_id, None).map_err(code_graph_error)?;
         append_code_index_status_event(&state.journal, &repo_id, &report)
@@ -2083,11 +2083,10 @@ async fn get_run_code_outline(
         issue.repository_binding.as_ref(),
     )
     .await?;
-    let selected_config = repo_id
-        .as_deref()
-        .zip(state.memory_config.clone())
-        .map(|(repo_id, config)| code_memory_for_graph_read(&config, repo_id))
-        .transpose()?;
+    let selected_config = match (repo_id.as_deref(), state.memory_config.clone()) {
+        (Some(repo_id), Some(config)) => Some(code_memory_for_graph_read(&config, repo_id).await?),
+        _ => None,
+    };
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), selected_config.clone()) {
         let comparison_bases = state.comparison_bases.clone();
@@ -2191,7 +2190,7 @@ async fn get_run_code_diff_overlay(
             "run code diff overlay requires a repo id",
         )
     })?;
-    let config = code_memory_for_graph_read(&config, &repo_id)?;
+    let config = code_memory_for_graph_read(&config, &repo_id).await?;
     let comparison_bases = state.comparison_bases.clone();
     let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
     let overlay = tokio::task::spawn_blocking({
@@ -2253,7 +2252,7 @@ async fn get_run_code_graph(
             "run code graph requires a repo id",
         )
     })?;
-    let config = code_memory_for_graph_read(&config, &repo_id)?;
+    let config = code_memory_for_graph_read(&config, &repo_id).await?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -2456,12 +2455,6 @@ fn code_repo_id_for_workspace(
                 return Some(repository_id.clone());
             }
         }
-        if config.repository_sources.len() == 1 {
-            return config.repository_sources.keys().next().cloned();
-        }
-        if let Some(repository_id) = config.default_repository_id.clone() {
-            return Some(repository_id);
-        }
         if !config.repository_sources.is_empty() {
             return None;
         }
@@ -2551,15 +2544,24 @@ fn configured_code_memory(
     })
 }
 
-fn code_memory_for_repository(
+async fn code_memory_for_repository(
     mut config: MemoryConfig,
     repo_id: &str,
 ) -> Result<MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
     if let Some(source) = config.repository_sources.get(repo_id) {
         config.repo_root = source.root.clone();
         config.code_index_target_branch = source.target_branch.clone();
-        let local_config =
-            MemoryConfig::load(&source.root, None).map_err(code_graph_memory_error)?;
+        let root = source.root.clone();
+        let local_config = tokio::task::spawn_blocking(move || MemoryConfig::load(&root, None))
+            .await
+            .map_err(|error| {
+                code_graph_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "memory_config_load_failed",
+                    &format!("repository memory config task failed: {error}"),
+                )
+            })?
+            .map_err(code_graph_memory_error)?;
         config.enabled = local_config.enabled;
         config.code_intel = local_config.code_intel;
         return Ok(config);
@@ -2574,12 +2576,12 @@ fn code_memory_for_repository(
     Ok(config)
 }
 
-fn code_memory_for_graph_read(
+async fn code_memory_for_graph_read(
     config: &MemoryConfig,
     repo_id: &str,
 ) -> Result<MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
-    let config = code_memory_for_repository(config.clone(), repo_id)?;
-    if !config.enabled || !config.code_intel.enabled || !config.code_intel.ast.enabled {
+    let config = code_memory_for_repository(config.clone(), repo_id).await?;
+    if !config.enabled || !config.code_intel.enabled {
         return Err(code_graph_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "code_graph_unavailable",
@@ -5559,6 +5561,7 @@ mod tests {
     use crate::opensymphony_gateway_schema::event_journal::{
         EventActor, EventKind, StreamErrorType,
     };
+    use crate::opensymphony_memory::MemoryRepositorySource;
 
     #[test]
     fn completed_tasks_sort_puts_undated_rows_last_in_both_directions() {
@@ -5607,6 +5610,56 @@ mod tests {
                 .map(|row| row.issue_key.as_str())
                 .collect::<Vec<_>>(),
             vec!["COE-2", "COE-99", "COE-100"],
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_graph_reads_do_not_require_ast_enabled() {
+        let catalog = tempfile::tempdir().expect("catalog temp dir");
+        let repository = tempfile::tempdir().expect("repository temp dir");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: true\n  ast:\n    enabled: false\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let resolved = code_memory_for_graph_read(&config, "repo-a")
+            .await
+            .expect("persisted graph reads should remain available");
+        assert!(!resolved.code_intel.ast.enabled);
+    }
+
+    #[test]
+    fn unmatched_configured_workspace_has_no_repository_fallback() {
+        let catalog = tempfile::tempdir().expect("catalog temp dir");
+        let repository = tempfile::tempdir().expect("repository temp dir");
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        assert_eq!(
+            code_repo_id_for_workspace(workspace.path(), Some(&config)),
+            None
         );
     }
 
