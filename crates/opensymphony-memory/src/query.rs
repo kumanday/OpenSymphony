@@ -136,10 +136,6 @@ fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<P
             if let Some(source) = config.repository_sources.get(repository_id) {
                 add_path(&mut paths, source.root.join(&indexed.capsule_path));
             }
-        } else if owning_repositories.is_empty() {
-            for source in config.repository_sources.values() {
-                add_path(&mut paths, source.root.join(&indexed.capsule_path));
-            }
         }
         add_path(&mut paths, config.memory_root.join(&indexed.capsule_path));
     }

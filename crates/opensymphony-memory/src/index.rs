@@ -124,9 +124,13 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 scope_refs.push(scope_ref.clone());
             }
         }
+        let had_legacy_live_owner = source_ids.iter().any(|owner| is_live_capture_owner(owner));
         source_refs.retain(|source_ref| {
             source_ref.registration_source_id.is_some()
-                || source_ref.repo_id.as_deref() != config.default_repository_id.as_deref()
+                || (source_ref.repo_id.as_deref() != config.default_repository_id.as_deref()
+                    && !(had_legacy_live_owner
+                        && source_ref.repo_id.is_none()
+                        && source_ref.registration_source_id.is_none()))
         });
         let live_source_refs = issue_plan
             .prs
@@ -145,7 +149,6 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 source_refs.push(source_ref);
             }
         }
-        let had_legacy_live_owner = source_ids.iter().any(|owner| owner == LIVE_CAPTURE_OWNER);
         source_ids.retain(|owner| owner != &live_owner && owner != LIVE_CAPTURE_OWNER);
         source_ids.push(live_owner.clone());
         let scope_refs_json = serde_json::to_string(&scope_refs)?;

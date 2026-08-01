@@ -778,6 +778,16 @@ fn resolve_auto_capture_repository_config(
     let repository_id = if candidate_repositories.len() == 1 {
         candidate_repositories.into_iter().next()
     } else if candidate_repositories.is_empty() {
+        let selected_issue_is_known = source
+            .issues
+            .iter()
+            .any(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()));
+        if selected_issue_is_known && config.repository_sources.len() > 1 {
+            return Err(MemoryError::InvalidInput(
+                "cannot auto-capture a terminal issue without a unique repository source"
+                    .to_string(),
+            ));
+        }
         config.default_repository_id.clone().or_else(|| {
             (config.repository_sources.len() == 1)
                 .then(|| config.repository_sources.keys().next().cloned())
@@ -793,7 +803,6 @@ fn resolve_auto_capture_repository_config(
         return Ok(config.clone());
     };
     let mut routed = MemoryConfig::load(&repository.root, None)?;
-    routed.config_path = config.config_path.clone();
     routed.repo_root = repository.root.clone();
     routed.memory_root = config.memory_root.clone();
     routed.index_path = config.index_path.clone();
@@ -3580,7 +3589,11 @@ fn resolve_code_graph_overlay(
         return Err(MemoryError::InvalidInput(
             "run workspace repository binding does not match the requested repository".to_string(),
         ));
-    } else if manifest.repository_binding.is_none()
+    } else if manifest
+        .repository_binding
+        .as_ref()
+        .and_then(|binding| binding.repository_id())
+        .is_none()
         && !config.repository_sources.is_empty()
         && let Some(source) = config.repository_sources.get(repo_id)
         && !workspace_matches_registered_repository(&workspace_path, &source.root)
@@ -5049,7 +5062,16 @@ fn git_remote_matches_repository_id(
         };
         let remote = normalize_git_remote_locator(&remote);
         let locator = normalize_git_remote_locator(configured_locator);
-        return remote == locator || remote.ends_with(&format!("/{locator}"));
+        if remote == locator {
+            return true;
+        }
+        let Some(host) = canonical_repository_host(repository_id) else {
+            return false;
+        };
+        let locator_path = locator
+            .strip_prefix(&format!("{host}/"))
+            .unwrap_or(locator.as_str());
+        return remote == format!("{host}/{locator_path}");
     }
     let Some(remote_repository_id) = git_remote_repository_slug(repo_root) else {
         return false;
@@ -5059,6 +5081,24 @@ fn git_remote_matches_repository_id(
     };
     let canonical_slug = canonical_key.rsplit('/').next().unwrap_or(canonical_key);
     remote_repository_id.eq_ignore_ascii_case(canonical_slug)
+}
+
+fn canonical_repository_host(repository_id: &str) -> Option<String> {
+    let mut parts = repository_id.split(':');
+    let provider = parts.next()?.to_ascii_lowercase();
+    let authority = parts.next()?;
+    if authority.eq_ignore_ascii_case("repository") {
+        return match provider.as_str() {
+            "github" => Some("github.com".to_string()),
+            "gitlab" => Some("gitlab.com".to_string()),
+            "bitbucket" => Some("bitbucket.org".to_string()),
+            _ => None,
+        };
+    }
+    if parts.next()? != "repository" {
+        return None;
+    }
+    Some(authority.to_ascii_lowercase())
 }
 
 fn normalize_git_remote_locator(value: &str) -> String {
@@ -7291,6 +7331,10 @@ mod tests {
         .expect("routed config");
         assert_eq!(routed.default_repository_id.as_deref(), Some("repo-b"));
         assert_eq!(routed.repo_root, repository.path());
+        assert_eq!(
+            routed.config_path,
+            repository.path().join("opensymphony-memory.yaml")
+        );
         assert!(routed.areas.contains_key("routed"));
         assert!(!routed.areas.contains_key("special-area"));
     }
@@ -11405,6 +11449,11 @@ Public memory concept.
             "github:github.com:repository:repo-42",
             Some("example/repo-a"),
         ));
+        assert!(super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:repository:repo-a",
+            Some("example/repo-a"),
+        ));
         assert_eq!(
             super::normalize_git_remote_locator("ssh://git@github.com/org/repo.git"),
             "github.com/org/repo"
@@ -11431,6 +11480,11 @@ Public memory concept.
             unrelated_repository.path(),
             "github:github.com:repository:repo-42",
             Some("github.com/example/repo-a"),
+        ));
+        assert!(!super::git_remote_matches_repository_id(
+            unrelated_repository.path(),
+            "github:repository:repo-a",
+            Some("example/repo-a"),
         ));
     }
 
@@ -11527,6 +11581,50 @@ Public memory concept.
         )
         .expect_err("ambiguous repository scope must be rejected");
         assert!(error.to_string().contains("multiple repository sources"));
+    }
+
+    #[test]
+    fn auto_capture_rejects_terminal_issue_without_repository_match() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        for (repository_id, root) in [
+            ("repo-a", repository_a.path()),
+            ("repo-b", repository_b.path()),
+        ] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["other-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let error = super::resolve_auto_capture_repository_config(
+            &config,
+            &SourceFile {
+                issues: vec![IssueEvidence {
+                    identifier: "COE-551".to_string(),
+                    project_id: Some("unmanaged-project".to_string()),
+                    ..IssueEvidence::default()
+                }],
+                ..SourceFile::default()
+            },
+            &IssueSelection {
+                identifiers: vec!["COE-551".to_string()],
+                ..IssueSelection::default()
+            },
+        )
+        .expect_err("unmatched multi-repository capture must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("without a unique repository source")
+        );
     }
 
     #[test]
