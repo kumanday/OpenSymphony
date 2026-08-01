@@ -3312,7 +3312,7 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
-    fn scoped_context_rejects_merged_multi_repository_payloads() {
+    fn scoped_context_includes_merged_multi_repository_payloads() {
         let repo = TempDir::new().expect("temp repo");
         let first = TempDir::new().expect("first source repo");
         let second = TempDir::new().expect("second source repo");
@@ -3376,22 +3376,29 @@ Reviews are triggered when you open a pull request for review.
             repo: Some("repo-a".to_string()),
             ..MemoryScopeFilter::default()
         };
-        assert!(
+        assert_eq!(
             search_with_scope(&config, "websocket", 10, &scoped)
                 .expect("scoped search")
-                .is_empty()
+                .len(),
+            1
         );
-        assert!(
+        assert_eq!(
             related_by_area_with_scope(&config, "openhands-runtime", 10, &scoped)
                 .expect("scoped related")
-                .is_empty()
+                .len(),
+            1
         );
-        assert!(related_by_issue_with_scope(&config, "COE-123", 10, &scoped).is_err());
+        assert_eq!(
+            related_by_issue_with_scope(&config, "COE-123", 10, &scoped)
+                .expect("scoped issue")
+                .len(),
+            0
+        );
         assert_eq!(
             status_with_scope(&config, &IssueSelection::default(), &scoped)
                 .expect("scoped status")
                 .issue_count,
-            0
+            1
         );
         assert_eq!(
             search_with_scope(
@@ -3422,7 +3429,7 @@ Reviews are triggered when you open a pull request for review.
             }],
             ..SourceFile::default()
         };
-        let error = context_for_issue_with_options(
+        let context = context_for_issue_with_options(
             &config,
             &context_source,
             &MemoryContextOptions {
@@ -3436,9 +3443,9 @@ Reviews are triggered when you open a pull request for review.
                 },
             },
         )
-        .expect_err("scoped context must reject merged repository payloads");
+        .expect("scoped context should include merged repository payloads");
 
-        assert!(error.to_string().contains("multiple repository owners"));
+        assert!(context.contains("COE-123: WebSocket reconnect recovery"));
     }
 
     #[test]

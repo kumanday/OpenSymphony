@@ -3589,6 +3589,27 @@ fn refresh_memory_index_from_okf_inner(
                     source,
                 })?
         };
+        let registered_reimport_sources = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT source_id FROM registered_memory_sources WHERE source_kind IN ('legacy_store', 'okf_bundle')",
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
         let incoming = rows
             .iter()
             .map(|row| row.concept_id.as_str())
@@ -3657,6 +3678,65 @@ fn refresh_memory_index_from_okf_inner(
                         })?;
                 }
             } else {
+                let surviving_reimport_sources = source_ids
+                    .iter()
+                    .filter(|owner| registered_reimport_sources.contains(*owner))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let has_surviving_live_owner =
+                    source_ids.iter().any(|owner| is_live_capture_owner(owner));
+                if has_surviving_live_owner || !surviving_reimport_sources.is_empty() {
+                    transaction
+                        .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    transaction
+                        .execute(
+                            "DELETE FROM source_scope_refs WHERE concept_id = ?",
+                            [&concept_id],
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    transaction
+                        .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    for table in [
+                        "issue_areas",
+                        "pull_requests",
+                        "changed_files",
+                        "checks",
+                        "reviews",
+                    ] {
+                        transaction
+                            .execute(
+                                &format!("DELETE FROM {table} WHERE issue_key = ?"),
+                                [&issue_key],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    for surviving_source_id in surviving_reimport_sources {
+                        transaction
+                            .execute(
+                                "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
+                                [&surviving_source_id],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    continue;
+                }
                 let source_scope_rows = {
                     let mut statement = transaction
                         .prepare(
@@ -4871,6 +4951,70 @@ mod index_tests {
             .expect("imported relation count");
         assert_eq!(live_relations, 1);
         assert_eq!(imported_relations, 1);
+    }
+
+    #[test]
+    fn stale_registered_source_drops_payload_before_surviving_live_owner_reads_it() {
+        let root = tempfile::TempDir::new().expect("catalog root");
+        let mut config = MemoryConfig::load(root.path(), None).expect("catalog config");
+        config = config.with_repository_source(MemoryRepositorySource {
+            repository_id: "github:repository:a".to_string(),
+            root: root.path().join("repo-a"),
+            commit_sha: Some("commit-a".to_string()),
+            project_scope_ids: BTreeSet::new(),
+            target_branch: None,
+        });
+        let source = RegisteredMemorySource {
+            source_id: "github:repository:a:okf".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "commit-a".to_string(),
+            kind: MemorySourceKind::OkfBundle,
+            root: root.path().join("okf-a"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:before".to_string(),
+        };
+        register_memory_source(&config, &source).expect("source registration");
+        fs::create_dir_all(source.root.join("issues")).expect("bundle issues");
+        fs::write(
+            source.root.join("index.md"),
+            "---\nokf_version: \"0.1\"\n---\n\n# Index\n",
+        )
+        .expect("bundle index");
+        fs::write(
+            source.root.join("issues/COE-550.md"),
+            "---\ntype: issue-capsule\ntitle: \"COE-550: Registered payload\"\nopensymphony:\n  visibility: private\n  kind: issue_capsule\n---\n\n# COE-550: Registered payload\n\nRegistered source body.\n",
+        )
+        .expect("bundle issue");
+
+        merge_memory_index_from_okf(
+            &config,
+            &source.root,
+            "github:repository:a",
+            &source.source_id,
+        )
+            .expect("initial source import");
+        let connection = open_index(&config).expect("catalog index");
+        connection
+            .execute(
+                "UPDATE issues SET source_ids_json = ? WHERE issue_key = 'COE-550'",
+                [r#"["github:repository:a:okf","__live_capture__:github:repository:b"]"#],
+            )
+            .expect("shared ownership");
+        drop(connection);
+        fs::remove_file(source.root.join("issues/COE-550.md")).expect("drop source issue");
+
+        merge_memory_index_from_okf(
+            &config,
+            &source.root,
+            "github:repository:a",
+            &source.source_id,
+        )
+            .expect("refresh after source issue removal");
+
+        assert!(load_indexed_issues(&config)
+            .expect("catalog issues")
+            .into_iter()
+            .all(|issue| issue.issue_key != "COE-550"));
     }
 
     #[test]

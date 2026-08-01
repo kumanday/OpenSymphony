@@ -5038,18 +5038,20 @@ fn git_remote_matches_repository_id(
 }
 
 fn normalize_git_remote_locator(value: &str) -> String {
-    let value = value
+    let mut value = value
         .trim()
         .trim_end_matches('/')
         .trim_end_matches(".git")
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_start_matches("ssh://")
-        .trim_start_matches("git://");
-    let value = value
-        .strip_prefix("git@")
-        .and_then(|value| value.split_once(':').map(|(_, path)| path))
-        .unwrap_or(value);
+        .trim_start_matches("git://")
+        .to_string();
+    if let Some(stripped) = value.strip_prefix("git@").map(str::to_string)
+        && let Some((host, path)) = stripped.split_once(':')
+    {
+        value = format!("{host}/{path}");
+    }
     value.to_ascii_lowercase()
 }
 
@@ -11390,6 +11392,29 @@ Public memory concept.
             repository.path(),
             "github:github.com:repository:repo-42",
             Some("example/repo-a"),
+        ));
+
+        let unrelated_repository = TempDir::new().expect("unrelated repository");
+        std::fs::write(unrelated_repository.path().join("README.md"), "other\n")
+            .expect("unrelated readme");
+        init_test_git_repo(unrelated_repository.path(), "develop");
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@evil.example:example/repo-a.git"
+                ])
+                .current_dir(unrelated_repository.path())
+                .status()
+                .expect("unrelated git remote add")
+                .success()
+        );
+        assert!(!super::git_remote_matches_repository_id(
+            unrelated_repository.path(),
+            "github:github.com:repository:repo-42",
+            Some("github.com/example/repo-a"),
         ));
     }
 

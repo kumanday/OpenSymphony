@@ -29,22 +29,7 @@ pub fn brief_with_scope(
             "no capsule found for {issue_key} in the requested scope"
         )));
     }
-    if !scope.all_accessible && has_multiple_repository_owners(&indexed.scope_refs) {
-        return Err(MemoryError::InvalidInput(format!(
-            "memory brief for {issue_key} is ambiguous because the concept has multiple repository owners"
-        )));
-    }
     Ok(render_indexed_brief(config, &indexed))
-}
-
-fn has_multiple_repository_owners(scope_refs: &[KnowledgeScope]) -> bool {
-    scope_refs
-        .iter()
-        .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
-        .map(|scope| &scope.id)
-        .collect::<BTreeSet<_>>()
-        .len()
-        > 1
 }
 
 fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
@@ -674,12 +659,6 @@ pub fn context_for_issue_with_options(
             if !indexed_issue_matches_scope(config, indexed, &options.scope) {
                 continue;
             }
-            if !options.scope.all_accessible && has_multiple_repository_owners(&indexed.scope_refs) {
-                return Err(MemoryError::InvalidInput(format!(
-                    "memory context for {} is ambiguous because the concept has multiple repository owners",
-                    indexed.issue_key
-                )));
-            }
             let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(config, indexed));
             documentation_paths.extend(docs);
             selected.push(SelectedContextBrief {
@@ -975,7 +954,6 @@ fn indexed_issue_visible_in_scope(
     scope: &MemoryScopeFilter,
 ) -> bool {
     indexed_issue_matches_scope(config, issue, scope)
-        && (scope.all_accessible || !has_multiple_repository_owners(&issue.scope_refs))
 }
 
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
