@@ -861,6 +861,7 @@ impl WorkspaceManager {
         binding: &RepositoryBinding,
         checkout_deadline: Option<Instant>,
     ) -> Result<Option<EnsureWorkspaceResult>, WorkspaceError> {
+        let repository = self.checkout_repository_for_binding(binding)?;
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
             WorkspaceError::ReadDirectory {
                 path: self.config.root.clone(),
@@ -970,6 +971,57 @@ impl WorkspaceManager {
                 .await
             {
                 Ok(Some(checkout)) => checkout,
+                Ok(None) if handle.checkout_generation().is_some() => {
+                    let facts = self
+                        .verify_git_checkout(
+                            handle.workspace_path(),
+                            binding,
+                            repository,
+                            true,
+                            true,
+                        )
+                        .await?;
+                    let instruction = self
+                        .load_instruction_provenance(
+                            handle.workspace_path(),
+                            repository,
+                            &facts.head,
+                        )
+                        .await?;
+                    let now = Utc::now();
+                    let checkout = CheckoutManifest {
+                        schema_version: 1,
+                        generation: handle
+                            .checkout_generation()
+                            .expect("receipt-owned published checkout has a generation")
+                            .to_owned(),
+                        issue_id: issue.issue_id.clone(),
+                        identifier: issue.identifier.clone(),
+                        run_id: issue.issue_id.clone(),
+                        sanitized_workspace_key: handle.workspace_key().to_owned(),
+                        workspace_path: handle.workspace_path().to_path_buf(),
+                        repository_binding: binding.clone(),
+                        remote_fingerprint: binding
+                            .repository
+                            .safe_remote_fingerprint
+                            .as_str()
+                            .to_owned(),
+                        target_branch: facts.branch.clone(),
+                        target_commit: facts.head.clone(),
+                        current_branch: facts.branch,
+                        head: facts.head,
+                        shallow: facts.shallow,
+                        clean: facts.clean,
+                        instruction,
+                        created_at: now,
+                        verified_at: now,
+                        quarantined: false,
+                        quarantine_reason: None,
+                    };
+                    self.write_manifest(&handle, &handle.checkout_manifest_path(), &checkout)
+                        .await?;
+                    checkout
+                }
                 Ok(None) => continue,
                 Err(error) => {
                     self.quarantine_checkout(&handle, error.to_string()).await?;
@@ -1108,6 +1160,13 @@ impl WorkspaceManager {
             }
         }
         Ok(())
+    }
+
+    /// Sweep staging generations once during orchestrator startup, before any
+    /// worker can begin acquiring a checkout. Lifecycle discovery must not call
+    /// this while another acquisition may still own a staging directory.
+    pub async fn recover_abandoned_staging_checkouts(&self) -> Result<(), WorkspaceError> {
+        self.sweep_abandoned_staging_checkouts().await
     }
 
     async fn retained_checkout_allows_worker_changes(
@@ -2087,8 +2146,6 @@ impl WorkspaceManager {
         &self,
     ) -> Result<Vec<(WorkspaceHandle, IssueManifest)>, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
-        self.sweep_abandoned_staging_checkouts().await?;
-
         let mut workspaces = Vec::new();
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
             WorkspaceError::ReadDirectory {
@@ -2144,10 +2201,13 @@ impl WorkspaceManager {
                         {
                             workspaces.push((handle, manifest));
                         }
-                        Ok(Some(_)) => tracing::warn!(
-                            path = %handle.workspace_path().display(),
-                            "skipping workspace with mismatched issue and checkout ownership"
-                        ),
+                        Ok(Some(_)) => {
+                            self.quarantine_checkout(
+                                &handle,
+                                "checkout ownership manifests do not match".to_owned(),
+                            )
+                            .await?;
+                        }
                         Ok(None) => {}
                     }
                 }
@@ -2563,6 +2623,33 @@ impl WorkspaceManager {
         if is_published_checkout_generation_directory(workspace_path)
             && !path_exists(&issue_manifest_path).await?
         {
+            if let Some(manifest) = self
+                .receipt_owned_issue_manifest(&canonical_workspace)
+                .await?
+            {
+                let handle = WorkspaceHandle::new(
+                    manifest.issue_id.clone(),
+                    manifest.identifier.clone(),
+                    manifest.sanitized_workspace_key.clone(),
+                    canonical_workspace.clone(),
+                );
+                let handle = match self
+                    .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
+                    .await?
+                {
+                    Some(checkout) => handle.with_checkout_generation(checkout.generation),
+                    None => published_checkout_generation(&canonical_workspace)
+                        .map_or(handle.clone(), |generation| {
+                            handle.with_checkout_generation(generation)
+                        }),
+                };
+                tracing::warn!(
+                    path = %canonical_workspace.display(),
+                    issue = %manifest.identifier,
+                    "preserving receipt-owned published checkout generation for recovery"
+                );
+                return Ok(Some((handle, manifest)));
+            }
             tracing::warn!(
                 path = %canonical_workspace.display(),
                 "sweeping incomplete published checkout generation without issue ownership"
@@ -2653,6 +2740,50 @@ impl WorkspaceManager {
         };
 
         Ok(Some((handle, manifest)))
+    }
+
+    async fn receipt_owned_issue_manifest(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<Option<IssueManifest>, WorkspaceError> {
+        let receipt_path = workspace_path.join(".opensymphony.after_create.json");
+        let raw = match fs::read_to_string(&receipt_path).await {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path: receipt_path,
+                    source,
+                });
+            }
+        };
+        let receipt = match serde_json::from_str::<AfterCreateBootstrapReceipt>(&raw) {
+            Ok(receipt) => receipt,
+            Err(_) => return Ok(None),
+        };
+        let handle = WorkspaceHandle::new(
+            receipt.issue_id.clone(),
+            receipt.identifier.clone(),
+            receipt.sanitized_workspace_key.clone(),
+            workspace_path.to_path_buf(),
+        );
+        if !after_create_receipt_claims_workspace(&handle, &receipt) {
+            return Ok(None);
+        }
+        Ok(Some(IssueManifest {
+            issue_id: receipt.issue_id,
+            identifier: receipt.identifier,
+            title: String::new(),
+            current_state: String::new(),
+            sanitized_workspace_key: receipt.sanitized_workspace_key,
+            workspace_path: receipt.workspace_path,
+            created_at: receipt.completed_at,
+            updated_at: receipt.completed_at,
+            last_seen_tracker_refresh_at: None,
+            repository_binding: receipt
+                .repository_binding
+                .map(crate::opensymphony_domain::RepositoryBindingOutcome::Resolved),
+        }))
     }
 
     async fn execute_hook(
@@ -3550,15 +3681,21 @@ fn is_generation_shaped_directory(path: &Path, workspace_key: &str) -> bool {
 }
 
 fn is_published_checkout_generation_directory(path: &Path) -> bool {
+    published_checkout_generation(path).is_some()
+}
+
+fn published_checkout_generation(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.rsplit_once("--"))
-        .is_some_and(|(_, generation)| {
+        .map(|(_, generation)| generation)
+        .filter(|generation| {
             generation.len() == 32
                 && generation
                     .chars()
                     .all(|character| character.is_ascii_hexdigit())
         })
+        .map(str::to_owned)
 }
 
 fn is_checkout_generation_directory(path: &Path) -> bool {

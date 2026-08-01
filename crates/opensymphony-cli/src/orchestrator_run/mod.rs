@@ -994,6 +994,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         .with_legacy_repository(legacy_repository)
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default()),
     );
+    workspace_manager
+        .recover_abandoned_staging_checkouts()
+        .await?;
     let retry_state_root = runtime.state_root.clone().unwrap_or_else(|| {
         workspace_manager
             .config()

@@ -854,6 +854,10 @@ impl RuntimeWorkspaceBackend {
                                 thread_id = %manifest.conversation_id,
                                 "skipping terminal Codex archive for an untrusted runtime envelope"
                             );
+                            return Err(CliWorkspaceError::CodexLifecycle(
+                                "terminal Codex conversation binding is not compatible with the checkout run envelope"
+                                    .to_owned(),
+                            ));
                         }
                     }
                     Ok(manifest) => {

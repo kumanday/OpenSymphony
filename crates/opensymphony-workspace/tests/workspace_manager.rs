@@ -376,7 +376,7 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         .await
         .expect("abandoned staging marker should be written");
     manager
-        .list_all_workspaces()
+        .recover_abandoned_staging_checkouts()
         .await
         .expect("workspace discovery should sweep abandoned staging generations");
     assert!(!abandoned_staging.exists());
@@ -863,11 +863,32 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("checkout metadata without an issue manifest should be written");
 
+    let receipt_owned_path =
+        workspace_root.join("receipt-owned-generation--abcdef0123456789abcdef0123456789");
+    tokio::fs::create_dir_all(receipt_owned_path.join(".opensymphony"))
+        .await
+        .expect("receipt-owned generation directory should exist");
+    let receipt = serde_json::json!({
+        "issue_id": "receipt-owned-issue",
+        "identifier": "COE-549-receipt-owned",
+        "sanitized_workspace_key": "receipt-owned-generation",
+        "workspace_path": std::fs::canonicalize(&receipt_owned_path)
+            .expect("receipt-owned path should canonicalize"),
+        "completed_at": chrono::Utc::now(),
+    });
+    tokio::fs::write(
+        receipt_owned_path.join(".opensymphony.after_create.json"),
+        serde_json::to_vec_pretty(&receipt).expect("receipt should encode"),
+    )
+    .await
+    .expect("receipt should be written");
+
     manager
         .list_all_workspaces()
         .await
         .expect("workspace discovery should quarantine malformed generations");
     assert!(!malformed_path.exists());
+    assert!(receipt_owned_path.exists());
 
     let found = manager
         .find_workspace_by_issue_reference(&issue.issue_id)
