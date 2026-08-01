@@ -2535,10 +2535,12 @@ fn normalize_git_remote(remote: &str) -> String {
             break;
         }
     }
-    if let Some(stripped) = value.strip_prefix("git@")
-        && let Some((host, path)) = stripped.split_once(':')
-    {
-        value = format!("{host}/{path}");
+    if let Some(stripped) = value.strip_prefix("git@") {
+        if let Some((host, path)) = stripped.split_once(':') {
+            value = format!("{host}/{path}");
+        } else if let Some((host, path)) = stripped.split_once('/') {
+            value = format!("{host}/{path}");
+        }
     }
     value
         .trim_end_matches('/')
@@ -5716,6 +5718,10 @@ mod tests {
         assert_eq!(
             normalize_git_remote("ssh://git@github.com:org/repo/"),
             normalize_git_remote("http://github.com/org/repo"),
+        );
+        assert_eq!(
+            normalize_git_remote("ssh://git@github.com/org/repo.git"),
+            normalize_git_remote("https://github.com/org/repo"),
         );
     }
 

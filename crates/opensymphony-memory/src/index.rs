@@ -3498,6 +3498,11 @@ fn refresh_memory_index_from_okf_inner(
         path: config.index_path.clone(),
         source,
     })?;
+    if let Some(source_id) = source_id
+        && !replace_existing
+    {
+        preflight_merge_conflicts(&connection, &rows, source_id, config)?;
+    }
     let transaction = connection
         .transaction()
         .map_err(|source| MemoryError::DuckDb {
@@ -4122,6 +4127,62 @@ fn refresh_memory_index_from_okf_inner(
         markdown_indexes,
         warning_count,
     })
+}
+
+fn preflight_merge_conflicts(
+    connection: &Connection,
+    rows: &[OkfIndexRow],
+    source_id: &str,
+    config: &MemoryConfig,
+) -> Result<(), MemoryError> {
+    for row in rows {
+        let Some((concept_id, title, visibility, source_hash, body, encoded_source_ids)) =
+            connection
+                .query_row(
+                    "SELECT concept_id, title, visibility, source_hash, body, source_ids_json FROM issues WHERE issue_key = ?",
+                    params![row.issue_key],
+                    |query_row| {
+                        Ok((
+                            query_row.get::<_, String>(0)?,
+                            query_row.get::<_, String>(1)?,
+                            query_row.get::<_, String>(2)?,
+                            query_row.get::<_, String>(3)?,
+                            query_row.get::<_, String>(4)?,
+                            query_row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        else {
+            continue;
+        };
+        let existing_source_ids =
+            serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
+        if existing_source_ids.iter().any(|existing| existing == source_id) {
+            continue;
+        }
+        let payload_matches = concept_id == row.concept_id
+            && title == row.title
+            && visibility == row.visibility.as_str()
+            && source_hash == row.source_hash
+            && body == row.body;
+        if !payload_matches {
+            return Err(MemoryError::InvalidInput(format!(
+                "conflicting memory source `{source_id}` for `{}`; existing owners: {}",
+                row.issue_key,
+                if existing_source_ids.is_empty() {
+                    "<unknown>".to_string()
+                } else {
+                    existing_source_ids.join(", ")
+                }
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct OkfIndexRow {
@@ -5025,6 +5086,43 @@ mod index_tests {
             .expect("catalog issues")
             .into_iter()
             .all(|issue| issue.issue_key != "COE-550"));
+    }
+
+    #[test]
+    fn merge_preflights_conflicting_same_key_payloads_before_replacement() {
+        let root = tempfile::TempDir::new().expect("catalog root");
+        let config = MemoryConfig::load(root.path(), None).expect("catalog config");
+        let bundle_a = root.path().join("bundle-a");
+        let bundle_b = root.path().join("bundle-b");
+        for (bundle, title, body) in [
+            (&bundle_a, "Source A", "Body from source A."),
+            (&bundle_b, "Source B", "Body from source B."),
+        ] {
+            fs::create_dir_all(bundle.join("issues")).expect("bundle issues");
+            fs::write(
+                bundle.join("index.md"),
+                "---\nokf_version: \"0.1\"\n---\n\n# Index\n",
+            )
+            .expect("bundle index");
+            fs::write(
+                bundle.join("issues/COE-550.md"),
+                format!(
+                    "---\ntype: issue-capsule\ntitle: \"COE-550: {title}\"\nopensymphony:\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: {title}\n\n{body}\n"
+                ),
+            )
+            .expect("bundle issue");
+        }
+
+        merge_memory_index_from_okf(&config, &bundle_a, "repo-a", "repo-a:okf")
+            .expect("first source import");
+        let error = merge_memory_index_from_okf(&config, &bundle_b, "repo-b", "repo-b:okf")
+            .expect_err("different same-key payloads must be rejected");
+        assert!(matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting memory source")));
+
+        let issues = load_indexed_issues(&config).expect("catalog issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].title, "COE-550: Source A");
+        assert_eq!(issues[0].body, "# COE-550: Source A\n\nBody from source A.\n");
     }
 
     #[test]
