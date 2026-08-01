@@ -863,13 +863,18 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("checkout metadata without an issue manifest should be written");
 
+    manager
+        .list_all_workspaces()
+        .await
+        .expect("workspace discovery should quarantine malformed generations");
+    assert!(!malformed_path.exists());
+
     let found = manager
         .find_workspace_by_issue_reference(&issue.issue_id)
         .await
         .expect("malformed generations should not abort legacy lookup")
         .expect("legacy workspace should still be found");
     assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
-    assert!(!malformed_path.exists());
     assert!(
         workspace_root
             .join(".opensymphony-quarantine")

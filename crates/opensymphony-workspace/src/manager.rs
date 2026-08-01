@@ -900,7 +900,7 @@ impl WorkspaceManager {
                             %source,
                             "skipping retained checkout with a malformed generation manifest"
                         );
-                        if is_published_checkout_generation_directory(&entry.path()) {
+                        if is_checkout_generation_directory(&entry.path()) {
                             self.quarantine_checkout_path(
                                 &entry.path(),
                                 "malformed retained checkout generation manifest",
@@ -920,7 +920,7 @@ impl WorkspaceManager {
             {
                 Ok(checkout) => checkout,
                 Err(WorkspaceError::DecodeManifest { .. }) => {
-                    if is_published_checkout_generation_directory(&entry.path()) {
+                    if is_checkout_generation_directory(&entry.path()) {
                         self.quarantine_checkout_path(
                             &entry.path(),
                             "malformed retained checkout generation manifest",
@@ -1989,7 +1989,7 @@ impl WorkspaceManager {
                 }
                 Ok(_) => {}
                 Err(WorkspaceError::DecodeManifest { .. }) => {
-                    if is_published_checkout_generation_directory(&candidate) {
+                    if is_checkout_generation_directory(&candidate) {
                         self.quarantine_checkout_path(
                             &candidate,
                             "malformed retained checkout generation manifest",
@@ -2038,7 +2038,7 @@ impl WorkspaceManager {
                 }
                 Ok(_) => {}
                 Err(WorkspaceError::DecodeManifest { .. }) => {
-                    if is_published_checkout_generation_directory(&entry.path()) {
+                    if is_checkout_generation_directory(&entry.path()) {
                         self.quarantine_checkout_path(
                             &entry.path(),
                             "malformed retained checkout generation manifest",
@@ -2159,13 +2159,27 @@ impl WorkspaceManager {
                         %source,
                         "skipping workspace with malformed checkout manifest during recovery"
                     );
-                    if is_published_checkout_generation_directory(&entry.path()) {
+                    if is_checkout_generation_directory(&entry.path()) {
                         self.quarantine_checkout_path(
                             &entry.path(),
                             "malformed retained checkout generation manifest",
                         )
                         .await?;
                     }
+                }
+                Err(error @ WorkspaceError::CheckoutVerification { .. })
+                    if is_checkout_generation_directory(&entry.path()) =>
+                {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "quarantining retained checkout generation that failed ownership validation"
+                    );
+                    self.quarantine_checkout_path(
+                        &entry.path(),
+                        "retained checkout generation failed ownership validation",
+                    )
+                    .await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -3545,6 +3559,13 @@ fn is_published_checkout_generation_directory(path: &Path) -> bool {
                     .chars()
                     .all(|character| character.is_ascii_hexdigit())
         })
+}
+
+fn is_checkout_generation_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once("--"))
+        .is_some_and(|(_, generation)| !generation.is_empty())
 }
 
 fn missing_manifest_error(path: PathBuf) -> WorkspaceError {
