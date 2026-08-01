@@ -651,6 +651,17 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("missing checkout issue manifest should be written");
 
+    let missing_issue_path = workspace_root.join("missing-issue-generation");
+    tokio::fs::create_dir_all(missing_issue_path.join(".opensymphony"))
+        .await
+        .expect("missing issue manifest directory should exist");
+    tokio::fs::write(
+        missing_issue_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("checkout metadata without an issue manifest should be written");
+
     let found = manager
         .find_workspace_by_issue_reference(&issue.issue_id)
         .await

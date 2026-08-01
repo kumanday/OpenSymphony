@@ -2208,7 +2208,15 @@ impl WorkspaceManager {
         let issue_manifest_path = canonical_workspace.join(".opensymphony").join("issue.json");
         let raw = match fs::read_to_string(&issue_manifest_path).await {
             Ok(raw) => raw,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let checkout_manifest_path = canonical_workspace
+                    .join(".opensymphony")
+                    .join("checkout.json");
+                if path_exists(&checkout_manifest_path).await? {
+                    return Err(missing_manifest_error(issue_manifest_path));
+                }
+                return Ok(None);
+            }
             Err(source) => {
                 return Err(WorkspaceError::ReadManifest {
                     path: issue_manifest_path,
@@ -2253,9 +2261,7 @@ impl WorkspaceManager {
                     &manifest.sanitized_workspace_key,
                 ) =>
             {
-                return Err(missing_checkout_manifest_error(
-                    handle.checkout_manifest_path(),
-                ));
+                return Err(missing_manifest_error(handle.checkout_manifest_path()));
             }
             Ok(None) => handle,
             Err(error @ WorkspaceError::DecodeManifest { .. })
@@ -2820,7 +2826,10 @@ fn remote_contains_credentials(remote: &str) -> bool {
     let Some((username, host)) = authority.split_once('@') else {
         return false;
     };
-    host.is_empty() || username.contains(':') || !username.eq_ignore_ascii_case("git")
+    host.is_empty()
+        || username.is_empty()
+        || username.contains(':')
+        || username.eq_ignore_ascii_case("token")
 }
 
 fn is_proven_checkout_invalid(error: &WorkspaceError) -> bool {
@@ -3138,7 +3147,7 @@ fn is_generation_shaped_directory(path: &Path, workspace_key: &str) -> bool {
         .is_some_and(|generation| !generation.is_empty())
 }
 
-fn missing_checkout_manifest_error(path: PathBuf) -> WorkspaceError {
+fn missing_manifest_error(path: PathBuf) -> WorkspaceError {
     WorkspaceError::DecodeManifest {
         path,
         source: serde_json::from_str::<serde_json::Value>("")
@@ -3220,6 +3229,12 @@ mod tests {
             "ssh://deploy@example.com/org/repo.git"
         ));
         assert!(!remote_contains_credentials("git@example.com:org/repo.git"));
+        assert!(!remote_contains_credentials(
+            "deploy@example.com:org/repo.git"
+        ));
+        assert!(remote_contains_credentials(
+            "ssh://deploy:password@example.com/org/repo.git"
+        ));
         assert!(!remote_contains_credentials(
             "https://example.com/org/repo.git"
         ));

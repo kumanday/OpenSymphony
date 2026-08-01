@@ -819,6 +819,9 @@ fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo:
     {
         return indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Repository, repo);
     }
+    if issue.changed_files.is_empty() {
+        return true;
+    }
     let repo = repo_scope_prefix(config, repo);
     if repo.is_empty() || repo == "." {
         return true;
