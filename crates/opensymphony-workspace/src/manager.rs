@@ -950,6 +950,12 @@ impl WorkspaceManager {
             if manifest.sanitized_workspace_key != expected_workspace_key
                 || manifest.workspace_path != handle.workspace_path()
             {
+                self.quarantine_checkout(
+                    &handle,
+                    "issue manifest deterministic workspace key does not match the requested issue"
+                        .to_owned(),
+                )
+                .await?;
                 continue;
             }
             let checkout = match self

@@ -609,6 +609,31 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         clean_retry.handle.workspace_path()
     );
 
+    let mut mismatched_key_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(renamed.handle.issue_manifest_path())
+            .await
+            .expect("renamed issue manifest should be readable"),
+    )
+    .expect("renamed issue manifest should decode");
+    mismatched_key_manifest["sanitized_workspace_key"] =
+        serde_json::Value::String("wrong-deterministic-key".to_owned());
+    tokio::fs::write(
+        renamed.handle.issue_manifest_path(),
+        serde_json::to_vec_pretty(&mismatched_key_manifest)
+            .expect("mismatched key manifest should encode"),
+    )
+    .await
+    .expect("mismatched key manifest should be writable");
+    let repaired_key = manager
+        .ensure(&renamed_issue)
+        .await
+        .expect("mismatched deterministic key should quarantine and republish");
+    assert!(repaired_key.created);
+    assert_ne!(
+        repaired_key.handle.workspace_path(),
+        renamed.handle.workspace_path()
+    );
+
     assert!(!clean_retry.handle.workspace_path().exists());
     assert!(
         temp_dir
