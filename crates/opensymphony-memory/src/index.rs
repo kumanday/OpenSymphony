@@ -2866,6 +2866,7 @@ pub fn merge_legacy_memory_index(
         if source_ids.len() <= 1 {
             continue;
         }
+        let preserves_live_relations = source_ids.iter().any(|owner| owner == LIVE_CAPTURE_OWNER);
         let source_ids = source_ids
             .iter()
             .filter(|owner| source_id_belongs_to_configured_repository(config, owner))
@@ -2917,22 +2918,24 @@ pub fn merge_legacy_memory_index(
                     source,
                 })?;
         }
-        for table in [
-            "issue_areas",
-            "pull_requests",
-            "changed_files",
-            "checks",
-            "reviews",
-        ] {
-            transaction
-                .execute(
-                    &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
-                    [issue_key],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
+        if !preserves_live_relations {
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
+                        [issue_key],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
         }
     }
     for table in [
@@ -4630,6 +4633,85 @@ mod index_tests {
             )
             .expect("source scope refs");
         assert_eq!(source_scope_count, 3);
+    }
+
+    #[test]
+    fn merge_legacy_memory_index_preserves_live_relation_rows() {
+        let catalog_root = tempfile::TempDir::new().expect("catalog root");
+        let source_root = tempfile::TempDir::new().expect("source root");
+        let mut config = MemoryConfig::load(catalog_root.path(), None).expect("catalog config");
+        config = config.with_repository_source(MemoryRepositorySource {
+            repository_id: "repo-a".to_string(),
+            root: source_root.path().to_path_buf(),
+            commit_sha: None,
+            project_scope_ids: BTreeSet::new(),
+            target_branch: None,
+        });
+        let source_config = MemoryConfig::load(source_root.path(), None).expect("source config");
+        let connection = open_index(&config).expect("catalog index");
+        migrate_index(&connection).expect("catalog index migration");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-550",
+                    "Live capture",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-550.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-550",
+                    "[]",
+                    "[]",
+                    r#"["__live_capture__","repo-a:legacy"]"#,
+                ],
+            )
+            .expect("catalog issue");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area) VALUES ('COE-550', 'memory')",
+                [],
+            )
+            .expect("live relation");
+        drop(connection);
+
+        let source_connection = open_index(&source_config).expect("source index");
+        migrate_index(&source_connection).expect("source index migration");
+        source_connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area) VALUES ('COE-550', 'memory')",
+                [],
+            )
+            .expect("source relation");
+        drop(source_connection);
+
+        merge_legacy_memory_index(&config, &source_config, "repo-a:legacy")
+            .expect("legacy merge");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("catalog index should reopen")
+            .expect("catalog index exists");
+        let live_relations: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-550' AND source_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("live relation count");
+        let imported_relations: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-550' AND source_id = 'repo-a:legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported relation count");
+        assert_eq!(live_relations, 1);
+        assert_eq!(imported_relations, 1);
     }
 
     #[test]

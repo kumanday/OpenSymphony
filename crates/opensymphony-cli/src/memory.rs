@@ -3380,16 +3380,13 @@ async fn call_code_graph_context_tool(
         let overlay = optional_string_arg(&arguments, "runId")
             .or_else(|| optional_string_arg(&arguments, "run"))
             .map(|run_id| {
-                let overlay_config = config
-                    .repository_sources
-                    .get(&repo_id)
-                    .map(|source| {
-                        let mut selected = config.clone();
-                        selected.repo_root = source.root.clone();
-                        selected.code_index_target_branch = source.target_branch.clone();
-                        selected
-                    })
-                    .unwrap_or_else(|| config.clone());
+                let overlay_config = memory_config_for_repository(&config, Some(&repo_id))?;
+                if !ast_tools_enabled(&overlay_config) {
+                    return Err(MemoryError::InvalidInput(
+                        "workspace code graph overlays are disabled for the selected repository"
+                            .to_string(),
+                    ));
+                }
                 resolve_code_graph_overlay(
                     &overlay_config,
                     workspace_root.as_deref(),
@@ -7613,6 +7610,11 @@ mod tests {
             "pub fn answer() -> u8 { 42 }\n",
         )
         .expect("baseline source");
+        std::fs::write(
+            target.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 128\n",
+        )
+        .expect("repository memory config");
         init_test_git_repo(target.path(), "develop");
         let config = MemoryConfig::load(target.path(), None).expect("memory config");
         call_memory_ingest_code_intel_tool(
@@ -7796,6 +7798,47 @@ mod tests {
                 .expect("unanalyzed files")
                 .iter()
                 .any(|path| path == "src/lib.rs")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_graph_context_rejects_disabled_selected_ast_overlay_policy() {
+        let target = TempDir::new().expect("target repo");
+        std::fs::write(
+            target.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    enabled: false\n",
+        )
+        .expect("repository memory config");
+        init_test_git_repo(target.path(), "develop");
+        let catalog = TempDir::new().expect("catalog");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        let repo_id = "github:repository:target".to_string();
+        config.repository_sources.insert(
+            repo_id.clone(),
+            MemoryRepositorySource {
+                repository_id: repo_id.clone(),
+                root: target.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: Some("develop".to_string()),
+            },
+        );
+
+        let error = call_code_graph_context_tool(
+            config,
+            json!({
+                "repository": repo_id,
+                "runId": "COE-550",
+                "query": "answer",
+            }),
+            None,
+        )
+        .await
+        .expect_err("disabled selected AST overlays must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("workspace code graph overlays are disabled")
         );
     }
 
