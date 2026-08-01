@@ -454,10 +454,18 @@ async fn prepare_active_conversation_store_for_issues(
     let mut report = ActiveConversationStorePreparation::default();
 
     for issue in active_issues {
-        let Some(workspace) = workspace_manager
-            .find_workspace_by_issue_reference(issue.identifier.as_str())
+        let workspace = match workspace_manager
+            .find_verified_workspace_by_issue_reference(issue.identifier.as_str())
             .await?
-        else {
+        {
+            Some(workspace) => Some(workspace),
+            None => {
+                workspace_manager
+                    .find_workspace_by_issue_reference(issue.identifier.as_str())
+                    .await?
+            }
+        };
+        let Some(workspace) = workspace else {
             report.skipped_without_workspace += 1;
             continue;
         };
@@ -877,7 +885,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         let mut recoveries = Vec::new();
         for (handle, manifest) in self.manager.list_all_workspaces().await? {
-            let run_manifest = self.manager.load_run_manifest(&handle).await?;
+            let mut run_manifest = self.manager.load_run_manifest(&handle).await?;
             let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
                 matches!(
                     run.status,
@@ -885,7 +893,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 )
             });
             let conversation_manifest =
-                recovered_conversation_manifest(&self.manager, &handle, run_manifest.as_ref())
+                recovered_conversation_manifest(&self.manager, &handle, run_manifest.as_mut())
                     .await?;
             let harness_kind = conversation_manifest
                 .as_ref()
@@ -1364,7 +1372,7 @@ fn retry_reason_from_manifest(value: &str) -> Option<RetryReason> {
 async fn recovered_conversation_manifest(
     manager: &WorkspaceManager,
     handle: &WorkspaceHandle,
-    run_manifest: Option<&RunManifest>,
+    run_manifest: Option<&mut RunManifest>,
 ) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
     let manifest_path = handle.conversation_manifest_path();
     if let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? {
@@ -1379,6 +1387,28 @@ async fn recovered_conversation_manifest(
                 return Ok(None);
             }
         };
+        if let Some(run_manifest) = run_manifest
+            && manifest.runtime_envelope.as_ref() != run_manifest.runtime_envelope.as_ref()
+        {
+            let pending_path = pending_conversation_manifest_path(handle);
+            if let Some(raw_pending) = manager.read_text_artifact(handle, &pending_path).await?
+                && let Ok(Some(pending_manifest)) =
+                    serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
+                && pending_manifest.conversation_id == manifest.conversation_id
+                && runtime_envelope_matches_pending_binding(
+                    run_manifest.runtime_envelope.as_ref(),
+                    &pending_manifest,
+                )
+            {
+                run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
+                manager.write_run_manifest(handle, run_manifest).await?;
+                tracing::info!(
+                    manifest = %manifest_path.display(),
+                    conversation_id = %manifest.conversation_id,
+                    "reconciled pending Codex conversation binding into the run manifest"
+                );
+            }
+        }
         return Ok(Some(manifest));
     }
 
@@ -1407,7 +1437,11 @@ async fn recovered_conversation_manifest(
         );
         return Ok(None);
     };
-    if manifest.runtime_envelope.as_ref() != run_manifest.runtime_envelope.as_ref()
+    let exact_envelope_match =
+        manifest.runtime_envelope.as_ref() == run_manifest.runtime_envelope.as_ref();
+    let pending_binding_transition =
+        runtime_envelope_matches_pending_binding(run_manifest.runtime_envelope.as_ref(), &manifest);
+    if !exact_envelope_match && !pending_binding_transition
         || manifest
             .runtime_envelope
             .as_ref()
@@ -1421,6 +1455,16 @@ async fn recovered_conversation_manifest(
         return Ok(None);
     }
 
+    if pending_binding_transition {
+        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        manager.write_run_manifest(handle, run_manifest).await?;
+        tracing::info!(
+            manifest = %manifest_path.display(),
+            conversation_id = %manifest.conversation_id,
+            "reconciled pending conversation binding into the run manifest"
+        );
+    }
+
     manager
         .write_json_artifact(handle, &manifest_path, &manifest)
         .await?;
@@ -1430,6 +1474,27 @@ async fn recovered_conversation_manifest(
         "promoted pending OpenHands conversation manifest during recovery"
     );
     Ok(Some(manifest))
+}
+
+fn runtime_envelope_matches_pending_binding(
+    run_envelope: Option<&TerminalRuntimeEnvelope>,
+    pending_manifest: &IssueConversationManifest,
+) -> bool {
+    let (Some(run_envelope), Some(pending_envelope)) =
+        (run_envelope, pending_manifest.runtime_envelope.as_ref())
+    else {
+        return false;
+    };
+    if pending_envelope.conversation_binding.as_deref()
+        != Some(pending_manifest.conversation_id.as_str())
+    {
+        return false;
+    }
+    let mut run_without_binding = run_envelope.clone();
+    let mut pending_without_binding = pending_envelope.clone();
+    run_without_binding.conversation_binding = None;
+    pending_without_binding.conversation_binding = None;
+    run_without_binding == pending_without_binding
 }
 
 fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
@@ -1702,7 +1767,7 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
-            let prior_run_manifest =
+            let mut prior_run_manifest =
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(manifest) => manifest,
                     Err(error) => {
@@ -1726,24 +1791,24 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
-            let persisted_conversation_binding = prior_run_manifest
+            let recovered_conversation = recovered_conversation_manifest(
+                &workspace_manager,
+                &ensured.handle,
+                prior_run_manifest.as_mut(),
+            )
+            .await
+            .ok()
+            .flatten();
+            let persisted_conversation_binding = recovered_conversation
                 .as_ref()
                 .and_then(|manifest| manifest.runtime_envelope.as_ref())
-                .and_then(|envelope| envelope.conversation_binding.clone());
-            let persisted_conversation_binding = if persisted_conversation_binding.is_some() {
-                persisted_conversation_binding
-            } else {
-                recovered_conversation_manifest(
-                    &workspace_manager,
-                    &ensured.handle,
-                    prior_run_manifest.as_ref(),
-                )
-                .await
-                .ok()
-                .flatten()
-                .and_then(|manifest| manifest.runtime_envelope)
-                .and_then(|envelope| envelope.conversation_binding)
-            };
+                .and_then(|envelope| envelope.conversation_binding.clone())
+                .or_else(|| {
+                    prior_run_manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.runtime_envelope.as_ref())
+                        .and_then(|envelope| envelope.conversation_binding.clone())
+                });
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
                 match if allow_worker_changes {
@@ -1893,7 +1958,7 @@ impl RuntimeWorkerBackend {
             let mut initialize_fresh_conversation = false;
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
-                    Ok(Some(run_manifest)) => {
+                    Ok(Some(mut run_manifest)) => {
                         let conversation_manifest = if matches!(
                             run_manifest.status,
                             RunStatus::Prepared | RunStatus::Running
@@ -1916,7 +1981,7 @@ impl RuntimeWorkerBackend {
                                 match recovered_conversation_manifest(
                                     &workspace_manager,
                                     &ensured.handle,
-                                    Some(&run_manifest),
+                                    Some(&mut run_manifest),
                                 )
                                 .await
                                 {
@@ -2867,6 +2932,21 @@ async fn try_run_codex_stdio_issue(
                         )
                     })?;
             }
+            workspace_manager
+                .write_json_artifact(
+                    workspace,
+                    &pending_conversation_manifest_path(workspace),
+                    &Option::<IssueConversationManifest>::None,
+                )
+                .await
+                .map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "pending runtime envelope cleanup",
+                        error,
+                    )
+                })?;
             (
                 conversation_id,
                 manifest,
@@ -4255,6 +4335,14 @@ async fn write_codex_conversation_manifest(
     workspace_manager
         .write_json_artifact(
             workspace,
+            &pending_conversation_manifest_path(workspace),
+            &Some(&manifest),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    workspace_manager
+        .write_json_artifact(
+            workspace,
             &workspace.conversation_manifest_path(),
             &manifest,
         )
@@ -5209,6 +5297,61 @@ mod tests {
         assert!(!fresh_conversation_initialization_pending(
             &run_manifest,
             &conversation_manifest
+        ));
+    }
+
+    #[test]
+    fn pending_binding_transition_reconciles_a_run_written_before_the_binding() {
+        let envelope: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "repository_binding": {
+                "alias": "main",
+                "repository": {
+                    "id": "github:repository:repo",
+                    "safe_remote_fingerprint": "sha256:fingerprint"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory"
+            },
+            "config_generation": "config",
+            "inventory_generation": "inventory",
+            "policy_generation": "config",
+            "checkout_generation": "generation-1",
+            "checkout_path": "/workspace/COE-479--generation-1",
+            "target_branch": "develop",
+            "target_commit": "commit",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit",
+                "source": "root",
+                "native_discovery_paths": [],
+                "native_discovery_hashes": {}
+            },
+            "harness": "openhands_agent_server",
+            "model_profile": "default",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("sample runtime envelope should decode");
+        let mut pending_envelope = envelope.clone();
+        pending_envelope.conversation_binding = Some("conv-pending".to_owned());
+        let mut pending_manifest = sample_conversation_manifest("conv-pending");
+        pending_manifest.runtime_envelope = Some(pending_envelope);
+
+        assert!(runtime_envelope_matches_pending_binding(
+            Some(&envelope),
+            &pending_manifest,
+        ));
+
+        pending_manifest
+            .runtime_envelope
+            .as_mut()
+            .expect("pending envelope")
+            .target_commit = "different-commit".to_owned();
+        assert!(!runtime_envelope_matches_pending_binding(
+            Some(&envelope),
+            &pending_manifest,
         ));
     }
 

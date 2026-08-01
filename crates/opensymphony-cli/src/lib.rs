@@ -32,6 +32,7 @@ use crate::opensymphony_openhands::{
 use crate::opensymphony_workflow::{
     Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
 };
+use crate::opensymphony_workspace::TerminalRuntimeEnvelope;
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand};
 use install_tooling::{
@@ -2399,6 +2400,9 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     } else {
         old_manifest.runtime_envelope.clone()
     };
+    let rehydration_runtime_envelope = persisted_runtime_envelope
+        .as_ref()
+        .map(|envelope| refresh_rehydration_runtime_envelope(envelope, &workflow));
 
     println!(
         "Found existing conversation: {}",
@@ -2438,9 +2442,12 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let run_descriptor = RunDescriptor::new("rehydrate", 1);
     let mut run_manifest = persisted_run_manifest.unwrap_or_else(|| {
         let mut manifest = RunManifest::new(&workspace, &run_descriptor);
-        manifest.runtime_envelope = persisted_runtime_envelope.clone();
+        manifest.runtime_envelope = rehydration_runtime_envelope.clone();
         manifest
     });
+    if rehydration_runtime_envelope.is_some() {
+        run_manifest.runtime_envelope = rehydration_runtime_envelope;
+    }
 
     // Create a minimal RunAttempt for the rehydration
     use crate::opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
@@ -2526,6 +2533,31 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     println!("The new conversation will be used on the next orchestrator run.");
 
     Ok(())
+}
+
+fn refresh_rehydration_runtime_envelope(
+    persisted: &TerminalRuntimeEnvelope,
+    workflow: &ResolvedWorkflow,
+) -> TerminalRuntimeEnvelope {
+    let mut refreshed = persisted.clone();
+    refreshed.harness = "openhands_agent_server".to_string();
+    refreshed.model_profile = workflow
+        .config
+        .routing
+        .model_profile
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    refreshed.model = workflow.config.routing.model.clone().or_else(|| {
+        workflow
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.model.clone())
+    });
+    refreshed
 }
 
 async fn resolve_rehydrate_runtime(
