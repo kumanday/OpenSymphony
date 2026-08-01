@@ -3878,6 +3878,59 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn capture_scopes_prefer_issue_project_repository_over_default() {
+        let repo = TempDir::new().expect("temp repo");
+        let source_repo = TempDir::new().expect("source repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: source_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: source_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let mut issue = sample_source().issues[0].clone();
+        issue.project_id = Some("project-b".to_string());
+        let plan = CaptureIssuePlan {
+            issue,
+            prs: Vec::new(),
+            capsule_path: PathBuf::new(),
+            areas: Vec::new(),
+            docs_targets: Vec::new(),
+            source_hash: String::new(),
+            already_captured: false,
+            stale: false,
+            warnings: Vec::new(),
+        };
+
+        let scopes = capture_scope_refs(&config, &plan);
+        assert!(
+            scopes.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Repository && scope.id == "repo-b"
+            })
+        );
+        assert!(
+            !scopes.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Repository && scope.id == "repo-a"
+            })
+        );
+    }
+
+    #[test]
     fn okf_import_restricts_project_scopes_to_the_registered_repository() {
         let repo = TempDir::new().expect("temp repo");
         let bundle = repo.path().join("bundle");

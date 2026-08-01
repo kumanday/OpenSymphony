@@ -4018,17 +4018,18 @@ pub fn migrate_code_repository_identity(
         };
         let duplicate_ids = transaction
             .prepare(&format!(
-                "SELECT DISTINCT legacy.{id_column}, canonical.{id_column}, {canonical_key_column} FROM {table} AS legacy JOIN {table} AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.{id_column} <> canonical.{id_column} AND {predicates}"
+                "SELECT DISTINCT legacy.{id_column}, canonical.{id_column}, {canonical_key_column}, legacy.commit_sha FROM {table} AS legacy JOIN {table} AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.{id_column} <> canonical.{id_column} AND {predicates}"
             ))?
             .query_map(params![canonical_repo_id, legacy_repo_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        for (duplicate_id, canonical_id, canonical_key) in duplicate_ids {
+        for (duplicate_id, canonical_id, canonical_key, duplicate_commit_sha) in duplicate_ids {
             if table == "code_symbols" {
                 let duplicate_key = transaction.query_row(
                     "SELECT symbol_key FROM code_symbols WHERE repo_id = ? AND symbol_id = ?",
@@ -4070,8 +4071,10 @@ pub fn migrate_code_repository_identity(
                 }
             }
             transaction.execute(
-                &format!("DELETE FROM {table} WHERE repo_id = ? AND {id_column} = ?"),
-                params![legacy_repo_id, duplicate_id],
+                &format!(
+                    "DELETE FROM {table} WHERE repo_id = ? AND {id_column} = ? AND commit_sha = ?"
+                ),
+                params![legacy_repo_id, duplicate_id, duplicate_commit_sha],
             )?;
         }
     }
@@ -10079,6 +10082,37 @@ mod code_graph_tests {
                 ],
             )
             .expect("edge");
+        connection
+            .execute(
+                "INSERT INTO code_edge_revisions (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-edge",
+                    "legacy-repo",
+                    "def",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "call",
+                    "legacy-symbol",
+                    "legacy-key",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "exact",
+                    2_i64,
+                    0_i64,
+                    2_i64,
+                    4_i64,
+                    5_i64,
+                    9_i64,
+                    "content-def",
+                    "parser",
+                    "query-pack",
+                    "later",
+                    "current",
+                ],
+            )
+            .expect("edge revision");
         drop(connection);
 
         migrate_code_repository_identity(&config, "legacy-repo", "canonical-repo")
@@ -10134,6 +10168,14 @@ mod code_graph_tests {
         assert_ne!(edge.1, "legacy-edge");
         assert_eq!(edge.2, symbol.1);
         assert_eq!(edge.3.as_deref(), Some(symbol.2.as_str()));
+        let revision = connection
+            .query_row(
+                "SELECT repo_id, commit_sha FROM code_edge_revisions",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("historical edge revision");
+        assert_eq!(revision, ("canonical-repo".to_string(), "def".to_string()));
     }
 
     #[test]

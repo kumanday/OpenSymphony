@@ -2027,7 +2027,8 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 ))
             })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
-        let include_okf_exports = !local_config.index_path.is_file();
+        let include_okf_exports = !local_config.index_path.is_file()
+            && !memory_source_has_live_markdown(&local_config.memory_root)?;
         let mut roots = vec![
             (MemorySourceKind::Repository, source.root.clone()),
             (MemorySourceKind::Policy, local_config.config_path.clone()),
@@ -2104,15 +2105,19 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
         matches!(
             existing.kind,
             MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
-        ) && configured_source_generations
-            .get(&existing.source_id)
-            .is_none_or(|generation| generation != &existing.generation)
+        ) && (existing.status != MemorySourceRegistrationStatus::Registered
+            || configured_source_generations
+                .get(&existing.source_id)
+                .is_none_or(|generation| generation != &existing.generation))
     }) || configured_source_generations.iter().any(
         |(source_id, generation)| {
             registered_sources
                 .iter()
                 .find(|existing| existing.source_id == *source_id)
-                .is_none_or(|existing| existing.generation != *generation)
+                .is_none_or(|existing| {
+                    existing.status != MemorySourceRegistrationStatus::Registered
+                        || existing.generation != *generation
+                })
         },
     );
     for source in config.repository_sources.values() {
@@ -2131,7 +2136,8 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
                 ))
             })?;
         let local_config = MemoryConfig::load(&source.root, None)?;
-        let include_okf_exports = !local_config.index_path.is_file();
+        let include_okf_exports = !local_config.index_path.is_file()
+            && !memory_source_has_live_markdown(&local_config.memory_root)?;
         let mut roots = vec![
             (MemorySourceKind::Repository, source.root.clone()),
             (MemorySourceKind::Policy, local_config.config_path.clone()),
@@ -2469,6 +2475,42 @@ fn collect_memory_source_entries(
         }
     }
     Ok(())
+}
+
+fn memory_source_has_live_markdown(root: &Path) -> Result<bool, MemoryError> {
+    if !root.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(root).map_err(|source| MemoryError::ReadFile {
+        path: root.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            if path.file_name().is_some_and(|name| name == "indexes") {
+                continue;
+            }
+            if memory_source_has_live_markdown(&path)? {
+                return Ok(true);
+            }
+        } else if file_type.is_file()
+            && path.extension().is_some_and(|extension| extension == "md")
+            && path
+                .file_name()
+                .is_some_and(|name| name != "index.md" && name != "log.md")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn memory_activity_marker_path(memory_root: &Path) -> PathBuf {
@@ -6926,6 +6968,19 @@ mod tests {
                 .docs_target,
             active.path().join("docs/ops.md")
         );
+    }
+
+    #[test]
+    fn live_memory_markdown_detection_ignores_generated_indexes() {
+        let root = TempDir::new().expect("memory root");
+        std::fs::create_dir_all(root.path().join("indexes")).expect("indexes");
+        std::fs::write(root.path().join("indexes/index.md"), "# index\n").expect("index");
+        std::fs::write(root.path().join("indexes/log.md"), "# log\n").expect("log");
+        assert!(!super::memory_source_has_live_markdown(root.path()).expect("scan"));
+
+        std::fs::create_dir_all(root.path().join("issues")).expect("issues");
+        std::fs::write(root.path().join("issues/COE-550.md"), "# live\n").expect("issue");
+        assert!(super::memory_source_has_live_markdown(root.path()).expect("scan"));
     }
 
     #[test]

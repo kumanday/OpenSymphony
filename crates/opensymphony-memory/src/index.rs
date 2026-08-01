@@ -304,24 +304,24 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
         .into_iter()
         .flatten()
         .collect::<BTreeSet<_>>();
-    let routed_repository_id = config
-        .default_repository_id
-        .clone()
-        .or_else(|| {
-            let candidates = config
-                .repository_sources
-                .values()
-                .filter(|source| {
-                    !issue_projects.is_empty()
-                        && source
-                            .project_scope_ids
-                            .iter()
-                            .any(|project| issue_projects.contains(project))
-                })
-                .map(|source| source.repository_id.clone())
-                .collect::<BTreeSet<_>>();
-            (candidates.len() == 1).then(|| candidates.into_iter().next()).flatten()
-        })
+    let routed_repository_id = {
+        let candidates = config
+            .repository_sources
+            .values()
+            .filter(|source| {
+                !issue_projects.is_empty()
+                    && source
+                        .project_scope_ids
+                        .iter()
+                        .any(|project| issue_projects.contains(project))
+            })
+            .map(|source| source.repository_id.clone())
+            .collect::<BTreeSet<_>>();
+        (candidates.len() == 1)
+            .then(|| candidates.into_iter().next())
+            .flatten()
+            .or_else(|| config.default_repository_id.clone())
+    }
         .or_else(|| {
             (config.repository_sources.len() == 1)
                 .then(|| config.repository_sources.keys().next().cloned())
@@ -3493,13 +3493,44 @@ fn refresh_memory_index_from_okf_inner(
                         })?;
                 }
             } else {
-                let remaining_project_scopes = source_ids
-                    .iter()
-                    .filter_map(|owner| registered_source_repositories.get(owner))
-                    .filter_map(|repository_id| config.repository_sources.get(repository_id))
-                    .flat_map(|source| source.project_scope_ids.iter())
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
+                let source_scope_rows = {
+                    let mut statement = transaction
+                        .prepare(
+                            "SELECT source_id, scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    statement
+                        .query_map([&concept_id], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?
+                };
+                let remaining_project_scopes = if source_scope_rows.is_empty() {
+                    source_ids
+                        .iter()
+                        .filter_map(|owner| registered_source_repositories.get(owner))
+                        .filter_map(|repository_id| config.repository_sources.get(repository_id))
+                        .flat_map(|source| source.project_scope_ids.iter())
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                } else {
+                    source_scope_rows
+                        .into_iter()
+                        .filter(|(owner, _)| source_ids.contains(owner))
+                        .map(|(_, scope_id)| scope_id)
+                        .collect::<BTreeSet<_>>()
+                };
                 let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes)
                     .unwrap_or_default()
                     .into_iter()
