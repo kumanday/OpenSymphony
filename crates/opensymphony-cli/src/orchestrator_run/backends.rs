@@ -78,6 +78,8 @@ pub(super) enum CliWorkspaceError {
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
     #[error("Codex lifecycle recovery failed: {0}")]
     CodexLifecycle(String),
+    #[error("OpenHands lifecycle recovery failed: {0}")]
+    OpenHandsLifecycle(String),
     #[error("retry state persistence failed: {0}")]
     RetryState(String),
 }
@@ -137,6 +139,7 @@ pub(super) struct ManagedLocalPreparation {
 
 pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
+    openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
@@ -752,6 +755,7 @@ impl RuntimeWorkspaceBackend {
     ) -> Self {
         Self {
             manager,
+            openhands_conversation_store: None,
             active_states: workflow
                 .config
                 .tracker
@@ -771,6 +775,14 @@ impl RuntimeWorkspaceBackend {
             retain_failed,
             retry_state_root,
         }
+    }
+
+    pub(super) fn with_openhands_conversation_store(
+        mut self,
+        store: Option<OpenHandsConversationStorePaths>,
+    ) -> Self {
+        self.openhands_conversation_store = store;
+        self
     }
 }
 
@@ -844,7 +856,42 @@ impl RuntimeWorkspaceBackend {
                             );
                         }
                     }
-                    Ok(_) => {}
+                    Ok(manifest) => {
+                        if let Some(store) = self.openhands_conversation_store.as_ref() {
+                            match store.move_conversation_to(
+                                manifest.conversation_id.as_str(),
+                                ConversationStoreKind::Archived,
+                            ) {
+                                Ok(ConversationMoveOutcome::Moved { from, .. }) => {
+                                    tracing::info!(
+                                        issue = %handle.identifier(),
+                                        conversation_id = %manifest.conversation_id,
+                                        from = %from,
+                                        "moved terminal OpenHands conversation into the archived store before workspace removal"
+                                    );
+                                }
+                                Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {}
+                                Ok(ConversationMoveOutcome::Missing) => {
+                                    tracing::warn!(
+                                        issue = %handle.identifier(),
+                                        conversation_id = %manifest.conversation_id,
+                                        "terminal OpenHands conversation was already absent before workspace removal"
+                                    );
+                                }
+                                Err(error) => {
+                                    return Err(CliWorkspaceError::OpenHandsLifecycle(
+                                        error.to_string(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                conversation_id = %manifest.conversation_id,
+                                "removing terminal workspace without an OpenHands conversation store"
+                            );
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(
                             issue = %handle.identifier(),
@@ -6230,6 +6277,66 @@ mod tests {
             .await
             .expect("failed cleanup should remove retained terminal workspace");
         assert!(!ensured.handle.workspace_path().exists());
+    }
+
+    #[tokio::test]
+    async fn runtime_failed_cleanup_retires_openhands_before_removal() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let conversation_id = "11111111-1111-4111-8111-111111111111";
+        let store = OpenHandsConversationStorePaths::for_tool_dir(
+            tempdir.path().join("openhands-tool"),
+            tempdir.path(),
+        )
+        .expect("conversation store should resolve");
+        store
+            .ensure_active_and_archived()
+            .expect("conversation stores should exist");
+        fs::create_dir_all(store.active.join(conversation_id))
+            .expect("active OpenHands conversation should exist");
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &sample_conversation_manifest(conversation_id),
+            )
+            .await
+            .expect("OpenHands conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow)
+            .with_openhands_conversation_store(Some(store.clone()));
+
+        backend
+            .cleanup_failed_workspace(&workspace)
+            .await
+            .expect("failed cleanup should retire OpenHands before removal");
+
+        assert!(!ensured.handle.workspace_path().exists());
+        assert!(!store.active.join(conversation_id).exists());
+        assert!(
+            store
+                .archived
+                .join(conversation_id.replace('-', ""))
+                .is_dir()
+        );
     }
 
     #[tokio::test]

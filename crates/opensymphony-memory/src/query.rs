@@ -827,7 +827,12 @@ fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo:
     if issue.changed_files.is_empty() {
         return true;
     }
-    let repo = repo_scope_prefix(config, repo);
+    let Some(repo) = repo_scope_prefix(config, repo) else {
+        // Canonical repository IDs are durable identities, not filesystem
+        // prefixes. Legacy capsules without explicit repository scope remain
+        // compatible with them instead of being filtered by an impossible path.
+        return true;
+    };
     if repo.is_empty() || repo == "." {
         return true;
     }
@@ -837,8 +842,11 @@ fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo:
     })
 }
 
-fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> String {
+fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> Option<String> {
     let path = PathBuf::from(repo);
+    if !path.is_absolute() && repo.contains(':') {
+        return None;
+    }
     let relative = if path.is_absolute() {
         path.strip_prefix(&config.repo_root)
             .map(Path::to_path_buf)
@@ -852,6 +860,7 @@ fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> String {
         .filter(|component| component != ".")
         .collect::<Vec<_>>()
         .join("/")
+        .into()
 }
 
 pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, MemoryError> {

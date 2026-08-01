@@ -122,6 +122,16 @@ fn after_create_requires_empty_workspace_command() -> &'static str {
 }
 
 #[cfg(unix)]
+fn after_create_published_path_command() -> &'static str {
+    "pwd > .git/after_create_cwd.txt"
+}
+
+#[cfg(windows)]
+fn after_create_published_path_command() -> &'static str {
+    "cd > .git\\after_create_cwd.txt"
+}
+
+#[cfg(unix)]
 fn after_create_retry_command() -> &'static str {
     "if [ ! -f after_create_attempt.txt ]; then echo first > after_create_attempt.txt; echo retry 1>&2; exit 23; fi; echo success > after_create_success.txt"
 }
@@ -391,6 +401,21 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         reused.handle.workspace_path(),
         first.handle.workspace_path()
     );
+
+    let outside_objects = temp_dir.path().join("outside-objects");
+    std::fs::create_dir_all(&outside_objects).expect("outside objects should exist");
+    let alternates = first
+        .handle
+        .workspace_path()
+        .join(".git/objects/info/alternates");
+    std::fs::write(&alternates, format!("{}\n", outside_objects.display()))
+        .expect("alternates file should be written");
+    assert!(matches!(
+        manager.verify_checkout(&first.handle).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("alternates")
+    ));
+    std::fs::remove_file(&alternates).expect("alternates file should be removed");
 
     let outside_worktree = temp_dir.path().join("outside-worktree");
     std::fs::create_dir_all(&outside_worktree).expect("outside worktree should exist");
@@ -665,6 +690,56 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     assert_ne!(
         repaired_key.handle.workspace_path(),
         renamed.handle.workspace_path()
+    );
+
+    let mut quarantined_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(repaired_key.handle.checkout_manifest_path())
+            .await
+            .expect("checkout manifest should be readable"),
+    )
+    .expect("checkout manifest should decode");
+    quarantined_manifest["quarantined"] = serde_json::Value::Bool(true);
+    quarantined_manifest["quarantine_reason"] = serde_json::Value::String("test quarantine".into());
+    tokio::fs::write(
+        repaired_key.handle.checkout_manifest_path(),
+        serde_json::to_vec_pretty(&quarantined_manifest)
+            .expect("quarantined manifest should encode"),
+    )
+    .await
+    .expect("quarantined manifest should be writable");
+    assert!(matches!(
+        manager.verify_checkout(&repaired_key.handle).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason == "checkout generation is already quarantined"
+    ));
+
+    let hook_manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces-after-create"),
+        HookConfig {
+            after_create: Some(HookDefinition::shell(after_create_published_path_command())),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("after-create manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        repository,
+    )]));
+    let hooked = hook_manager
+        .ensure(&issue)
+        .await
+        .expect("after-create checkout should publish");
+    let recorded_cwd = std::fs::read_to_string(
+        hooked
+            .handle
+            .workspace_path()
+            .join(".git/after_create_cwd.txt"),
+    )
+    .expect("after-create cwd should be recorded");
+    assert_eq!(
+        std::fs::canonicalize(recorded_cwd.trim()).expect("recorded cwd should exist"),
+        std::fs::canonicalize(hooked.handle.workspace_path()).expect("checkout should exist")
     );
 
     assert!(!clean_retry.handle.workspace_path().exists());

@@ -1005,7 +1005,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         &runtime.workflow,
         runtime.retain_failed,
         retry_state_root,
-    );
+    )
+    .with_openhands_conversation_store(runtime.openhands_conversation_store.clone());
     let selected_openhands = selected_openhands_harness(&runtime);
     let managed_local_preparation = if selected_openhands {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())

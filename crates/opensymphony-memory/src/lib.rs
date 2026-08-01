@@ -3305,6 +3305,18 @@ Reviews are triggered when you open a pull request for review.
         assert!(indexed_issue_matches_scope(
             &config,
             &IndexedIssue {
+                scope_refs: Vec::new(),
+                changed_files: vec![PathBuf::from("src/lib.rs")],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                repo: Some("github:github.com:repository:42".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
                 scope_refs: vec![KnowledgeScope {
                     kind: KnowledgeScopeKind::Repository,
                     id: "repository-1".to_string(),

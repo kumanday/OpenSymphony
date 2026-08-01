@@ -490,14 +490,27 @@ impl WorkspaceManager {
             staging_path,
         )
         .with_checkout_generation(generation.clone());
-        let after_create_started = Instant::now();
-        let after_create = match self
-            .execute_hook(HookKind::AfterCreate, &staging_workspace)
+
+        fs::rename(staging_workspace.workspace_path(), &published_path)
             .await
-        {
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "publish checkout generation before after_create".to_owned(),
+                path: published_path.clone(),
+                detail: source.to_string(),
+            })?;
+        staging_cleanup.register(published_path.clone());
+        let workspace = WorkspaceHandle::new(
+            issue.issue_id.clone(),
+            issue.identifier.clone(),
+            staging_workspace.workspace_key().to_owned(),
+            self.canonicalize_path(&published_path).await?,
+        )
+        .with_checkout_generation(generation.clone());
+        let after_create_started = Instant::now();
+        let after_create = match self.execute_hook(HookKind::AfterCreate, &workspace).await {
             Ok(record) => record,
             Err(failure) => {
-                let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+                let _ = fs::remove_dir_all(workspace.workspace_path()).await;
                 return Err(failure.error);
             }
         };
@@ -506,23 +519,17 @@ impl WorkspaceManager {
         }
         if let Err(error) = checkout_operation_with_timeout(
             checkout_time_remaining(checkout_deadline),
-            staging_workspace.workspace_path(),
+            workspace.workspace_path(),
             "verify checkout after creation hook",
-            self.verify_git_checkout(
-                staging_workspace.workspace_path(),
-                binding,
-                repository,
-                true,
-                true,
-            ),
+            self.verify_git_checkout(workspace.workspace_path(), binding, repository, true, true),
         )
         .await
         {
-            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
             return Err(error);
         }
-        if let Err(error) = self.bootstrap_workspace_layout(&staging_workspace).await {
-            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+        if let Err(error) = self.bootstrap_workspace_layout(&workspace).await {
+            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
             return Err(error);
         }
 
@@ -533,8 +540,8 @@ impl WorkspaceManager {
             issue_id: issue.issue_id.clone(),
             identifier: issue.identifier.clone(),
             run_id: run_id.unwrap_or(&issue.issue_id).to_owned(),
-            sanitized_workspace_key: staging_workspace.workspace_key().to_owned(),
-            workspace_path: published_path.clone(),
+            sanitized_workspace_key: workspace.workspace_key().to_owned(),
+            workspace_path: workspace.workspace_path().to_path_buf(),
             repository_binding: binding.clone(),
             remote_fingerprint: binding
                 .repository
@@ -555,56 +562,28 @@ impl WorkspaceManager {
         };
         if let Err(error) = self
             .write_manifest(
-                &staging_workspace,
-                &staging_workspace.checkout_manifest_path(),
+                &workspace,
+                &workspace.checkout_manifest_path(),
                 &checkout_manifest,
             )
             .await
         {
-            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
             return Err(error);
         }
-        let issue_manifest = match self
-            .upsert_issue_manifest_at_path(issue, &staging_workspace, &published_path)
-            .await
-        {
+        let issue_manifest = match self.upsert_issue_manifest(issue, &workspace).await {
             Ok(manifest) => manifest,
             Err(error) => {
-                let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+                let _ = fs::remove_dir_all(workspace.workspace_path()).await;
                 return Err(error);
             }
         };
         if after_create.is_some()
-            && let Err(error) = self
-                .write_after_create_receipt_at_path(issue, &staging_workspace, &published_path)
-                .await
+            && let Err(error) = self.write_after_create_receipt(issue, &workspace).await
         {
-            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
+            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
             return Err(error);
         }
-
-        if let Err(source) = fs::rename(staging_workspace.workspace_path(), &published_path).await {
-            let _ = fs::remove_dir_all(staging_workspace.workspace_path()).await;
-            return Err(WorkspaceError::CheckoutOperation {
-                operation: "publish checkout generation".to_owned(),
-                path: published_path.clone(),
-                detail: source.to_string(),
-            });
-        }
-        staging_cleanup.disarm();
-        let workspace = WorkspaceHandle::new(
-            issue.issue_id.clone(),
-            issue.identifier.clone(),
-            staging_workspace.workspace_key().to_owned(),
-            self.canonicalize_path(&published_path).await?,
-        )
-        .with_checkout_generation(generation);
-        let after_create = after_create.map(|mut record| {
-            if let Ok(relative) = record.cwd.strip_prefix(staging_workspace.workspace_path()) {
-                record.cwd = workspace.workspace_path().join(relative);
-            }
-            record
-        });
         if let Err(error) = checkout_operation_with_timeout(
             checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
@@ -616,6 +595,7 @@ impl WorkspaceManager {
             self.remove_published_checkout(&workspace).await;
             return Err(error);
         }
+        staging_cleanup.disarm();
 
         Ok(EnsureWorkspaceResult {
             handle: workspace,
@@ -711,6 +691,13 @@ impl WorkspaceManager {
                 path: workspace.workspace_path().to_path_buf(),
                 generation: manifest.generation,
                 reason: "workspace handle generation does not match manifest".to_owned(),
+            });
+        }
+        if manifest.quarantined {
+            return Err(WorkspaceError::CheckoutVerification {
+                path: workspace.workspace_path().to_path_buf(),
+                generation: manifest.generation,
+                reason: "checkout generation is already quarantined".to_owned(),
             });
         }
         let repository = self
@@ -920,6 +907,17 @@ impl WorkspaceManager {
             else {
                 continue;
             };
+            if self
+                .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
+                .await?
+                .is_some_and(|checkout| checkout.quarantined)
+            {
+                tracing::warn!(
+                    path = %handle.workspace_path().display(),
+                    "skipping retained checkout already marked quarantined"
+                );
+                continue;
+            }
             if manifest.issue_id != issue.issue_id {
                 continue;
             }
@@ -1215,6 +1213,8 @@ impl WorkspaceManager {
                 .env("GIT_ASKPASS", path)
                 .env("GIT_TERMINAL_PROMPT", "0");
         }
+        command.env_remove("GIT_OBJECT_DIRECTORY");
+        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
         configure_process_group(&mut command);
         command
             .stdout(Stdio::piped())
@@ -1364,6 +1364,8 @@ impl WorkspaceManager {
                 ));
             }
         }
+        self.verify_git_object_alternates(checkout, &canonical_checkout)
+            .await?;
         let expected = SafeRemoteFingerprint::from_remote(
             &repository.provider,
             repository.provider_id.as_deref(),
@@ -1473,12 +1475,87 @@ impl WorkspaceManager {
         })
     }
 
+    async fn verify_git_object_alternates(
+        &self,
+        checkout: &Path,
+        canonical_checkout: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let object_dir = self
+            .git(checkout, &["rev-parse", "--git-path", "objects"])
+            .await?;
+        let object_dir = PathBuf::from(object_dir);
+        let object_dir = if object_dir.is_absolute() {
+            object_dir
+        } else {
+            canonical_checkout.join(object_dir)
+        };
+        let object_dir = self
+            .canonicalize_path(&object_dir)
+            .await
+            .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        ensure_descendant(canonical_checkout, &object_dir).map_err(|_| {
+            checkout_verification(
+                checkout,
+                "Git object directory escapes the checkout generation",
+            )
+        })?;
+
+        let alternates = object_dir.join("info").join("alternates");
+        let metadata = match fs::symlink_metadata(&alternates).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManagedFile {
+                    path: alternates,
+                    source,
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(checkout_verification(
+                checkout,
+                "Git alternates file escapes the checkout generation",
+            ));
+        }
+        let contents = fs::read_to_string(&alternates).await.map_err(|source| {
+            WorkspaceError::ReadManagedFile {
+                path: alternates.clone(),
+                source,
+            }
+        })?;
+        for alternate in contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let alternate = PathBuf::from(alternate);
+            let alternate = if alternate.is_absolute() {
+                alternate
+            } else {
+                object_dir.join(alternate)
+            };
+            let canonical_alternate = self
+                .canonicalize_path(&alternate)
+                .await
+                .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+            if ensure_descendant(canonical_checkout, &canonical_alternate).is_err() {
+                return Err(checkout_verification(
+                    checkout,
+                    "Git object alternates escape the checkout generation",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn git(&self, checkout: &Path, args: &[&str]) -> Result<String, WorkspaceError> {
         let mut command = Command::new("git");
         command.arg("-C").arg(checkout).args(args);
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
+        command.env_remove("GIT_OBJECT_DIRECTORY");
+        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
         command.env("GIT_NO_REPLACE_OBJECTS", "1");
         let output = command
             .kill_on_drop(true)
@@ -1937,6 +2014,10 @@ impl WorkspaceManager {
                         )
                         .await?
                     {
+                        Some(checkout) if checkout.quarantined => tracing::warn!(
+                            path = %handle.workspace_path().display(),
+                            "skipping workspace already marked quarantined during recovery"
+                        ),
                         Some(checkout)
                             if issue_manifest_owns_checkout(&handle, &manifest, &checkout) =>
                         {
@@ -2440,6 +2521,8 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
+        command.env_remove("GIT_OBJECT_DIRECTORY");
+        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
 
         let started_at = Utc::now();
         let started = Instant::now();
