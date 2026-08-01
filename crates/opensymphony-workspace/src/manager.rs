@@ -2218,7 +2218,18 @@ impl WorkspaceManager {
         };
         let manifest = match serde_json::from_str::<IssueManifest>(&raw) {
             Ok(manifest) => manifest,
-            Err(_) => return Ok(None),
+            Err(source) => {
+                let checkout_manifest_path = canonical_workspace
+                    .join(".opensymphony")
+                    .join("checkout.json");
+                if path_exists(&checkout_manifest_path).await? {
+                    return Err(WorkspaceError::DecodeManifest {
+                        path: issue_manifest_path,
+                        source,
+                    });
+                }
+                return Ok(None);
+            }
         };
 
         let handle = WorkspaceHandle::new(
@@ -2781,13 +2792,13 @@ fn checkout_verification(path: &Path, reason: &str) -> WorkspaceError {
 }
 
 fn remote_contains_credentials(remote: &str) -> bool {
-    if let Ok(url) = Url::parse(remote)
-        && (url.password().is_some()
-            || (!url.username().is_empty()
-                && !(url.scheme().eq_ignore_ascii_case("ssh")
-                    && url.username().eq_ignore_ascii_case("git"))))
-    {
-        return true;
+    if let Ok(url) = Url::parse(remote) {
+        if url.password().is_some() {
+            return true;
+        }
+        if !url.username().is_empty() && !url.scheme().eq_ignore_ascii_case("ssh") {
+            return true;
+        }
     }
 
     let Some((authority, _path)) = remote.split_once(':') else {
@@ -2799,7 +2810,7 @@ fn remote_contains_credentials(remote: &str) -> bool {
     let Some((username, host)) = authority.split_once('@') else {
         return false;
     };
-    host.is_empty() || !username.eq_ignore_ascii_case("git")
+    host.is_empty() || username.contains(':') || !username.eq_ignore_ascii_case("git")
 }
 
 fn is_proven_checkout_invalid(error: &WorkspaceError) -> bool {
@@ -3179,6 +3190,9 @@ mod tests {
         ));
         assert!(remote_contains_credentials(
             "TOKEN@example.com:org/repo.git"
+        ));
+        assert!(!remote_contains_credentials(
+            "ssh://deploy@example.com/org/repo.git"
         ));
         assert!(!remote_contains_credentials("git@example.com:org/repo.git"));
         assert!(!remote_contains_credentials(

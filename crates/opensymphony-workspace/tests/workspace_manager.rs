@@ -616,6 +616,23 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("malformed checkout manifest should be written");
 
+    let malformed_issue_path = workspace_root.join("malformed-issue-generation");
+    tokio::fs::create_dir_all(malformed_issue_path.join(".opensymphony"))
+        .await
+        .expect("malformed issue generation directory should exist");
+    tokio::fs::write(
+        malformed_issue_path.join(".opensymphony/issue.json"),
+        b"not-json",
+    )
+    .await
+    .expect("malformed issue manifest should be written");
+    tokio::fs::write(
+        malformed_issue_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("strict generation marker should be written");
+
     let found = manager
         .find_workspace_by_issue_reference(&issue.issue_id)
         .await

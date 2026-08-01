@@ -3211,6 +3211,58 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn indexed_memory_scope_matches_project_and_repository() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let issue = IndexedIssue {
+            issue_key: "COE-123".to_string(),
+            concept_id: "issue-coe-123".to_string(),
+            concept_type: "issue-capsule".to_string(),
+            title: "Scoped memory".to_string(),
+            description: None,
+            state: Some("Done".to_string()),
+            milestone: None,
+            labels: Vec::new(),
+            tags: Vec::new(),
+            areas: Vec::new(),
+            capsule_path: repo.path().join("COE-123.md"),
+            visibility: MemoryVisibility::Private,
+            source_hash: "hash".to_string(),
+            warning_count: 0,
+            docs_sync_status: "synced".to_string(),
+            completion_time: None,
+            captured_at: "2026-08-01T00:00:00Z".to_string(),
+            changed_files: vec![PathBuf::from("repo-one/src/lib.rs")],
+            scope_refs: vec![KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-1".to_string(),
+                label: Some("Project One".to_string()),
+            }],
+            source_refs: Vec::new(),
+            links: Vec::new(),
+            citations: Vec::new(),
+            freshness: MemoryFreshness::Current,
+            warnings: Vec::new(),
+            body: "Scoped body".to_string(),
+        };
+        let scope = MemoryScopeFilter {
+            project: Some("project one".to_string()),
+            repo: Some("repo-one".to_string()),
+            ..MemoryScopeFilter::default()
+        };
+
+        assert!(indexed_issue_matches_scope(&config, &issue, &scope));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                project: Some("other-project".to_string()),
+                ..scope
+            }
+        ));
+    }
+
+    #[test]
     fn capture_evolves_memory_config_and_keeps_changed_files_index_only() {
         let repo = TempDir::new().expect("temp repo");
         let config = MemoryConfig::load(repo.path(), None).expect("default config");

@@ -42,14 +42,14 @@ use crate::{
         MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
         archive_blocking_warning_count, brief, code_graph_context,
         code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_source_file, mark_archived, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, refresh_memory_index, refresh_memory_index_from_okf,
-        related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
-        render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
-        sha256_hex, status_with_scope, write_capture_plan, write_docs_sync_plan,
-        write_memory_init_plan,
+        context_for_issue_with_options_and_scope, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, persist_code_intel_documents, persist_code_intel_skipped_files,
+        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
+        refresh_memory_index_from_okf, related_by_area_with_scope, related_by_issue_with_scope,
+        related_by_paths_with_scope, render_archive_plan, render_capture_dry_run,
+        search_with_scope, sha256_bytes_hex, sha256_hex, status_with_scope, write_capture_plan,
+        write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -2390,7 +2390,9 @@ async fn call_memory_tool_with_workspace(
                 limit: usize_arg(&arguments, "limit", 20),
             };
             let source = context_source_from_mcp(&arguments);
-            let mut text = context_for_issue_with_options(config, &source, &options)?;
+            let scope = scope_filter_from_mcp(&arguments, false);
+            let mut text =
+                context_for_issue_with_options_and_scope(config, &source, &options, &scope)?;
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {

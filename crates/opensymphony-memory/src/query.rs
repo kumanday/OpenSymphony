@@ -347,9 +347,26 @@ pub fn context_for_issue_with_options(
     source: &SourceFile,
     options: &MemoryContextOptions,
 ) -> Result<String, MemoryError> {
+    context_for_issue_with_options_and_scope(
+        config,
+        source,
+        options,
+        &MemoryScopeFilter::default(),
+    )
+}
+
+pub fn context_for_issue_with_options_and_scope(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    options: &MemoryContextOptions,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let issue_key = normalize_issue_key(&options.issue);
     let max_total = options.limit.clamp(1, 20);
-    let indexed_issues = load_indexed_issues(config)?;
+    let indexed_issues = load_indexed_issues(config)?
+        .into_iter()
+        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .collect::<Vec<_>>();
     let indexed_by_key = indexed_issues
         .iter()
         .map(|issue| (issue.issue_key.clone(), issue))
@@ -744,6 +761,19 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
+    if let Some(project_set) = scope
+        .project_set
+        .as_ref()
+        .and_then(|value| normalize_optional(value))
+        && !indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::ProjectSet, &project_set)
+    {
+        return false;
+    }
+    if let Some(project) = scope.project.as_ref().and_then(|value| normalize_optional(value))
+        && !indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Project, &project)
+    {
+        return false;
+    }
     if let Some(area) = scope.area.as_ref().map(|area| slugify(area))
         && !issue.areas().contains(&area)
     {
@@ -755,6 +785,21 @@ fn indexed_issue_matches_scope(
         return false;
     }
     true
+}
+
+fn indexed_issue_matches_scope_ref(
+    issue: &IndexedIssue,
+    kind: KnowledgeScopeKind,
+    expected: &str,
+) -> bool {
+    issue.scope_refs.iter().any(|scope| {
+        scope.kind == kind
+            && (scope.id.eq_ignore_ascii_case(expected)
+                || scope
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.eq_ignore_ascii_case(expected)))
+    })
 }
 
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {

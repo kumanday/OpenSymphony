@@ -1729,7 +1729,7 @@ impl RuntimeWorkerBackend {
                     .clone()
                     .with_memory(worker_memory_env.as_ref().map(memory_access_from_runtime)),
                 OverlayEnvironment {
-                    overrides: worker_environment,
+                    overrides: worker_environment.clone(),
                     blocked: checkout_credential_envs.clone(),
                 },
             );
@@ -2010,7 +2010,7 @@ impl RuntimeWorkerBackend {
                     &codex_interrupts,
                     &updates_tx,
                     &mut launch_tx,
-                    &worker_env,
+                    &worker_environment,
                     &checkout_credential_envs,
                     recovered,
                 )
