@@ -1387,63 +1387,66 @@ async fn recovered_conversation_manifest(
 ) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
     let manifest_path = handle.conversation_manifest_path();
     if let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? {
-        let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
-            Ok(manifest) => manifest,
+        match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+            Ok(manifest) => {
+                if let Some(run_manifest) = run_manifest
+                    && manifest.runtime_envelope.as_ref() != run_manifest.runtime_envelope.as_ref()
+                {
+                    let pending_path = pending_conversation_manifest_path(handle);
+                    if let Some(raw_pending) =
+                        manager.read_text_artifact(handle, &pending_path).await?
+                        && let Ok(Some(pending_manifest)) =
+                            serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
+                    {
+                        if pending_manifest.conversation_id == manifest.conversation_id
+                            && runtime_envelope_matches_pending_binding(
+                                run_manifest.runtime_envelope.as_ref(),
+                                &pending_manifest,
+                            )
+                        {
+                            run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
+                            manager.write_run_manifest(handle, run_manifest).await?;
+                            tracing::info!(
+                                manifest = %manifest_path.display(),
+                                conversation_id = %manifest.conversation_id,
+                                "reconciled pending Codex conversation binding into the run manifest"
+                            );
+                        } else if matches!(
+                            run_manifest.status,
+                            RunStatus::Preparing | RunStatus::Prepared
+                        ) && pending_manifest.issue_id.to_string()
+                            == run_manifest.issue_id
+                            && pending_manifest.identifier.to_string() == run_manifest.identifier
+                            && runtime_envelope_matches_pending_binding(
+                                run_manifest.runtime_envelope.as_ref(),
+                                &pending_manifest,
+                            )
+                        {
+                            run_manifest.runtime_envelope =
+                                pending_manifest.runtime_envelope.clone();
+                            manager.write_run_manifest(handle, run_manifest).await?;
+                            manager
+                                .write_json_artifact(handle, &manifest_path, &pending_manifest)
+                                .await?;
+                            tracing::info!(
+                                manifest = %manifest_path.display(),
+                                conversation_id = %pending_manifest.conversation_id,
+                                "promoted pending replacement conversation manifest during recovery"
+                            );
+                            return Ok(Some(pending_manifest));
+                        }
+                    }
+                }
+                return Ok(Some(manifest));
+            }
             Err(error) => {
                 tracing::warn!(
                     manifest = %manifest_path.display(),
                     %error,
-                    "skipping recovered scheduler harness kind for invalid conversation manifest"
+                    "conversation manifest is malformed; attempting pending recovery copy"
                 );
-                return Ok(None);
-            }
-        };
-        if let Some(run_manifest) = run_manifest
-            && manifest.runtime_envelope.as_ref() != run_manifest.runtime_envelope.as_ref()
-        {
-            let pending_path = pending_conversation_manifest_path(handle);
-            if let Some(raw_pending) = manager.read_text_artifact(handle, &pending_path).await?
-                && let Ok(Some(pending_manifest)) =
-                    serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
-            {
-                if pending_manifest.conversation_id == manifest.conversation_id
-                    && runtime_envelope_matches_pending_binding(
-                        run_manifest.runtime_envelope.as_ref(),
-                        &pending_manifest,
-                    )
-                {
-                    run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
-                    manager.write_run_manifest(handle, run_manifest).await?;
-                    tracing::info!(
-                        manifest = %manifest_path.display(),
-                        conversation_id = %manifest.conversation_id,
-                        "reconciled pending Codex conversation binding into the run manifest"
-                    );
-                } else if matches!(
-                    run_manifest.status,
-                    RunStatus::Preparing | RunStatus::Prepared
-                ) && pending_manifest.issue_id.to_string() == run_manifest.issue_id
-                    && pending_manifest.identifier.to_string() == run_manifest.identifier
-                    && runtime_envelope_matches_pending_binding(
-                        run_manifest.runtime_envelope.as_ref(),
-                        &pending_manifest,
-                    )
-                {
-                    run_manifest.runtime_envelope = pending_manifest.runtime_envelope.clone();
-                    manager.write_run_manifest(handle, run_manifest).await?;
-                    manager
-                        .write_json_artifact(handle, &manifest_path, &pending_manifest)
-                        .await?;
-                    tracing::info!(
-                        manifest = %manifest_path.display(),
-                        conversation_id = %pending_manifest.conversation_id,
-                        "promoted pending replacement conversation manifest during recovery"
-                    );
-                    return Ok(Some(pending_manifest));
-                }
             }
         }
-        return Ok(Some(manifest));
     }
 
     let Some(run_manifest) = run_manifest else {
@@ -1889,11 +1892,7 @@ impl RuntimeWorkerBackend {
             };
             let worker_memory_env = memory_env.as_ref().map(|memory| {
                 let mut scoped = memory.clone();
-                scoped.project = issue
-                    .project_slug
-                    .clone()
-                    .or_else(|| issue.project_id.clone())
-                    .unwrap_or_else(|| memory.project.clone());
+                scoped.project = worker_memory_project(&issue, &memory.project);
                 scoped.execution_repo = runtime_envelope
                     .as_ref()
                     .map(|envelope| envelope.repository_binding.repository.id.to_string())
@@ -2431,6 +2430,14 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
 
 fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
     memory_scope_prompt_values(&memory.project, &memory.execution_repo)
+}
+
+fn worker_memory_project(issue: &NormalizedIssue, fallback: &str) -> String {
+    issue
+        .project_id
+        .clone()
+        .or_else(|| issue.project_slug.clone())
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 fn memory_scope_prompt_values(project: &str, repo: &str) -> String {
@@ -7429,6 +7436,18 @@ mod tests {
             .expect("worker environment should provide continuation scope");
         assert!(continuation_scope.contains("project=project-alpha"));
         assert!(continuation_scope.contains("repo=/tmp/project-alpha/services/api"));
+    }
+
+    #[test]
+    fn worker_memory_scope_prefers_canonical_project_id_over_slug() {
+        let mut issue = sample_issue();
+        issue.project_id = Some("canonical-project-id".to_owned());
+        issue.project_slug = Some("human-readable-slug".to_owned());
+
+        assert_eq!(
+            worker_memory_project(&issue, "workflow-project"),
+            "canonical-project-id"
+        );
     }
 
     #[tokio::test]

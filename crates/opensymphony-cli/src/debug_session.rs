@@ -1164,6 +1164,15 @@ fn build_debug_client(
         .as_ref()
         .map(checkout_credential_environment_variables)
         .unwrap_or_default();
+    config.env_remove.retain(|variable| {
+        !runtime
+            .workflow
+            .extensions
+            .openhands
+            .local_server
+            .env
+            .contains_key(variable)
+    });
     let conversation_store_path = conversation_store_kind.and_then(|kind| {
         runtime
             .conversation_store
