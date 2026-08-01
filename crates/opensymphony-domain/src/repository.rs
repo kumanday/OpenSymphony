@@ -235,6 +235,10 @@ impl RepositoryBindingOutcome {
             _ => true,
         }
     }
+
+    pub fn binding_changed_opt(left: Option<&Self>, right: Option<&Self>) -> bool {
+        left != right
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

@@ -228,6 +228,16 @@ fn strict_recovery_enabled(repository_routing: Option<&RepositoryRouting>) -> bo
         .is_some_and(|routing| matches!(routing.mode, RepositoryRoutingMode::ProjectSet))
 }
 
+fn strict_recovery_configured(
+    repository_routing: Option<&RepositoryRouting>,
+    repository_checkouts: Option<
+        &BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>,
+    >,
+) -> bool {
+    strict_recovery_enabled(repository_routing)
+        || repository_checkouts.is_some_and(|checkouts| !checkouts.is_empty())
+}
+
 struct DoctorWorkflowEnvironment {
     fallback_linear_api_key: bool,
     blocked: BTreeSet<String>,
@@ -2274,7 +2284,10 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
     let runtime = resolve_rehydrate_runtime(&current_dir, args.config.as_deref()).await?;
-    let strict_recovery = strict_recovery_enabled(runtime.repository_routing.as_ref());
+    let configured_strict = strict_recovery_configured(
+        runtime.repository_routing.as_ref(),
+        runtime.repository_checkouts.as_ref(),
+    );
     let workflow = runtime.workflow;
 
     // Setup workspace manager
@@ -2284,17 +2297,32 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
 
     // Find workspace by issue reference
-    let workspace = if strict_recovery {
-        workspace_manager
+    let (workspace, strict_recovery) = if configured_strict {
+        (
+            workspace_manager
+                .find_verified_workspace_by_issue_reference(&args.issue)
+                .await
+                .map_err(|e| format!("failed to find verified workspace: {}", e))?
+                .ok_or_else(|| format!("No verified workspace found for issue {}", args.issue))?,
+            true,
+        )
+    } else {
+        match workspace_manager
             .find_verified_workspace_by_issue_reference(&args.issue)
             .await
-    } else {
-        workspace_manager
-            .find_workspace_by_issue_reference(&args.issue)
-            .await
-    }
-    .map_err(|e| format!("failed to find workspace: {}", e))?
-    .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
+            .map_err(|e| format!("failed to find verified workspace: {}", e))?
+        {
+            Some(workspace) => (workspace, true),
+            None => (
+                workspace_manager
+                    .find_workspace_by_issue_reference(&args.issue)
+                    .await
+                    .map_err(|e| format!("failed to find workspace: {}", e))?
+                    .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?,
+                false,
+            ),
+        }
+    };
 
     // Load existing conversation manifest
     let manifest_path = workspace.conversation_manifest_path();

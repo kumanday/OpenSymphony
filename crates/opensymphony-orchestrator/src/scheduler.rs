@@ -1202,7 +1202,7 @@ where
                             .cloned()
                             .map(RepositoryBindingOutcome::Resolved)
                     });
-                let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+                let binding_changed = RepositoryBindingOutcome::binding_changed_opt(
                     normalized.repository_binding.as_ref(),
                     recovered_binding.as_ref(),
                 );
@@ -1584,7 +1584,7 @@ where
                 .get(&normalized.id)
                 .is_some_and(|execution| {
                     execution.workspace().is_some()
-                        && RepositoryBindingOutcome::canonical_identity_changed_opt(
+                        && RepositoryBindingOutcome::binding_changed_opt(
                             execution.issue().repository_binding.as_ref(),
                             normalized.repository_binding.as_ref(),
                         )
@@ -1653,7 +1653,7 @@ where
                             SchedulerStatus::Claimed
                                 | SchedulerStatus::Running
                                 | SchedulerStatus::RetryQueued
-                        ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
+                        ) && RepositoryBindingOutcome::binding_changed_opt(
                             existing.issue().repository_binding.as_ref(),
                             issue.repository_binding.as_ref(),
                         ) {
@@ -2192,7 +2192,7 @@ where
             .repository_binding
             .clone()
             .map(RepositoryBindingOutcome::Resolved);
-        let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+        let binding_changed = RepositoryBindingOutcome::binding_changed_opt(
             current_execution.issue().repository_binding.as_ref(),
             recovered_binding.as_ref(),
         );

@@ -149,6 +149,7 @@ pub(super) struct RuntimeWorkerBackend {
     workflow: Arc<ResolvedWorkflow>,
     workspace_manager: Arc<WorkspaceManager>,
     runner_config: IssueSessionRunnerConfig,
+    memory_env: Option<RuntimeMemoryEnv>,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
     worker_env: BTreeMap<String, String>,
     checkout_credential_envs: BTreeSet<String>,
@@ -1538,6 +1539,7 @@ impl RuntimeWorkerBackend {
             workspace_manager,
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
+            memory_env,
             workpad_comment_source,
             worker_env,
             checkout_credential_envs: BTreeSet::new(),
@@ -1579,17 +1581,10 @@ impl RuntimeWorkerBackend {
 
     fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
         let checkout_credential_envs = self.checkout_credential_envs.clone();
-        let mut runner = IssueSessionRunner::with_environment(
-            self.client.clone(),
-            self.runner_config.clone(),
-            OverlayEnvironment {
-                overrides: self.worker_env.clone(),
-                blocked: checkout_credential_envs.clone(),
-            },
-        );
-        if let Some(source) = self.workpad_comment_source.clone() {
-            runner = runner.with_workpad_comment_source(source);
-        }
+        let client = self.client.clone();
+        let runner_config = self.runner_config.clone();
+        let memory_env = self.memory_env.clone();
+        let workpad_comment_source = self.workpad_comment_source.clone();
         let workspace_manager = self.workspace_manager.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
@@ -1711,6 +1706,36 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
+            let worker_memory_env = memory_env.as_ref().map(|memory| {
+                let mut scoped = memory.clone();
+                scoped.project = issue
+                    .project_slug
+                    .clone()
+                    .or_else(|| issue.project_id.clone())
+                    .unwrap_or_else(|| memory.project.clone());
+                scoped.execution_repo = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.repository_binding.repository.id.to_string())
+                    .unwrap_or_else(|| memory.execution_repo.clone());
+                scoped
+            });
+            let mut worker_environment = worker_env.clone();
+            if let Some(memory) = &worker_memory_env {
+                inject_memory_env(&mut worker_environment, memory);
+            }
+            let mut runner = IssueSessionRunner::with_environment(
+                client.clone(),
+                runner_config
+                    .clone()
+                    .with_memory(worker_memory_env.as_ref().map(memory_access_from_runtime)),
+                OverlayEnvironment {
+                    overrides: worker_environment,
+                    blocked: checkout_credential_envs.clone(),
+                },
+            );
+            if let Some(source) = workpad_comment_source.clone() {
+                runner = runner.with_workpad_comment_source(source);
+            }
             let repository_instructions = if ensured.handle.checkout_generation().is_some() {
                 let result = if allow_worker_changes {
                     workspace_manager

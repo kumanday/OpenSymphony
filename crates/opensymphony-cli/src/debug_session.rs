@@ -368,25 +368,44 @@ pub async fn run_command(args: DebugArgs) -> ExitCode {
 
 async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     let runtime = resolve_runtime_config(&args).await?;
-    let strict_recovery = super::strict_recovery_enabled(runtime.repository_routing.as_ref());
+    let configured_strict = super::strict_recovery_configured(
+        runtime.repository_routing.as_ref(),
+        runtime.repository_checkouts.as_ref(),
+    );
     let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
-    let workspace = if strict_recovery {
-        manager
+    let (workspace, strict_recovery) = if configured_strict {
+        (
+            manager
+                .find_verified_workspace_by_issue_reference(&args.issue_id)
+                .await?
+                .ok_or_else(|| DebugCommandError::WorkspaceNotFound {
+                    issue_reference: args.issue_id.clone(),
+                    workspace_root: runtime.workflow.config.workspace.root.clone(),
+                })?,
+            true,
+        )
+    } else {
+        match manager
             .find_verified_workspace_by_issue_reference(&args.issue_id)
             .await?
-    } else {
-        manager
-            .find_workspace_by_issue_reference(&args.issue_id)
-            .await?
-    }
-    .ok_or_else(|| DebugCommandError::WorkspaceNotFound {
-        issue_reference: args.issue_id.clone(),
-        workspace_root: runtime.workflow.config.workspace.root.clone(),
-    })?;
+        {
+            Some(workspace) => (workspace, true),
+            None => (
+                manager
+                    .find_workspace_by_issue_reference(&args.issue_id)
+                    .await?
+                    .ok_or_else(|| DebugCommandError::WorkspaceNotFound {
+                        issue_reference: args.issue_id.clone(),
+                        workspace_root: runtime.workflow.config.workspace.root.clone(),
+                    })?,
+                false,
+            ),
+        }
+    };
     let manifest_path = workspace.conversation_manifest_path();
     let raw_manifest = load_conversation_manifest_raw(&manager, &workspace).await?;
-    verify_strict_recovery_envelope(&runtime, &manager, &workspace, &raw_manifest).await?;
+    verify_strict_recovery_envelope(&manager, &workspace, &raw_manifest, strict_recovery).await?;
     if let Some(mut codex) = codex_debug_metadata_from_raw_manifest(
         &raw_manifest,
         &manifest_path,
@@ -959,12 +978,12 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
 }
 
 async fn verify_strict_recovery_envelope(
-    runtime: &DebugRuntimeConfig,
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     raw_manifest: &str,
+    strict_recovery: bool,
 ) -> Result<(), DebugCommandError> {
-    if !super::strict_recovery_enabled(runtime.repository_routing.as_ref()) {
+    if !strict_recovery {
         return Ok(());
     }
     let run_envelope = manager

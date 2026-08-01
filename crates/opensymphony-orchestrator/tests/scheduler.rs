@@ -2724,7 +2724,7 @@ async fn queued_binding_change_reconciles_before_retry_is_due() {
 }
 
 #[tokio::test]
-async fn same_repository_recovery_retains_persisted_binding_generations() {
+async fn same_repository_recovery_supersedes_stale_binding_generations() {
     let recovered_worker_id =
         WorkerId::new("worker-same-repository-generation").expect("worker id should be valid");
     let recovered_workspace = workspace_record(
@@ -2800,7 +2800,8 @@ async fn same_repository_recovery_retains_persisted_binding_generations() {
         .await
         .expect("same-repository recovery should reuse the persisted run");
 
-    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
     let run = &scheduler.worker().launches[0].run;
     assert_eq!(
         run.repository_binding
@@ -2813,6 +2814,14 @@ async fn same_repository_recovery_retains_persisted_binding_generations() {
             .as_ref()
             .map(|binding| binding.inventory_generation.as_str()),
         Some("inventory-before-restart")
+    );
+    assert_eq!(
+        scheduler.worker().launches[1]
+            .run
+            .repository_binding
+            .as_ref()
+            .map(|binding| binding.config_generation.as_str()),
+        Some("config-test")
     );
     assert_eq!(
         scheduler
@@ -6002,7 +6011,7 @@ async fn unproven_recovery_keeps_workspace_and_worker_until_stop_acknowledges() 
 }
 
 #[tokio::test]
-async fn alias_only_binding_mutation_keeps_running_generation() {
+async fn alias_only_binding_mutation_supersedes_running_generation() {
     let mut issue = tracker_issue("lin-repo-alias", "COE-548-ALIAS", "In Progress", 0);
     issue.project_id = Some("project-id".to_string());
     issue.labels = vec!["repo:one".to_string()];
@@ -6036,10 +6045,10 @@ async fn alias_only_binding_mutation_keeps_running_generation() {
     scheduler
         .tick(ts(3_600_100))
         .await
-        .expect("alias-only binding refresh should not supersede the run");
+        .expect("alias-only binding refresh should supersede the run");
 
-    assert_eq!(scheduler.worker().launches.len(), 1);
-    assert!(scheduler.worker().aborted.is_empty());
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
     assert_eq!(
         scheduler
             .execution(&IssueId::new("lin-repo-alias").expect("issue id should be valid"))
