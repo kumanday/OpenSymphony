@@ -2712,6 +2712,10 @@ impl IssueSessionRunner {
             envelope.conversation_binding = Some(manifest.conversation_id.to_string());
         }
         run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        let pending_manifest_path = pending_conversation_manifest_path(workspace);
+        workspace_manager
+            .write_json_artifact(workspace, &pending_manifest_path, &Some(&manifest))
+            .await?;
         workspace_manager
             .write_run_manifest(workspace, run_manifest)
             .await?;
@@ -2724,6 +2728,15 @@ impl IssueSessionRunner {
                 workspace,
                 &workspace.conversation_manifest_path(),
                 &manifest,
+            )
+            .await?;
+        // The pending copy makes the run/conversation binding recoverable if
+        // the process exits after run.json but before conversation.json.
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &pending_manifest_path,
+                &Option::<IssueConversationManifest>::None,
             )
             .await?;
         workspace_manager
@@ -4135,6 +4148,10 @@ fn create_conversation_request_path(workspace: &WorkspaceHandle) -> PathBuf {
     workspace
         .openhands_dir()
         .join("create-conversation-request.json")
+}
+
+pub fn pending_conversation_manifest_path(workspace: &WorkspaceHandle) -> PathBuf {
+    workspace.openhands_dir().join("pending-conversation.json")
 }
 
 fn last_conversation_state_path(workspace: &WorkspaceHandle) -> PathBuf {

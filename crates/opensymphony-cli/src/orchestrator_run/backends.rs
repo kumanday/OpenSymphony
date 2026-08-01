@@ -30,6 +30,7 @@ use crate::opensymphony_openhands::{
     OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient, OpenHandsConversationStorePaths,
     OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
+    pending_conversation_manifest_path,
 };
 use crate::opensymphony_orchestrator::{
     RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
@@ -884,7 +885,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 )
             });
             let conversation_manifest =
-                recovered_conversation_manifest(&self.manager, &handle).await?;
+                recovered_conversation_manifest(&self.manager, &handle, run_manifest.as_ref())
+                    .await?;
             let harness_kind = conversation_manifest
                 .as_ref()
                 .map(recovered_harness_kind_from_manifest);
@@ -1362,22 +1364,71 @@ fn retry_reason_from_manifest(value: &str) -> Option<RetryReason> {
 async fn recovered_conversation_manifest(
     manager: &WorkspaceManager,
     handle: &WorkspaceHandle,
+    run_manifest: Option<&RunManifest>,
 ) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
     let manifest_path = handle.conversation_manifest_path();
-    let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? else {
+    if let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? {
+        let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::warn!(
+                    manifest = %manifest_path.display(),
+                    %error,
+                    "skipping recovered scheduler harness kind for invalid conversation manifest"
+                );
+                return Ok(None);
+            }
+        };
+        return Ok(Some(manifest));
+    }
+
+    let Some(run_manifest) = run_manifest else {
         return Ok(None);
     };
-    let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            tracing::warn!(
-                manifest = %manifest_path.display(),
-                %error,
-                "skipping recovered scheduler harness kind for invalid conversation manifest"
-            );
-            return Ok(None);
-        }
+    if !matches!(
+        run_manifest.status,
+        RunStatus::Preparing | RunStatus::Prepared
+    ) || run_manifest.runtime_envelope.is_none()
+    {
+        return Ok(None);
+    }
+
+    let pending_path = pending_conversation_manifest_path(handle);
+    let Some(raw_pending) = manager.read_text_artifact(handle, &pending_path).await? else {
+        return Ok(None);
     };
+    let Some(manifest) = serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
+        .ok()
+        .flatten()
+    else {
+        tracing::warn!(
+            manifest = %pending_path.display(),
+            "skipping invalid pending OpenHands conversation manifest"
+        );
+        return Ok(None);
+    };
+    if manifest.runtime_envelope.as_ref() != run_manifest.runtime_envelope.as_ref()
+        || manifest
+            .runtime_envelope
+            .as_ref()
+            .and_then(|envelope| envelope.conversation_binding.as_deref())
+            != Some(manifest.conversation_id.as_str())
+    {
+        tracing::warn!(
+            manifest = %pending_path.display(),
+            "skipping pending OpenHands conversation with an incompatible runtime envelope"
+        );
+        return Ok(None);
+    }
+
+    manager
+        .write_json_artifact(handle, &manifest_path, &manifest)
+        .await?;
+    tracing::info!(
+        manifest = %manifest_path.display(),
+        conversation_id = %manifest.conversation_id,
+        "promoted pending OpenHands conversation manifest during recovery"
+    );
     Ok(Some(manifest))
 }
 
@@ -1403,6 +1454,25 @@ fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) ->
     OPENHANDS_AGENT_SERVER_KIND.to_string()
 }
 
+fn fresh_conversation_initialization_pending(
+    run_manifest: &RunManifest,
+    conversation_manifest: &IssueConversationManifest,
+) -> bool {
+    run_manifest.status == RunStatus::Prepared
+        && conversation_manifest.fresh_conversation
+        && !conversation_manifest.workflow_prompt_seeded
+        && conversation_manifest.last_prompt_kind.is_none()
+        && conversation_manifest.active_run_id.is_none()
+        && conversation_manifest.prepared_run_id.is_none()
+        && conversation_manifest.trigger_pending_run_id.is_none()
+        && conversation_manifest.runtime_envelope == run_manifest.runtime_envelope
+        && conversation_manifest
+            .runtime_envelope
+            .as_ref()
+            .and_then(|envelope| envelope.conversation_binding.as_deref())
+            == Some(conversation_manifest.conversation_id.as_str())
+}
+
 fn recoverable_run_manifest(
     run_manifest: &RunManifest,
     conversation_manifest: Option<&IssueConversationManifest>,
@@ -1424,6 +1494,11 @@ fn recoverable_run_manifest(
     });
     if !conversation_binding_compatible {
         return false;
+    }
+    if conversation_manifest
+        .is_some_and(|manifest| fresh_conversation_initialization_pending(run_manifest, manifest))
+    {
+        return true;
     }
     run_manifest.status == RunStatus::Running
         || (run_manifest.status == RunStatus::Prepared
@@ -1658,12 +1733,16 @@ impl RuntimeWorkerBackend {
             let persisted_conversation_binding = if persisted_conversation_binding.is_some() {
                 persisted_conversation_binding
             } else {
-                recovered_conversation_manifest(&workspace_manager, &ensured.handle)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|manifest| manifest.runtime_envelope)
-                    .and_then(|envelope| envelope.conversation_binding)
+                recovered_conversation_manifest(
+                    &workspace_manager,
+                    &ensured.handle,
+                    prior_run_manifest.as_ref(),
+                )
+                .await
+                .ok()
+                .flatten()
+                .and_then(|manifest| manifest.runtime_envelope)
+                .and_then(|envelope| envelope.conversation_binding)
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
@@ -1811,6 +1890,7 @@ impl RuntimeWorkerBackend {
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
                 .with_runtime_envelope(runtime_envelope.clone());
+            let mut initialize_fresh_conversation = false;
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(Some(run_manifest)) => {
@@ -1836,6 +1916,7 @@ impl RuntimeWorkerBackend {
                                 match recovered_conversation_manifest(
                                     &workspace_manager,
                                     &ensured.handle,
+                                    Some(&run_manifest),
                                 )
                                 .await
                                 {
@@ -1854,6 +1935,14 @@ impl RuntimeWorkerBackend {
                         } else {
                             None
                         };
+                        initialize_fresh_conversation =
+                            conversation_manifest.as_ref().is_some_and(|manifest| {
+                                route.harness_kind != CODEX_APP_SERVER_KIND
+                                    && fresh_conversation_initialization_pending(
+                                        &run_manifest,
+                                        manifest,
+                                    )
+                            });
                         if recoverable_run_manifest(
                             &run_manifest,
                             conversation_manifest.as_ref(),
@@ -2034,7 +2123,7 @@ impl RuntimeWorkerBackend {
                 launch_tx,
                 updates_tx: updates_tx.clone(),
             };
-            let result = if recovered {
+            let result = if recovered && !initialize_fresh_conversation {
                 runner
                     .recover_with_observer(
                         &workspace_manager,
@@ -5041,6 +5130,85 @@ mod tests {
             &run_manifest,
             Some(&conversation_manifest),
             false,
+        ));
+    }
+
+    #[test]
+    fn strict_recovery_accepts_fresh_conversation_binding_before_first_prompt() {
+        let now = chrono::Utc::now();
+        let runtime_envelope: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "repository_binding": {
+                "alias": "main",
+                "repository": {
+                    "id": "github:repository:repo",
+                    "safe_remote_fingerprint": "sha256:fingerprint"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory"
+            },
+            "config_generation": "config",
+            "inventory_generation": "inventory",
+            "policy_generation": "config",
+            "checkout_generation": "generation-1",
+            "checkout_path": "/workspace/COE-479--generation-1",
+            "target_branch": "develop",
+            "target_commit": "commit",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit",
+                "source": "root",
+                "native_discovery_paths": [],
+                "native_discovery_hashes": {}
+            },
+            "harness": "openhands_agent_server",
+            "model_profile": "default",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "conversation_binding": "conv-pending",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("sample runtime envelope should decode");
+        let run_manifest = RunManifest {
+            run_id: "run-strict-pending".to_owned(),
+            issue_id: "issue-contract".to_owned(),
+            identifier: "COE-479".to_owned(),
+            sanitized_workspace_key: "COE-479".to_owned(),
+            workspace_path: PathBuf::from("/workspace/COE-479--generation-1"),
+            repository_binding: None,
+            runtime_envelope: Some(runtime_envelope.clone()),
+            attempt: 1,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Prepared,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        let mut conversation_manifest = sample_conversation_manifest("conv-pending");
+        conversation_manifest.workflow_prompt_seeded = false;
+        conversation_manifest.runtime_envelope = Some(runtime_envelope);
+
+        assert!(fresh_conversation_initialization_pending(
+            &run_manifest,
+            &conversation_manifest
+        ));
+        assert!(recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+
+        conversation_manifest.last_prompt_kind = Some(IssueSessionPromptKind::Full);
+        assert!(!fresh_conversation_initialization_pending(
+            &run_manifest,
+            &conversation_manifest
         ));
     }
 
