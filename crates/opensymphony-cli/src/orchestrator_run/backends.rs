@@ -1775,19 +1775,23 @@ impl RuntimeWorkerBackend {
                         return;
                     }
                 };
+                let mut checkout_facts = format!(
+                    "Path: {}\nGeneration: {}\nBranch: {}\nCommit: {}",
+                    checkout.checkout_path.display(),
+                    checkout.checkout_generation,
+                    checkout.target_branch,
+                    checkout.target_commit
+                );
+                if let Some(memory) = worker_memory_env.as_ref() {
+                    checkout_facts.push_str(&memory_scope_prompt(memory));
+                }
                 Some(compose_terminal_prompt(
                     &central_procedure,
                     &format!(
                         "Issue: {}\nTitle: {}\nAttempt: {}",
                         issue.identifier, issue.title, attempt
                     ),
-                    &format!(
-                        "Path: {}\nGeneration: {}\nBranch: {}\nCommit: {}",
-                        checkout.checkout_path.display(),
-                        checkout.checkout_generation,
-                        checkout.target_branch,
-                        checkout.target_commit
-                    ),
+                    &checkout_facts,
                     repository_instructions.as_deref(),
                     &format!(
                         "harness={} cwd={} containment={}",
@@ -2226,16 +2230,19 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
         memory.project.clone(),
     );
     env.insert(
-        "OPENSYMPHONY_MEMORY_PROJECT_SET".to_string(),
-        memory.project.clone(),
-    );
-    env.insert(
         "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
         memory.execution_repo.clone(),
     );
     if let Some(token) = &memory.token {
         env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
     }
+}
+
+fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
+    format!(
+        "\nMemory tool scope: project={}; repo={}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope.",
+        memory.project, memory.execution_repo
+    )
 }
 
 fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
@@ -7036,15 +7043,14 @@ mod tests {
             Some("project-alpha")
         );
         assert_eq!(
-            env.get("OPENSYMPHONY_MEMORY_PROJECT_SET")
-                .map(String::as_str),
-            Some("project-alpha")
-        );
-        assert_eq!(
             env.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")
                 .map(String::as_str),
             Some("/tmp/project-alpha/services/api")
         );
+        assert_eq!(env.get("OPENSYMPHONY_MEMORY_PROJECT_SET"), None);
+        let prompt = memory_scope_prompt(&memory);
+        assert!(prompt.contains("project=project-alpha"));
+        assert!(prompt.contains("repo=/tmp/project-alpha/services/api"));
     }
 
     #[tokio::test]

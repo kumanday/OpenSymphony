@@ -803,6 +803,13 @@ fn indexed_issue_matches_scope_ref(
 }
 
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
+    if issue
+        .scope_refs
+        .iter()
+        .any(|scope| scope.kind == KnowledgeScopeKind::Repository)
+    {
+        return indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Repository, repo);
+    }
     let repo = repo_scope_prefix(config, repo);
     if repo.is_empty() || repo == "." {
         return true;

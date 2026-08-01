@@ -3233,11 +3233,18 @@ Reviews are triggered when you open a pull request for review.
             completion_time: None,
             captured_at: "2026-08-01T00:00:00Z".to_string(),
             changed_files: vec![PathBuf::from("repo-one/src/lib.rs")],
-            scope_refs: vec![KnowledgeScope {
-                kind: KnowledgeScopeKind::Project,
-                id: "project-1".to_string(),
-                label: Some("Project One".to_string()),
-            }],
+            scope_refs: vec![
+                KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: "project-1".to_string(),
+                    label: Some("Project One".to_string()),
+                },
+                KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: "repository-1".to_string(),
+                    label: Some("Repo One".to_string()),
+                },
+            ],
             source_refs: Vec::new(),
             links: Vec::new(),
             citations: Vec::new(),
@@ -3247,11 +3254,37 @@ Reviews are triggered when you open a pull request for review.
         };
         let scope = MemoryScopeFilter {
             project: Some("project one".to_string()),
-            repo: Some("repo-one".to_string()),
+            repo: Some("repository-1".to_string()),
             ..MemoryScopeFilter::default()
         };
 
         assert!(indexed_issue_matches_scope(&config, &issue, &scope));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                scope_refs: vec![KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: "project-1".to_string(),
+                    label: Some("Project One".to_string()),
+                }],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                repo: Some("repo-one".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                changed_files: vec![PathBuf::from("src/lib.rs")],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                repo: Some("repository-1".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
         assert!(!indexed_issue_matches_scope(
             &config,
             &issue,

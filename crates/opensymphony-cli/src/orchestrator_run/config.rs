@@ -1432,6 +1432,10 @@ fn reject_checkout_credential_env_reuse(
     for variable in ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"] {
         non_checkout_variables.insert(variable.to_owned(), "linear.oauth_client_credentials");
     }
+    non_checkout_variables.insert(
+        "OPENSYMPHONY_CODEX_BIN".to_owned(),
+        "runtime.codex_binary_env",
+    );
     if let Some(front_matter) = config.openhands.front_matter.as_ref() {
         let value = serde_yaml::to_value(front_matter).map_err(|_| {
             CentralConfigError::InvalidReference {
@@ -3030,6 +3034,25 @@ scheduler:
                     if field == "linear.oauth_client_credentials"
             ));
         }
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_codex_binary() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent",
+            "  github-ssh:\n    kind: environment\n    variable: OPENSYMPHONY_CODEX_BIN",
+        );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("Codex binary selector must not reuse checkout credentials");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "runtime.codex_binary_env"
+        ));
     }
 
     #[test]

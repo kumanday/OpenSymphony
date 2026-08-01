@@ -3618,7 +3618,6 @@ async fn fetch_memory_context_from_server(
     if let Value::Object(map) = &mut arguments {
         if let Some(project) = &memory.project {
             map.insert("project".to_string(), json!(project));
-            map.insert("projectSet".to_string(), json!(project));
         }
         if let Some(repo) = &memory.execution_repo {
             map.insert("repo".to_string(), json!(repo));
@@ -4399,10 +4398,7 @@ mod tests {
             "COE-100"
         );
         assert_eq!(request["params"]["arguments"]["project"], "project-alpha");
-        assert_eq!(
-            request["params"]["arguments"]["projectSet"],
-            "project-alpha"
-        );
+        assert!(request["params"]["arguments"].get("projectSet").is_none());
         assert_eq!(request["params"]["arguments"]["repo"], "/tmp/repo-alpha");
         task.abort();
     }
