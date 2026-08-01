@@ -386,6 +386,14 @@ impl WorkspaceComparisonBases {
     }
 }
 
+fn comparison_bases_for_memory_config(config: &MemoryConfig) -> WorkspaceComparisonBases {
+    let target_branch =
+        config.code_index_target_branch.clone().map(Ok).or_else(|| {
+            Some(code_index_branch(&config.repo_root).map_err(|error| error.to_string()))
+        });
+    WorkspaceComparisonBases::with_target_branch(target_branch)
+}
+
 type WorkspaceScanReceiver = tokio::sync::watch::Receiver<Option<WorkspaceScanOutcome>>;
 
 /// Result of one workspace git sweep: the comparison base (when resolvable)
@@ -720,10 +728,10 @@ impl GatewayServer {
 
     /// Install the local memory catalog used by `/api/v1/memory/*` reads.
     pub fn with_memory_config(mut self, config: Option<MemoryConfig>) -> Self {
-        let target_branch = config
+        self.comparison_bases = config
             .as_ref()
-            .map(|config| code_index_branch(&config.repo_root).map_err(|error| error.to_string()));
-        self.comparison_bases = WorkspaceComparisonBases::with_target_branch(target_branch);
+            .map(comparison_bases_for_memory_config)
+            .unwrap_or_default();
         self.memory_config = config;
         self
     }
@@ -2107,7 +2115,7 @@ async fn get_run_code_outline(
     }
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), selected_config.clone()) {
-        let comparison_bases = state.comparison_bases.clone();
+        let comparison_bases = comparison_bases_for_memory_config(&config);
         let overlay_run_identifier = run_identifier.clone();
         let overlay_relative_path = relative_path.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
@@ -2193,7 +2201,7 @@ async fn get_run_code_diff_overlay(
         )
     })?;
     let config = code_memory_for_live_graph_read(&config, &repo_id).await?;
-    let comparison_bases = state.comparison_bases.clone();
+    let comparison_bases = comparison_bases_for_memory_config(&config);
     let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
     let overlay = tokio::task::spawn_blocking({
         let workspace_path = workspace_path.clone();
@@ -2263,7 +2271,7 @@ async fn get_run_code_graph(
         aggregate: parse_code_graph_aggregate(params.aggregate.as_deref())?,
         include_stale: params.include_stale.unwrap_or(false),
     };
-    let comparison_bases = state.comparison_bases.clone();
+    let comparison_bases = comparison_bases_for_memory_config(&config);
     let snapshot = tokio::task::spawn_blocking(move || {
         let base = comparison_bases
             .resolve(&run_id, &workspace_path)
@@ -6709,6 +6717,57 @@ exit 2
         assert!(
             workspace_comparison_base(missing_target.path(), Some(&missing_target_branch)).is_err()
         );
+    }
+
+    #[test]
+    fn memory_comparison_bases_use_selected_repository_target_branch() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::write(
+            workspace.join("WORKFLOW.md"),
+            "Target branch: `feature/worktree`\n",
+        )
+        .expect("write workflow");
+        std::fs::write(workspace.join("README.md"), "baseline\n").expect("write baseline");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "develop"]);
+        run_git(workspace, &["add", "."]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "baseline",
+                "--no-gpg-sign",
+            ],
+        );
+        let develop_revision =
+            command_single_line(workspace, "git", &["rev-parse", "HEAD"]).expect("revision");
+        run_git(workspace, &["checkout", "-B", "feature/worktree"]);
+        std::fs::write(workspace.join("README.md"), "feature\n").expect("write feature");
+        run_git(workspace, &["add", "README.md"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature",
+                "--no-gpg-sign",
+            ],
+        );
+
+        let mut config = MemoryConfig::load(workspace, None).expect("memory config");
+        config.code_index_target_branch = Some("develop".to_owned());
+        let comparison_bases = comparison_bases_for_memory_config(&config);
+        let resolved = comparison_bases
+            .resolve("run", workspace)
+            .expect("comparison base");
+        assert_eq!(resolved.merge_base, develop_revision);
     }
 
     #[test]

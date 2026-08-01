@@ -135,7 +135,7 @@ enum MemoryCommand {
     #[command(about = "Show one issue capsule")]
     Show(ShowArgs),
     #[command(about = "Show a compact issue memory brief")]
-    Brief(ShowArgs),
+    Brief(BriefArgs),
     #[command(about = "Search captured issue memory")]
     Search(SearchArgs),
     #[command(about = "Find related issue memory")]
@@ -253,6 +253,14 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct ShowArgs {
+    #[arg(help = "Issue identifier")]
+    issue: String,
+}
+
+#[derive(Debug, Args)]
+struct BriefArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
     #[arg(help = "Issue identifier")]
     issue: String,
 }
@@ -940,11 +948,11 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Show(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_show(&config, args, ShowMode::Full)
+            run_show(&config, args)
         }
         MemoryCommand::Brief(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_show(&config, args, ShowMode::Brief)
+            run_brief(&config, args)
         }
         MemoryCommand::Search(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
@@ -1362,22 +1370,14 @@ fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ShowMode {
-    Full,
-    Brief,
+fn run_show(config: &MemoryConfig, args: ShowArgs) -> Result<(), MemoryError> {
+    let contents = load_issue_capsule(config, &args.issue)?;
+    println!("{contents}");
+    Ok(())
 }
 
-fn run_show(config: &MemoryConfig, args: ShowArgs, mode: ShowMode) -> Result<(), MemoryError> {
-    match mode {
-        ShowMode::Brief => {
-            println!("{}", brief(config, &args.issue)?);
-        }
-        ShowMode::Full => {
-            let contents = load_issue_capsule(config, &args.issue)?;
-            println!("{contents}");
-        }
-    }
+fn run_brief(config: &MemoryConfig, args: BriefArgs) -> Result<(), MemoryError> {
+    println!("{}", brief(config, &args.issue)?);
     Ok(())
 }
 
@@ -1574,9 +1574,10 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 "force": args.force
             }),
         )),
-        MemoryCommand::Brief(args) => {
-            Some(("memory.brief", json!({ "issue": args.issue.clone() })))
-        }
+        MemoryCommand::Brief(args) => Some((
+            "memory.brief",
+            with_scope_json(&args.scope, json!({ "issue": args.issue.clone() })),
+        )),
         MemoryCommand::Search(args) => Some((
             "memory.search",
             with_scope_json(
@@ -7220,9 +7221,9 @@ mod tests {
         call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
         load_memory_config, memory_server_health, memory_server_health_payload,
         memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, sha256_file_hex,
-        trim_auto_memory_status_log,
+        remote_memory_tool_request, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
+        sha256_file_hex, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -7464,6 +7465,21 @@ mod tests {
         let scope = brief_scope_filter(&config, &json!({"allAccessible": true}))
             .expect("explicit broad scope");
         assert!(scope.all_accessible);
+    }
+
+    #[test]
+    fn remote_brief_forwards_repository_scope() {
+        let command = super::MemoryCommand::Brief(super::BriefArgs {
+            scope: super::ScopeArgs {
+                repo: Some("repo-b".to_string()),
+                ..Default::default()
+            },
+            issue: "COE-550".to_string(),
+        });
+        let (tool, arguments) = remote_memory_tool_request(&command).expect("remote brief request");
+        assert_eq!(tool, "memory.brief");
+        assert_eq!(arguments["repo"], "repo-b");
+        assert_eq!(arguments["issue"], "COE-550");
     }
 
     #[test]
