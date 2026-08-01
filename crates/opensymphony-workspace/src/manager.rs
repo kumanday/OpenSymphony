@@ -2247,6 +2247,16 @@ impl WorkspaceManager {
             .await
         {
             Ok(Some(checkout)) => handle.with_checkout_generation(checkout.generation),
+            Ok(None)
+                if is_generation_shaped_directory(
+                    workspace_path,
+                    &manifest.sanitized_workspace_key,
+                ) =>
+            {
+                return Err(missing_checkout_manifest_error(
+                    handle.checkout_manifest_path(),
+                ));
+            }
             Ok(None) => handle,
             Err(error @ WorkspaceError::DecodeManifest { .. })
                 if workspace_path
@@ -2843,7 +2853,7 @@ fn workflow_body(bytes: &[u8]) -> Vec<u8> {
 async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
     let mut pending = vec![root.to_path_buf()];
     let mut paths = Vec::new();
-    let mut scanned_entries = 0;
+    let mut instruction_candidates = 0;
     while let Some(directory) = pending.pop() {
         let mut entries =
             fs::read_dir(&directory)
@@ -2861,13 +2871,6 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                     source,
                 })?
         {
-            scanned_entries += 1;
-            if scanned_entries > 10_000 {
-                return Err(checkout_verification(
-                    root,
-                    "instruction discovery exceeded the entry limit",
-                ));
-            }
             let path = entry.path();
             let file_type =
                 entry
@@ -2891,6 +2894,13 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                 && entry.file_name() == "AGENTS.md"
                 && let Ok(relative) = path.strip_prefix(root)
             {
+                instruction_candidates += 1;
+                if instruction_candidates > 10_000 {
+                    return Err(checkout_verification(
+                        root,
+                        "instruction discovery exceeded the candidate limit",
+                    ));
+                }
                 paths.push(relative.to_path_buf());
             }
         }
@@ -3118,6 +3128,21 @@ async fn path_exists(path: &Path) -> Result<bool, WorkspaceError> {
             path: path.to_path_buf(),
             source: error,
         }),
+    }
+}
+
+fn is_generation_shaped_directory(path: &Path, workspace_key: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(&format!("{workspace_key}--")))
+        .is_some_and(|generation| !generation.is_empty())
+}
+
+fn missing_checkout_manifest_error(path: PathBuf) -> WorkspaceError {
+    WorkspaceError::DecodeManifest {
+        path,
+        source: serde_json::from_str::<serde_json::Value>("")
+            .expect_err("empty JSON must produce a decode error"),
     }
 }
 

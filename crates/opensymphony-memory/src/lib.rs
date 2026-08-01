@@ -3285,6 +3285,22 @@ Reviews are triggered when you open a pull request for review.
                 ..MemoryScopeFilter::default()
             }
         ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                scope_refs: vec![KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: "repository-1".to_string(),
+                    label: Some("Repo One".to_string()),
+                }],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                project: Some("project-1".to_string()),
+                repo: Some("repository-1".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
         assert!(!indexed_issue_matches_scope(
             &config,
             &issue,

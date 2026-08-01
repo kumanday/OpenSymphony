@@ -770,7 +770,7 @@ fn indexed_issue_matches_scope(
         return false;
     }
     if let Some(project) = scope.project.as_ref().and_then(|value| normalize_optional(value))
-        && !indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Project, &project)
+        && !indexed_issue_matches_project(issue, &project)
     {
         return false;
     }
@@ -785,6 +785,15 @@ fn indexed_issue_matches_scope(
         return false;
     }
     true
+}
+
+fn indexed_issue_matches_project(issue: &IndexedIssue, project: &str) -> bool {
+    let has_explicit_project_scope = issue
+        .scope_refs
+        .iter()
+        .any(|scope| scope.kind == KnowledgeScopeKind::Project);
+    !has_explicit_project_scope
+        || indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Project, project)
 }
 
 fn indexed_issue_matches_scope_ref(

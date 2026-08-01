@@ -633,6 +633,24 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("strict generation marker should be written");
 
+    let missing_checkout_path =
+        workspace_root.join("malformed-generation--missing-checkout-manifest");
+    tokio::fs::create_dir_all(missing_checkout_path.join(".opensymphony"))
+        .await
+        .expect("missing checkout manifest directory should exist");
+    let mut missing_checkout_issue = issue_manifest.clone();
+    missing_checkout_issue["sanitized_workspace_key"] =
+        serde_json::Value::String("malformed-generation".to_owned());
+    missing_checkout_issue["workspace_path"] =
+        serde_json::Value::String(missing_checkout_path.display().to_string());
+    tokio::fs::write(
+        missing_checkout_path.join(".opensymphony/issue.json"),
+        serde_json::to_vec_pretty(&missing_checkout_issue)
+            .expect("missing checkout issue manifest should encode"),
+    )
+    .await
+    .expect("missing checkout issue manifest should be written");
+
     let found = manager
         .find_workspace_by_issue_reference(&issue.issue_id)
         .await

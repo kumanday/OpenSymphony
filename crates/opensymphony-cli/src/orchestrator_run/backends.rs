@@ -2239,10 +2239,20 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
 }
 
 fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
+    memory_scope_prompt_values(&memory.project, &memory.execution_repo)
+}
+
+fn memory_scope_prompt_values(project: &str, repo: &str) -> String {
     format!(
-        "\nMemory tool scope: project={}; repo={}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope.",
-        memory.project, memory.execution_repo
+        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope."
     )
+}
+
+fn memory_scope_prompt_from_environment(environment: &BTreeMap<String, String>) -> Option<String> {
+    Some(memory_scope_prompt_values(
+        environment.get("OPENSYMPHONY_MEMORY_PROJECT")?,
+        environment.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")?,
+    ))
 }
 
 fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
@@ -2847,7 +2857,13 @@ async fn try_run_codex_stdio_issue(
             .map_err(|source| {
                 format!("failed to render workflow prompt for Codex route: {source}")
             })?,
-        (IssueSessionPromptKind::Continuation, _) => build_continuation_guidance(issue, run),
+        (IssueSessionPromptKind::Continuation, _) => {
+            let mut prompt = build_continuation_guidance(issue, run);
+            if let Some(scope) = memory_scope_prompt_from_environment(worker_env) {
+                prompt.push_str(&scope);
+            }
+            prompt
+        }
     };
     let turn_start = adapter
         .start_issue_turn_request(
@@ -7051,6 +7067,10 @@ mod tests {
         let prompt = memory_scope_prompt(&memory);
         assert!(prompt.contains("project=project-alpha"));
         assert!(prompt.contains("repo=/tmp/project-alpha/services/api"));
+        let continuation_scope = memory_scope_prompt_from_environment(&env)
+            .expect("worker environment should provide continuation scope");
+        assert!(continuation_scope.contains("project=project-alpha"));
+        assert!(continuation_scope.contains("repo=/tmp/project-alpha/services/api"));
     }
 
     #[tokio::test]

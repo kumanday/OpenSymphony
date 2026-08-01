@@ -2959,7 +2959,10 @@ impl IssueSessionRunner {
                     })
                     .map_err(|error| error.to_string())
             }
-            IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
+            IssueSessionPromptKind::Continuation => Ok(append_memory_scope_guidance(
+                build_continuation_guidance(issue, run),
+                self.config.memory.as_ref(),
+            )),
         }
     }
 
@@ -3515,6 +3518,23 @@ pub fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) ->
         "Continue working on issue {}: {}.\nThe original workflow prompt is already present in this conversation, so do not resend or restate it.\nResume from the current workspace and conversation context, inspect the latest progress, and continue from where the previous worker left off.\nCurrent issue state: {}\n{}\n",
         issue.identifier, issue.title, issue.state.name, attempt,
     )
+}
+
+fn append_memory_scope_guidance(
+    mut guidance: String,
+    memory: Option<&MemoryWorkerAccess>,
+) -> String {
+    let Some(memory) = memory else {
+        return guidance;
+    };
+    let (Some(project), Some(repo)) = (memory.project.as_deref(), memory.execution_repo.as_deref())
+    else {
+        return guidance;
+    };
+    guidance.push_str(&format!(
+        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope."
+    ));
+    guidance
 }
 
 async fn write_memory_context_artifact(
@@ -4401,6 +4421,23 @@ mod tests {
         assert!(request["params"]["arguments"].get("projectSet").is_none());
         assert_eq!(request["params"]["arguments"]["repo"], "/tmp/repo-alpha");
         task.abort();
+    }
+
+    #[test]
+    fn continuation_guidance_carries_worker_memory_scope() {
+        let guidance = append_memory_scope_guidance(
+            "continue from the existing conversation".to_owned(),
+            Some(&MemoryWorkerAccess {
+                endpoint: "http://127.0.0.1:8765/mcp".to_owned(),
+                token: None,
+                project: Some("project-alpha".to_owned()),
+                execution_repo: Some("repo-alpha".to_owned()),
+            }),
+        );
+
+        assert!(guidance.contains("project=project-alpha"));
+        assert!(guidance.contains("repo=repo-alpha"));
+        assert!(guidance.contains("memory.context"));
     }
 
     async fn memory_test_mcp(
