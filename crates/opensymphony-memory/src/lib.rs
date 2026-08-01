@@ -3707,6 +3707,75 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn live_capture_merges_registered_source_ownership_and_relations() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        let source = sample_source();
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan = plan_capture(&config, &source, &selection, true, false).expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("initial capture");
+
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = 'COE-123'",
+                params![
+                    r#"["__live_capture__:repo-a","github:repository:b:okf"]"#,
+                    r#"[{"kind":"work_item","id":"COE-123"},{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"b","repo_id":"repo-b","registration_source_id":"github:repository:b:okf"}]"#,
+                ],
+            )
+            .expect("registered ownership");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-123', 'area:registered', 'github:repository:b:okf')",
+                [],
+            )
+            .expect("registered relation");
+        drop(connection);
+
+        write_capture_plan(&config, &plan, false).expect("refresh capture");
+
+        let issue = load_indexed_issues(&config)
+            .expect("indexed issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-123")
+            .expect("captured issue");
+        assert!(
+            issue
+                .source_refs
+                .iter()
+                .any(|source| source.registration_source_id.as_deref()
+                    == Some("github:repository:b:okf"))
+        );
+        assert!(issue.scope_refs.iter().any(|scope| scope.id == "project-b"));
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index exists");
+        let source_ids: String = connection
+            .query_row(
+                "SELECT source_ids_json FROM issues WHERE issue_key = 'COE-123'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source ownership");
+        assert!(source_ids.contains("__live_capture__:repo-a"));
+        assert!(source_ids.contains("github:repository:b:okf"));
+        let registered_relation_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-123' AND source_id = 'github:repository:b:okf'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("registered relation");
+        assert_eq!(registered_relation_count, 1);
+    }
+
+    #[test]
     fn docs_sync_omits_private_capsule_links_for_public_docs() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());

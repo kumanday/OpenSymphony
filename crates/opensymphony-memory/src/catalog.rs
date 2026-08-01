@@ -506,6 +506,16 @@ pub fn withdraw_memory_repository_records(
             path: config.index_path.clone(),
             source: error,
         })?;
+    let withdrawn_live_owner = live_capture_owner(Some(repository_id));
+    transaction
+        .execute(
+            "DELETE FROM source_scope_refs WHERE source_id = ? OR source_id = ?",
+            duckdb::params![withdrawn_live_owner.clone(), LIVE_CAPTURE_OWNER],
+        )
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?;
     let configured_remaining_project_scopes = registered_source_repositories
         .values()
         .filter(|candidate| candidate.as_str() != repository_id)
@@ -515,7 +525,38 @@ pub fn withdraw_memory_repository_records(
         .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, scopes_json, sources_json, source_ids_json) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default();
-        source_ids.retain(|source_id| source_id != LIVE_CAPTURE_OWNER);
+        let had_legacy_live_owner = source_ids.iter().any(|source_id| source_id == LIVE_CAPTURE_OWNER);
+        source_ids.retain(|source_id| {
+            !live_capture_owner_matches_repository(source_id, repository_id)
+        });
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
+                    duckdb::params![issue_key, withdrawn_live_owner.clone()],
+                )
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            if had_legacy_live_owner {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
+                        [&issue_key],
+                    )
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+            }
+        }
         if source_ids.is_empty() {
             transaction
                 .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
@@ -1219,6 +1260,79 @@ mod catalog_tests {
             )
             .expect("repository a scopes");
         assert_eq!(remaining_a_scopes, 0);
+    }
+
+    #[test]
+    fn withdrawing_repository_preserves_other_live_owner_relations() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-557",
+                    "Cross repository live capture",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-557.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-557",
+                    r#"[{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"}]"#,
+                    "[]",
+                    r#"["__live_capture__:repo-a","__live_capture__:repo-b"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-557', 'repository', 'repo-a', NULL), ('issues/COE-557', 'repository', 'repo-b', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-557', 'area-a', '__live_capture__:repo-a'), ('COE-557', 'area-b', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("live relation rows");
+        drop(connection);
+
+        withdraw_memory_repository_records(&config, "repo-a").expect("repository withdrawal");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index exists");
+        let source_ids: String = connection
+            .query_row(
+                "SELECT source_ids_json FROM issues WHERE issue_key = 'COE-557'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("surviving issue");
+        assert_eq!(source_ids, r#"["__live_capture__:repo-b"]"#);
+        let remaining_area_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-557' AND source_id = '__live_capture__:repo-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("remaining live relation");
+        assert_eq!(remaining_area_count, 1);
+        let withdrawn_area_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-557' AND source_id = '__live_capture__:repo-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("withdrawn live relation");
+        assert_eq!(withdrawn_area_count, 0);
     }
 
     #[test]

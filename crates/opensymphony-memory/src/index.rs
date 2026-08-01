@@ -1,5 +1,20 @@
 const UNDATED_LOG_DATE: &str = "1970-01-01";
 const LIVE_CAPTURE_OWNER: &str = "__live_capture__";
+const LIVE_CAPTURE_OWNER_PREFIX: &str = "__live_capture__:";
+
+fn live_capture_owner(repository_id: Option<&str>) -> String {
+    repository_id
+        .map(|repository_id| format!("{LIVE_CAPTURE_OWNER_PREFIX}{repository_id}"))
+        .unwrap_or_else(|| LIVE_CAPTURE_OWNER.to_string())
+}
+
+fn is_live_capture_owner(owner: &str) -> bool {
+    owner == LIVE_CAPTURE_OWNER || owner.starts_with(LIVE_CAPTURE_OWNER_PREFIX)
+}
+
+fn live_capture_owner_matches_repository(owner: &str, repository_id: &str) -> bool {
+    owner == LIVE_CAPTURE_OWNER || owner == live_capture_owner(Some(repository_id))
+}
 
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
     let mut connection = open_index(config)?;
@@ -18,9 +33,46 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let body = read_to_string(&issue_plan.capsule_path)?;
         let labels_json = serde_json::to_string(&issue_plan.issue.labels)?;
         let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
-        let scope_refs = capture_scope_refs(config, issue_plan);
-        let scope_refs_json = serde_json::to_string(&scope_refs)?;
-        let source_refs = issue_plan
+        let live_owner = live_capture_owner(config.default_repository_id.as_deref());
+        let existing = transaction
+            .query_row(
+                "SELECT scope_refs_json, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
+                params![issue_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        let (mut scope_refs, mut source_refs, mut source_ids) = existing
+            .map(|(scope_refs_json, source_refs_json, source_ids_json)| {
+                (
+                    serde_json::from_str::<Vec<KnowledgeScope>>(&scope_refs_json)
+                        .unwrap_or_default(),
+                    serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json)
+                        .unwrap_or_default(),
+                    serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        let live_scope_refs = capture_scope_refs(config, issue_plan);
+        for scope_ref in &live_scope_refs {
+            if !scope_refs.contains(scope_ref) {
+                scope_refs.push(scope_ref.clone());
+            }
+        }
+        source_refs.retain(|source_ref| {
+            source_ref.registration_source_id.is_some()
+                || source_ref.repo_id.as_deref() != config.default_repository_id.as_deref()
+        });
+        let live_source_refs = issue_plan
             .prs
             .iter()
             .map(|pr| MemorySourceRef {
@@ -32,8 +84,17 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 registration_source_id: None,
             })
             .collect::<Vec<_>>();
+        for source_ref in live_source_refs {
+            if !source_refs.contains(&source_ref) {
+                source_refs.push(source_ref);
+            }
+        }
+        let had_legacy_live_owner = source_ids.iter().any(|owner| owner == LIVE_CAPTURE_OWNER);
+        source_ids.retain(|owner| owner != &live_owner && owner != LIVE_CAPTURE_OWNER);
+        source_ids.push(live_owner.clone());
+        let scope_refs_json = serde_json::to_string(&scope_refs)?;
         let source_refs_json = serde_json::to_string(&source_refs)?;
-        let source_ids_json = serde_json::to_string(&vec![LIVE_CAPTURE_OWNER])?;
+        let source_ids_json = serde_json::to_string(&source_ids)?;
         let freshness = MemoryFreshness::Current;
         transaction
             .execute("DELETE FROM issues WHERE issue_key = ?", params![issue_key])
@@ -82,7 +143,10 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             })?;
 
         transaction
-            .execute("DELETE FROM scope_refs WHERE concept_id = ?", params![format!("issues/{issue_key}")])
+            .execute(
+                "DELETE FROM scope_refs WHERE concept_id = ?",
+                params![format!("issues/{issue_key}")],
+            )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -105,18 +169,74 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         }
         transaction
             .execute(
-                "DELETE FROM issue_areas WHERE issue_key = ?",
-                params![issue_key],
+                "DELETE FROM source_scope_refs WHERE source_id = ?",
+                params![live_owner.clone()],
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
+        if had_legacy_live_owner {
+            transaction
+                .execute(
+                    "DELETE FROM source_scope_refs WHERE source_id = ?",
+                    params![LIVE_CAPTURE_OWNER],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for scope_ref in &live_scope_refs {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
+                    params![
+                        format!("issues/{issue_key}"),
+                        live_owner.clone(),
+                        scope_kind_name(&scope_ref.kind),
+                        scope_ref.id,
+                        scope_ref.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
+                    params![issue_key, live_owner.clone()],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            if had_legacy_live_owner {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
+                        params![issue_key],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
         for area in &issue_plan.areas {
             transaction
                 .execute(
-                    "INSERT INTO issue_areas (issue_key, area) VALUES (?, ?)",
-                    params![issue_key, area],
+                    "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
+                    params![issue_key, area, live_owner.clone()],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -124,44 +244,10 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 })?;
         }
 
-        transaction
-            .execute(
-                "DELETE FROM pull_requests WHERE issue_key = ?",
-                params![issue_key],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        transaction
-            .execute(
-                "DELETE FROM changed_files WHERE issue_key = ?",
-                params![issue_key],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        transaction
-            .execute("DELETE FROM checks WHERE issue_key = ?", params![issue_key])
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        transaction
-            .execute(
-                "DELETE FROM reviews WHERE issue_key = ?",
-                params![issue_key],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-
         for pr in &issue_plan.prs {
             transaction
                 .execute(
-                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         issue_key,
                         pr.number as i64,
@@ -170,6 +256,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                         pr.branch.clone(),
                         pr.merge_sha.clone(),
                         pr.merged_at.map(|value| value.to_rfc3339()),
+                        live_owner.clone(),
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -179,12 +266,13 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             for file in &pr.changed_files {
                 transaction
                     .execute(
-                        "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind, source_id) VALUES (?, ?, ?, ?, ?)",
                         params![
                             issue_key,
                             pr.number as i64,
                             file.path.to_string_lossy().to_string(),
                             file.change_kind.clone(),
+                            live_owner.clone(),
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -195,13 +283,14 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             for check in &pr.checks {
                 transaction
                     .execute(
-                        "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at, source_id) VALUES (?, ?, ?, ?, ?, ?)",
                         params![
                             issue_key,
                             pr.number as i64,
                             check.name.clone(),
                             check.conclusion.clone(),
                             check.completed_at.map(|value| value.to_rfc3339()),
+                            live_owner.clone(),
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -212,7 +301,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             for review in &pr.reviews {
                 transaction
                     .execute(
-                        "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition) VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition, source_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         params![
                             issue_key,
                             pr.number as i64,
@@ -220,6 +309,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                             review.state.clone(),
                             review.submitted_at.map(|value| value.to_rfc3339()),
                             review.disposition.clone(),
+                            live_owner.clone(),
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -2866,7 +2956,7 @@ pub fn merge_legacy_memory_index(
         if source_ids.len() <= 1 {
             continue;
         }
-        let preserves_live_relations = source_ids.iter().any(|owner| owner == LIVE_CAPTURE_OWNER);
+        let preserves_live_relations = source_ids.iter().any(|owner| is_live_capture_owner(owner));
         let source_ids = source_ids
             .iter()
             .filter(|owner| source_id_belongs_to_configured_repository(config, owner))
@@ -3079,7 +3169,7 @@ pub fn backfill_legacy_memory_source_scopes(
     };
     for (issue_key, concept_id, encoded_scopes, encoded_sources, encoded_source_ids) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
-        let has_registered_owner = source_ids.iter().any(|value| value != LIVE_CAPTURE_OWNER);
+        let has_registered_owner = source_ids.iter().any(|value| !is_live_capture_owner(value));
         if has_registered_owner && !source_ids.iter().any(|value| value == source_id) {
             continue;
         }
