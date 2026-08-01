@@ -900,6 +900,13 @@ impl WorkspaceManager {
                             %source,
                             "skipping retained checkout with a malformed generation manifest"
                         );
+                        if is_published_checkout_generation_directory(&entry.path()) {
+                            self.quarantine_checkout_path(
+                                &entry.path(),
+                                "malformed retained checkout generation manifest",
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -907,11 +914,24 @@ impl WorkspaceManager {
             else {
                 continue;
             };
-            if self
+            let checkout = match self
                 .load_manifest::<CheckoutManifest>(&handle, &handle.checkout_manifest_path())
-                .await?
-                .is_some_and(|checkout| checkout.quarantined)
+                .await
             {
+                Ok(checkout) => checkout,
+                Err(WorkspaceError::DecodeManifest { .. }) => {
+                    if is_published_checkout_generation_directory(&entry.path()) {
+                        self.quarantine_checkout_path(
+                            &entry.path(),
+                            "malformed retained checkout generation manifest",
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if checkout.is_some_and(|checkout| checkout.quarantined) {
                 tracing::warn!(
                     path = %handle.workspace_path().display(),
                     "skipping retained checkout already marked quarantined"
@@ -1143,28 +1163,6 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         reason: String,
     ) -> Result<(), WorkspaceError> {
-        let quarantine_root = self.config.root.join(".opensymphony-quarantine");
-        self.reject_symlinked_workspace_root(&quarantine_root)
-            .await?;
-        self.create_directory(&quarantine_root).await?;
-        self.reject_symlinked_workspace_root(&quarantine_root)
-            .await?;
-        let canonical_root = self.canonicalize_path(&self.config.root).await?;
-        let canonical_quarantine_root = self.canonicalize_path(&quarantine_root).await?;
-        ensure_descendant(&canonical_root, &canonical_quarantine_root)?;
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let destination = quarantine_root.join(format!(
-            "{}-{suffix}",
-            workspace
-                .workspace_path()
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("checkout")
-        ));
-        self.reject_symlinked_workspace_root(&destination).await?;
         match self
             .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
             .await
@@ -1178,10 +1176,44 @@ impl WorkspaceManager {
             Ok(None) | Err(WorkspaceError::DecodeManifest { .. }) => {}
             Err(error) => return Err(error),
         }
-        fs::rename(workspace.workspace_path(), &destination)
+        self.quarantine_checkout_path(workspace.workspace_path(), &reason)
+            .await
+    }
+
+    async fn quarantine_checkout_path(
+        &self,
+        workspace_path: &Path,
+        reason: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.reject_symlinked_workspace_root(workspace_path).await?;
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let canonical_workspace = self.canonicalize_path(workspace_path).await?;
+        ensure_descendant(&canonical_root, &canonical_workspace)?;
+
+        let quarantine_root = self.config.root.join(".opensymphony-quarantine");
+        self.reject_symlinked_workspace_root(&quarantine_root)
+            .await?;
+        self.create_directory(&quarantine_root).await?;
+        self.reject_symlinked_workspace_root(&quarantine_root)
+            .await?;
+        let canonical_quarantine_root = self.canonicalize_path(&quarantine_root).await?;
+        ensure_descendant(&canonical_root, &canonical_quarantine_root)?;
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let destination = quarantine_root.join(format!(
+            "{}-{suffix}",
+            workspace_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("checkout")
+        ));
+        self.reject_symlinked_workspace_root(&destination).await?;
+        fs::rename(workspace_path, &destination)
             .await
             .map_err(|source| WorkspaceError::CheckoutQuarantined {
-                path: workspace.workspace_path().to_path_buf(),
+                path: workspace_path.to_path_buf(),
                 reason: format!("{reason}; quarantine failed: {source}"),
             })
     }
@@ -1956,7 +1988,15 @@ impl WorkspaceManager {
                     return Ok(Some(handle));
                 }
                 Ok(_) => {}
-                Err(WorkspaceError::DecodeManifest { .. }) => {}
+                Err(WorkspaceError::DecodeManifest { .. }) => {
+                    if is_published_checkout_generation_directory(&candidate) {
+                        self.quarantine_checkout_path(
+                            &candidate,
+                            "malformed retained checkout generation manifest",
+                        )
+                        .await?;
+                    }
+                }
                 Err(error) => return Err(error),
             },
             Err(WorkspaceError::EmptyIdentifier | WorkspaceError::InvalidWorkspaceKey { .. }) => {}
@@ -1997,7 +2037,15 @@ impl WorkspaceManager {
                     return Ok(Some(handle));
                 }
                 Ok(_) => {}
-                Err(WorkspaceError::DecodeManifest { .. }) => {}
+                Err(WorkspaceError::DecodeManifest { .. }) => {
+                    if is_published_checkout_generation_directory(&entry.path()) {
+                        self.quarantine_checkout_path(
+                            &entry.path(),
+                            "malformed retained checkout generation manifest",
+                        )
+                        .await?;
+                    }
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -2077,22 +2125,30 @@ impl WorkspaceManager {
                             &handle,
                             &handle.checkout_manifest_path(),
                         )
-                        .await?
+                        .await
                     {
-                        Some(checkout) if checkout.quarantined => tracing::warn!(
+                        Err(WorkspaceError::DecodeManifest { .. }) => {
+                            self.quarantine_checkout_path(
+                                handle.workspace_path(),
+                                "malformed retained checkout generation manifest",
+                            )
+                            .await?;
+                        }
+                        Err(error) => return Err(error),
+                        Ok(Some(checkout)) if checkout.quarantined => tracing::warn!(
                             path = %handle.workspace_path().display(),
                             "skipping workspace already marked quarantined during recovery"
                         ),
-                        Some(checkout)
+                        Ok(Some(checkout))
                             if issue_manifest_owns_checkout(&handle, &manifest, &checkout) =>
                         {
                             workspaces.push((handle, manifest));
                         }
-                        Some(_) => tracing::warn!(
+                        Ok(Some(_)) => tracing::warn!(
                             path = %handle.workspace_path().display(),
                             "skipping workspace with mismatched issue and checkout ownership"
                         ),
-                        None => {}
+                        Ok(None) => {}
                     }
                 }
                 Ok(Some((handle, manifest))) => workspaces.push((handle, manifest)),
@@ -2103,6 +2159,13 @@ impl WorkspaceManager {
                         %source,
                         "skipping workspace with malformed checkout manifest during recovery"
                     );
+                    if is_published_checkout_generation_directory(&entry.path()) {
+                        self.quarantine_checkout_path(
+                            &entry.path(),
+                            "malformed retained checkout generation manifest",
+                        )
+                        .await?;
+                    }
                 }
                 Err(error) => return Err(error),
             }

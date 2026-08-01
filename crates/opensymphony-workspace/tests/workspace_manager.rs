@@ -785,7 +785,8 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
         .await
         .expect("legacy workspace should exist");
 
-    let malformed_path = workspace_root.join("malformed-generation");
+    let malformed_path =
+        workspace_root.join("malformed-generation--0123456789abcdef0123456789abcdef");
     tokio::fs::create_dir_all(malformed_path.join(".opensymphony"))
         .await
         .expect("malformed generation directory should exist");
@@ -797,8 +798,12 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .expect("issue manifest should decode");
     issue_manifest["sanitized_workspace_key"] =
         serde_json::Value::String("malformed-generation".to_owned());
-    issue_manifest["workspace_path"] =
-        serde_json::Value::String(malformed_path.display().to_string());
+    issue_manifest["workspace_path"] = serde_json::Value::String(
+        std::fs::canonicalize(&malformed_path)
+            .expect("malformed generation path should canonicalize")
+            .display()
+            .to_string(),
+    );
     tokio::fs::write(
         malformed_path.join(".opensymphony/issue.json"),
         serde_json::to_vec_pretty(&issue_manifest).expect("issue manifest should encode"),
@@ -864,6 +869,15 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
         .expect("malformed generations should not abort legacy lookup")
         .expect("legacy workspace should still be found");
     assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
+    assert!(!malformed_path.exists());
+    assert!(
+        workspace_root
+            .join(".opensymphony-quarantine")
+            .read_dir()
+            .expect("malformed generation quarantine should exist")
+            .next()
+            .is_some()
+    );
     let sweep_root = temp_dir.path().join("sweep-workspaces");
     let orphan_published_path =
         sweep_root.join("orphan-generation--0123456789abcdef0123456789abcdef");
