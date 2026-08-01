@@ -517,6 +517,12 @@ impl WorkspaceManager {
         if let Some(deadline) = checkout_deadline.as_mut() {
             *deadline += after_create_started.elapsed();
         }
+        if after_create.is_some()
+            && let Err(error) = self.write_after_create_receipt(issue, &workspace).await
+        {
+            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
+            return Err(error);
+        }
         if let Err(error) = checkout_operation_with_timeout(
             checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
@@ -578,12 +584,6 @@ impl WorkspaceManager {
                 return Err(error);
             }
         };
-        if after_create.is_some()
-            && let Err(error) = self.write_after_create_receipt(issue, &workspace).await
-        {
-            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
-            return Err(error);
-        }
         if let Err(error) = checkout_operation_with_timeout(
             checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
@@ -1038,6 +1038,56 @@ impl WorkspaceManager {
             }
         }
         Ok(None)
+    }
+
+    async fn sweep_abandoned_staging_checkouts(&self) -> Result<(), WorkspaceError> {
+        let staging_root = self.config.root.join(".opensymphony-staging");
+        if !path_exists(&staging_root).await? {
+            return Ok(());
+        }
+        self.reject_symlinked_workspace_root(&staging_root).await?;
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let canonical_staging_root = self.canonicalize_path(&staging_root).await?;
+        ensure_descendant(&canonical_root, &canonical_staging_root)?;
+
+        let mut entries =
+            fs::read_dir(&staging_root)
+                .await
+                .map_err(|source| WorkspaceError::ReadDirectory {
+                    path: staging_root.clone(),
+                    source,
+                })?;
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| WorkspaceError::ReadDirectory {
+                    path: staging_root.clone(),
+                    source,
+                })?
+        {
+            let path = entry.path();
+            let file_type =
+                entry
+                    .file_type()
+                    .await
+                    .map_err(|source| WorkspaceError::ReadDirectory {
+                        path: path.clone(),
+                        source,
+                    })?;
+            if file_type.is_dir() {
+                self.remove_incomplete_published_checkout(&path).await?;
+            } else {
+                match fs::remove_file(&path).await {
+                    Ok(()) => {}
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(WorkspaceError::RemoveWorkspace { path, source });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn retained_checkout_allows_worker_changes(
@@ -1989,6 +2039,7 @@ impl WorkspaceManager {
         &self,
     ) -> Result<Vec<(WorkspaceHandle, IssueManifest)>, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
+        self.sweep_abandoned_staging_checkouts().await?;
 
         let mut workspaces = Vec::new();
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {

@@ -366,6 +366,21 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let mut issue = sample_issue("COE-549/terminal");
     issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
 
+    let abandoned_staging = temp_dir
+        .path()
+        .join("workspaces/.opensymphony-staging/orphan-generation");
+    tokio::fs::create_dir_all(&abandoned_staging)
+        .await
+        .expect("abandoned staging generation should be created");
+    tokio::fs::write(abandoned_staging.join("partial-clone"), b"incomplete")
+        .await
+        .expect("abandoned staging marker should be written");
+    manager
+        .list_all_workspaces()
+        .await
+        .expect("workspace discovery should sweep abandoned staging generations");
+    assert!(!abandoned_staging.exists());
+
     let first = manager
         .ensure_with_run_id(&issue, Some("run-terminal-1"))
         .await

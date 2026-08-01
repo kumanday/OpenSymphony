@@ -1462,35 +1462,36 @@ impl IssueSessionRunner {
         let mut pre_trigger_baseline_event_ids =
             trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
-            loop {
-                match recovery_client.run_conversation(conversation_id).await {
-                    Ok(_) => break,
-                    Err(OpenHandsError::HttpStatus {
-                        status_code: 409, ..
-                    }) => {
-                        if let Err(error) = active_session.stream.reconcile_events().await {
-                            debug!(
-                                %error,
-                                conversation_id = %active_session.manifest.conversation_id,
-                                "pre-wait reconcile failed after recovered run retry conflict, proceeding anyway"
-                            );
-                        }
-                        if let Err(error) = self
-                            .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
-                            .await
-                        {
-                            return Err(IssueSessionError::RehydrationFailed(format!(
-                                "previous OpenHands turn did not finish before recovered run retry: {error}"
-                            )));
-                        }
-                        pre_trigger_baseline_event_ids =
-                            Some(all_event_ids(active_session.stream.event_cache().items()));
+            match recovery_client.run_conversation(conversation_id).await {
+                Ok(_) => {}
+                Err(OpenHandsError::HttpStatus {
+                    status_code: 409, ..
+                }) => {
+                    if let Err(error) = active_session.stream.reconcile_events().await {
+                        debug!(
+                            %error,
+                            conversation_id = %active_session.manifest.conversation_id,
+                            "pre-wait reconcile failed after recovered run retry conflict, proceeding anyway"
+                        );
                     }
-                    Err(error) => {
+                    if let Err(error) = self
+                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .await
+                    {
                         return Err(IssueSessionError::RehydrationFailed(format!(
-                            "failed to trigger recovered OpenHands run: {error}"
+                            "previous OpenHands turn did not finish before recovered run retry: {error}"
                         )));
                     }
+                    pre_trigger_baseline_event_ids =
+                        Some(all_event_ids(active_session.stream.event_cache().items()));
+                    // The trigger was accepted before the crash, so a
+                    // recovered 409 is evidence of the already-running turn.
+                    // Do not issue /run again after it finishes.
+                }
+                Err(error) => {
+                    return Err(IssueSessionError::RehydrationFailed(format!(
+                        "failed to trigger recovered OpenHands run: {error}"
+                    )));
                 }
             }
             active_session.manifest.trigger_pending_run_id = None;

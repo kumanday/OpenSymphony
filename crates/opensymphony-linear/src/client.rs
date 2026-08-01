@@ -560,6 +560,7 @@ impl LinearClient {
         include_archived: bool,
     ) -> Result<Vec<TrackerIssue>, LinearError> {
         let mut issues = Vec::new();
+        let mut seen_issue_ids = HashSet::new();
         let project_slugs = self.project_slugs_for_queries().await?;
         for project_slug in &project_slugs {
             let mut after = None;
@@ -578,7 +579,10 @@ impl LinearClient {
 
                 let page_info = response.issues.page_info;
                 for node in response.issues.nodes {
-                    issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                    let issue = normalize_issue(self.expand_issue(node).await?)?;
+                    if seen_issue_ids.insert(issue.id.clone()) {
+                        issues.push(issue);
+                    }
                 }
 
                 if !page_info.has_next_page {
@@ -610,6 +614,7 @@ impl LinearClient {
         }
 
         let mut issues = Vec::new();
+        let mut seen_issue_ids = HashSet::new();
         let project_slugs = self.project_slugs_for_queries().await?;
         for project_slug in &project_slugs {
             let mut after = None;
@@ -629,7 +634,10 @@ impl LinearClient {
 
                 let page_info = response.issues.page_info;
                 for node in response.issues.nodes {
-                    issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                    let issue = normalize_issue(self.expand_issue(node).await?)?;
+                    if seen_issue_ids.insert(issue.id.clone()) {
+                        issues.push(issue);
+                    }
                 }
 
                 if !page_info.has_next_page {
@@ -660,6 +668,7 @@ impl LinearClient {
         }
 
         let mut issues = Vec::new();
+        let mut seen_issue_ids = HashSet::new();
         let project_slugs = self.project_slugs_for_queries().await?;
         for project_slug in &project_slugs {
             let mut after = None;
@@ -678,7 +687,10 @@ impl LinearClient {
 
                 let page_info = response.issues.page_info;
                 for node in response.issues.nodes {
-                    issues.push(normalize_issue_summary(node)?);
+                    let issue = normalize_issue_summary(node)?;
+                    if seen_issue_ids.insert(issue.id.clone()) {
+                        issues.push(issue);
+                    }
                 }
 
                 if !page_info.has_next_page {

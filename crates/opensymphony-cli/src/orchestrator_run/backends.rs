@@ -1688,7 +1688,11 @@ fn recoverable_run_manifest(
                 // whether a prompt was accepted before scheduler retry logic
                 // considers sending another turn.
                 if manifest.prepared_run_id.as_deref() == Some(run_manifest.run_id.as_str()) {
-                    return true;
+                    // A strict prepared-only marker is ambiguous: the prompt
+                    // may already have been accepted, but the active marker
+                    // was not persisted. Refuse attach rather than risk
+                    // sending the same prompt twice.
+                    return !strict_checkout;
                 }
 
                 manifest.prepared_run_id.is_none()

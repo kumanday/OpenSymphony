@@ -178,7 +178,7 @@ async fn candidate_issues_scan_every_configured_project() {
         .await
         .expect("candidate query should scan every project");
 
-    assert_eq!(issues.len(), 4);
+    assert_eq!(issues.len(), 2);
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[0].body["variables"]["id"], "first-id");
@@ -216,7 +216,36 @@ async fn mixed_project_ids_keep_slug_only_entries_on_their_slug() {
         .await
         .expect("mixed project scan should resolve");
 
-    assert_eq!(issues.len(), 4);
+    assert_eq!(issues.len(), 2);
+}
+
+#[tokio::test]
+async fn candidate_issue_summaries_deduplicate_across_configured_projects() {
+    let fixture = include_str!("fixtures/candidate_issues_page.json");
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"first-id","name":"First","slugId":"first-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"second-id","name":"Second","slugId":"second-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(fixture),
+        QueuedResponse::json(fixture),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["first-id".to_owned(), "second-id".to_owned()];
+    config.project_slugs = vec!["first-project".to_owned(), "second-project".to_owned()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issue_summaries()
+        .await
+        .expect("candidate summary query should scan every project");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(server.recorded_requests().await.len(), 4);
 }
 
 #[tokio::test]
