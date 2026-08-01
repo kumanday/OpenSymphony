@@ -2054,14 +2054,13 @@ fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if value.contains('?') || value.contains('#') {
         return Err(CentralConfigError::CredentialBearingRemote);
     }
-    if let Some((user, host)) = value.split_once('@') {
-        if user.is_empty()
+    if let Some((user, host)) = value.split_once('@')
+        && (user.is_empty()
             || user.contains(':')
             || user.eq_ignore_ascii_case("token")
-            || host.is_empty()
-        {
-            return Err(CentralConfigError::CredentialBearingRemote);
-        }
+            || host.is_empty())
+    {
+        return Err(CentralConfigError::CredentialBearingRemote);
     }
     Ok(())
 }
