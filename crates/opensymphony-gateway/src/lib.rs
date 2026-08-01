@@ -2483,7 +2483,7 @@ async fn run_repository_id(
     let bound = binding
         .and_then(|binding| binding.repository_id())
         .map(|repository_id| repository_id.as_str().to_owned());
-    let fallback = if bound.is_none() && requested.is_none() {
+    let fallback = if bound.is_none() {
         let workspace_path = workspace_path.to_path_buf();
         let config = config.cloned();
         Some(
@@ -2504,14 +2504,25 @@ async fn run_repository_id(
     };
     let bound = bound.or(fallback.flatten());
     if config.is_some_and(|config| !config.repository_sources.is_empty())
-        && let (Some(requested), Some(bound)) = (requested.as_deref(), bound.as_deref())
-        && requested != bound
+        && let Some(requested) = requested.as_deref()
     {
-        return Err(code_graph_response(
-            StatusCode::BAD_REQUEST,
-            "repo_binding_mismatch",
-            "requested repository does not match the run workspace repository",
-        ));
+        match bound.as_deref() {
+            Some(bound) if requested == bound => {}
+            Some(_) => {
+                return Err(code_graph_response(
+                    StatusCode::BAD_REQUEST,
+                    "repo_binding_mismatch",
+                    "requested repository does not match the run workspace repository",
+                ));
+            }
+            None => {
+                return Err(code_graph_response(
+                    StatusCode::BAD_REQUEST,
+                    "repo_binding_unresolved",
+                    "run workspace repository could not be resolved",
+                ));
+            }
+        }
     }
     Ok(requested.or(bound))
 }
@@ -5681,6 +5692,51 @@ mod tests {
         assert_eq!(
             code_repo_id_for_workspace(workspace.path(), Some(&config)),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_run_validates_requested_repository_against_workspace() {
+        let catalog = tempfile::tempdir().expect("catalog temp dir");
+        let repository = tempfile::tempdir().expect("repository temp dir");
+        let other_repository = tempfile::tempdir().expect("other repository temp dir");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        for (repository_id, root) in [
+            ("repo-a", repository.path()),
+            ("repo-b", other_repository.path()),
+        ] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+
+        let error = run_repository_id(
+            Some("repo-b".to_string()),
+            repository.path(),
+            Some(&config),
+            None,
+        )
+        .await
+        .expect_err("requested repository must match the unbound workspace");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            run_repository_id(
+                Some("repo-a".to_string()),
+                repository.path(),
+                Some(&config),
+                None,
+            )
+            .await
+            .expect("matching requested repository should resolve"),
+            Some("repo-a".to_string())
         );
     }
 
