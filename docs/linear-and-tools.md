@@ -63,6 +63,25 @@ Linear API quota:
 - full-detail active issue reads run at startup, for selected dispatches, and
   then hourly
 
+Multi-project central routing keeps the configured project identities as
+parallel vectors rather than collapsing them into one scalar selector:
+
+- `tracker.project_ids` and `tracker.project_slugs` remain index-aligned; each
+  provider project ID is resolved to its current `slugId` before a project-
+  scoped query, while legacy slug-only entries use their configured slug
+  directly
+- active candidates, lightweight active summaries, terminal cleanup reads,
+  running-issue state refreshes, and project issue scans iterate every
+  configured project and combine their paginated results before the scheduler
+  or gateway consumes them
+- the scalar `tracker.project_id`/`tracker.project_slug` fields remain the
+  compatibility view for the first configured project; they do not limit a
+  central multi-project poll to that one project
+- gateway task-graph snapshots use the same combined project-scoped read and
+  retain only requested nodes and relationships present in that snapshot;
+  identifier lookups remain the bounded fallback for tracked issues that moved
+  outside the configured project set
+
 The lightweight dispatch query returns summary-shaped scheduler data only.
 Selected candidates must be reloaded through bounded issue-by-identifier
 full-detail lookups before workspace creation, prompt construction, or worker
