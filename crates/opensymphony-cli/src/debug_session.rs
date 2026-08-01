@@ -993,18 +993,18 @@ async fn verify_strict_recovery_envelope(
         ),
         None => None,
     };
-    if let (Some(run), Some(conversation)) = (&run_envelope, &conversation_envelope)
-        && run != conversation
-    {
+    let (Some(run), Some(conversation)) = (&run_envelope, &conversation_envelope) else {
+        return Err(DebugCommandError::StrictRecovery {
+            detail: "strict checkout requires both run and conversation runtime envelopes"
+                .to_owned(),
+        });
+    };
+    if run != conversation {
         return Err(DebugCommandError::StrictRecovery {
             detail: "run and conversation runtime envelopes disagree".to_owned(),
         });
     }
-    let expected = run_envelope.or(conversation_envelope).ok_or_else(|| {
-        DebugCommandError::StrictRecovery {
-            detail: "strict checkout has no persisted runtime envelope".to_owned(),
-        }
-    })?;
+    let expected = run;
     if expected.conversation_binding.as_deref() != Some(conversation_id) {
         return Err(DebugCommandError::StrictRecovery {
             detail: "runtime envelope conversation binding does not match the containing manifest"
@@ -1012,7 +1012,7 @@ async fn verify_strict_recovery_envelope(
         });
     }
     manager
-        .verify_runtime_envelope_for_retry(workspace, &expected)
+        .verify_runtime_envelope_for_retry(workspace, expected)
         .await
         .map(|_| ())
         .map_err(|error| DebugCommandError::StrictRecovery {

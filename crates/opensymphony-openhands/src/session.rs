@@ -1872,11 +1872,10 @@ impl IssueSessionRunner {
                                 actual != expected
                             })
                         }) => {
-                            self.retire_conversation(
-                                &manifest,
-                                "terminal runtime envelope changed",
-                            )
-                            .await?;
+                            tracing::warn!(
+                                conversation_id = %manifest.conversation_id,
+                                "skipping retirement of conversation with an untrusted runtime envelope"
+                            );
                             self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
@@ -1932,15 +1931,19 @@ impl IssueSessionRunner {
                     )
                 });
                 if let Some(manifest) = loaded.manifest.as_ref() {
-                    if run_manifest.runtime_envelope.is_some()
-                        && manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
-                            envelope.conversation_binding.as_deref()
-                                != Some(manifest.conversation_id.as_str())
-                        })
-                    {
+                    let safe_to_retire = run_manifest.runtime_envelope.as_ref().is_none_or(
+                        |expected| {
+                            manifest.runtime_envelope.as_ref().is_some_and(|actual| {
+                                actual == expected
+                                    && actual.conversation_binding.as_deref()
+                                        == Some(manifest.conversation_id.as_str())
+                            })
+                        },
+                    );
+                    if !safe_to_retire {
                         tracing::warn!(
                             conversation_id = %manifest.conversation_id,
-                            "skipping retirement of fresh_each_run conversation with mismatched runtime envelope binding"
+                            "skipping retirement of fresh_each_run conversation with an untrusted runtime envelope"
                         );
                     } else {
                         self.retire_conversation(

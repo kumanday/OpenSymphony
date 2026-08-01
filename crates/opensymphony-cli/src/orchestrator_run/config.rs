@@ -18,6 +18,9 @@ use crate::opensymphony_workflow::{
     ResolvedWorkflow, RoutingFrontMatter, TrackerFrontMatter, WorkflowDefinition,
     WorkflowFrontMatter, WorkspaceFrontMatter,
 };
+use crate::opensymphony_workflow::{
+    DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
+};
 use crate::opensymphony_workspace::CheckoutRepository;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1383,22 +1386,39 @@ fn reject_checkout_credential_env_reuse(
         );
     }
     for (field, variable) in [
-        ("routing.harness_env", config.routing.harness_env.as_deref()),
-        ("routing.model_env", config.routing.model_env.as_deref()),
+        (
+            "routing.harness_env",
+            config
+                .routing
+                .harness_env
+                .as_deref()
+                .unwrap_or(DEFAULT_ROUTING_HARNESS_ENV),
+        ),
+        (
+            "routing.model_env",
+            config
+                .routing
+                .model_env
+                .as_deref()
+                .unwrap_or(DEFAULT_ROUTING_MODEL_ENV),
+        ),
         (
             "routing.model_profile_env",
-            config.routing.model_profile_env.as_deref(),
+            config
+                .routing
+                .model_profile_env
+                .as_deref()
+                .unwrap_or(DEFAULT_ROUTING_MODEL_PROFILE_ENV),
         ),
     ] {
-        if let Some(variable) = variable {
-            non_checkout_variables.insert(variable.to_owned(), field);
-        }
+        non_checkout_variables.insert(variable.to_owned(), field);
     }
-    if let Some(variable) = config
-        .memory
-        .as_ref()
-        .and_then(|memory| memory.token_env.as_deref())
-    {
+    if let Some(variable) = config.memory.as_ref().and_then(|memory| {
+        memory
+            .token_env
+            .as_deref()
+            .or_else(|| memory.serve.then_some(DEFAULT_MEMORY_TOKEN_ENV))
+    }) {
         non_checkout_variables.insert(variable.to_owned(), "memory.token_env");
     }
     if let Some(front_matter) = config.openhands.front_matter.as_ref() {
@@ -2906,6 +2926,56 @@ scheduler:
 
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("memory token must not reuse checkout credentials");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "memory.token_env"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_default_model_selector() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("  harness_env: TEST_HARNESS\n", "")
+            .replace("  model_env: TEST_MODEL\n", "")
+            .replace("  model_profile_env: TEST_MODEL_PROFILE\n", "")
+            .replace(
+                "  github-ssh:\n    kind: ssh-agent",
+                "  github-ssh:\n    kind: environment\n    variable: OPENSYMPHONY_MODEL",
+            );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("the default model selector must not reuse checkout credentials");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "routing.model_env"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_default_memory_token() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "  github-ssh:\n    kind: ssh-agent",
+                "  github-ssh:\n    kind: environment\n    variable: OPENSYMPHONY_MEMORY_TOKEN",
+            )
+            .replace(
+                &format!("  catalog_root: {}/state/memory", root.path().display()),
+                &format!(
+                    "  catalog_root: {}/state/memory\n  serve: true",
+                    root.path().display()
+                ),
+            );
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("the default memory token must not reuse checkout credentials");
         assert!(matches!(
             error,
             CentralConfigError::InvalidReference { field }
