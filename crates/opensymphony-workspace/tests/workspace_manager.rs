@@ -478,6 +478,34 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         clean_retry.handle.workspace_path(),
         repaired.handle.workspace_path()
     );
+    std::fs::write(
+        clean_retry
+            .handle
+            .workspace_path()
+            .join("after-trigger-clear.txt"),
+        "worker edit after trigger\n",
+    )
+    .expect("post-trigger worker edit should be written");
+    manager
+        .write_json_artifact(
+            &clean_retry.handle,
+            &clean_retry.handle.conversation_manifest_path(),
+            &json!({
+                "active_run_id": "run-prepared-trigger-pending",
+                "trigger_pending_run_id": null
+            }),
+        )
+        .await
+        .expect("cleared trigger marker should be written");
+    let retained_after_trigger_clear = manager
+        .ensure(&issue)
+        .await
+        .expect("active prepared checkout should survive cleared trigger marker");
+    assert!(!retained_after_trigger_clear.created);
+    assert_eq!(
+        retained_after_trigger_clear.handle.workspace_path(),
+        clean_retry.handle.workspace_path()
+    );
 
     let mut run_manifest = RunManifest::new(
         &clean_retry.handle,

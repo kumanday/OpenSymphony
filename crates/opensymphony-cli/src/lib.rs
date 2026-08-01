@@ -766,14 +766,17 @@ pub async fn run_doctor_command(
 
     // Run bulk rehydration if requested
     if rehydrate {
-        if strict_recovery_enabled(
+        if strict_recovery_configured(
             central_config
                 .as_ref()
                 .map(|central| &central.repository_routing),
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_checkouts),
         ) {
             checks.push(CheckResult::fail(
                 "rehydration",
-                "bulk doctor rehydration is unavailable for project_set; use issue-scoped strict recovery",
+                "bulk doctor rehydration is unavailable when verified checkout policies are configured; use issue-scoped strict recovery",
             ));
         } else {
             match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
@@ -2793,6 +2796,7 @@ mod tests {
         RepositoryRouting, RepositoryRoutingMode,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
+    use crate::opensymphony_workspace::CheckoutRepository;
     use clap::{Parser, error::ErrorKind};
     use tempfile::TempDir;
 
@@ -2820,6 +2824,39 @@ mod tests {
         routing.mode = RepositoryRoutingMode::ProjectSet;
         assert!(super::strict_recovery_enabled(Some(&routing)));
         assert!(!super::strict_recovery_enabled(None));
+    }
+
+    #[test]
+    fn strict_recovery_requires_checkout_policies_for_legacy_single() {
+        let routing = RepositoryRouting {
+            mode: RepositoryRoutingMode::LegacySingle,
+            inventory: BTreeMap::new(),
+            project_repositories: BTreeMap::new(),
+            active_projects: BTreeSet::new(),
+            legacy_repository: Some("repo".to_owned()),
+            config_generation: "config".to_owned(),
+            inventory_generation: "inventory".to_owned(),
+        };
+        let checkouts = BTreeMap::from([(
+            "repo".to_owned(),
+            CheckoutRepository {
+                provider: "git".to_owned(),
+                provider_id: None,
+                remote_locator: "owner/repo".to_owned(),
+                remote: "git@github.com:owner/repo.git".to_owned(),
+                target_branch: "develop".to_owned(),
+                credential_kind: "ssh-agent".to_owned(),
+                credential_reference: None,
+                credential_env: None,
+                instructions_path: PathBuf::from("AGENTS.md"),
+                review_profile: "default".to_owned(),
+            },
+        )]);
+
+        assert!(super::strict_recovery_configured(
+            Some(&routing),
+            Some(&checkouts)
+        ));
     }
 
     #[test]

@@ -1076,14 +1076,14 @@ impl WorkspaceManager {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw_manifest) else {
             return Ok(false);
         };
-        Ok(manifest
+        let active_run_matches = manifest
             .get("active_run_id")
             .and_then(serde_json::Value::as_str)
-            == Some(run.run_id.as_str())
-            && manifest
-                .get("trigger_pending_run_id")
-                .and_then(serde_json::Value::as_str)
-                == Some(run.run_id.as_str()))
+            == Some(run.run_id.as_str());
+        let trigger_pending_run = manifest
+            .get("trigger_pending_run_id")
+            .and_then(serde_json::Value::as_str);
+        Ok(active_run_matches && trigger_pending_run.is_none_or(|run_id| run_id == run.run_id))
     }
 
     async fn quarantine_checkout(
