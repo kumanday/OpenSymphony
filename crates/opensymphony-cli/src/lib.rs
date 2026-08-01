@@ -32,7 +32,7 @@ use crate::opensymphony_openhands::{
 use crate::opensymphony_workflow::{
     Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
 };
-use crate::opensymphony_workspace::TerminalRuntimeEnvelope;
+use crate::opensymphony_workspace::{TerminalRuntimeEnvelope, environment_variable_names_equal};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand};
 use install_tooling::{
@@ -1983,7 +1983,8 @@ fn maybe_start_local_supervisor(
             .openhands
             .local_server
             .env
-            .contains_key(variable)
+            .keys()
+            .any(|configured| environment_variable_names_equal(variable, configured))
     });
     supervisor_config.startup_timeout = Duration::from_millis(
         runtime

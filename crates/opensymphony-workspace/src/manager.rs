@@ -423,25 +423,14 @@ impl WorkspaceManager {
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
         self.reject_symlinked_workspace_root(&staging_path).await?;
         let mut staging_cleanup = StagingCleanupGuard::new(staging_path.clone());
-        let clone_result = match checkout_time_remaining(checkout_deadline) {
-            Some(timeout_duration) => match timeout(
-                timeout_duration,
-                self.run_git_clone(repository, &staging_path, &mut staging_cleanup),
+        let clone_result = self
+            .run_git_clone(
+                repository,
+                &staging_path,
+                &mut staging_cleanup,
+                checkout_time_remaining(checkout_deadline),
             )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(WorkspaceError::CheckoutOperation {
-                    operation: "acquire verified checkout".to_owned(),
-                    path: staging_path.clone(),
-                    detail: format!("checkout acquisition timed out after {timeout_duration:?}"),
-                }),
-            },
-            None => {
-                self.run_git_clone(repository, &staging_path, &mut staging_cleanup)
-                    .await
-            }
-        };
+            .await;
         if clone_result.is_err() {
             let _ = fs::remove_dir_all(&staging_path).await;
         }
@@ -741,7 +730,7 @@ impl WorkspaceManager {
                 &manifest.repository_binding,
                 repository,
                 !allow_worker_changes,
-                !allow_worker_changes,
+                false,
             ),
         )
         .await?;
@@ -1158,6 +1147,7 @@ impl WorkspaceManager {
         repository: &CheckoutRepository,
         destination: &Path,
         staging_cleanup: &mut StagingCleanupGuard,
+        timeout_duration: Option<Duration>,
     ) -> Result<(), WorkspaceError> {
         let environment_credential = repository.credential_kind == "environment";
         let ssh_agent_credential = repository.credential_kind == "ssh-agent";
@@ -1225,9 +1215,13 @@ impl WorkspaceManager {
                 .env("GIT_ASKPASS", path)
                 .env("GIT_TERMINAL_PROMPT", "0");
         }
-        command.kill_on_drop(true);
-        let output = match command.output().await {
-            Ok(output) => output,
+        configure_process_group(&mut command);
+        command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
             Err(source) => {
                 if let Some(path) = askpass_path {
                     let _ = fs::remove_file(path).await;
@@ -1239,16 +1233,83 @@ impl WorkspaceManager {
                 });
             }
         };
+        let process_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(process_id);
+        let stdout_task = tokio::spawn(read_child_pipe(child.stdout.take()));
+        let stderr_task = tokio::spawn(read_child_pipe(child.stderr.take()));
+        let status = match timeout_duration {
+            Some(timeout_duration) => match timeout(timeout_duration, child.wait()).await {
+                Ok(status) => status,
+                Err(_) => {
+                    let terminate = terminate_process_tree(&mut child, process_id).await;
+                    let _ = child.wait().await;
+                    #[cfg(unix)]
+                    process_group_guard.disarm();
+                    let _ = join_child_pipe(stdout_task).await;
+                    let _ = join_child_pipe(stderr_task).await;
+                    if let Some(path) = askpass_path {
+                        let _ = fs::remove_file(path).await;
+                    }
+                    if let Err(error) = terminate {
+                        return Err(WorkspaceError::CheckoutOperation {
+                            operation: "terminate clone process group".to_owned(),
+                            path: destination.to_path_buf(),
+                            detail: error.to_string(),
+                        });
+                    }
+                    return Err(WorkspaceError::CheckoutOperation {
+                        operation: "acquire verified checkout".to_owned(),
+                        path: destination.to_path_buf(),
+                        detail: format!(
+                            "checkout acquisition timed out after {timeout_duration:?}"
+                        ),
+                    });
+                }
+            },
+            None => child.wait().await,
+        };
+        let status = match status {
+            Ok(status) => status,
+            Err(source) => {
+                let _ = join_child_pipe(stdout_task).await;
+                let _ = join_child_pipe(stderr_task).await;
+                if let Some(path) = askpass_path {
+                    let _ = fs::remove_file(path).await;
+                }
+                return Err(WorkspaceError::CheckoutOperation {
+                    operation: "clone repository".to_owned(),
+                    path: destination.to_path_buf(),
+                    detail: source.to_string(),
+                });
+            }
+        };
+        #[cfg(unix)]
+        process_group_guard.disarm();
+        let _stdout = join_child_pipe(stdout_task).await.map_err(|source| {
+            WorkspaceError::CheckoutOperation {
+                operation: "read clone output".to_owned(),
+                path: destination.to_path_buf(),
+                detail: source.to_string(),
+            }
+        })?;
+        let stderr = join_child_pipe(stderr_task).await.map_err(|source| {
+            WorkspaceError::CheckoutOperation {
+                operation: "read clone error output".to_owned(),
+                path: destination.to_path_buf(),
+                detail: source.to_string(),
+            }
+        })?;
         if let Some(path) = askpass_path {
             let _ = fs::remove_file(path).await;
         }
-        if output.status.success() {
+        if status.success() {
             return Ok(());
         }
         Err(WorkspaceError::CheckoutOperation {
             operation: "clone repository".to_owned(),
             path: destination.to_path_buf(),
-            detail: redact_runtime_diagnostic(&String::from_utf8_lossy(&output.stderr)),
+            detail: redact_runtime_diagnostic(&String::from_utf8_lossy(&stderr)),
         })
     }
 
@@ -1270,6 +1331,20 @@ impl WorkspaceManager {
             .canonicalize_path(checkout)
             .await
             .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        let worktree_root = self
+            .git(checkout, &["rev-parse", "--show-toplevel"])
+            .await
+            .map_err(|_| checkout_verification(checkout, "Git worktree root is unavailable"))?;
+        let canonical_worktree_root = self
+            .canonicalize_path(Path::new(&worktree_root))
+            .await
+            .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
+        if canonical_worktree_root != canonical_checkout {
+            return Err(checkout_verification(
+                checkout,
+                "Git worktree root does not equal the checkout generation",
+            ));
+        }
         for git_path in ["--git-dir", "--git-common-dir"] {
             let git_path = self.git(checkout, &["rev-parse", git_path]).await?;
             let git_path = PathBuf::from(&git_path);
@@ -2356,7 +2431,7 @@ impl WorkspaceManager {
         };
         let cwd = self.resolve_hook_cwd(workspace, kind, hook).await?;
         let mut command = build_shell_command(&hook.command);
-        configure_hook_command(&mut command);
+        configure_process_group(&mut command);
         command
             .current_dir(&cwd)
             .stdout(Stdio::piped())
@@ -2843,7 +2918,7 @@ async fn run_hook_command(
             }))
         }
         Err(_) => {
-            terminate_hook_process_tree(&mut child, process_id).await?;
+            terminate_process_tree(&mut child, process_id).await?;
             let _ = child.wait().await?;
             let stdout = join_child_pipe(stdout_task).await?;
             let stderr = join_child_pipe(stderr_task).await?;
@@ -3005,15 +3080,15 @@ async fn join_child_pipe(
 }
 
 #[cfg(unix)]
-fn configure_hook_command(command: &mut Command) {
+fn configure_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn configure_hook_command(_command: &mut Command) {}
+fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-async fn terminate_hook_process_tree(
+async fn terminate_process_tree(
     _child: &mut tokio::process::Child,
     process_id: Option<u32>,
 ) -> io::Result<()> {
@@ -3041,7 +3116,7 @@ async fn terminate_hook_process_tree(
 }
 
 #[cfg(windows)]
-async fn terminate_hook_process_tree(
+async fn terminate_process_tree(
     child: &mut tokio::process::Child,
     process_id: Option<u32>,
 ) -> io::Result<()> {
@@ -3067,11 +3142,37 @@ async fn terminate_hook_process_tree(
 }
 
 #[cfg(not(any(unix, windows)))]
-async fn terminate_hook_process_tree(
+async fn terminate_process_tree(
     child: &mut tokio::process::Child,
     _process_id: Option<u32>,
 ) -> io::Result<()> {
     child.kill().await
+}
+
+#[cfg(unix)]
+struct ProcessGroupGuard(Option<Pid>);
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(process_id: Option<u32>) -> Self {
+        let process_group = process_id
+            .and_then(|process_id| i32::try_from(process_id).ok())
+            .and_then(Pid::from_raw);
+        Self(process_group)
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.0.take() {
+            let _ = kill_process_group(process_group, Signal::KILL);
+        }
+    }
 }
 
 fn classify_issue_manifest_ownership(

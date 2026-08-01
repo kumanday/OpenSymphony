@@ -21,7 +21,9 @@ use crate::opensymphony_workflow::{
 use crate::opensymphony_workflow::{
     DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
 };
-use crate::opensymphony_workspace::{CheckoutRepository, SSH_AUTH_SOCK_ENV};
+use crate::opensymphony_workspace::{
+    CheckoutRepository, SSH_AUTH_SOCK_ENV, environment_variable_names_equal,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -1379,7 +1381,10 @@ fn reject_checkout_credential_env_reuse(
         else {
             continue;
         };
-        if checkout_variables.contains(variable) {
+        if checkout_variables
+            .iter()
+            .any(|checkout| environment_variable_names_equal(checkout, variable))
+        {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("tracker_profiles.{tracker_id}.credential"),
             });
@@ -1460,10 +1465,11 @@ fn reject_checkout_credential_env_reuse(
             &mut non_checkout_variables,
         );
     }
-    if let Some((_, field)) = non_checkout_variables
-        .iter()
-        .find(|(variable, _)| checkout_variables.contains(*variable))
-    {
+    if let Some((_, field)) = non_checkout_variables.iter().find(|(variable, _)| {
+        checkout_variables
+            .iter()
+            .any(|checkout| environment_variable_names_equal(checkout, variable))
+    }) {
         return Err(CentralConfigError::InvalidReference {
             field: (*field).to_owned(),
         });

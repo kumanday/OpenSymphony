@@ -392,6 +392,39 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         first.handle.workspace_path()
     );
 
+    let outside_worktree = temp_dir.path().join("outside-worktree");
+    std::fs::create_dir_all(&outside_worktree).expect("outside worktree should exist");
+    git(
+        first.handle.workspace_path(),
+        &[
+            "config",
+            "core.worktree",
+            outside_worktree.to_str().expect("outside worktree path"),
+        ],
+    );
+    let root_error = manager
+        .verify_checkout(&first.handle)
+        .await
+        .expect_err("checkout with an escaped Git worktree root must be rejected");
+    assert!(matches!(
+        root_error,
+        WorkspaceError::CheckoutVerification { .. }
+    ));
+    git(
+        first.handle.workspace_path(),
+        &["config", "--unset", "core.worktree"],
+    );
+
+    std::fs::write(source.join("README.md"), "advanced upstream\n")
+        .expect("upstream update should be written");
+    git(&source, &["add", "README.md"]);
+    git(&source, &["commit", "-m", "advance upstream"]);
+    git(&source, &["push", "origin", "main"]);
+    manager
+        .verify_checkout(&first.handle)
+        .await
+        .expect("recorded pinned target should remain valid after origin advances");
+
     let mut non_file_repository = repository.clone();
     non_file_repository.instructions_path = "configured-dir".into();
     let non_file_manager = WorkspaceManager::new(manager_config(

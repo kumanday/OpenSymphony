@@ -24,6 +24,7 @@ use crate::opensymphony_workspace::{
     CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueManifest,
     TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle, WorkspaceManager,
     WorkspaceManagerConfig, checkout_credential_environment_variables,
+    environment_variable_names_equal,
 };
 use clap::Args;
 use crossterm::{
@@ -1171,7 +1172,8 @@ fn build_debug_client(
             .openhands
             .local_server
             .env
-            .contains_key(variable)
+            .keys()
+            .any(|configured| environment_variable_names_equal(variable, configured))
     });
     let conversation_store_path = conversation_store_kind.and_then(|kind| {
         runtime

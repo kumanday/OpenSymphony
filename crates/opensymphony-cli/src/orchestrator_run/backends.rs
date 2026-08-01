@@ -42,7 +42,7 @@ use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
     RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
     WorkspaceManager, WorkspaceManagerConfig, checkout_credential_environment_variables,
-    compose_terminal_prompt,
+    compose_terminal_prompt, environment_variable_names_equal,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -682,7 +682,11 @@ fn checkout_env_remove_variables(
     mut variables: BTreeSet<String>,
     local_server_env: &BTreeMap<String, String>,
 ) -> BTreeSet<String> {
-    variables.retain(|variable| !local_server_env.contains_key(variable));
+    variables.retain(|variable| {
+        !local_server_env
+            .keys()
+            .any(|configured| environment_variable_names_equal(variable, configured))
+    });
     variables
 }
 
