@@ -80,6 +80,8 @@ pub(super) enum CliWorkspaceError {
     CodexLifecycle(String),
     #[error("OpenHands lifecycle recovery failed: {0}")]
     OpenHandsLifecycle(String),
+    #[error("conversation lifecycle recovery failed: {0}")]
+    ConversationLifecycle(String),
     #[error("retry state persistence failed: {0}")]
     RetryState(String),
 }
@@ -923,6 +925,11 @@ impl RuntimeWorkspaceBackend {
                             %error,
                             "continuing terminal cleanup with invalid conversation manifest"
                         );
+                        if handle.checkout_generation().is_some() {
+                            return Err(CliWorkspaceError::ConversationLifecycle(format!(
+                                "strict terminal conversation manifest is malformed: {error}"
+                            )));
+                        }
                     }
                 }
             }

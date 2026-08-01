@@ -1018,8 +1018,12 @@ impl WorkspaceManager {
                         quarantined: false,
                         quarantine_reason: None,
                     };
-                    self.write_manifest(&handle, &handle.checkout_manifest_path(), &checkout)
-                        .await?;
+                    self.write_manifest_atomically(
+                        &handle,
+                        &handle.checkout_manifest_path(),
+                        &checkout,
+                    )
+                    .await?;
                     checkout
                 }
                 Ok(None) => continue,

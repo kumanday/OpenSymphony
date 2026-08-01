@@ -194,6 +194,38 @@ async fn candidate_issues_scan_every_configured_project() {
 }
 
 #[tokio::test]
+async fn candidate_issues_prefers_the_latest_snapshot_across_projects() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(project_issues_response_with_states(&[(
+            "issue-overlap",
+            "COE-260",
+            "Earlier project snapshot",
+            "In Progress",
+            "started",
+        )])),
+        QueuedResponse::json(project_issues_response_with_states(&[(
+            "issue-overlap",
+            "COE-260",
+            "Later project snapshot",
+            "In Progress",
+            "started",
+        )])),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_slugs = vec!["old-project".to_owned(), "new-project".to_owned()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("candidate query should retain the latest project snapshot");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].title, "Later project snapshot");
+}
+
+#[tokio::test]
 async fn mixed_project_ids_keep_slug_only_entries_on_their_slug() {
     let fixture = include_str!("fixtures/candidate_issues_page.json");
     let server = MockGraphqlServer::start(vec![

@@ -4417,11 +4417,7 @@ fn scope_filter(
     area: Option<&str>,
 ) -> MemoryScopeFilter {
     MemoryScopeFilter {
-        project_set: scope
-            .project_set
-            .as_deref()
-            .and_then(non_empty)
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET")),
+        project_set: project_set_scope(scope),
         project: scope
             .project
             .as_deref()
@@ -4437,6 +4433,18 @@ fn scope_filter(
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
     }
+}
+
+fn project_set_scope(scope: &ScopeArgs) -> Option<String> {
+    scope
+        .project_set
+        .as_deref()
+        .and_then(non_empty)
+        .or_else(|| {
+            (!scope.all_accessible)
+                .then(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
+                .flatten()
+        })
 }
 
 fn env_scope_value(name: &str) -> Option<String> {
