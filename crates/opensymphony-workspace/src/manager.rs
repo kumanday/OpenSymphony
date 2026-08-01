@@ -835,6 +835,14 @@ impl WorkspaceManager {
             .await
     }
 
+    pub async fn checkout_allows_worker_changes(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<bool, WorkspaceError> {
+        self.retained_checkout_allows_worker_changes(workspace)
+            .await
+    }
+
     pub async fn read_checkout_instructions_for_retry(
         &self,
         workspace: &WorkspaceHandle,
@@ -1064,9 +1072,10 @@ impl WorkspaceManager {
         // OpenHands persists active_run_id and trigger_pending_run_id before
         // the run manifest advances from Prepared to Running. A crash in that
         // window may leave legitimate worker edits in the checkout, so treat
-        // this exact marker pair as worker-active during recovery. Parse only
-        // the marker fields here to keep the workspace crate independent of
-        // the harness-specific conversation manifest type.
+        // a matching active marker with either a matching or cleared pending
+        // marker as worker-active during recovery. Parse only the marker
+        // fields here to keep the workspace crate independent of the
+        // harness-specific conversation manifest type.
         let Some(raw_manifest) = self
             .read_text_artifact(workspace, &workspace.conversation_manifest_path())
             .await?
@@ -2287,6 +2296,15 @@ impl WorkspaceManager {
             canonical_workspace,
         );
         if !issue_manifest_claims_workspace(&handle, &manifest) {
+            let checkout_manifest_path = handle.checkout_manifest_path();
+            if path_exists(&checkout_manifest_path).await?
+                || is_generation_shaped_directory(workspace_path, &manifest.sanitized_workspace_key)
+            {
+                return Err(checkout_verification(
+                    workspace_path,
+                    "issue manifest ownership does not match published checkout",
+                ));
+            }
             return Ok(None);
         }
 

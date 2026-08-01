@@ -1429,6 +1429,18 @@ fn reject_checkout_credential_env_reuse(
     }) {
         non_checkout_variables.insert(variable.to_owned(), "memory.token_env");
     }
+    if config.memory.as_ref().is_some_and(|memory| memory.serve) {
+        for variable in [
+            "OPENSYMPHONY_MEMORY_ENDPOINT",
+            "OPENSYMPHONY_MEMORY_PROJECT",
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+            DEFAULT_MEMORY_TOKEN_ENV,
+        ] {
+            non_checkout_variables
+                .entry(variable.to_owned())
+                .or_insert("memory.runtime");
+        }
+    }
     for variable in ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"] {
         non_checkout_variables.insert(variable.to_owned(), "linear.oauth_client_credentials");
     }
@@ -1915,7 +1927,8 @@ fn build_repository_routing(
             .unwrap_or_default(),
     };
     let mut active_projects = active_project_ids.clone();
-    let mut project_repositories = BTreeMap::new();
+    let mut project_repositories: BTreeMap<String, BTreeSet<CanonicalRepositoryId>> =
+        BTreeMap::new();
     for project_id in &active_project_ids {
         let project = config.linear_projects.get(project_id).ok_or_else(|| {
             CentralConfigError::InvalidReference {
@@ -1940,6 +1953,11 @@ fn build_repository_routing(
             if project_repositories
                 .get(key)
                 .is_some_and(|existing| existing != &allowed)
+                || project_repositories.iter().any(|(existing_key, existing)| {
+                    existing_key != key
+                        && existing_key.eq_ignore_ascii_case(key)
+                        && existing != &allowed
+                })
             {
                 return Err(CentralConfigError::AmbiguousProjectRoutingKey {
                     key: key.to_owned(),
@@ -2024,9 +2042,7 @@ fn validate_repository(
 
 fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if let Ok(url) = Url::parse(value) {
-        let conventional_ssh_user =
-            url.scheme().eq_ignore_ascii_case("ssh") && url.username().eq_ignore_ascii_case("git");
-        if (!url.username().is_empty() && !conventional_ssh_user)
+        if (!url.username().is_empty() && !url.scheme().eq_ignore_ascii_case("ssh"))
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
@@ -2038,10 +2054,14 @@ fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if value.contains('?') || value.contains('#') {
         return Err(CentralConfigError::CredentialBearingRemote);
     }
-    if let Some((user, host)) = value.split_once('@')
-        && (user != "git" || host.is_empty())
-    {
-        return Err(CentralConfigError::CredentialBearingRemote);
+    if let Some((user, host)) = value.split_once('@') {
+        if user.is_empty()
+            || user.contains(':')
+            || user.eq_ignore_ascii_case("token")
+            || host.is_empty()
+        {
+            return Err(CentralConfigError::CredentialBearingRemote);
+        }
     }
     Ok(())
 }
@@ -3302,6 +3322,32 @@ scheduler:
     }
 
     #[test]
+    fn central_config_rejects_case_insensitive_project_routing_collisions() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("projects: [core]", "projects: [core, other]")
+            .replace(
+                "linear_projects:\n  core:\n    provider_project_id: core-project\n    repositories: [core-repo]",
+                "linear_projects:\n  other:\n    provider_project_id: CORE\n    repositories: [other-repo]\n  core:\n    provider_project_id: core-project\n    repositories: [core-repo]",
+            )
+            .replace(
+                "repositories:\n  core-repo:",
+                "repositories:\n  other-repo:\n    aliases: [other]\n    remote:\n      provider: github\n      locator: example/other\n      clone: git@github.com:example/other.git\n    target_branch: develop\n    credential: github-ssh\n    review_profile: github-standard\n    instructions:\n      path: AGENTS.md\n  core-repo:",
+            );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("case-insensitive project keys with different repositories should fail");
+        assert!(
+            matches!(
+                error,
+                CentralConfigError::AmbiguousProjectRoutingKey { ref key } if key == "CORE"
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn central_config_allows_alias_reuse_in_inactive_project_sets() {
         let root = tempfile::tempdir().expect("central config root should exist");
         std::fs::write(root.path().join("integration.md"), "integration\n")
@@ -3346,6 +3392,57 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("credential-bearing remote locator should fail");
         assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
+    }
+
+    #[test]
+    fn central_config_allows_ordinary_ssh_usernames_in_remotes() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        for clone in [
+            "ssh://deploy@example.com/team/repo.git",
+            "deploy@example.com:team/repo.git",
+        ] {
+            let source = central_fixture(root.path())
+                .replace("git@github.com:kumanday/OpenSymphony.git", clone);
+            resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect("ordinary SSH usernames should not be treated as credentials");
+        }
+    }
+
+    #[test]
+    fn central_config_rejects_generated_memory_runtime_variable_reuse() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        for variable in [
+            "OPENSYMPHONY_MEMORY_ENDPOINT",
+            "OPENSYMPHONY_MEMORY_PROJECT",
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+        ] {
+            let source = central_fixture(root.path())
+                .replace(
+                    "  github-ssh:\n    kind: ssh-agent",
+                    &format!("  github-ssh:\n    kind: environment\n    variable: {variable}"),
+                )
+                .replace(
+                    &format!("  catalog_root: {}/state/memory", root.path().display()),
+                    &format!(
+                        "  catalog_root: {}/state/memory\n  serve: true",
+                        root.path().display()
+                    ),
+                );
+
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err(
+                    "generated memory runtime variables must not reuse checkout credentials",
+                );
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field }
+                    if field == "memory.runtime"
+            ));
+        }
     }
 
     #[test]

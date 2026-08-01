@@ -719,6 +719,51 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
 }
 
 #[tokio::test]
+async fn legacy_workspace_lookup_rejects_semantically_invalid_published_manifest() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-549-semantic-generation");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+
+    let mut issue_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(ensured.handle.issue_manifest_path())
+            .await
+            .expect("issue manifest should be readable"),
+    )
+    .expect("issue manifest should decode");
+    issue_manifest["workspace_path"] = serde_json::Value::String(
+        workspace_root
+            .join("claimed-by-another-workspace")
+            .display()
+            .to_string(),
+    );
+    tokio::fs::write(
+        ensured.handle.issue_manifest_path(),
+        serde_json::to_vec_pretty(&issue_manifest).expect("issue manifest should encode"),
+    )
+    .await
+    .expect("semantic mismatch should be written");
+    tokio::fs::write(ensured.handle.checkout_manifest_path(), b"{}")
+        .await
+        .expect("published checkout marker should be written");
+
+    let error = manager
+        .find_workspace_by_issue_reference(&issue.issue_id)
+        .await
+        .expect_err("published semantic ownership mismatch must not be silently ignored");
+    assert!(matches!(error, WorkspaceError::CheckoutVerification { .. }));
+}
+
+#[tokio::test]
 async fn ensure_retries_after_create_after_failed_first_bootstrap() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let workspace_root = temp_dir.path().join("workspaces");
