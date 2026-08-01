@@ -1666,21 +1666,7 @@ impl IssueSessionRunner {
                 );
 
                 let _ = active_session.stream.close().await;
-                if let Err(retirement_error) = self
-                    .retire_conversation(
-                        &active_session.manifest,
-                        "condenser tool-matching recovery",
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        %retirement_error,
-                        "condenser tool-matching recovery could not retire the old conversation"
-                    );
-                    break (active_session, outcome);
-                }
-
-                match self
+                let replacement = self
                     .create_fresh_session(
                         workspace_manager,
                         workspace,
@@ -1690,9 +1676,21 @@ impl IssueSessionRunner {
                         workflow,
                         Some("condenser tool-matching error auto-recovery".to_string()),
                     )
-                    .await
-                {
+                    .await;
+                match replacement {
                     Ok(Step::Continue(fresh_session)) => {
+                        if let Err(retirement_error) = self
+                            .retire_conversation(
+                                &active_session.manifest,
+                                "condenser tool-matching recovery",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %retirement_error,
+                                "condenser tool-matching recovery could not retire the old conversation after replacement"
+                            );
+                        }
                         tracing::info!(
                             old_conversation_id = %active_session.manifest.conversation_id,
                             new_conversation_id = %fresh_session.manifest.conversation_id,
@@ -1893,8 +1891,7 @@ impl IssueSessionRunner {
                     {
                         ReuseSession::Active(session) => Ok(Step::Continue(*session)),
                         ReuseSession::Reset { reason, manifest } => {
-                            self.retire_conversation(&manifest, &reason).await?;
-                            self.create_fresh_session(
+                            let replacement = self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
                                 run_manifest,
@@ -1903,7 +1900,9 @@ impl IssueSessionRunner {
                                 workflow,
                                 Some(reason),
                             )
-                            .await
+                            .await?;
+                            self.retire_replaced_conversation(&manifest, &replacement).await;
+                            Ok(replacement)
                         }
                     },
                     None => {
@@ -1924,6 +1923,15 @@ impl IssueSessionRunner {
                 let loaded = self
                     .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
                     .await?;
+                let safe_to_retire = loaded.manifest.as_ref().is_none_or(|manifest| {
+                    run_manifest.runtime_envelope.as_ref().is_none_or(|expected| {
+                        manifest.runtime_envelope.as_ref().is_some_and(|actual| {
+                            actual == expected
+                                && actual.conversation_binding.as_deref()
+                                    == Some(manifest.conversation_id.as_str())
+                        })
+                    })
+                });
                 let reset_reason = loaded.manifest.as_ref().map_or(loaded.reset_reason, |_| {
                     Some(
                         "workflow reuse policy `fresh_each_run` requested a new conversation for this run"
@@ -1931,29 +1939,19 @@ impl IssueSessionRunner {
                     )
                 });
                 if let Some(manifest) = loaded.manifest.as_ref() {
-                    let safe_to_retire = run_manifest.runtime_envelope.as_ref().is_none_or(
-                        |expected| {
-                            manifest.runtime_envelope.as_ref().is_some_and(|actual| {
-                                actual == expected
-                                    && actual.conversation_binding.as_deref()
-                                        == Some(manifest.conversation_id.as_str())
-                            })
-                        },
-                    );
                     if !safe_to_retire {
                         tracing::warn!(
                             conversation_id = %manifest.conversation_id,
                             "skipping retirement of fresh_each_run conversation with an untrusted runtime envelope"
                         );
                     } else {
-                        self.retire_conversation(
-                            manifest,
-                            "workflow reuse policy `fresh_each_run` requested a new conversation",
-                        )
-                        .await?;
+                        tracing::debug!(
+                            conversation_id = %manifest.conversation_id,
+                            "deferring fresh_each_run conversation retirement until replacement is durable"
+                        );
                     }
                 }
-                self.create_fresh_session(
+                let replacement = self.create_fresh_session(
                     workspace_manager,
                     workspace,
                     run_manifest,
@@ -1962,7 +1960,13 @@ impl IssueSessionRunner {
                     workflow,
                     reset_reason,
                 )
-                .await
+                .await?;
+                if safe_to_retire
+                    && let Some(manifest) = loaded.manifest.as_ref()
+                {
+                    self.retire_replaced_conversation(manifest, &replacement).await;
+                }
+                Ok(replacement)
             }
             IssueSessionReusePolicy::Unsupported(policy) => self
                 .persist_failure_without_stream(
@@ -2486,6 +2490,29 @@ impl IssueSessionRunner {
         Ok(())
     }
 
+    async fn retire_replaced_conversation(
+        &self,
+        manifest: &IssueConversationManifest,
+        replacement: &Step<ActiveSession>,
+    ) {
+        if !matches!(replacement, Step::Continue(_)) {
+            return;
+        }
+        if let Err(error) = self
+            .retire_conversation(
+                manifest,
+                "superseded conversation after replacement became durable",
+            )
+            .await
+        {
+            tracing::warn!(
+                conversation_id = %manifest.conversation_id,
+                %error,
+                "failed to retire superseded conversation after durable replacement"
+            );
+        }
+    }
+
     async fn try_attach_and_resume(
         &self,
         client: &OpenHandsClient,
@@ -2800,17 +2827,6 @@ impl IssueSessionRunner {
             None
         };
 
-        // Delete the old conversation
-        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str())
-            && let Err(error) = self.client.delete_conversation(conversation_id).await
-        {
-            tracing::warn!(
-                conversation_id = %old_conversation_id,
-                %error,
-                "failed to delete old conversation during rehydration"
-            );
-        }
-
         // Create a fresh session with the current configuration
         let step = self
             .create_fresh_session(
@@ -2836,6 +2852,16 @@ impl IssueSessionRunner {
                 ));
             }
         };
+
+        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str())
+            && let Err(error) = self.client.delete_conversation(conversation_id).await
+        {
+            tracing::warn!(
+                conversation_id = %old_conversation_id,
+                %error,
+                "failed to delete old conversation after replacement became durable during rehydration"
+            );
+        }
 
         // Copy token counts from old manifest to preserve metrics across rehydration
         session.manifest.input_tokens = old_manifest.input_tokens;
