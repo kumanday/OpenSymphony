@@ -1398,6 +1398,7 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
+        command.env("GIT_NO_REPLACE_OBJECTS", "1");
         let output = command
             .kill_on_drop(true)
             .output()

@@ -642,11 +642,7 @@ pub(super) async fn build_runtime_transport(
     config.command = local_server.command.clone();
     config.extra_env = local_server.env.clone();
     config.extra_env.extend(worker_env.clone());
-    config.env_remove = runtime
-        .repository_checkouts
-        .as_ref()
-        .map(checkout_credential_environment_variables)
-        .unwrap_or_default();
+    config.env_remove = runtime_checkout_env_remove(runtime, &local_server.env);
     if let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() {
         conversation_store.ensure_active_and_archived()?;
         config.extra_env.insert(
@@ -673,6 +669,21 @@ fn runtime_checkout_credential_envs(runtime: &RunRuntimeConfig) -> BTreeSet<Stri
         .as_ref()
         .map(checkout_credential_environment_variables)
         .unwrap_or_default()
+}
+
+fn runtime_checkout_env_remove(
+    runtime: &RunRuntimeConfig,
+    local_server_env: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    checkout_env_remove_variables(runtime_checkout_credential_envs(runtime), local_server_env)
+}
+
+fn checkout_env_remove_variables(
+    mut variables: BTreeSet<String>,
+    local_server_env: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    variables.retain(|variable| !local_server_env.contains_key(variable));
+    variables
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
@@ -1394,19 +1405,42 @@ async fn recovered_conversation_manifest(
             if let Some(raw_pending) = manager.read_text_artifact(handle, &pending_path).await?
                 && let Ok(Some(pending_manifest)) =
                     serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
-                && pending_manifest.conversation_id == manifest.conversation_id
-                && runtime_envelope_matches_pending_binding(
-                    run_manifest.runtime_envelope.as_ref(),
-                    &pending_manifest,
-                )
             {
-                run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
-                manager.write_run_manifest(handle, run_manifest).await?;
-                tracing::info!(
-                    manifest = %manifest_path.display(),
-                    conversation_id = %manifest.conversation_id,
-                    "reconciled pending Codex conversation binding into the run manifest"
-                );
+                if pending_manifest.conversation_id == manifest.conversation_id
+                    && runtime_envelope_matches_pending_binding(
+                        run_manifest.runtime_envelope.as_ref(),
+                        &pending_manifest,
+                    )
+                {
+                    run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
+                    manager.write_run_manifest(handle, run_manifest).await?;
+                    tracing::info!(
+                        manifest = %manifest_path.display(),
+                        conversation_id = %manifest.conversation_id,
+                        "reconciled pending Codex conversation binding into the run manifest"
+                    );
+                } else if matches!(
+                    run_manifest.status,
+                    RunStatus::Preparing | RunStatus::Prepared
+                ) && pending_manifest.issue_id.to_string() == run_manifest.issue_id
+                    && pending_manifest.identifier.to_string() == run_manifest.identifier
+                    && runtime_envelope_matches_pending_binding(
+                        run_manifest.runtime_envelope.as_ref(),
+                        &pending_manifest,
+                    )
+                {
+                    run_manifest.runtime_envelope = pending_manifest.runtime_envelope.clone();
+                    manager.write_run_manifest(handle, run_manifest).await?;
+                    manager
+                        .write_json_artifact(handle, &manifest_path, &pending_manifest)
+                        .await?;
+                    tracing::info!(
+                        manifest = %manifest_path.display(),
+                        conversation_id = %pending_manifest.conversation_id,
+                        "promoted pending replacement conversation manifest during recovery"
+                    );
+                    return Ok(Some(pending_manifest));
+                }
             }
         }
         return Ok(Some(manifest));
@@ -7346,6 +7380,16 @@ mod tests {
         };
 
         assert_eq!(env.get("CHECKOUT_TOKEN"), None);
+    }
+
+    #[test]
+    fn local_server_environment_keys_are_not_scrubbed_as_checkout_credentials() {
+        let env_remove = checkout_env_remove_variables(
+            BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()]),
+            &BTreeMap::from([(String::from("NODE_ENV"), String::from("development"))]),
+        );
+
+        assert_eq!(env_remove, BTreeSet::from(["CHECKOUT_TOKEN".to_owned()]));
     }
 
     #[test]
