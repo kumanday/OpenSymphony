@@ -293,26 +293,38 @@ pub fn withdraw_memory_source_records(
             path: config.index_path.clone(),
             source: error,
         })?;
-    let registered_source_repositories = {
+    let (registered_source_repositories, registered_source_kinds) = {
         let mut statement = transaction
-            .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
+            .prepare("SELECT source_id, repository_id, source_kind FROM registered_memory_sources")
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
             })?;
-        statement
+        let rows = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
             })?
-            .collect::<Result<BTreeMap<_, _>, _>>()
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
-            })?
+            })?;
+        (
+            rows.iter()
+                .map(|(source_id, repository_id, _)| (source_id.clone(), repository_id.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            rows.into_iter()
+                .map(|(source_id, _, source_kind)| (source_id, source_kind))
+                .collect::<BTreeMap<_, _>>(),
+        )
     };
     for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
@@ -353,6 +365,60 @@ pub fn withdraw_memory_source_records(
                 .unwrap_or_default();
             let mut sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
                 .unwrap_or_default();
+            let surviving_reimport_sources = if is_live_capture_owner(source_id) {
+                source_ids
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(
+                            registered_source_kinds.get(*candidate).map(String::as_str),
+                            Some("legacy_store" | "okf_bundle")
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            if !surviving_reimport_sources.is_empty() {
+                transaction
+                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+                transaction
+                    .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+                for table in [
+                    "issue_areas",
+                    "pull_requests",
+                    "changed_files",
+                    "checks",
+                    "reviews",
+                ] {
+                    transaction
+                        .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                        .map_err(|error| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source: error,
+                        })?;
+                }
+                for surviving_source_id in surviving_reimport_sources {
+                    transaction
+                        .execute(
+                            "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
+                            [&surviving_source_id],
+                        )
+                        .map_err(|error| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source: error,
+                        })?;
+                }
+                continue;
+            }
             let has_other_source = source_ids.iter().any(|candidate| {
                 candidate != source_id
                     && source_repository_id(config, &registered_source_repositories, candidate)
@@ -1548,5 +1614,74 @@ mod catalog_tests {
         assert!(issue.scope_refs.iter().any(|scope| {
             scope.kind == KnowledgeScopeKind::Project && scope.id == "project-b"
         }));
+    }
+
+    #[test]
+    fn withdrawing_live_owner_removes_payload_until_surviving_store_reimports() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let surviving_source = RegisteredMemorySource {
+            source_id: "github:repository:b:legacy_store".to_string(),
+            repository_id: "github:repository:b".to_string(),
+            commit_sha: "def456".to_string(),
+            kind: MemorySourceKind::LegacyStore,
+            root: root.path().join("legacy-b"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:legacy-b".to_string(),
+        };
+        register_memory_source(&config, &surviving_source).expect("surviving source");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-558",
+                    "Live payload",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-558.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "captured by repository A",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-558",
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"repository","id":"github:repository:b"}]"#,
+                    "[]",
+                    r#"["__live_capture__:github:repository:a","github:repository:b:legacy_store"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-558', 'repository', 'github:repository:a', NULL), ('issues/COE-558', 'repository', 'github:repository:b', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+        drop(connection);
+
+        withdraw_memory_source_records(
+            &config,
+            "__live_capture__:github:repository:a",
+            "github:repository:a",
+        )
+        .expect("live source withdrawal");
+
+        assert!(
+            load_indexed_issues(&config)
+                .expect("issues")
+                .into_iter()
+                .all(|issue| issue.issue_key != "COE-558")
+        );
+        assert_eq!(
+            registered_memory_sources(&config)
+                .expect("registered sources")
+                .into_iter()
+                .find(|source| source.source_id == surviving_source.source_id)
+                .expect("surviving source")
+                .status,
+            MemorySourceRegistrationStatus::Pending
+        );
     }
 }

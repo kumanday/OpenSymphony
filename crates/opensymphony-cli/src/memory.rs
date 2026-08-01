@@ -2088,6 +2088,13 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
     let mut configured_source_generations = BTreeMap::new();
     let mut source_memory_locks = BTreeMap::<PathBuf, MemoryCoordinationLock>::new();
     for source in config.repository_sources.values() {
+        if !git_remote_matches_repository_id(&source.root, &source.repository_id) {
+            return Err(MemoryError::InvalidInput(format!(
+                "configured repository `{}` at {} does not match its origin remote",
+                source.repository_id,
+                source.root.display()
+            )));
+        }
         let commit_sha = source
             .commit_sha
             .clone()
@@ -4921,6 +4928,17 @@ fn legacy_code_repository_matches_source(
 fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
     let remote_output = git_remote_url(repo_root)?;
     remote_output.rsplit(['/', ':']).next().map(str::to_string)
+}
+
+fn git_remote_matches_repository_id(repo_root: &Path, repository_id: &str) -> bool {
+    let Some(remote_repository_id) = git_remote_repository_slug(repo_root) else {
+        return false;
+    };
+    let Some(canonical_key) = repository_id.split(":repository:").nth(1) else {
+        return false;
+    };
+    let canonical_slug = canonical_key.rsplit('/').next().unwrap_or(canonical_key);
+    remote_repository_id.eq_ignore_ascii_case(canonical_slug)
 }
 
 fn git_remote_url(repo_root: &Path) -> Option<String> {
@@ -11225,6 +11243,35 @@ Public memory concept.
         assert!(
             matches!(error, MemoryError::InvalidInput(message) if message.contains("canonical repository"))
         );
+    }
+
+    #[test]
+    fn configured_memory_checkout_must_match_canonical_remote() {
+        let repository = TempDir::new().expect("repository");
+        std::fs::write(repository.path().join("README.md"), "repo-a\n").expect("readme");
+        init_test_git_repo(repository.path(), "develop");
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:example/repo-a.git"
+                ])
+                .current_dir(repository.path())
+                .status()
+                .expect("git remote add")
+                .success()
+        );
+
+        assert!(super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:repository:repo-a"
+        ));
+        assert!(!super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:repository:repo-b"
+        ));
     }
 
     #[test]

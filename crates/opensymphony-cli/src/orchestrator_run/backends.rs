@@ -1466,7 +1466,7 @@ impl RuntimeWorkerBackend {
                 memory.execution_repo = None;
                 worker_env.remove("OPENSYMPHONY_MEMORY_EXECUTION_REPO");
             }
-            if let Some(project) = issue.project_slug.as_ref().or(issue.project_id.as_ref()) {
+            if let Some(project) = issue.project_id.as_ref().or(issue.project_slug.as_ref()) {
                 memory.project = Some(project.clone());
                 worker_env.insert("OPENSYMPHONY_MEMORY_PROJECT".to_string(), project.clone());
             } else if memory.project_set.is_some() {
@@ -6538,6 +6538,21 @@ mod tests {
                 .map(String::as_str),
             Some("/tmp/project-alpha/services/api")
         );
+    }
+
+    #[test]
+    fn memory_scope_prefers_stable_project_id_over_slug() {
+        let mut issue = sample_issue();
+        issue.project_id = Some("project-stable-id".to_string());
+        issue.project_slug = Some("renamed-project".to_string());
+
+        let project = issue
+            .project_id
+            .as_ref()
+            .or(issue.project_slug.as_ref())
+            .cloned();
+
+        assert_eq!(project.as_deref(), Some("project-stable-id"));
     }
 
     #[tokio::test]
