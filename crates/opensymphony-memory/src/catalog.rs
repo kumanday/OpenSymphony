@@ -572,13 +572,6 @@ pub fn withdraw_memory_repository_records(
             path: config.index_path.clone(),
             source: error,
         })?;
-    let configured_remaining_project_scopes = registered_source_repositories
-        .values()
-        .filter(|candidate| candidate.as_str() != repository_id)
-        .filter_map(|candidate| config.repository_sources.get(candidate))
-        .flat_map(|source| source.project_scope_ids.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>();
     for (issue_key, concept_id, scopes_json, sources_json, source_ids_json) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default();
         let had_legacy_live_owner = source_ids.iter().any(|source_id| source_id == LIVE_CAPTURE_OWNER);
@@ -726,7 +719,15 @@ pub fn withdraw_memory_repository_records(
                     source: error,
                 })?;
             if provenance_count == 0 {
-                remaining_project_scopes = configured_remaining_project_scopes.clone();
+                remaining_project_scopes = source_ids
+                    .iter()
+                    .filter_map(|candidate| {
+                        source_repository_id(config, &registered_source_repositories, candidate)
+                    })
+                    .filter_map(|repository_id| config.repository_sources.get(&repository_id))
+                    .flat_map(|source| source.project_scope_ids.iter())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
             }
         }
         let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&scopes_json)

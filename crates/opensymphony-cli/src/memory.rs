@@ -529,7 +529,7 @@ pub(crate) async fn auto_capture_terminal(
         None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
     };
     let source = load_linear_source_from_client(&client, &identifiers).await?;
-    let repository_groups = auto_capture_repository_groups(&config, &source, &identifiers);
+    let repository_groups = auto_capture_repository_groups(&config, &source, &identifiers)?;
     if repository_groups.len() > 1 {
         let mut aggregate = AutoMemoryReport {
             capture_completed: true,
@@ -593,7 +593,12 @@ pub(crate) async fn auto_capture_terminal(
     let mut warnings = Vec::new();
     let mut capture_completed = true;
     let evolved_config = if capture_plan.selected.is_empty() {
-        config.clone()
+        let mut evolved = config.clone();
+        evolved.repo_root = capture_config.repo_root.clone();
+        evolved.default_repository_id = capture_config.default_repository_id.clone();
+        evolved.code_index_target_branch = capture_config.code_index_target_branch.clone();
+        apply_repository_memory_policy(&mut evolved, &capture_config);
+        evolved
     } else {
         let capture_report = write_capture_plan(&capture_config, &capture_plan, false)?;
         warnings.extend(capture_report.warnings);
@@ -823,7 +828,7 @@ fn auto_capture_repository_groups(
     config: &MemoryConfig,
     source: &SourceFile,
     identifiers: &[String],
-) -> BTreeMap<Option<String>, Vec<String>> {
+) -> Result<BTreeMap<Option<String>, Vec<String>>, MemoryError> {
     let mut groups = BTreeMap::new();
     for identifier in identifiers {
         let repository_id = source
@@ -832,6 +837,9 @@ fn auto_capture_repository_groups(
             .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
             .and_then(|issue| {
                 let candidates = auto_capture_candidate_repositories(config, issue);
+                if candidates.len() > 1 {
+                    return None;
+                }
                 (candidates.len() == 1)
                     .then(|| candidates.into_iter().next())
                     .flatten()
@@ -841,7 +849,23 @@ fn auto_capture_repository_groups(
             .or_insert_with(Vec::new)
             .push(identifier.clone());
     }
-    groups
+    for identifier in identifiers {
+        let Some(issue) = source
+            .issues
+            .iter()
+            .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+        else {
+            continue;
+        };
+        let candidates = auto_capture_candidate_repositories(config, issue);
+        if candidates.len() > 1 {
+            return Err(MemoryError::InvalidInput(format!(
+                "cannot auto-capture `{}` because its project scope matches multiple repository sources",
+                issue.identifier
+            )));
+        }
+    }
+    Ok(groups)
 }
 
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
@@ -5047,10 +5071,12 @@ fn normalize_git_remote_locator(value: &str) -> String {
         .trim_start_matches("ssh://")
         .trim_start_matches("git://")
         .to_string();
-    if let Some(stripped) = value.strip_prefix("git@").map(str::to_string)
-        && let Some((host, path)) = stripped.split_once(':')
-    {
-        value = format!("{host}/{path}");
+    if let Some(stripped) = value.strip_prefix("git@").map(str::to_string) {
+        if let Some((host, path)) = stripped.split_once(':') {
+            value = format!("{host}/{path}");
+        } else if let Some((host, path)) = stripped.split_once('/') {
+            value = format!("{host}/{path}");
+        }
     }
     value.to_ascii_lowercase()
 }
@@ -5087,23 +5113,9 @@ fn workspace_matches_registered_repository(workspace_root: &Path, repository_roo
     {
         return true;
     }
-    let normalize_remote = |remote: &str| {
-        let remote = remote
-            .trim()
-            .trim_end_matches('/')
-            .trim_end_matches(".git")
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .trim_start_matches("ssh://")
-            .trim_start_matches("git://");
-        let remote = remote
-            .strip_prefix("git@")
-            .map(|value| value.replacen(':', "/", 1))
-            .unwrap_or_else(|| remote.to_string());
-        remote.to_ascii_lowercase()
-    };
     git_remote_url(repository_root).is_some_and(|repository_remote| {
-        normalize_remote(&workspace_remote) == normalize_remote(&repository_remote)
+        normalize_git_remote_locator(&workspace_remote)
+            == normalize_git_remote_locator(&repository_remote)
     })
 }
 
@@ -11393,6 +11405,10 @@ Public memory concept.
             "github:github.com:repository:repo-42",
             Some("example/repo-a"),
         ));
+        assert_eq!(
+            super::normalize_git_remote_locator("ssh://git@github.com/org/repo.git"),
+            "github.com/org/repo"
+        );
 
         let unrelated_repository = TempDir::new().expect("unrelated repository");
         std::fs::write(unrelated_repository.path().join("README.md"), "other\n")
@@ -11464,7 +11480,8 @@ Public memory concept.
             &config,
             &source,
             &["COE-1".to_string(), "COE-2".to_string()],
-        );
+        )
+        .expect("unambiguous repository groups");
         assert_eq!(
             groups.get(&Some("repo-a".to_string())),
             Some(&vec!["COE-1".to_string()])
@@ -11473,6 +11490,43 @@ Public memory concept.
             groups.get(&Some("repo-b".to_string())),
             Some(&vec!["COE-2".to_string()])
         );
+    }
+
+    #[test]
+    fn auto_capture_rejects_ambiguous_repository_scope() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        for (repository_id, root) in [
+            ("repo-a", repository_a.path()),
+            ("repo-b", repository_b.path()),
+        ] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["shared-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let error = super::auto_capture_repository_groups(
+            &config,
+            &SourceFile {
+                issues: vec![IssueEvidence {
+                    identifier: "COE-550".to_string(),
+                    project_id: Some("shared-project".to_string()),
+                    ..IssueEvidence::default()
+                }],
+                ..SourceFile::default()
+            },
+            &["COE-550".to_string()],
+        )
+        .expect_err("ambiguous repository scope must be rejected");
+        assert!(error.to_string().contains("multiple repository sources"));
     }
 
     #[test]

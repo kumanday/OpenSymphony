@@ -2102,6 +2102,9 @@ type: topic-doc
         config.index_path = catalog.join("memory.duckdb");
         config.containment_root = Some(state.clone());
 
+        refresh_memory_index_from_okf(&config, &catalog)
+            .expect("central catalog reindex should use state containment");
+
         let export = export_okf_bundle(
             &config,
             MemoryVisibility::Private,

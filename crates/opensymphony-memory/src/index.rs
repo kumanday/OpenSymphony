@@ -3343,8 +3343,15 @@ fn refresh_memory_index_from_okf_inner(
     repository_id: Option<&str>,
     source_id: Option<&str>,
 ) -> Result<MemoryReindexReport, MemoryError> {
-    ensure_repo_contained(&config.repo_root, bundle_root)?;
     let bundle_root = canonicalize_existing_path(bundle_root)?;
+    let is_central_catalog_bundle = canonicalize_existing_prefix(&config.memory_root)
+        .is_ok_and(|memory_root| bundle_root == memory_root);
+    let containment_root = if is_central_catalog_bundle {
+        config.containment_root.as_deref().unwrap_or(&config.repo_root)
+    } else {
+        &config.repo_root
+    };
+    ensure_repo_contained(containment_root, &bundle_root)?;
     let lint = lint_okf_bundle_with_codes(&bundle_root, false)?;
     let errors = lint
         .findings
