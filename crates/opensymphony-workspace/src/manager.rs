@@ -394,10 +394,14 @@ impl WorkspaceManager {
             binding.repository_id().as_str(),
         )?;
 
-        if let Some(existing) = self
-            .find_compatible_checkout(issue, binding, checkout_deadline)
-            .await?
-        {
+        let compatible = checkout_operation_with_timeout(
+            checkout_time_remaining(checkout_deadline),
+            &self.config.root,
+            "scan retained checkout generations",
+            self.find_compatible_checkout(issue, binding, checkout_deadline),
+        )
+        .await?;
+        if let Some(existing) = compatible {
             if let Some(run_id) = run_id {
                 self.update_checkout_run_id(&existing.handle, run_id)
                     .await?;
@@ -1724,13 +1728,7 @@ impl WorkspaceManager {
                 continue;
             }
             match self.verify_checkout_for_retry(&handle).await {
-                Ok(checkout)
-                    if checkout.issue_id == manifest.issue_id
-                        && checkout.identifier == manifest.identifier
-                        && checkout.sanitized_workspace_key == manifest.sanitized_workspace_key
-                        && checkout.workspace_path == handle.workspace_path()
-                        && issue_manifest_binding_matches_checkout(&manifest, &checkout) =>
-                {
+                Ok(checkout) if issue_manifest_owns_checkout(&handle, &manifest, &checkout) => {
                     return Ok(Some(handle));
                 }
                 Ok(_) => {
@@ -1783,6 +1781,26 @@ impl WorkspaceManager {
             }
 
             match self.load_workspace_from_directory(&entry.path()).await {
+                Ok(Some((handle, manifest))) if handle.checkout_generation().is_some() => {
+                    match self
+                        .load_manifest::<CheckoutManifest>(
+                            &handle,
+                            &handle.checkout_manifest_path(),
+                        )
+                        .await?
+                    {
+                        Some(checkout)
+                            if issue_manifest_owns_checkout(&handle, &manifest, &checkout) =>
+                        {
+                            workspaces.push((handle, manifest));
+                        }
+                        Some(_) => tracing::warn!(
+                            path = %handle.workspace_path().display(),
+                            "skipping workspace with mismatched issue and checkout ownership"
+                        ),
+                        None => {}
+                    }
+                }
                 Ok(Some((handle, manifest))) => workspaces.push((handle, manifest)),
                 Ok(None) => {}
                 Err(WorkspaceError::DecodeManifest { path, source }) => {
@@ -3039,6 +3057,18 @@ fn issue_manifest_binding_matches_checkout(
         .as_ref()
         .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
         .is_some_and(|binding| binding == &checkout.repository_binding)
+}
+
+fn issue_manifest_owns_checkout(
+    handle: &WorkspaceHandle,
+    manifest: &IssueManifest,
+    checkout: &CheckoutManifest,
+) -> bool {
+    checkout.issue_id == manifest.issue_id
+        && checkout.identifier == manifest.identifier
+        && checkout.sanitized_workspace_key == manifest.sanitized_workspace_key
+        && checkout.workspace_path == handle.workspace_path()
+        && issue_manifest_binding_matches_checkout(manifest, checkout)
 }
 
 fn ensure_descendant(root: &Path, candidate: &Path) -> Result<(), WorkspaceError> {

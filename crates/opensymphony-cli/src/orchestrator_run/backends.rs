@@ -2407,63 +2407,24 @@ async fn try_run_codex_stdio_issue(
         load_codex_conversation_manifest(workspace_manager, workspace, issue)
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    let conversation_envelope_untrusted = run_manifest.runtime_envelope.is_some()
-        && existing_manifest.as_ref().is_some_and(|manifest| {
-            manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
-                envelope.conversation_binding.as_deref()
-                    != Some(manifest.conversation_id.to_string().as_str())
-            })
-        });
-    if (conversation_envelope_untrusted
-        || run_manifest
+    let conversation_envelope_untrusted =
+        run_manifest
             .runtime_envelope
             .as_ref()
             .is_some_and(|expected| {
-                existing_manifest
-                    .as_ref()
-                    .is_some_and(|manifest| manifest.runtime_envelope.as_ref() != Some(expected))
-            }))
-        && let Some(mut incompatible) = existing_manifest.take()
-    {
-        if conversation_envelope_untrusted {
-            tracing::warn!(
-                conversation_id = %incompatible.conversation_id,
-                "skipping retirement of Codex thread with mismatched runtime envelope binding"
-            );
-        } else {
-            ensure_codex_thread_active(
-                workspace_manager,
-                workspace,
-                &mut incompatible,
-                codex_bin,
-                checkout_credential_envs,
-            )
-            .await
-            .map_err(|error| {
-                codex_lifecycle_error(
-                    issue,
-                    Some(&incompatible.conversation_id.to_string()),
-                    "supersede incompatible conversation",
-                    error,
-                )
-            })?;
-            archive_terminal_codex_thread(
-                workspace_manager,
-                workspace,
-                &mut incompatible,
-                codex_bin,
-                checkout_credential_envs,
-            )
-            .await
-            .map_err(|error| {
-                codex_lifecycle_error(
-                    issue,
-                    Some(&incompatible.conversation_id.to_string()),
-                    "supersede incompatible conversation",
-                    error,
-                )
-            })?;
-        }
+                existing_manifest.as_ref().is_some_and(|manifest| {
+                    manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+                        envelope != expected
+                            || envelope.conversation_binding.as_deref()
+                                != Some(manifest.conversation_id.to_string().as_str())
+                    })
+                })
+            });
+    if conversation_envelope_untrusted && let Some(incompatible) = existing_manifest.take() {
+        tracing::warn!(
+            conversation_id = %incompatible.conversation_id,
+            "skipping retirement of Codex thread with an untrusted runtime envelope"
+        );
     }
     if let Some(manifest) = existing_manifest.as_mut() {
         ensure_codex_thread_active(

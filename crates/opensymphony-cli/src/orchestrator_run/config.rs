@@ -1421,6 +1421,9 @@ fn reject_checkout_credential_env_reuse(
     }) {
         non_checkout_variables.insert(variable.to_owned(), "memory.token_env");
     }
+    for variable in ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"] {
+        non_checkout_variables.insert(variable.to_owned(), "linear.oauth_client_credentials");
+    }
     if let Some(front_matter) = config.openhands.front_matter.as_ref() {
         let value = serde_yaml::to_value(front_matter).map_err(|_| {
             CentralConfigError::InvalidReference {
@@ -2981,6 +2984,27 @@ scheduler:
             CentralConfigError::InvalidReference { field }
                 if field == "memory.token_env"
         ));
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_linear_oauth() {
+        for variable in ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"] {
+            let root = tempfile::tempdir().expect("central config root should exist");
+            std::fs::write(root.path().join("integration.md"), "integration\n")
+                .expect("integration instructions should be written");
+            let source = central_fixture(root.path()).replace(
+                "  github-ssh:\n    kind: ssh-agent",
+                &format!("  github-ssh:\n    kind: environment\n    variable: {variable}"),
+            );
+
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("Linear OAuth variables must not reuse checkout credentials");
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field }
+                    if field == "linear.oauth_client_credentials"
+            ));
+        }
     }
 
     #[test]
