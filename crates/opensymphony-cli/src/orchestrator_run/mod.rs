@@ -992,19 +992,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             ),
         )?
         .with_legacy_repository(legacy_repository)
-        .with_repository_checkouts(
-            runtime
-                .repository_routing
-                .as_ref()
-                .filter(|routing| {
-                    matches!(
-                        routing.mode,
-                        crate::opensymphony_domain::RepositoryRoutingMode::ProjectSet
-                    )
-                })
-                .and(runtime.repository_checkouts.clone())
-                .unwrap_or_default(),
-        ),
+        .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default()),
     );
     let retry_state_root = runtime.state_root.clone().unwrap_or_else(|| {
         workspace_manager

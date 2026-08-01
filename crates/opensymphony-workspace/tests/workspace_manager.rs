@@ -8,8 +8,8 @@ use crate::opensymphony_workspace::{
     CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest,
     HookConfig, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, PromptCaptureDescriptor,
-    PromptKind, RunDescriptor, RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager,
-    WorkspaceManagerConfig, compose_terminal_prompt,
+    PromptKind, RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError,
+    WorkspaceManager, WorkspaceManagerConfig, compose_terminal_prompt,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -459,6 +459,28 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         repaired.handle.workspace_path()
     );
 
+    let mut run_manifest = RunManifest::new(
+        &clean_retry.handle,
+        &RunDescriptor::new("run-feature-branch", 1),
+    );
+    run_manifest.status = RunStatus::Running;
+    manager
+        .write_run_manifest(&clean_retry.handle, &run_manifest)
+        .await
+        .expect("running manifest should be written");
+    git(
+        clean_retry.handle.workspace_path(),
+        &["checkout", "-b", "worker-feature"],
+    );
+    manager
+        .verify_checkout_for_retry(&clean_retry.handle)
+        .await
+        .expect("worker feature branches should remain attachable");
+    git(
+        clean_retry.handle.workspace_path(),
+        &["checkout", "--detach", "HEAD"],
+    );
+
     git(
         clean_retry.handle.workspace_path(),
         &["checkout", "--orphan", "rewritten"],
@@ -538,6 +560,7 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         renamed.handle.workspace_path(),
         clean_retry.handle.workspace_path()
     );
+
     assert!(!clean_retry.handle.workspace_path().exists());
     assert!(
         temp_dir
@@ -548,6 +571,57 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
             .next()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-549-malformed-generation");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("legacy workspace should exist");
+
+    let malformed_path = workspace_root.join("malformed-generation");
+    tokio::fs::create_dir_all(malformed_path.join(".opensymphony"))
+        .await
+        .expect("malformed generation directory should exist");
+    let mut issue_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(ensured.handle.issue_manifest_path())
+            .await
+            .expect("issue manifest should be readable"),
+    )
+    .expect("issue manifest should decode");
+    issue_manifest["sanitized_workspace_key"] =
+        serde_json::Value::String("malformed-generation".to_owned());
+    issue_manifest["workspace_path"] =
+        serde_json::Value::String(malformed_path.display().to_string());
+    tokio::fs::write(
+        malformed_path.join(".opensymphony/issue.json"),
+        serde_json::to_vec_pretty(&issue_manifest).expect("issue manifest should encode"),
+    )
+    .await
+    .expect("malformed issue manifest should be written");
+    tokio::fs::write(
+        malformed_path.join(".opensymphony/checkout.json"),
+        b"not-json",
+    )
+    .await
+    .expect("malformed checkout manifest should be written");
+
+    let found = manager
+        .find_workspace_by_issue_reference(&issue.issue_id)
+        .await
+        .expect("malformed generations should not abort legacy lookup")
+        .expect("legacy workspace should still be found");
+    assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
 }
 
 #[tokio::test]

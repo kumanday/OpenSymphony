@@ -753,7 +753,7 @@ impl WorkspaceManager {
                     .safe_remote_fingerprint
                     .as_str()
             || manifest.target_branch != repository.target_branch
-            || manifest.target_branch != manifest.current_branch
+            || (!allow_worker_changes && manifest.target_branch != manifest.current_branch)
             || manifest.target_commit != manifest.head
         {
             return Err(WorkspaceError::CheckoutVerification {
@@ -763,7 +763,7 @@ impl WorkspaceManager {
             });
         }
         if (!allow_worker_changes && facts.head != manifest.head)
-            || facts.branch != manifest.current_branch
+            || (!allow_worker_changes && facts.branch != manifest.current_branch)
             || facts.shallow != manifest.shallow
             || (!allow_worker_changes && (!facts.clean || manifest.clean != facts.clean))
         {
@@ -1297,7 +1297,7 @@ impl WorkspaceManager {
             }
         }
         let branch = self.git(checkout, &["branch", "--show-current"]).await?;
-        if branch != repository.target_branch {
+        if enforce_worktree_state && branch != repository.target_branch {
             return Err(checkout_verification(checkout, "target branch mismatch"));
         }
         let remote_ref = format!("refs/remotes/origin/{}", repository.target_branch);
@@ -1677,14 +1677,16 @@ impl WorkspaceManager {
         self.create_directory(&self.config.root).await?;
 
         match super::workspace_path_for_root(&self.config.root, issue_reference) {
-            Ok(candidate) => {
-                if let Some((handle, manifest)) =
-                    self.load_workspace_from_directory(&candidate).await?
-                    && workspace_matches_issue_reference(&manifest, issue_reference)
+            Ok(candidate) => match self.load_workspace_from_directory(&candidate).await {
+                Ok(Some((handle, manifest)))
+                    if workspace_matches_issue_reference(&manifest, issue_reference) =>
                 {
                     return Ok(Some(handle));
                 }
-            }
+                Ok(_) => {}
+                Err(WorkspaceError::DecodeManifest { .. }) => {}
+                Err(error) => return Err(error),
+            },
             Err(WorkspaceError::EmptyIdentifier | WorkspaceError::InvalidWorkspaceKey { .. }) => {}
             Err(error) => return Err(error),
         }
@@ -1716,11 +1718,15 @@ impl WorkspaceManager {
                 continue;
             }
 
-            if let Some((handle, manifest)) =
-                self.load_workspace_from_directory(&entry.path()).await?
-                && workspace_matches_issue_reference(&manifest, issue_reference)
-            {
-                return Ok(Some(handle));
+            match self.load_workspace_from_directory(&entry.path()).await {
+                Ok(Some((handle, manifest)))
+                    if workspace_matches_issue_reference(&manifest, issue_reference) =>
+                {
+                    return Ok(Some(handle));
+                }
+                Ok(_) => {}
+                Err(WorkspaceError::DecodeManifest { .. }) => {}
+                Err(error) => return Err(error),
             }
         }
 

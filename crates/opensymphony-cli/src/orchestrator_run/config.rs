@@ -21,7 +21,7 @@ use crate::opensymphony_workflow::{
 use crate::opensymphony_workflow::{
     DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
 };
-use crate::opensymphony_workspace::CheckoutRepository;
+use crate::opensymphony_workspace::{CheckoutRepository, SSH_AUTH_SOCK_ENV};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -1351,17 +1351,25 @@ fn resolve_central_config(
 fn reject_checkout_credential_env_reuse(
     config: &CentralConfigFile,
 ) -> Result<(), CentralConfigError> {
-    let checkout_variables = config
+    let mut checkout_variables = config
         .repositories
-        .iter()
-        .filter_map(|(repository_id, repository)| {
+        .values()
+        .filter_map(|repository| {
             config
                 .credentials
                 .get(&repository.credential)
                 .and_then(|credential| credential.variable.as_deref())
-                .map(|variable| (variable.to_owned(), repository_id))
+                .map(str::to_owned)
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<BTreeSet<_>>();
+    if config.repositories.values().any(|repository| {
+        config
+            .credentials
+            .get(&repository.credential)
+            .is_some_and(|credential| credential.kind == "ssh-agent")
+    }) {
+        checkout_variables.insert(SSH_AUTH_SOCK_ENV.to_owned());
+    }
 
     for (tracker_id, tracker) in &config.tracker_profiles {
         let Some(variable) = config
@@ -1371,7 +1379,7 @@ fn reject_checkout_credential_env_reuse(
         else {
             continue;
         };
-        if checkout_variables.contains_key(variable) {
+        if checkout_variables.contains(variable) {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("tracker_profiles.{tracker_id}.credential"),
             });
@@ -1438,7 +1446,7 @@ fn reject_checkout_credential_env_reuse(
     }
     if let Some((_, field)) = non_checkout_variables
         .iter()
-        .find(|(variable, _)| checkout_variables.contains_key(*variable))
+        .find(|(variable, _)| checkout_variables.contains(*variable))
     {
         return Err(CentralConfigError::InvalidReference {
             field: (*field).to_owned(),
@@ -2907,6 +2915,23 @@ scheduler:
                     if actual == field
             ));
         }
+    }
+
+    #[test]
+    fn central_config_rejects_ssh_agent_socket_reuse_by_routing_selector() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("harness_env: TEST_HARNESS", "harness_env: SSH_AUTH_SOCK");
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("SSH agent socket must not be reused by routing selectors");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "routing.harness_env"
+        ));
     }
 
     #[test]

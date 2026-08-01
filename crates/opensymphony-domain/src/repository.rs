@@ -150,8 +150,14 @@ impl RepositoryRouting {
             .collect::<Vec<_>>();
         let project_key = project_keys
             .iter()
-            .find(|key| self.active_projects.contains(*key))
-            .cloned()
+            .find_map(|key| {
+                self.active_projects.get(key).cloned().or_else(|| {
+                    self.active_projects
+                        .iter()
+                        .find(|active| active.eq_ignore_ascii_case(key))
+                        .cloned()
+                })
+            })
             .or_else(|| project_keys.first().cloned());
 
         if self.mode == RepositoryRoutingMode::ProjectSet {
@@ -815,6 +821,21 @@ mod tests {
                 &labels(&["repo:one"]),
                 Some("stale-provider-id"),
                 Some("project-id"),
+                false,
+            ),
+            RepositoryBindingOutcome::Resolved(_)
+        ));
+    }
+
+    #[test]
+    fn project_routing_matches_active_slugs_case_insensitively() {
+        let strict = routing(RepositoryRoutingMode::ProjectSet);
+
+        assert!(matches!(
+            strict.resolve(
+                &labels(&["repo:one"]),
+                Some("stale-provider-id"),
+                Some("PROJECT-ID"),
                 false,
             ),
             RepositoryBindingOutcome::Resolved(_)
