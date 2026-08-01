@@ -396,7 +396,10 @@ pub fn withdraw_memory_source_records(
                 _ => true,
             });
             if !has_other_source {
-                sources.retain(|source| source.repo_id.as_deref() != Some(repository_id));
+                sources.retain(|source| {
+                    source.registration_source_id.is_none()
+                        || source.repo_id.as_deref() != Some(repository_id)
+                });
             }
             transaction
                 .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
@@ -443,7 +446,7 @@ pub fn withdraw_memory_repository_records(
     })?;
     let mut statement = connection
         .prepare(
-            "SELECT DISTINCT issues.issue_key, issues.concept_id, issues.scope_refs_json, issues.source_refs_json FROM issues JOIN scope_refs ON scope_refs.concept_id = issues.concept_id WHERE scope_refs.scope_kind = 'repository' AND scope_refs.scope_id = ?",
+            "SELECT DISTINCT issues.issue_key, issues.concept_id, issues.scope_refs_json, issues.source_refs_json, issues.source_ids_json FROM issues JOIN scope_refs ON scope_refs.concept_id = issues.concept_id WHERE scope_refs.scope_kind = 'repository' AND scope_refs.scope_id = ?",
         )
         .map_err(|error| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -456,6 +459,7 @@ pub fn withdraw_memory_repository_records(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(|error| MemoryError::DuckDb {
@@ -509,7 +513,43 @@ pub fn withdraw_memory_repository_records(
         .flat_map(|source| source.project_scope_ids.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
-    for (issue_key, concept_id, scopes_json, sources_json) in rows {
+    for (issue_key, concept_id, scopes_json, sources_json, source_ids_json) in rows {
+        let source_ids = serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default();
+        let has_other_registered_source = source_ids.iter().any(|source_id| {
+            source_id != LIVE_CAPTURE_OWNER
+                && registered_source_repositories
+                    .get(source_id)
+                    .is_some_and(|owner| owner != repository_id)
+        });
+        if source_ids.iter().any(|id| id == LIVE_CAPTURE_OWNER) && !has_other_registered_source {
+            transaction
+                .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            transaction
+                .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+            }
+            continue;
+        }
         let mut scope_statement = transaction
             .prepare(
                 "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
@@ -997,7 +1037,8 @@ mod catalog_tests {
     #[test]
     fn withdraws_live_capture_without_source_registration_ownership() {
         let root = TempDir::new().expect("memory root");
-        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let mut config = MemoryConfig::load(root.path(), None).expect("config");
+        config.default_project_set_id = Some("set-a".to_string());
         let source = RegisteredMemorySource {
             source_id: "github:repository:a:repository".to_string(),
             repository_id: "github:repository:a".to_string(),
@@ -1027,7 +1068,7 @@ mod catalog_tests {
                     "issues/COE-553",
                     r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project","id":"project-a"},{"kind":"project_set","id":"set-a"}]"#,
                     "[]",
-                    "[]",
+                    r#"["__live_capture__"]"#,
                 ],
             )
             .expect("live capture");
@@ -1045,6 +1086,68 @@ mod catalog_tests {
             .expect("issues")
             .into_iter()
             .all(|issue| issue.issue_key != "COE-553"));
+    }
+
+    #[test]
+    fn withdrawing_registered_source_preserves_live_capture_owner() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let source = RegisteredMemorySource {
+            source_id: "github:repository:a:repository".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::Repository,
+            root: root.path().join("repo-a"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:repo".to_string(),
+        };
+        register_memory_source(&config, &source).expect("repository source");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-555",
+                    "Live capture refreshed from source",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-555.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-555",
+                    r#"[{"kind":"repository","id":"github:repository:a"}]"#,
+                    r#"[{"kind":"github_pr","id":"42","repo_id":"github:repository:a"},{"kind":"legacy_store","id":"source","repo_id":"github:repository:a","registration_source_id":"github:repository:a:repository"}]"#,
+                    r#"["__live_capture__","github:repository:a:repository"]"#,
+                ],
+            )
+            .expect("live capture");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL)",
+                [],
+            )
+            .expect("normalized scope");
+
+        withdraw_memory_source_records(
+            &config,
+            &source.source_id,
+            &source.repository_id,
+        )
+        .expect("source withdrawal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-555")
+            .expect("live issue remains");
+        assert!(issue
+            .source_refs
+            .iter()
+            .any(|source_ref| source_ref.registration_source_id.is_none()));
     }
 
     #[test]

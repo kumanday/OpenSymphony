@@ -1,4 +1,5 @@
 const UNDATED_LOG_DATE: &str = "1970-01-01";
+const LIVE_CAPTURE_OWNER: &str = "__live_capture__";
 
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
     let mut connection = open_index(config)?;
@@ -32,7 +33,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             })
             .collect::<Vec<_>>();
         let source_refs_json = serde_json::to_string(&source_refs)?;
-        let empty_json = serde_json::to_string(&Vec::<String>::new())?;
+        let source_ids_json = serde_json::to_string(&vec![LIVE_CAPTURE_OWNER])?;
         let freshness = MemoryFreshness::Current;
         transaction
             .execute("DELETE FROM issues WHERE issue_key = ?", params![issue_key])
@@ -42,7 +43,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             })?;
         transaction
             .execute(
-                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, source_ids_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     issue_key,
                     issue_title(&issue_plan.issue),
@@ -68,8 +69,9 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     labels_json.clone(),
                     scope_refs_json,
                     source_refs_json,
-                    empty_json.clone(),
-                    empty_json.clone(),
+                    source_ids_json,
+                    serde_json::to_string(&Vec::<String>::new())?,
+                    serde_json::to_string(&Vec::<String>::new())?,
                     freshness.as_str(),
                     warnings_json,
                 ],
@@ -3074,7 +3076,8 @@ pub fn backfill_legacy_memory_source_scopes(
     };
     for (issue_key, concept_id, encoded_scopes, encoded_sources, encoded_source_ids) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
-        if !source_ids.is_empty() && !source_ids.iter().any(|value| value == source_id) {
+        let has_registered_owner = source_ids.iter().any(|value| value != LIVE_CAPTURE_OWNER);
+        if has_registered_owner && !source_ids.iter().any(|value| value == source_id) {
             continue;
         }
         if !source_ids.iter().any(|value| value == source_id) {
@@ -3634,7 +3637,8 @@ fn refresh_memory_index_from_okf_inner(
                 let existing_source_ids = serde_json::from_str::<Vec<String>>(&existing_source_ids)
                     .unwrap_or_default();
                 let source_only = source_id.is_some_and(|source_id| {
-                    existing_source_ids.iter().all(|id| id == source_id)
+                    !existing_source_ids.is_empty()
+                        && existing_source_ids.iter().all(|id| id == source_id)
                 });
                 if !source_only {
                     let refreshed_project_scopes = repository_id

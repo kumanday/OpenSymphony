@@ -561,7 +561,11 @@ pub(crate) async fn auto_capture_terminal(
         let capture_report = write_capture_plan(&capture_config, &capture_plan, false)?;
         warnings.extend(capture_report.warnings);
         match reload_memory_config(&config) {
-            Ok(config) => config,
+            Ok(mut evolved) => {
+                evolved.repo_root = capture_config.repo_root.clone();
+                apply_repository_memory_policy(&mut evolved, &capture_config);
+                evolved
+            }
             Err(error) => {
                 capture_completed = false;
                 warnings.push(format!(
@@ -699,6 +703,18 @@ pub(crate) async fn auto_capture_terminal(
         archive_completed,
         warnings,
     })
+}
+
+fn apply_repository_memory_policy(target: &mut MemoryConfig, source: &MemoryConfig) {
+    target.enabled = source.enabled;
+    target.code_intel = source.code_intel.clone();
+    target.visibility = source.visibility;
+    target.confidence_threshold = source.confidence_threshold;
+    target.source_snapshot_policy = source.source_snapshot_policy;
+    target.markdown_indexes = source.markdown_indexes;
+    target.docs = source.docs.clone();
+    target.areas = source.areas.clone();
+    target.redaction = source.redaction.clone();
 }
 
 fn resolve_auto_capture_repository_config(
@@ -3449,6 +3465,13 @@ fn resolve_code_graph_overlay(
         return Err(MemoryError::InvalidInput(
             "run workspace repository binding does not match the requested repository".to_string(),
         ));
+    } else if !config.repository_sources.is_empty()
+        && let Some(source) = config.repository_sources.get(repo_id)
+        && !workspace_matches_registered_repository(&workspace_path, &source.root)
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace has no repository binding and does not resolve to the requested repository".to_string(),
+        ));
     }
     let workspace_key = workspace_candidate
         .file_name()
@@ -4270,8 +4293,12 @@ async fn call_memory_ingest_code_intel_tool(
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let limit = usize_arg(arguments, "limit", 10);
-    let scope_refs = scope_refs_for_context(&scope, &paths);
     let persist = bool_arg(arguments, "persist");
+    let paths = paths
+        .into_iter()
+        .take(resolved_config.code_intel.ast.max_files_per_request)
+        .collect::<Vec<_>>();
+    let scope_refs = scope_refs_for_context(&scope, &paths);
     if !resolved_config.enabled || !resolved_config.code_intel.enabled {
         return Err(MemoryError::InvalidInput(
             "code-intelligence ingestion is disabled for the selected repository".to_string(),
@@ -4298,10 +4325,6 @@ async fn call_memory_ingest_code_intel_tool(
         (artifacts, Some(report))
     } else {
         let repo_root = resolve_code_intel_repo_for_scope(&resolved_config, &scope)?;
-        let paths = paths
-            .into_iter()
-            .take(resolved_config.code_intel.ast.max_files_per_request)
-            .collect();
         let artifacts = code_intel_artifacts_blocking(
             repo_root,
             paths,
@@ -4440,6 +4463,24 @@ fn code_intel_documents_for_persistence(
         let relative_display = relative.to_string_lossy().to_string();
         if resolved.is_dir() {
             skipped_files.push(format!("{relative_display}: directory"));
+            continue;
+        }
+        let metadata = fs::metadata(&resolved).map_err(|source| MemoryError::ReadFile {
+            path: resolved.clone(),
+            source,
+        })?;
+        if metadata.len() > request.config.code_intel.ast.max_file_bytes {
+            record_skipped_code_intel_file(
+                &mut skipped_files,
+                &mut skipped_file_inputs,
+                &relative,
+                &relative_display,
+                &resolved,
+                &format!(
+                    "exceeds AST max_file_bytes {}",
+                    request.config.code_intel.ast.max_file_bytes
+                ),
+            )?;
             continue;
         }
         let Some(language) = crate::opensymphony_code_intel::detect_language(&relative) else {
@@ -4859,6 +4900,11 @@ fn legacy_code_repository_matches_source(
 }
 
 fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
+    let remote_output = git_remote_url(repo_root)?;
+    remote_output.rsplit(['/', ':']).next().map(str::to_string)
+}
+
+fn git_remote_url(repo_root: &Path) -> Option<String> {
     let output = process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_root)
@@ -4867,12 +4913,47 @@ fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let remote_output = String::from_utf8_lossy(&output.stdout);
-    let remote = remote_output
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
-    remote.rsplit(['/', ':']).next().map(str::to_string)
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_string(),
+    )
+}
+
+fn workspace_matches_registered_repository(workspace_root: &Path, repository_root: &Path) -> bool {
+    let Some(workspace_remote) = git_remote_url(workspace_root) else {
+        return false;
+    };
+    let workspace_remote_path = Path::new(&workspace_remote);
+    if workspace_remote_path.is_absolute()
+        && workspace_remote_path
+            .canonicalize()
+            .ok()
+            .zip(repository_root.canonicalize().ok())
+            .is_some_and(|(workspace, repository)| workspace == repository)
+    {
+        return true;
+    }
+    let normalize_remote = |remote: &str| {
+        let remote = remote
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_start_matches("ssh://")
+            .trim_start_matches("git://");
+        let remote = remote
+            .strip_prefix("git@")
+            .map(|value| value.replacen(':', "/", 1))
+            .unwrap_or_else(|| remote.to_string());
+        remote.to_ascii_lowercase()
+    };
+    git_remote_url(repository_root).is_some_and(|repository_remote| {
+        normalize_remote(&workspace_remote) == normalize_remote(&repository_remote)
+    })
 }
 
 fn git_worktree_dirty(repo_root: &Path) -> bool {
@@ -6996,6 +7077,11 @@ mod tests {
     fn auto_capture_routes_github_discovery_to_issue_repository() {
         let catalog = TempDir::new().expect("catalog temp repo");
         let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "areas:\n  routed:\n    aliases: [special-area]\n    docs_target: routed.md\n",
+        )
+        .expect("repository memory config");
         let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
         config.default_repository_id = Some("repo-a".to_string());
         config.repository_sources.insert(
@@ -7037,6 +7123,8 @@ mod tests {
         .expect("routed config");
         assert_eq!(routed.default_repository_id.as_deref(), Some("repo-b"));
         assert_eq!(routed.repo_root, repository.path());
+        assert!(routed.areas.contains_key("routed"));
+        assert!(!routed.areas.contains_key("special-area"));
     }
 
     #[test]
@@ -7539,6 +7627,17 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("repo id")
             .to_string();
+        let mut config = config.with_default_repository_id(repo_id.clone());
+        config.repository_sources.insert(
+            repo_id.clone(),
+            MemoryRepositorySource {
+                repository_id: repo_id.clone(),
+                root: target.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: Some("develop".to_string()),
+            },
+        );
 
         let workspaces = TempDir::new().expect("workspace root");
         let workspace = workspaces.path().join("COE-544");
@@ -8438,6 +8537,69 @@ mod tests {
                 .any(|artifact| artifact["summary"]
                     .as_str()
                     .is_some_and(|summary| summary.contains("max AST file size of 1 bytes")))
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_persistence_honors_selected_limits() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n    max_files_per_request: 1\n",
+        )
+        .expect("repository config");
+        std::fs::write(
+            repository.path().join("src/big.rs"),
+            "pub fn oversized() {}\n",
+        )
+        .expect("oversized source");
+        std::fs::write(
+            repository.path().join("src/second.rs"),
+            "pub fn second() {}\n",
+        )
+        .expect("second source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository
+                    .path()
+                    .canonicalize()
+                    .expect("canonical repository"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "repo": "repo-a",
+                "paths": ["src/big.rs", "src/second.rs"],
+                "persist": true,
+            }),
+        )
+        .await
+        .expect("persistent ingest succeeds");
+
+        assert_eq!(result["parsedFiles"], 0);
+        assert_eq!(result["persistedRows"], 0);
+        assert_eq!(
+            result["skippedFiles"]
+                .as_array()
+                .expect("skipped files")
+                .len(),
+            1
+        );
+        assert!(
+            result["skippedFiles"][0]
+                .as_str()
+                .expect("skip reason")
+                .contains("max_file_bytes 1")
         );
     }
 
