@@ -1506,6 +1506,10 @@ fn load_runtime_memory_config(
                 project_scope_ids: source.project_scope_ids.clone(),
                 target_branch: Some(source.target_branch.clone()),
             });
+        config = config.with_repository_remote_locator(
+            source.repository_id.clone(),
+            source.remote_locator.clone(),
+        );
     }
     if let Some(project_set_id) = runtime.project_set_id.clone() {
         config = config.with_default_project_set_id(project_set_id);

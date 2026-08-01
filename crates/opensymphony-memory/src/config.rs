@@ -108,8 +108,9 @@ impl MemoryConfig {
                 .redaction
                 .map_or_else(RedactionConfig::default, |redaction| RedactionConfig {
                     deny_patterns: normalize_list(redaction.deny_patterns),
-                }),
+            }),
             repository_sources: BTreeMap::new(),
+            repository_remote_locators: BTreeMap::new(),
             default_repository_id: None,
             default_project_set_id: None,
             project_scope_ids: BTreeSet::new(),

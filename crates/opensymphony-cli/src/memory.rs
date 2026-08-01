@@ -524,12 +524,49 @@ pub(crate) async fn auto_capture_terminal(
         .cloned()
         .map(Ok)
         .unwrap_or_else(|| load_memory_config(repo_root, None))?;
-    let _coordination_lock = acquire_memory_writer_guard(&config, writer_gate).await?;
     let client = match resolved_workflow {
         Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
         None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
     };
     let source = load_linear_source_from_client(&client, &identifiers).await?;
+    let repository_groups = auto_capture_repository_groups(&config, &source, &identifiers);
+    if repository_groups.len() > 1 {
+        let mut aggregate = AutoMemoryReport {
+            capture_completed: true,
+            docs_sync_completed: true,
+            archive_completed: true,
+            ..AutoMemoryReport::default()
+        };
+        for group in repository_groups.into_values() {
+            let report = Box::pin(auto_capture_terminal(
+                repo_root,
+                workflow_path,
+                resolved_workflow,
+                &group,
+                conversation_store,
+                auto_archive,
+                Some(&config),
+                writer_gate.clone(),
+            ))
+            .await?;
+            aggregate
+                .completed_issue_keys
+                .extend(report.completed_issue_keys);
+            aggregate
+                .captured_issue_keys
+                .extend(report.captured_issue_keys);
+            aggregate
+                .archived_issue_keys
+                .extend(report.archived_issue_keys);
+            aggregate.docs_written.extend(report.docs_written);
+            aggregate.capture_completed &= report.capture_completed;
+            aggregate.docs_sync_completed &= report.docs_sync_completed;
+            aggregate.archive_completed &= report.archive_completed;
+            aggregate.warnings.extend(report.warnings);
+        }
+        return Ok(aggregate);
+    }
+    let _coordination_lock = acquire_memory_writer_guard(&config, writer_gate).await?;
     let selection = IssueSelection {
         identifiers,
         ..IssueSelection::default()
@@ -731,19 +768,7 @@ fn resolve_auto_capture_repository_config(
         .issues
         .iter()
         .filter(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()))
-        .flat_map(|issue| {
-            [issue.project_id.as_ref(), issue.project_slug.as_ref()]
-                .into_iter()
-                .flatten()
-                .collect::<BTreeSet<_>>()
-        })
-        .flat_map(|project_id| {
-            config
-                .repository_sources
-                .values()
-                .filter(move |repository| repository.project_scope_ids.contains(project_id))
-                .map(|repository| repository.repository_id.clone())
-        })
+        .flat_map(|issue| auto_capture_candidate_repositories(config, issue))
         .collect::<BTreeSet<_>>();
     let repository_id = if candidate_repositories.len() == 1 {
         candidate_repositories.into_iter().next()
@@ -773,7 +798,50 @@ fn resolve_auto_capture_repository_config(
     routed.default_project_set_id = config.default_project_set_id.clone();
     routed.project_scope_ids = config.project_scope_ids.clone();
     routed.code_index_target_branch = config.code_index_target_branch.clone();
+    routed.repository_remote_locators = config.repository_remote_locators.clone();
     Ok(routed)
+}
+
+fn auto_capture_candidate_repositories(
+    config: &MemoryConfig,
+    issue: &IssueEvidence,
+) -> BTreeSet<String> {
+    [issue.project_id.as_ref(), issue.project_slug.as_ref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|project_id| {
+            config
+                .repository_sources
+                .values()
+                .filter(move |repository| repository.project_scope_ids.contains(project_id))
+                .map(|repository| repository.repository_id.clone())
+        })
+        .collect()
+}
+
+fn auto_capture_repository_groups(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    identifiers: &[String],
+) -> BTreeMap<Option<String>, Vec<String>> {
+    let mut groups = BTreeMap::new();
+    for identifier in identifiers {
+        let repository_id = source
+            .issues
+            .iter()
+            .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+            .and_then(|issue| {
+                let candidates = auto_capture_candidate_repositories(config, issue);
+                (candidates.len() == 1)
+                    .then(|| candidates.into_iter().next())
+                    .flatten()
+            });
+        groups
+            .entry(repository_id)
+            .or_insert_with(Vec::new)
+            .push(identifier.clone());
+    }
+    groups
 }
 
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
@@ -1025,6 +1093,10 @@ fn apply_central_memory_root(
                 project_scope_ids: source.project_scope_ids.clone(),
                 target_branch: Some(source.target_branch.clone()),
             });
+        *config = config.clone().with_repository_remote_locator(
+            source.repository_id.clone(),
+            source.remote_locator.clone(),
+        );
     }
     if let Some(project_set_id) = central.project_set_id.clone() {
         *config = config.clone().with_default_project_set_id(project_set_id);
@@ -1060,6 +1132,7 @@ fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryErr
     evolved.index_path = config.index_path.clone();
     evolved.containment_root = config.containment_root.clone();
     evolved.repository_sources = config.repository_sources.clone();
+    evolved.repository_remote_locators = config.repository_remote_locators.clone();
     evolved.default_repository_id = config.default_repository_id.clone();
     evolved.default_project_set_id = config.default_project_set_id.clone();
     evolved.project_scope_ids = config.project_scope_ids.clone();
@@ -2088,7 +2161,14 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
     let mut configured_source_generations = BTreeMap::new();
     let mut source_memory_locks = BTreeMap::<PathBuf, MemoryCoordinationLock>::new();
     for source in config.repository_sources.values() {
-        if !git_remote_matches_repository_id(&source.root, &source.repository_id) {
+        if !git_remote_matches_repository_id(
+            &source.root,
+            &source.repository_id,
+            config
+                .repository_remote_locators
+                .get(&source.repository_id)
+                .map(String::as_str),
+        ) {
             return Err(MemoryError::InvalidInput(format!(
                 "configured repository `{}` at {} does not match its origin remote",
                 source.repository_id,
@@ -4930,7 +5010,19 @@ fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
     remote_output.rsplit(['/', ':']).next().map(str::to_string)
 }
 
-fn git_remote_matches_repository_id(repo_root: &Path, repository_id: &str) -> bool {
+fn git_remote_matches_repository_id(
+    repo_root: &Path,
+    repository_id: &str,
+    configured_locator: Option<&str>,
+) -> bool {
+    if let Some(configured_locator) = configured_locator {
+        let Some(remote) = git_remote_url(repo_root) else {
+            return false;
+        };
+        let remote = normalize_git_remote_locator(&remote);
+        let locator = normalize_git_remote_locator(configured_locator);
+        return remote == locator || remote.ends_with(&format!("/{locator}"));
+    }
     let Some(remote_repository_id) = git_remote_repository_slug(repo_root) else {
         return false;
     };
@@ -4939,6 +5031,22 @@ fn git_remote_matches_repository_id(repo_root: &Path, repository_id: &str) -> bo
     };
     let canonical_slug = canonical_key.rsplit('/').next().unwrap_or(canonical_key);
     remote_repository_id.eq_ignore_ascii_case(canonical_slug)
+}
+
+fn normalize_git_remote_locator(value: &str) -> String {
+    let value = value
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("ssh://")
+        .trim_start_matches("git://");
+    let value = value
+        .strip_prefix("git@")
+        .and_then(|value| value.split_once(':').map(|(_, path)| path))
+        .unwrap_or(value);
+    value.to_ascii_lowercase()
 }
 
 fn git_remote_url(repo_root: &Path) -> Option<String> {
@@ -11266,12 +11374,76 @@ Public memory concept.
 
         assert!(super::git_remote_matches_repository_id(
             repository.path(),
-            "github:repository:repo-a"
+            "github:repository:repo-a",
+            None,
         ));
         assert!(!super::git_remote_matches_repository_id(
             repository.path(),
-            "github:repository:repo-b"
+            "github:repository:repo-b",
+            None,
         ));
+        assert!(super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:github.com:repository:repo-42",
+            Some("example/repo-a"),
+        ));
+    }
+
+    #[test]
+    fn auto_capture_groups_terminal_issues_by_unique_repository_scope() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository_a.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repository_b.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let source = SourceFile {
+            issues: vec![
+                IssueEvidence {
+                    identifier: "COE-1".to_string(),
+                    project_id: Some("project-a".to_string()),
+                    ..IssueEvidence::default()
+                },
+                IssueEvidence {
+                    identifier: "COE-2".to_string(),
+                    project_id: Some("project-b".to_string()),
+                    ..IssueEvidence::default()
+                },
+            ],
+            ..SourceFile::default()
+        };
+
+        let groups = super::auto_capture_repository_groups(
+            &config,
+            &source,
+            &["COE-1".to_string(), "COE-2".to_string()],
+        );
+        assert_eq!(
+            groups.get(&Some("repo-a".to_string())),
+            Some(&vec!["COE-1".to_string()])
+        );
+        assert_eq!(
+            groups.get(&Some("repo-b".to_string())),
+            Some(&vec!["COE-2".to_string()])
+        );
     }
 
     #[test]

@@ -626,6 +626,7 @@ pub struct MemoryConfig {
     pub areas: BTreeMap<String, AreaConfig>,
     pub redaction: RedactionConfig,
     pub repository_sources: BTreeMap<String, MemoryRepositorySource>,
+    pub repository_remote_locators: BTreeMap<String, String>,
     pub default_repository_id: Option<String>,
     pub default_project_set_id: Option<String>,
     pub project_scope_ids: BTreeSet<String>,

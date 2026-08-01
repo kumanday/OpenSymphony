@@ -359,6 +359,7 @@ pub struct ResolvedIntegrationInstructions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedMemorySource {
     pub(crate) repository_id: String,
+    pub(crate) remote_locator: String,
     pub(crate) checkout_path: PathBuf,
     pub(crate) project_scope_ids: BTreeSet<String>,
     pub(crate) target_branch: String,
@@ -1351,6 +1352,7 @@ fn resolve_memory_sources(
         }
         let resolved = ResolvedMemorySource {
             repository_id: repository_id.clone(),
+            remote_locator: repository.remote.locator.clone(),
             checkout_path: resolve_central_path(
                 config_root,
                 checkout_path,

@@ -24,6 +24,16 @@ impl MemoryConfig {
         self
     }
 
+    pub fn with_repository_remote_locator(
+        mut self,
+        repository_id: impl Into<String>,
+        remote_locator: impl Into<String>,
+    ) -> Self {
+        self.repository_remote_locators
+            .insert(repository_id.into(), remote_locator.into());
+        self
+    }
+
     pub fn with_default_repository_id(mut self, repository_id: impl Into<String>) -> Self {
         self.default_repository_id = Some(repository_id.into());
         self
@@ -293,38 +303,26 @@ pub fn withdraw_memory_source_records(
             path: config.index_path.clone(),
             source: error,
         })?;
-    let (registered_source_repositories, registered_source_kinds) = {
+    let registered_source_repositories = {
         let mut statement = transaction
-            .prepare("SELECT source_id, repository_id, source_kind FROM registered_memory_sources")
+            .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
             })?;
-        let rows = statement
+        statement
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
             })?
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<BTreeMap<_, _>, _>>()
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
-            })?;
-        (
-            rows.iter()
-                .map(|(source_id, repository_id, _)| (source_id.clone(), repository_id.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            rows.into_iter()
-                .map(|(source_id, _, source_kind)| (source_id, source_kind))
-                .collect::<BTreeMap<_, _>>(),
-        )
+            })?
     };
     for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in rows {
         let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
@@ -365,60 +363,6 @@ pub fn withdraw_memory_source_records(
                 .unwrap_or_default();
             let mut sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
                 .unwrap_or_default();
-            let surviving_reimport_sources = if is_live_capture_owner(source_id) {
-                source_ids
-                    .iter()
-                    .filter(|candidate| {
-                        matches!(
-                            registered_source_kinds.get(*candidate).map(String::as_str),
-                            Some("legacy_store" | "okf_bundle")
-                        )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            if !surviving_reimport_sources.is_empty() {
-                transaction
-                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?;
-                transaction
-                    .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?;
-                for table in [
-                    "issue_areas",
-                    "pull_requests",
-                    "changed_files",
-                    "checks",
-                    "reviews",
-                ] {
-                    transaction
-                        .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
-                        .map_err(|error| MemoryError::DuckDb {
-                            path: config.index_path.clone(),
-                            source: error,
-                        })?;
-                }
-                for surviving_source_id in surviving_reimport_sources {
-                    transaction
-                        .execute(
-                            "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
-                            [&surviving_source_id],
-                        )
-                        .map_err(|error| MemoryError::DuckDb {
-                            path: config.index_path.clone(),
-                            source: error,
-                        })?;
-                }
-                continue;
-            }
             let has_other_source = source_ids.iter().any(|candidate| {
                 candidate != source_id
                     && source_repository_id(config, &registered_source_repositories, candidate)
@@ -576,26 +520,38 @@ pub fn withdraw_memory_repository_records(
         path: config.index_path.clone(),
         source: error,
     })?;
-    let registered_source_repositories = {
+    let (registered_source_repositories, registered_source_kinds) = {
         let mut statement = transaction
-            .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
+            .prepare("SELECT source_id, repository_id, source_kind FROM registered_memory_sources")
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
             })?;
-        statement
+        let rows = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
             })?
-            .collect::<Result<BTreeMap<_, _>, _>>()
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|error| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source: error,
-            })?
+            })?;
+        (
+            rows.iter()
+                .map(|(source_id, repository_id, _)| (source_id.clone(), repository_id.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            rows.into_iter()
+                .map(|(source_id, _, source_kind)| (source_id, source_kind))
+                .collect::<BTreeMap<_, _>>(),
+        )
     };
     transaction
         .execute(
@@ -628,6 +584,9 @@ pub fn withdraw_memory_repository_records(
         let had_legacy_live_owner = source_ids.iter().any(|source_id| source_id == LIVE_CAPTURE_OWNER);
         source_ids.retain(|source_id| {
             !live_capture_owner_matches_repository(source_id, repository_id)
+                && source_repository_id(config, &registered_source_repositories, source_id)
+                    .as_deref()
+                    != Some(repository_id)
         });
         for table in [
             "issue_areas",
@@ -679,6 +638,56 @@ pub fn withdraw_memory_repository_records(
             ] {
                 transaction
                     .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+            }
+            continue;
+        }
+        let surviving_reimport_sources = source_ids
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    registered_source_kinds.get(*candidate).map(String::as_str),
+                    Some("legacy_store" | "okf_bundle")
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !surviving_reimport_sources.is_empty() {
+            transaction
+                .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            transaction
+                .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                .map_err(|error| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source: error,
+                })?;
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+            }
+            for surviving_source_id in surviving_reimport_sources {
+                transaction
+                    .execute(
+                        "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
+                        [&surviving_source_id],
+                    )
                     .map_err(|error| MemoryError::DuckDb {
                         path: config.index_path.clone(),
                         source: error,
@@ -1136,6 +1145,7 @@ mod catalog_tests {
         source_b.repository_id = "github:repository:b".to_string();
         source_b.root = root.path().join("okf-b");
         source_b.generation = "sha256:b".to_string();
+        source_b.kind = MemorySourceKind::Repository;
         register_memory_source(&config, &source_a).expect("source a");
         register_memory_source(&config, &source_b).expect("source b");
         let connection = open_index(&config).expect("index");
@@ -1156,7 +1166,7 @@ mod catalog_tests {
                     "2026-07-31T00:00:00Z",
                     "issues/COE-552",
                     r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"repository","id":"github:repository:b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-b"}]"#,
-                    r#"[{"kind":"legacy_store","id":"a","repo_id":"github:repository:a"},{"kind":"legacy_store","id":"b","repo_id":"github:repository:b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"a","repo_id":"github:repository:a"},{"kind":"repository","id":"b","repo_id":"github:repository:b"}]"#,
                     r#"["github:repository:a:okf","github:repository:b:okf"]"#,
                 ],
             )
@@ -1173,7 +1183,6 @@ mod catalog_tests {
                 [],
             )
             .expect("source scopes");
-
         withdraw_memory_repository_records(&config, &source_a.repository_id)
             .expect("repository withdrawal");
 
@@ -1661,12 +1670,8 @@ mod catalog_tests {
             .expect("normalized scopes");
         drop(connection);
 
-        withdraw_memory_source_records(
-            &config,
-            "__live_capture__:github:repository:a",
-            "github:repository:a",
-        )
-        .expect("live source withdrawal");
+        withdraw_memory_repository_records(&config, "github:repository:a")
+            .expect("repository withdrawal");
 
         assert!(
             load_indexed_issues(&config)
