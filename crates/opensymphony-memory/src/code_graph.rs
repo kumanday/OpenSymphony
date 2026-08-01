@@ -4167,24 +4167,26 @@ pub fn migrate_code_repository_identity(
 
     let symbol_rows = transaction
         .prepare(
-            "SELECT symbol_id, symbol_key, path, language, kind, name, container_chain FROM code_symbols WHERE repo_id = ? ORDER BY path, start_line, start_col, symbol_id",
+            "SELECT symbol_id, symbol_key, commit_sha, path, language, kind, name, container_chain FROM code_symbols WHERE repo_id = ? ORDER BY path, commit_sha NULLS FIRST, start_line, start_col, end_line, end_col, symbol_id",
         )?
         .query_map(params![legacy_repo_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut symbol_key_counts = BTreeMap::<String, usize>::new();
+    let mut symbol_key_counts = BTreeMap::<(String, String), usize>::new();
     let symbol_key_migrations = symbol_rows
         .into_iter()
-        .map(|(symbol_id, old_key, path, language, kind, name, container_chain)| {
+        .map(
+            |(symbol_id, old_key, commit_sha, path, language, kind, name, container_chain)| {
             let base_key = code_row_id(&[
                 canonical_repo_id,
                 &path,
@@ -4193,17 +4195,20 @@ pub fn migrate_code_repository_identity(
                 &container_chain,
                 &name,
             ]);
-            let ordinal = symbol_key_counts.entry(base_key.clone()).or_default();
+            let ordinal = symbol_key_counts
+                .entry((commit_sha.clone().unwrap_or_default(), base_key.clone()))
+                .or_default();
             *ordinal += 1;
             let new_key = if *ordinal == 1 {
                 base_key
             } else {
                 format!("{base_key}#{ordinal}")
             };
-            (symbol_id, old_key, new_key)
-        })
+            (symbol_id, old_key, commit_sha, new_key)
+        },
+        )
         .collect::<Vec<_>>();
-    for (symbol_id, old_key, new_key) in &symbol_key_migrations {
+    for (symbol_id, old_key, commit_sha, new_key) in &symbol_key_migrations {
         transaction.execute(
             "UPDATE code_symbols SET symbol_key = ? WHERE repo_id = ? AND symbol_id = ?",
             params![new_key, legacy_repo_id, symbol_id],
@@ -4212,9 +4217,9 @@ pub fn migrate_code_repository_identity(
             for column in ["source_symbol_key", "target_symbol_key"] {
                 transaction.execute(
                     &format!(
-                        "UPDATE {table} SET {column} = ? WHERE repo_id = ? AND {column} = ?"
+                        "UPDATE {table} SET {column} = ? WHERE repo_id = ? AND {column} = ? AND commit_sha IS NOT DISTINCT FROM ?"
                     ),
-                    params![new_key, legacy_repo_id, old_key],
+                    params![new_key, legacy_repo_id, old_key, commit_sha],
                 )?;
             }
         }
@@ -10095,6 +10100,39 @@ mod code_graph_tests {
             .expect("child symbol");
         connection
             .execute(
+                "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-main-def",
+                    "legacy-main-def-key",
+                    "legacy-repo",
+                    "def",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "function",
+                    "main",
+                    Option::<String>::None,
+                    "",
+                    Option::<String>::None,
+                    1_i64,
+                    0_i64,
+                    1_i64,
+                    10_i64,
+                    0_i64,
+                    10_i64,
+                    1_i64,
+                    1_i64,
+                    "content-def",
+                    "snippet-def",
+                    "parser",
+                    "query-pack",
+                    "later",
+                    "current",
+                ],
+            )
+            .expect("historical main symbol");
+        connection
+            .execute(
                 "INSERT INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 duckdb::params![
                     "legacy-edge",
@@ -10135,8 +10173,8 @@ mod code_graph_tests {
                     "src/lib.rs",
                     "rust",
                     "call",
-                    "legacy-symbol",
-                    "legacy-key",
+                    "legacy-main-def",
+                    "legacy-main-def-key",
                     Option::<String>::None,
                     Option::<String>::None,
                     Option::<String>::None,
@@ -10170,7 +10208,7 @@ mod code_graph_tests {
         assert_eq!(rows, vec!["canonical-repo"]);
         let symbol = connection
             .query_row(
-                "SELECT repo_id, symbol_id, symbol_key FROM code_symbols",
+                "SELECT repo_id, symbol_id, symbol_key FROM code_symbols WHERE commit_sha = 'abc' AND name = 'main'",
                 [],
                 |row| {
                     Ok((
@@ -10210,14 +10248,30 @@ mod code_graph_tests {
         assert_ne!(edge.1, "legacy-edge");
         assert_eq!(edge.2, symbol.1);
         assert_eq!(edge.3.as_deref(), Some(symbol.2.as_str()));
+        let historical_symbol_key: String = connection
+            .query_row(
+                "SELECT symbol_key FROM code_symbols WHERE commit_sha = 'def' AND name = 'main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("historical main symbol");
+        assert_eq!(historical_symbol_key, symbol.2);
         let revision = connection
             .query_row(
-                "SELECT repo_id, commit_sha FROM code_edge_revisions",
+                "SELECT repo_id, commit_sha, source_symbol_key FROM code_edge_revisions",
                 [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .expect("historical edge revision");
-        assert_eq!(revision, ("canonical-repo".to_string(), "def".to_string()));
+        assert_eq!(revision.0, "canonical-repo");
+        assert_eq!(revision.1, "def");
+        assert_eq!(revision.2.as_deref(), Some(historical_symbol_key.as_str()));
     }
 
     #[test]

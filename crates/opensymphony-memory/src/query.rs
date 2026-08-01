@@ -2,6 +2,20 @@ pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryErr
     brief_with_scope(config, issue_key, &MemoryScopeFilter::default())
 }
 
+pub fn load_issue_capsule(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryError> {
+    let issue_key = normalize_issue_key(issue_key);
+    let indexed = find_indexed_issue(config, &issue_key)?
+        .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    for path in indexed_capsule_paths(config, &indexed) {
+        match fs::read_to_string(&path) {
+            Ok(contents) => return Ok(contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(MemoryError::ReadFile { path, source }),
+        }
+    }
+    Ok(indexed.body)
+}
+
 pub fn brief_with_scope(
     config: &MemoryConfig,
     issue_key: &str,
@@ -50,21 +64,35 @@ fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String
 }
 
 fn display_capsule_path(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
-    let repository_id = indexed
+    let source_ref_repositories = indexed
         .source_refs
         .iter()
         .filter_map(|source| source.repo_id.as_deref())
-        .find(|repository_id| config.repository_sources.contains_key(*repository_id))
-        .or_else(|| {
-            indexed
-                .scope_refs
-                .iter()
-                .find(|scope| {
-                    scope.kind == KnowledgeScopeKind::Repository
-                        && config.repository_sources.contains_key(&scope.id)
-                })
-                .map(|scope| scope.id.as_str())
-        });
+        .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .collect::<BTreeSet<_>>();
+    let scope_repositories = indexed
+        .scope_refs
+        .iter()
+        .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+        .map(|scope| scope.id.as_str())
+        .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .collect::<BTreeSet<_>>();
+    let path_repositories = config
+        .repository_sources
+        .iter()
+        .filter(|(_, source)| indexed.capsule_path.strip_prefix(&source.root).is_ok())
+        .map(|(repository_id, _)| repository_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let repository_id = if path_repositories.len() == 1 {
+        path_repositories.iter().next().copied()
+    } else if path_repositories.is_empty() {
+        let mut candidates = source_ref_repositories;
+        candidates.extend(scope_repositories);
+        (candidates.len() == 1)
+            .then(|| candidates.into_iter().next().expect("one repository candidate"))
+    } else {
+        None
+    };
     let bundle_relative_path = repository_id
         .and_then(|repository_id| config.repository_sources.get(repository_id))
         .and_then(|source| indexed.capsule_path.strip_prefix(&source.root).ok())
@@ -89,6 +117,24 @@ fn display_capsule_path(config: &MemoryConfig, indexed: &IndexedIssue) -> String
     repository_id
         .map(|repository_id| format!("{repository_id}:{bundle_relative_path}"))
         .unwrap_or(bundle_relative_path)
+}
+
+fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let add_path = |paths: &mut Vec<PathBuf>, path: PathBuf| {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    if indexed.capsule_path.is_absolute() {
+        add_path(&mut paths, indexed.capsule_path.clone());
+    } else {
+        add_path(&mut paths, config.memory_root.join(&indexed.capsule_path));
+        for source in config.repository_sources.values() {
+            add_path(&mut paths, source.root.join(&indexed.capsule_path));
+        }
+    }
+    paths
 }
 
 pub fn search(

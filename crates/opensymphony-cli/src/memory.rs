@@ -46,16 +46,16 @@ use crate::{
         brief_with_scope, code_graph_context, code_graph_workspace_context_overlay,
         code_index_branch_for_config, code_repository_has_commit, code_repository_has_rows,
         context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_issue_capsule,
+        load_source_file, mark_archived, merge_legacy_memory_index, merge_memory_index_from_okf,
         migrate_code_repository_identity, persist_code_intel_documents,
         persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
         plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
-        render_archive_plan, render_capture_dry_run, search_with_scope, sha256_bytes_hex,
-        sha256_hex, status_with_scope, withdraw_code_repository, write_capture_plan,
-        write_docs_sync_plan, write_memory_init_plan,
+        render_archive_plan, render_capture_dry_run, search_with_scope, sha256_hex,
+        status_with_scope, withdraw_code_repository, write_capture_plan, write_docs_sync_plan,
+        write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -1268,11 +1268,7 @@ fn run_show(config: &MemoryConfig, args: ShowArgs, mode: ShowMode) -> Result<(),
             println!("{}", brief(config, &args.issue)?);
         }
         ShowMode::Full => {
-            let path = config.issue_capsule_path(&args.issue);
-            let contents = fs::read_to_string(&path).map_err(|source| MemoryError::ReadFile {
-                path: path.clone(),
-                source,
-            })?;
+            let contents = load_issue_capsule(config, &args.issue)?;
             println!("{contents}");
         }
     }
@@ -4592,17 +4588,35 @@ fn record_skipped_code_intel_file(
     resolved: &Path,
     reason: &str,
 ) -> Result<(), MemoryError> {
-    let bytes = fs::read(resolved).map_err(|source| MemoryError::ReadFile {
-        path: resolved.to_path_buf(),
-        source,
-    })?;
+    let content_sha256 = sha256_file_hex(resolved)?;
     skipped_files.push(format!("{relative_display}: {reason}"));
     skipped_file_inputs.push(CodeIntelSkippedFileInput {
         path: relative.to_path_buf(),
         reason: reason.to_string(),
-        content_sha256: sha256_bytes_hex(&bytes),
+        content_sha256,
     });
     Ok(())
+}
+
+fn sha256_file_hex(path: &Path) -> Result<String, MemoryError> {
+    let mut file = fs::File::open(path).map_err(|source| MemoryError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read =
+            io::Read::read(&mut file, &mut buffer).map_err(|source| MemoryError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn code_intel_artifacts_for_summary(
@@ -7022,7 +7036,8 @@ mod tests {
         load_memory_config, memory_server_health, memory_server_health_payload,
         memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
         remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
+        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, sha256_file_hex,
+        trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -8654,6 +8669,10 @@ mod tests {
                 .as_str()
                 .expect("skip reason")
                 .contains("max_file_bytes 1")
+        );
+        assert_eq!(
+            sha256_file_hex(&repository.path().join("src/big.rs")).expect("skipped file hash"),
+            crate::opensymphony_memory::sha256_bytes_hex(b"pub fn oversized() {}\n")
         );
     }
 

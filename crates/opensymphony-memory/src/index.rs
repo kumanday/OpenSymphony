@@ -16,6 +16,16 @@ fn live_capture_owner_matches_repository(owner: &str, repository_id: &str) -> bo
     owner == LIVE_CAPTURE_OWNER || owner == live_capture_owner(Some(repository_id))
 }
 
+fn source_owner_repository_id<'a>(
+    registered_source_repositories: &'a BTreeMap<String, String>,
+    owner: &'a str,
+) -> Option<&'a str> {
+    registered_source_repositories
+        .get(owner)
+        .map(String::as_str)
+        .or_else(|| owner.strip_prefix(LIVE_CAPTURE_OWNER_PREFIX))
+}
+
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
@@ -3320,7 +3330,10 @@ fn source_id_belongs_to_configured_repository(config: &MemoryConfig, source_id: 
     config
         .repository_sources
         .values()
-        .any(|source| source_id.starts_with(&format!("{}:", source.repository_id)))
+        .any(|source| {
+            source_id.starts_with(&format!("{}:", source.repository_id))
+                || source_id == live_capture_owner(Some(&source.repository_id))
+        })
 }
 
 fn refresh_memory_index_from_okf_inner(
@@ -3661,7 +3674,9 @@ fn refresh_memory_index_from_okf_inner(
                 let remaining_project_scopes = if source_scope_rows.is_empty() {
                     source_ids
                         .iter()
-                        .filter_map(|owner| registered_source_repositories.get(owner))
+                        .filter_map(|owner| {
+                            source_owner_repository_id(&registered_source_repositories, owner)
+                        })
                         .filter_map(|repository_id| config.repository_sources.get(repository_id))
                         .flat_map(|source| source.project_scope_ids.iter())
                         .cloned()
@@ -3678,9 +3693,8 @@ fn refresh_memory_index_from_okf_inner(
                     .into_iter()
                     .filter(|scope| match &scope.kind {
                         KnowledgeScopeKind::Repository => source_ids.iter().any(|owner| {
-                            registered_source_repositories
-                                .get(owner)
-                                .is_some_and(|repository_id| repository_id == &scope.id)
+                            source_owner_repository_id(&registered_source_repositories, owner)
+                                .is_some_and(|repository_id| repository_id == scope.id)
                         }),
                         KnowledgeScopeKind::Project => {
                             remaining_project_scopes.contains(&scope.id)
