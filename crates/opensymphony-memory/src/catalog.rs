@@ -383,7 +383,7 @@ pub fn withdraw_memory_source_records(
                 }
             }
             scopes.retain(|scope| match &scope.kind {
-                KnowledgeScopeKind::Repository => !has_other_source && scope.id != repository_id,
+                KnowledgeScopeKind::Repository => has_other_source || scope.id != repository_id,
                 KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
                 KnowledgeScopeKind::ProjectSet => config
                     .default_project_set_id
@@ -862,7 +862,7 @@ mod catalog_tests {
                     "body",
                     "2026-07-31T00:00:00Z",
                     "issues/COE-551",
-                    r#"[{"kind":"repository","id":"github:repository:123"},{"kind":"project","id":"project-public"},{"kind":"project","id":"project-private"}]"#,
+                    r#"[{"kind":"repository","id":"github:repository:123"},{"kind":"repository","id":"github:repository:other"},{"kind":"project","id":"project-public"},{"kind":"project","id":"project-private"}]"#,
                     "[]",
                     r#"["github:repository:123:okf-public","github:repository:123:okf-private"]"#,
                 ],
@@ -870,7 +870,7 @@ mod catalog_tests {
             .expect("shared issue");
         connection
             .execute(
-                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-551', 'repository', 'github:repository:123', NULL), ('issues/COE-551', 'project', 'project-public', NULL), ('issues/COE-551', 'project', 'project-private', NULL)",
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-551', 'repository', 'github:repository:123', NULL), ('issues/COE-551', 'repository', 'github:repository:other', NULL), ('issues/COE-551', 'project', 'project-public', NULL), ('issues/COE-551', 'project', 'project-private', NULL)",
                 [],
             )
             .expect("normalized scopes");
@@ -897,6 +897,13 @@ mod catalog_tests {
             .scope_refs
             .iter()
             .any(|scope| scope.id == "project-public"));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == "github:repository:123"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository
+                && scope.id == "github:repository:other"
+        }));
         assert!(issue
             .scope_refs
             .iter()

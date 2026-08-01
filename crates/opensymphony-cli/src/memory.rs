@@ -1237,13 +1237,31 @@ fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryErr
 }
 
 fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let mut scope = scope_filter(
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         Some(args.area.as_str()),
     );
-    println!("{}", docs_for_area_with_scope(config, &args.area, &scope)?);
+    if let Some(requested_repo) = scope.repo.clone()
+        && !config.repository_sources.contains_key(&requested_repo)
+        && !config.repository_sources.is_empty()
+    {
+        let requested_root = repo_existing_path(config, &requested_repo)?;
+        if let Some((repository_id, _)) = config.repository_sources.iter().find(|(_, source)| {
+            source
+                .root
+                .canonicalize()
+                .is_ok_and(|root| root == requested_root)
+        }) {
+            scope.repo = Some(repository_id.clone());
+        }
+    }
+    let docs_config = memory_config_for_docs_scope(config, &scope, &args.area)?;
+    println!(
+        "{}",
+        docs_for_area_with_scope(&docs_config, &args.area, &scope)?
+    );
     Ok(())
 }
 
@@ -1995,6 +2013,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
         }
     }
     let mut configured_source_generations = BTreeMap::new();
+    let mut source_memory_locks = BTreeMap::<PathBuf, MemoryCoordinationLock>::new();
     for source in config.repository_sources.values() {
         let commit_sha = source
             .commit_sha
@@ -2029,6 +2048,25 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
         for (kind, root) in roots {
             if !root.exists() {
                 continue;
+            }
+            let same_catalog = if kind == MemorySourceKind::LegacyStore {
+                match (
+                    fs::canonicalize(&root),
+                    fs::canonicalize(&config.memory_root),
+                ) {
+                    (Ok(root), Ok(catalog)) => root == catalog,
+                    _ => root == config.memory_root,
+                }
+            } else {
+                false
+            };
+            if kind == MemorySourceKind::LegacyStore && !same_catalog {
+                let lock_key = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    source_memory_locks.entry(lock_key)
+                {
+                    entry.insert(acquire_source_memory_writer_lock(&local_config)?);
+                }
             }
             let source_id = if kind == MemorySourceKind::OkfBundle {
                 let bundle_name = root
@@ -2126,8 +2164,17 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             } else {
                 false
             };
-            let _source_memory_lock = if kind == MemorySourceKind::LegacyStore && !same_catalog {
-                Some(acquire_source_memory_writer_lock(&local_config)?)
+            let source_lock_key = if kind == MemorySourceKind::LegacyStore && !same_catalog {
+                Some(fs::canonicalize(&root).unwrap_or_else(|_| root.clone()))
+            } else {
+                None
+            };
+            let _source_memory_lock = if let Some(lock_key) = source_lock_key {
+                if let Some(lock) = source_memory_locks.remove(&lock_key) {
+                    Some(lock)
+                } else {
+                    Some(acquire_source_memory_writer_lock(&local_config)?)
+                }
             } else {
                 None
             };
@@ -5365,6 +5412,9 @@ fn memory_config_for_docs_scope(
     scope: &MemoryScopeFilter,
     area: &str,
 ) -> Result<MemoryConfig, MemoryError> {
+    if config.repository_sources.is_empty() {
+        return Ok(config.clone());
+    }
     let repository_id = match scope.repo.as_deref() {
         Some(repository_id) if repository_matches_memory_scope(config, repository_id, scope) => {
             Some(repository_id)
