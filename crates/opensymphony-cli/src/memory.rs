@@ -2142,7 +2142,22 @@ async fn start_memory_server_with_auth(
 
 fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
     let mut source_ids = BTreeSet::new();
-    let registered_sources = registered_memory_sources(config)?;
+    let source_id_for = |repository_id: &str, kind: MemorySourceKind, root: &Path| {
+        if kind == MemorySourceKind::OkfBundle {
+            let bundle_name = root
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
+            format!(
+                "{}:{}:{}",
+                repository_id,
+                kind.as_str(),
+                sha256_hex(&bundle_name)
+            )
+        } else {
+            format!("{}:{}", repository_id, kind.as_str())
+        }
+    };
     let mut legacy_repository_names = BTreeMap::<String, usize>::new();
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
@@ -2210,6 +2225,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             if !root.exists() {
                 continue;
             }
+            source_ids.insert(source_id_for(&source.repository_id, kind, &root));
             let same_catalog = if kind == MemorySourceKind::LegacyStore {
                 match (
                     fs::canonicalize(&root),
@@ -2261,6 +2277,8 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             }
         }
     }
+    reconcile_memory_sources(config, &source_ids)?;
+    let registered_sources = registered_memory_sources(config)?;
     let source_reimport_pending = registered_sources.iter().any(|existing| {
         matches!(
             existing.kind,
@@ -2367,20 +2385,7 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             } else {
                 None
             };
-            let source_id = if kind == MemorySourceKind::OkfBundle {
-                let bundle_name = root
-                    .file_name()
-                    .map(|name| name.to_string_lossy())
-                    .unwrap_or_default();
-                format!(
-                    "{}:{}:{}",
-                    source.repository_id,
-                    kind.as_str(),
-                    sha256_hex(&bundle_name)
-                )
-            } else {
-                format!("{}:{}", source.repository_id, kind.as_str())
-            };
+            let source_id = source_id_for(&source.repository_id, kind, &root);
             source_ids.insert(source_id.clone());
             let registration = RegisteredMemorySource {
                 source_id,
@@ -2483,7 +2488,6 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             }
         }
     }
-    reconcile_memory_sources(config, &source_ids)?;
     Ok(())
 }
 

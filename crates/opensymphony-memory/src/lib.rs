@@ -1971,9 +1971,32 @@ type: topic-doc
         let config = config_for(repo.path());
         let bundle = repo.path().join(".opensymphony/memory");
         copy_dir_recursive(&okf_fixture("okf-reindex"), &bundle);
+        register_memory_source(
+            &config,
+            &RegisteredMemorySource {
+                source_id: "github:repository:catalog:legacy_store".to_string(),
+                repository_id: "github:repository:catalog".to_string(),
+                commit_sha: "commit-before-reindex".to_string(),
+                kind: MemorySourceKind::LegacyStore,
+                root: bundle.clone(),
+                status: MemorySourceRegistrationStatus::Registered,
+                generation: "generation-before-reindex".to_string(),
+            },
+        )
+        .expect("configured source should register");
 
         let report =
             refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should work");
+        assert_eq!(
+            registered_memory_sources(&config)
+                .expect("source registrations")
+                .into_iter()
+                .find(|source| source.source_id == "github:repository:catalog:legacy_store")
+                .expect("configured source")
+                .status,
+            MemorySourceRegistrationStatus::Pending,
+            "catalog replacement must force configured sources through registration again",
+        );
         let related = related_by_issue(&config, "COE-123", 10).expect("related memory");
         let search_results = search(&config, "generic concept", 10).expect("search");
 
@@ -3830,10 +3853,20 @@ Reviews are triggered when you open a pull request for review.
                 },
             );
         }
-        let capsule_path = source_b.path().join("issues/COE-556.md");
-        fs::create_dir_all(capsule_path.parent().expect("capsule parent")).expect("capsule dir");
-        let source_contents = "---\ntype: issue-capsule\n---\n\n# COE-556\n\nSource body.\n";
-        fs::write(&capsule_path, source_contents).expect("source capsule");
+        let source_contents = "---\ntype: issue-capsule\n---\n\n# COE-556\n\nSource B body.\n";
+        for (root, contents) in [
+            (
+                source_a.path(),
+                "---\ntype: issue-capsule\n---\n\n# COE-556\n\nSource A body.\n",
+            ),
+            (source_b.path(), source_contents),
+        ] {
+            let capsule_path = root.join("issues/COE-556.md");
+            fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+                .expect("capsule dir");
+            fs::write(capsule_path, contents).expect("source capsule");
+        }
+        let capsule_path = PathBuf::from("issues/COE-556.md");
         let connection = open_index(&config).expect("index");
         migrate_index(&connection).expect("index schema");
         connection
@@ -3852,9 +3885,9 @@ Reviews are triggered when you open a pull request for review.
                     "Indexed fallback body",
                     "2026-08-01T00:00:00Z",
                     "issues/COE-556",
-                    r#"[{"kind":"repository","id":"repo-a"}]"#,
-                    r#"[{"kind":"legacy_store","id":"source","repo_id":"repo-a"}]"#,
-                    r#"["repo-a:source"]"#,
+                    r#"[{"kind":"repository","id":"repo-b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source","repo_id":"repo-b"}]"#,
+                    r#"["repo-b:source"]"#,
                 ],
             )
             .expect("indexed source issue");

@@ -129,10 +129,34 @@ fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<P
     if indexed.capsule_path.is_absolute() {
         add_path(&mut paths, indexed.capsule_path.clone());
     } else {
-        add_path(&mut paths, config.memory_root.join(&indexed.capsule_path));
-        for source in config.repository_sources.values() {
-            add_path(&mut paths, source.root.join(&indexed.capsule_path));
+        let mut owning_repositories = indexed
+            .source_refs
+            .iter()
+            .filter_map(|source| source.repo_id.as_deref())
+            .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+            .collect::<BTreeSet<_>>();
+        owning_repositories.extend(
+            indexed
+                .scope_refs
+                .iter()
+                .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+                .map(|scope| scope.id.as_str())
+                .filter(|repository_id| config.repository_sources.contains_key(*repository_id)),
+        );
+        if owning_repositories.len() == 1 {
+            let repository_id = owning_repositories
+                .into_iter()
+                .next()
+                .expect("one owning repository");
+            if let Some(source) = config.repository_sources.get(repository_id) {
+                add_path(&mut paths, source.root.join(&indexed.capsule_path));
+            }
+        } else if owning_repositories.is_empty() {
+            for source in config.repository_sources.values() {
+                add_path(&mut paths, source.root.join(&indexed.capsule_path));
+            }
         }
+        add_path(&mut paths, config.memory_root.join(&indexed.capsule_path));
     }
     paths
 }

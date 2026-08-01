@@ -3522,6 +3522,15 @@ fn refresh_memory_index_from_okf_inner(
     if replace_existing {
         transaction
             .execute(
+                "UPDATE registered_memory_sources SET status = 'pending'",
+                [],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction
+            .execute(
                 "DELETE FROM scope_refs WHERE concept_id IN (SELECT concept_id FROM issues)",
                 [],
             )

@@ -2528,11 +2528,23 @@ async fn run_repository_id(
 }
 
 fn normalize_git_remote(remote: &str) -> String {
-    remote
-        .trim()
+    let mut value = remote.trim().to_string();
+    for scheme in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(stripped) = value.strip_prefix(scheme) {
+            value = stripped.to_string();
+            break;
+        }
+    }
+    if let Some(stripped) = value.strip_prefix("git@")
+        && let Some((host, path)) = stripped.split_once(':')
+    {
+        value = format!("{host}/{path}");
+    }
+    value
         .trim_end_matches('/')
         .trim_end_matches(".git")
-        .to_string()
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 fn repo_id_from_remote_url(url: &str) -> Option<String> {
@@ -5692,6 +5704,18 @@ mod tests {
         assert_eq!(
             code_repo_id_for_workspace(workspace.path(), Some(&config)),
             None
+        );
+    }
+
+    #[test]
+    fn equivalent_git_remote_spellings_normalize_to_one_identity() {
+        assert_eq!(
+            normalize_git_remote("git@github.com:org/repo.git"),
+            normalize_git_remote("https://github.com/org/repo.git"),
+        );
+        assert_eq!(
+            normalize_git_remote("ssh://git@github.com:org/repo/"),
+            normalize_git_remote("http://github.com/org/repo"),
         );
     }
 
