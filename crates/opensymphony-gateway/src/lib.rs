@@ -2089,6 +2089,22 @@ async fn get_run_code_outline(
         }
         _ => None,
     };
+    if let Some(config) = selected_config.as_ref() {
+        let metadata = tokio::fs::metadata(&file_path).await.map_err(|_| {
+            code_graph_response(
+                StatusCode::NOT_FOUND,
+                "code_file_not_found",
+                "requested run file is not available",
+            )
+        })?;
+        if metadata.len() > config.code_intel.ast.max_file_bytes {
+            return Err(code_graph_response(
+                StatusCode::BAD_REQUEST,
+                "code_file_too_large",
+                "requested run file exceeds the repository code-intelligence limit",
+            ));
+        }
+    }
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), selected_config.clone()) {
         let comparison_bases = state.comparison_bases.clone();
@@ -2123,22 +2139,6 @@ async fn get_run_code_outline(
             | Err(CodeGraphProjectionError::RevisionNotFound(_))
             | Err(CodeGraphProjectionError::FileNotFound(_)) => {}
             Err(error) => return Err(code_graph_error(error)),
-        }
-    }
-    if let Some(config) = selected_config.as_ref() {
-        let metadata = tokio::fs::metadata(&file_path).await.map_err(|_| {
-            code_graph_response(
-                StatusCode::NOT_FOUND,
-                "code_file_not_found",
-                "requested run file is not available",
-            )
-        })?;
-        if metadata.len() > config.code_intel.ast.max_file_bytes {
-            return Err(code_graph_response(
-                StatusCode::BAD_REQUEST,
-                "code_file_too_large",
-                "requested run file exceeds the repository code-intelligence limit",
-            ));
         }
     }
     let source = tokio::fs::read_to_string(&file_path).await.map_err(|_| {

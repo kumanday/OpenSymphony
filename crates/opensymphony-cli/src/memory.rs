@@ -3465,7 +3465,8 @@ fn resolve_code_graph_overlay(
         return Err(MemoryError::InvalidInput(
             "run workspace repository binding does not match the requested repository".to_string(),
         ));
-    } else if !config.repository_sources.is_empty()
+    } else if manifest.repository_binding.is_none()
+        && !config.repository_sources.is_empty()
         && let Some(source) = config.repository_sources.get(repo_id)
         && !workspace_matches_registered_repository(&workspace_path, &source.root)
     {

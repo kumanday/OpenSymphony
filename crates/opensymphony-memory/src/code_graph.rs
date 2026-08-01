@@ -4067,7 +4067,7 @@ pub fn migrate_code_repository_identity(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -4114,7 +4114,7 @@ pub fn migrate_code_repository_identity(
             }
             transaction.execute(
                 &format!(
-                    "DELETE FROM {table} WHERE repo_id = ? AND {id_column} = ? AND commit_sha = ?"
+                    "DELETE FROM {table} WHERE repo_id = ? AND {id_column} = ? AND commit_sha IS NOT DISTINCT FROM ?"
                 ),
                 params![legacy_repo_id, duplicate_id, duplicate_commit_sha],
             )?;
@@ -10288,7 +10288,7 @@ mod code_graph_tests {
             };
             connection
                 .execute(
-                    "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, 'abc', false, 'src/lib.rs', 'rust', 'function', 'main', NULL, '', NULL, 1, 0, 1, 10, 0, 10, 1, 1, 'content', 'snippet', 'parser', 'query-pack', 'now', 'current')",
+                    "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, NULL, false, 'src/lib.rs', 'rust', 'function', 'main', NULL, '', NULL, 1, 0, 1, 10, 0, 10, 1, 1, 'content', 'snippet', 'parser', 'query-pack', 'now', 'current')",
                     [symbol_id, symbol_key, repo_id],
                 )
                 .expect("symbol");

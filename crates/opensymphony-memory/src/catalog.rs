@@ -1,3 +1,19 @@
+fn source_repository_id(
+    config: &MemoryConfig,
+    registered_source_repositories: &BTreeMap<String, String>,
+    source_id: &str,
+) -> Option<String> {
+    registered_source_repositories
+        .get(source_id)
+        .cloned()
+        .or_else(|| source_id.strip_prefix("__live_capture__:").map(str::to_string))
+        .or_else(|| {
+            (source_id == LIVE_CAPTURE_OWNER)
+                .then(|| config.default_repository_id.clone())
+                .flatten()
+        })
+}
+
 impl MemoryConfig {
     pub fn with_repository_source(
         mut self,
@@ -339,15 +355,14 @@ pub fn withdraw_memory_source_records(
                 .unwrap_or_default();
             let has_other_source = source_ids.iter().any(|candidate| {
                 candidate != source_id
-                    && registered_source_repositories
-                        .get(candidate)
+                    && source_repository_id(config, &registered_source_repositories, candidate)
                         .is_some_and(|owner| owner == repository_id)
             });
             let has_other_project_set_source = config.default_project_set_id.is_some()
                 && source_ids.iter().any(|candidate| {
                     candidate != source_id
-                        && registered_source_repositories
-                            .get(candidate)
+                        && source_repository_id(config, &registered_source_repositories, candidate)
+                            .as_deref()
                             .and_then(|owner| config.repository_sources.get(owner))
                             .is_some_and(|source| {
                                 config.project_scope_ids.is_empty()
@@ -381,7 +396,11 @@ pub fn withdraw_memory_source_records(
                 })?;
             if remaining_project_scopes.is_empty() {
                 let provenance_count: i64 = transaction
-                    .query_row("SELECT COUNT(*) FROM source_scope_refs", [], |row| row.get(0))
+                    .query_row(
+                        "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = ?",
+                        [&concept_id],
+                        |row| row.get(0),
+                    )
                     .map_err(|error| MemoryError::DuckDb {
                         path: config.index_path.clone(),
                         source: error,
@@ -389,8 +408,10 @@ pub fn withdraw_memory_source_records(
                 if provenance_count == 0 {
                     remaining_project_scopes = source_ids
                         .iter()
-                        .filter_map(|candidate| registered_source_repositories.get(candidate))
-                        .filter_map(|repository_id| config.repository_sources.get(repository_id))
+                        .filter_map(|candidate| {
+                            source_repository_id(config, &registered_source_repositories, candidate)
+                        })
+                        .filter_map(|repository_id| config.repository_sources.get(&repository_id))
                         .flat_map(|source| source.project_scope_ids.iter())
                         .cloned()
                         .collect::<BTreeSet<_>>();
@@ -620,7 +641,11 @@ pub fn withdraw_memory_repository_records(
             })?;
         if remaining_project_scopes.is_empty() {
             let provenance_count: i64 = transaction
-                .query_row("SELECT COUNT(*) FROM source_scope_refs", [], |row| row.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = ?",
+                    [&concept_id],
+                    |row| row.get(0),
+                )
                 .map_err(|error| MemoryError::DuckDb {
                     path: config.index_path.clone(),
                     source: error,
@@ -632,6 +657,22 @@ pub fn withdraw_memory_repository_records(
         let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&scopes_json)
             .unwrap_or_default()
             .into_iter()
+            .filter(|scope| {
+                scope.kind != KnowledgeScopeKind::ProjectSet
+                    || source_ids.iter().any(|candidate| {
+                        source_repository_id(config, &registered_source_repositories, candidate)
+                            .as_deref()
+                            .and_then(|owner| config.repository_sources.get(owner))
+                            .is_some_and(|source| {
+                                config.default_project_set_id.as_deref()
+                                    == Some(scope.id.as_str())
+                                    && (config.project_scope_ids.is_empty()
+                                        || !source
+                                            .project_scope_ids
+                                            .is_disjoint(&config.project_scope_ids))
+                            })
+                    })
+            })
             .filter(|scope| match &scope.kind {
                 KnowledgeScopeKind::Repository => scope.id != repository_id,
                 KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
@@ -1387,7 +1428,7 @@ mod catalog_tests {
                     "body",
                     "2026-07-31T00:00:00Z",
                     "issues/COE-554",
-                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project_set","id":"set-a"}]"#,
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project","id":"project-b"},{"kind":"project_set","id":"set-a"}]"#,
                     "[]",
                     r#"["github:repository:a:public","github:repository:a:private"]"#,
                 ],
@@ -1469,24 +1510,24 @@ mod catalog_tests {
                     "body",
                     "2026-07-31T00:00:00Z",
                     "issues/COE-555",
-                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project_set","id":"set-a"}]"#,
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project","id":"project-b"},{"kind":"project_set","id":"set-a"}]"#,
                     "[]",
-                    r#"["github:repository:a:public","github:repository:b:public"]"#,
+                    r#"["github:repository:a:public","__live_capture__:github:repository:b"]"#,
                 ],
             )
             .expect("shared issue");
         connection
             .execute(
-                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL), ('issues/COE-555', 'project_set', 'set-a', NULL)",
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL), ('issues/COE-555', 'project', 'project-b', NULL), ('issues/COE-555', 'project_set', 'set-a', NULL)",
                 [],
             )
             .expect("normalized scopes");
         connection
             .execute(
-                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'github:repository:b:public', 'project', 'project-b', NULL)",
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/unrelated', 'github:repository:b:public', 'project', 'project-b', NULL)",
                 [],
             )
-            .expect("surviving source scope");
+            .expect("unrelated source scope");
         drop(connection);
 
         withdraw_memory_source_records(
@@ -1503,6 +1544,9 @@ mod catalog_tests {
             .expect("remaining issue");
         assert!(issue.scope_refs.iter().any(|scope| {
             scope.kind == KnowledgeScopeKind::ProjectSet && scope.id == "set-a"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project && scope.id == "project-b"
         }));
     }
 }
