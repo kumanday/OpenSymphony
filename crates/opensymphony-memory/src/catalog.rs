@@ -387,9 +387,7 @@ pub fn withdraw_memory_source_records(
                 KnowledgeScopeKind::Repository => has_other_source || scope.id != repository_id,
                 KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
                 KnowledgeScopeKind::ProjectSet => {
-                    !registered_source_repositories
-                        .values()
-                        .all(|candidate| candidate == repository_id)
+                    has_other_source
                         && config
                             .default_project_set_id
                             .as_deref()
@@ -1047,5 +1045,74 @@ mod catalog_tests {
             .expect("issues")
             .into_iter()
             .all(|issue| issue.issue_key != "COE-553"));
+    }
+
+    #[test]
+    fn withdraws_source_preserves_project_set_scope_for_sibling_source() {
+        let root = TempDir::new().expect("memory root");
+        let mut config = MemoryConfig::load(root.path(), None).expect("config");
+        config.default_project_set_id = Some("set-a".to_string());
+        let source_a = RegisteredMemorySource {
+            source_id: "github:repository:a:public".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::OkfBundle,
+            root: root.path().join("public"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:public".to_string(),
+        };
+        let source_b = RegisteredMemorySource {
+            source_id: "github:repository:a:private".to_string(),
+            root: root.path().join("private"),
+            generation: "sha256:private".to_string(),
+            ..source_a.clone()
+        };
+        register_memory_source(&config, &source_a).expect("public source");
+        register_memory_source(&config, &source_b).expect("private source");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-554",
+                    "Project set concept",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-554.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-554",
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project_set","id":"set-a"}]"#,
+                    "[]",
+                    r#"["github:repository:a:public","github:repository:a:private"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-554', 'repository', 'github:repository:a', NULL), ('issues/COE-554', 'project_set', 'set-a', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+
+        withdraw_memory_source_records(
+            &config,
+            &source_a.source_id,
+            &source_a.repository_id,
+        )
+        .expect("source withdrawal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-554")
+            .expect("remaining issue");
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::ProjectSet && scope.id == "set-a"
+        }));
     }
 }

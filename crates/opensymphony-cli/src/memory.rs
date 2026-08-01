@@ -534,7 +534,7 @@ pub(crate) async fn auto_capture_terminal(
         identifiers,
         ..IssueSelection::default()
     };
-    let capture_config = resolve_auto_capture_repository_config(&config, &source, &selection);
+    let capture_config = resolve_auto_capture_repository_config(&config, &source, &selection)?;
     let mut capture_plan = plan_capture(&capture_config, &source, &selection, true, true)?;
     let issue_keys = capture_plan
         .selected
@@ -558,7 +558,7 @@ pub(crate) async fn auto_capture_terminal(
     let evolved_config = if capture_plan.selected.is_empty() {
         config.clone()
     } else {
-        let capture_report = write_capture_plan(&config, &capture_plan, false)?;
+        let capture_report = write_capture_plan(&capture_config, &capture_plan, false)?;
         warnings.extend(capture_report.warnings);
         match reload_memory_config(&config) {
             Ok(config) => config,
@@ -705,7 +705,7 @@ fn resolve_auto_capture_repository_config(
     config: &MemoryConfig,
     source: &SourceFile,
     selection: &IssueSelection,
-) -> MemoryConfig {
+) -> Result<MemoryConfig, MemoryError> {
     let issue_ids = selection
         .identifiers
         .iter()
@@ -741,15 +741,23 @@ fn resolve_auto_capture_repository_config(
         None
     };
     let Some(repository_id) = repository_id else {
-        return config.clone();
+        return Ok(config.clone());
     };
     let Some(repository) = config.repository_sources.get(&repository_id) else {
-        return config.clone();
+        return Ok(config.clone());
     };
-    let mut routed = config.clone();
+    let mut routed = MemoryConfig::load(&repository.root, None)?;
+    routed.config_path = config.config_path.clone();
     routed.repo_root = repository.root.clone();
+    routed.memory_root = config.memory_root.clone();
+    routed.index_path = config.index_path.clone();
+    routed.containment_root = config.containment_root.clone();
+    routed.repository_sources = config.repository_sources.clone();
     routed.default_repository_id = Some(repository_id);
-    routed
+    routed.default_project_set_id = config.default_project_set_id.clone();
+    routed.project_scope_ids = config.project_scope_ids.clone();
+    routed.code_index_target_branch = config.code_index_target_branch.clone();
+    Ok(routed)
 }
 
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
@@ -7025,7 +7033,8 @@ mod tests {
                 identifiers: vec!["COE-550".to_string()],
                 ..IssueSelection::default()
             },
-        );
+        )
+        .expect("routed config");
         assert_eq!(routed.default_repository_id.as_deref(), Some("repo-b"));
         assert_eq!(routed.repo_root, repository.path());
     }
