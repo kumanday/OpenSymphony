@@ -2084,7 +2084,9 @@ async fn get_run_code_outline(
     )
     .await?;
     let selected_config = match (repo_id.as_deref(), state.memory_config.clone()) {
-        (Some(repo_id), Some(config)) => Some(code_memory_for_graph_read(&config, repo_id).await?),
+        (Some(repo_id), Some(config)) => {
+            Some(code_memory_for_live_graph_read(&config, repo_id).await?)
+        }
         _ => None,
     };
     let run_identifier = issue.identifier.clone();
@@ -2190,7 +2192,7 @@ async fn get_run_code_diff_overlay(
             "run code diff overlay requires a repo id",
         )
     })?;
-    let config = code_memory_for_graph_read(&config, &repo_id).await?;
+    let config = code_memory_for_live_graph_read(&config, &repo_id).await?;
     let comparison_bases = state.comparison_bases.clone();
     let limit = params.limit.unwrap_or(500).clamp(1, 5_000);
     let overlay = tokio::task::spawn_blocking({
@@ -2252,7 +2254,7 @@ async fn get_run_code_graph(
             "run code graph requires a repo id",
         )
     })?;
-    let config = code_memory_for_graph_read(&config, &repo_id).await?;
+    let config = code_memory_for_live_graph_read(&config, &repo_id).await?;
     let options = CodeGraphSnapshotOptions {
         mode: parse_code_graph_mode(params.mode.as_deref())?,
         path: params.path,
@@ -2586,6 +2588,21 @@ async fn code_memory_for_graph_read(
             StatusCode::SERVICE_UNAVAILABLE,
             "code_graph_unavailable",
             "code intelligence is disabled for the selected repository",
+        ));
+    }
+    Ok(config)
+}
+
+async fn code_memory_for_live_graph_read(
+    config: &MemoryConfig,
+    repo_id: &str,
+) -> Result<MemoryConfig, (StatusCode, Json<serde_json::Value>)> {
+    let config = code_memory_for_graph_read(config, repo_id).await?;
+    if !config.code_intel.ast.enabled {
+        return Err(code_graph_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "code_graph_unavailable",
+            "AST code intelligence is disabled for the selected repository",
         ));
     }
     Ok(config)
@@ -5638,6 +5655,10 @@ mod tests {
             .await
             .expect("persisted graph reads should remain available");
         assert!(!resolved.code_intel.ast.enabled);
+        let live_error = code_memory_for_live_graph_read(&config, "repo-a")
+            .await
+            .expect_err("live overlays should retain AST gating");
+        assert_eq!(live_error.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

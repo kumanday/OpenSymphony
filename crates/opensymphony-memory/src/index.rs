@@ -577,6 +577,16 @@ CREATE TABLE IF NOT EXISTS scope_refs (
   PRIMARY KEY (concept_id, scope_kind, scope_id)
 );
 CREATE INDEX IF NOT EXISTS idx_scope_refs_lookup ON scope_refs(scope_kind, scope_id);
+CREATE TABLE IF NOT EXISTS source_scope_refs (
+  concept_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  label TEXT,
+  PRIMARY KEY (concept_id, source_id, scope_kind, scope_id)
+);
+CREATE INDEX IF NOT EXISTS idx_source_scope_refs_lookup
+  ON source_scope_refs(concept_id, source_id, scope_kind);
 CREATE TABLE IF NOT EXISTS registered_memory_sources (
   source_id TEXT PRIMARY KEY,
   repository_id TEXT NOT NULL,
@@ -3125,15 +3135,6 @@ pub fn backfill_legacy_memory_source_scopes(
     })
 }
 
-fn project_scope_ids_for_source(config: &MemoryConfig, source_id: &str) -> BTreeSet<String> {
-    config
-        .repository_sources
-        .values()
-        .find(|source| source_id.starts_with(&format!("{}:", source.repository_id)))
-        .map(|source| source.project_scope_ids.iter().cloned().collect())
-        .unwrap_or_else(|| config.project_scope_ids.iter().cloned().collect())
-}
-
 fn source_id_belongs_to_configured_repository(config: &MemoryConfig, source_id: &str) -> bool {
     config
         .repository_sources
@@ -3312,8 +3313,17 @@ fn refresh_memory_index_from_okf_inner(
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
                     source,
-                })?;
+            })?;
         }
+        transaction
+            .execute(
+                "DELETE FROM source_scope_refs WHERE source_id = ?",
+                [source_id],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
     }
     if replace_existing {
         transaction
@@ -3321,6 +3331,12 @@ fn refresh_memory_index_from_okf_inner(
                 "DELETE FROM scope_refs WHERE concept_id IN (SELECT concept_id FROM issues)",
                 [],
             )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction
+            .execute("DELETE FROM source_scope_refs", [])
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -3554,15 +3570,28 @@ fn refresh_memory_index_from_okf_inner(
                         .and_then(|repository_id| config.repository_sources.get(repository_id))
                         .map(|source| &source.project_scope_ids)
                         .unwrap_or(&config.project_scope_ids);
-                    let other_owner_project_scopes = existing_source_ids
-                        .iter()
-                        .filter(|existing_source_id| {
-                            source_id.is_none_or(|source_id| existing_source_id.as_str() != source_id)
-                        })
-                        .flat_map(|existing_source_id| {
-                            project_scope_ids_for_source(config, existing_source_id)
-                        })
-                        .collect::<BTreeSet<_>>();
+                    let other_owner_project_scopes = {
+                        let source_id = source_id.unwrap_or_default();
+                        let mut statement = transaction
+                            .prepare(
+                                "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND source_id <> ? AND scope_kind = 'project'",
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                        statement
+                            .query_map(params![row.concept_id, source_id], |row| row.get(0))
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                            .collect::<Result<BTreeSet<String>, _>>()
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                    };
                     let incoming_project_set_ids = scope_refs
                         .iter()
                         .filter(|scope| scope.kind == KnowledgeScopeKind::ProjectSet)
@@ -3617,6 +3646,25 @@ fn refresh_memory_index_from_okf_inner(
         let source_ids_json = serde_json::to_string(&source_ids)?;
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
         let source_refs_json = serde_json::to_string(&source_refs)?;
+        if let Some(source_id) = source_id {
+            for scope_ref in &scope_refs {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
+                        params![
+                            row.concept_id,
+                            source_id,
+                            scope_kind_name(&scope_ref.kind),
+                            scope_ref.id,
+                            scope_ref.label,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
         if !replace_existing {
             transaction
                 .execute(

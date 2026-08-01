@@ -2062,15 +2062,21 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             }
         }
     }
-    let source_reimport_pending =
-        configured_source_generations
-            .iter()
-            .any(|(source_id, generation)| {
-                registered_sources
-                    .iter()
-                    .find(|existing| existing.source_id == *source_id)
-                    .is_none_or(|existing| existing.generation != *generation)
-            });
+    let source_reimport_pending = registered_sources.iter().any(|existing| {
+        matches!(
+            existing.kind,
+            MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+        ) && configured_source_generations
+            .get(&existing.source_id)
+            .is_none_or(|generation| generation != &existing.generation)
+    }) || configured_source_generations.iter().any(
+        |(source_id, generation)| {
+            registered_sources
+                .iter()
+                .find(|existing| existing.source_id == *source_id)
+                .is_none_or(|existing| existing.generation != *generation)
+        },
+    );
     for source in config.repository_sources.values() {
         if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
             migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
@@ -2355,7 +2361,7 @@ fn memory_source_registration_generation(
         "absent".to_string()
     };
     Ok(sha256_hex(&format!(
-        "source-registration-v4\0{}\0{}\0{}\0{}\0{}",
+        "source-registration-v5\0{}\0{}\0{}\0{}\0{}",
         kind.as_str(),
         commit_sha,
         content_generation,

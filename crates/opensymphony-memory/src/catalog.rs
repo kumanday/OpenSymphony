@@ -267,6 +267,15 @@ pub fn withdraw_memory_source_records(
                 source: error,
             })?;
     }
+    transaction
+        .execute(
+            "DELETE FROM source_scope_refs WHERE source_id = ?",
+            [source_id],
+        )
+        .map_err(|error| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source: error,
+        })?;
     let registered_source_repositories = {
         let mut statement = transaction
             .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
@@ -338,13 +347,34 @@ pub fn withdraw_memory_source_records(
                     && !(source.registration_source_id.is_none() && source.id == source_id)
             });
             if !has_other_source {
-                let remaining_project_scopes = source_ids
-                    .iter()
-                    .filter_map(|candidate| registered_source_repositories.get(candidate))
-                    .filter_map(|repository_id| config.repository_sources.get(repository_id))
-                    .flat_map(|source| source.project_scope_ids.iter())
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
+                let mut scope_statement = transaction
+                    .prepare(
+                        "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
+                    )
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+                let mut remaining_project_scopes = scope_statement
+                    .query_map([&concept_id], |row| row.get(0))
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?
+                    .collect::<Result<BTreeSet<String>, _>>()
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+                if remaining_project_scopes.is_empty() {
+                    remaining_project_scopes = source_ids
+                        .iter()
+                        .filter_map(|candidate| registered_source_repositories.get(candidate))
+                        .filter_map(|repository_id| config.repository_sources.get(repository_id))
+                        .flat_map(|source| source.project_scope_ids.iter())
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                }
                 scopes.retain(|scope| match &scope.kind {
                     KnowledgeScopeKind::Repository => scope.id != repository_id,
                     KnowledgeScopeKind::Project => remaining_project_scopes.contains(&scope.id),
