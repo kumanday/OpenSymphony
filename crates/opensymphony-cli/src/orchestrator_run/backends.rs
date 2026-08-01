@@ -1650,6 +1650,22 @@ fn fresh_conversation_initialization_pending(
             == Some(conversation_manifest.conversation_id.as_str())
 }
 
+fn prompt_recorded_before_send_preparation(
+    run_manifest: &RunManifest,
+    conversation_manifest: &IssueConversationManifest,
+) -> bool {
+    run_manifest.status == RunStatus::Prepared
+        && conversation_manifest.issue_id.as_str() == run_manifest.issue_id
+        && conversation_manifest.last_prompt_kind.is_some()
+        && conversation_manifest.last_prompt_path.is_some()
+        && conversation_manifest
+            .last_prompt_at
+            .is_some_and(|prompt_at| prompt_at >= run_manifest.created_at)
+        && conversation_manifest.prepared_run_id.is_none()
+        && conversation_manifest.active_run_id.is_none()
+        && conversation_manifest.trigger_pending_run_id.is_none()
+}
+
 fn recoverable_run_manifest(
     run_manifest: &RunManifest,
     conversation_manifest: Option<&IssueConversationManifest>,
@@ -1682,6 +1698,16 @@ fn recoverable_run_manifest(
             && conversation_manifest.is_some_and(|manifest| {
                 if manifest.issue_id.as_str() != run_manifest.issue_id {
                     return false;
+                }
+
+                // record_prompt persists the rendered prompt before start_turn
+                // writes prepared_run_id. This is an unambiguously unsent
+                // window: retry the prompt instead of treating the prepared
+                // run as unrecoverable. The timestamp guard prevents an old
+                // prompt from making an unrelated newly prepared run look
+                // sendable.
+                if prompt_recorded_before_send_preparation(run_manifest, manifest) {
+                    return true;
                 }
 
                 // The prepared marker is written before send_message. A
@@ -5417,6 +5443,96 @@ mod tests {
         assert!(!fresh_conversation_initialization_pending(
             &run_manifest,
             &conversation_manifest
+        ));
+    }
+
+    #[test]
+    fn strict_recovery_accepts_prompt_recorded_before_send_preparation() {
+        let now = chrono::Utc::now();
+        let mut runtime_envelope: TerminalRuntimeEnvelope =
+            serde_json::from_value(serde_json::json!({
+                "repository_binding": {
+                    "alias": "main",
+                    "repository": {
+                        "id": "github:repository:repo",
+                        "safe_remote_fingerprint": "sha256:fingerprint"
+                    },
+                    "config_generation": "config",
+                    "inventory_generation": "inventory"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory",
+                "policy_generation": "config",
+                "checkout_generation": "generation-1",
+                "checkout_path": "/workspace/COE-479--generation-1",
+                "target_branch": "develop",
+                "target_commit": "commit",
+                "instruction": {
+                    "path": "AGENTS.md",
+                    "content_hash": "sha256:instructions",
+                    "source_commit": "commit",
+                    "source": "root",
+                    "native_discovery_paths": [],
+                    "native_discovery_hashes": {}
+                },
+                "harness": "openhands_agent_server",
+                "model_profile": "default",
+                "requested_execution_scope": "single_checkout",
+                "effective_containment": "trusted_host_process_cwd",
+                "conversation_binding": "conv-unsent-prompt",
+                "cleanup_intent": "workspace_manager_owned"
+            }))
+            .expect("sample runtime envelope should decode");
+        runtime_envelope.conversation_binding = Some("conv-unsent-prompt".to_owned());
+        let run_manifest = RunManifest {
+            run_id: "run-unsent-prompt".to_owned(),
+            issue_id: "issue-contract".to_owned(),
+            identifier: "COE-479".to_owned(),
+            sanitized_workspace_key: "COE-479".to_owned(),
+            workspace_path: PathBuf::from("/workspace/COE-479--generation-1"),
+            repository_binding: None,
+            runtime_envelope: Some(runtime_envelope.clone()),
+            attempt: 1,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Prepared,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        let mut conversation_manifest = sample_conversation_manifest("conv-unsent-prompt");
+        conversation_manifest.workflow_prompt_seeded = true;
+        conversation_manifest.runtime_envelope = Some(runtime_envelope);
+        conversation_manifest.last_prompt_kind = Some(IssueSessionPromptKind::Continuation);
+        conversation_manifest.last_prompt_at = Some(now);
+        conversation_manifest.last_prompt_path =
+            Some(PathBuf::from(".opensymphony/prompts/continuation.md"));
+
+        assert!(prompt_recorded_before_send_preparation(
+            &run_manifest,
+            &conversation_manifest
+        ));
+        assert!(recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+
+        conversation_manifest.last_prompt_at = Some(now - chrono::Duration::seconds(1));
+        assert!(!prompt_recorded_before_send_preparation(
+            &run_manifest,
+            &conversation_manifest
+        ));
+        assert!(!recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
         ));
     }
 

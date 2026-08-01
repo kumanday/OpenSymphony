@@ -567,7 +567,7 @@ impl WorkspaceManager {
             quarantine_reason: None,
         };
         if let Err(error) = self
-            .write_manifest(
+            .write_manifest_atomically(
                 &workspace,
                 &workspace.checkout_manifest_path(),
                 &checkout_manifest,

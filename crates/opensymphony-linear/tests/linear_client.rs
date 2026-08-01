@@ -818,6 +818,52 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
 }
 
 #[tokio::test]
+async fn issue_states_by_ids_prefers_the_latest_snapshot_across_projects() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{
+              "data": {"issues": {"nodes": [{
+                "id": "issue-overlap",
+                "identifier": "COE-260",
+                "updatedAt": "2026-03-21T16:00:00Z",
+                "state": {"id": "state-progress", "name": "In Progress", "type": "started"}
+              }], "pageInfo": {"hasNextPage": false, "endCursor": null}}}
+            }"#,
+        ),
+        QueuedResponse::json(
+            r#"{
+              "data": {"issues": {"nodes": [{
+                "id": "issue-overlap",
+                "identifier": "COE-260",
+                "updatedAt": "2026-03-21T17:00:00Z",
+                "state": {"id": "state-done", "name": "Done", "type": "completed"}
+              }], "pageInfo": {"hasNextPage": false, "endCursor": null}}}
+            }"#,
+        ),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_slugs = vec!["old-project".to_string(), "new-project".to_string()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let snapshots = client
+        .issue_states_by_ids(&["issue-overlap"])
+        .await
+        .expect("overlapping project state queries should succeed");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].state.name, "Done");
+    assert_eq!(
+        snapshots[0].updated_at.to_rfc3339(),
+        "2026-03-21T17:00:00+00:00"
+    );
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["variables"]["projectSlug"], "old-project");
+    assert_eq!(requests[1].body["variables"]["projectSlug"], "new-project");
+}
+
+#[tokio::test]
 async fn issue_states_by_ids_paginates_nested_labels() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!("fixtures/issue_states_with_label_paging.json")),

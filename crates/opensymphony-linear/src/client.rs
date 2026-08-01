@@ -721,6 +721,7 @@ impl LinearClient {
         }
 
         let mut snapshots = Vec::new();
+        let mut snapshot_indices = HashMap::new();
 
         let project_slugs = self.project_slugs_for_queries().await?;
         for project_slug in &project_slugs {
@@ -780,7 +781,17 @@ impl LinearClient {
                         )?;
                     }
                     node.labels.nodes = labels;
-                    snapshots.push(normalize_issue_state(node));
+                    let snapshot = normalize_issue_state(node);
+                    if let Some(index) = snapshot_indices.get(&snapshot.id).copied() {
+                        // A bound issue can temporarily be returned by more
+                        // than one configured project. Project queries run
+                        // sequentially, so the later response is the newest
+                        // state we observed and must replace the stale one.
+                        snapshots[index] = snapshot;
+                    } else {
+                        snapshot_indices.insert(snapshot.id.clone(), snapshots.len());
+                        snapshots.push(snapshot);
+                    }
                 }
 
                 if !page_info.has_next_page {
