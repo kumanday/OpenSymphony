@@ -908,7 +908,18 @@ impl WorkspaceManager {
                 continue;
             }
             let Some((handle, manifest)) =
-                self.load_workspace_from_directory(&entry.path()).await?
+                (match self.load_workspace_from_directory(&entry.path()).await {
+                    Ok(workspace) => workspace,
+                    Err(WorkspaceError::DecodeManifest { path, source }) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %source,
+                            "skipping retained checkout with a malformed generation manifest"
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                })
             else {
                 continue;
             };

@@ -1583,15 +1583,11 @@ where
                 .executions
                 .get(&normalized.id)
                 .is_some_and(|execution| {
-                    matches!(
-                        execution.status(),
-                        SchedulerStatus::Claimed
-                            | SchedulerStatus::Running
-                            | SchedulerStatus::RetryQueued
-                    ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
-                        execution.issue().repository_binding.as_ref(),
-                        normalized.repository_binding.as_ref(),
-                    )
+                    execution.workspace().is_some()
+                        && RepositoryBindingOutcome::canonical_identity_changed_opt(
+                            execution.issue().repository_binding.as_ref(),
+                            normalized.repository_binding.as_ref(),
+                        )
                 })
             {
                 self.supersede_binding(normalized.id.clone(), normalized, observed_at)

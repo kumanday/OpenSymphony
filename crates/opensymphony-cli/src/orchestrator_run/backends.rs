@@ -402,6 +402,17 @@ async fn migrate_legacy_workspace_conversations(
         if conversation_manifest_is_codex(&manifest) {
             continue;
         }
+        if workspace.checkout_generation().is_some()
+            && !strict_conversation_manifest_is_bound(workspace_manager, &workspace, &manifest)
+                .await?
+        {
+            tracing::warn!(
+                issue = %issue_manifest.identifier,
+                conversation_id = %manifest.conversation_id,
+                "skipping strict conversation migration with an untrusted runtime envelope"
+            );
+            continue;
+        }
 
         match conversation_store.move_conversation_to(
             manifest.conversation_id.as_str(),
@@ -473,6 +484,17 @@ async fn prepare_active_conversation_store_for_issues(
         if conversation_manifest_is_codex(&manifest) {
             continue;
         }
+        if workspace.checkout_generation().is_some()
+            && !strict_conversation_manifest_is_bound(workspace_manager, &workspace, &manifest)
+                .await?
+        {
+            tracing::warn!(
+                issue = %issue.identifier,
+                conversation_id = %manifest.conversation_id,
+                "skipping strict conversation migration with an untrusted runtime envelope"
+            );
+            continue;
+        }
 
         match conversation_store.move_conversation_to(
             manifest.conversation_id.as_str(),
@@ -502,6 +524,25 @@ async fn prepare_active_conversation_store_for_issues(
     }
 
     Ok(report)
+}
+
+async fn strict_conversation_manifest_is_bound(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+) -> Result<bool, RunCommandError> {
+    let Some(run_manifest) = workspace_manager.load_run_manifest(workspace).await? else {
+        return Ok(false);
+    };
+    let Some(run_envelope) = run_manifest.runtime_envelope.as_ref() else {
+        return Ok(false);
+    };
+    let Some(conversation_envelope) = manifest.runtime_envelope.as_ref() else {
+        return Ok(false);
+    };
+    Ok(conversation_envelope == run_envelope
+        && conversation_envelope.conversation_binding.as_deref()
+            == Some(manifest.conversation_id.as_str()))
 }
 
 fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool {

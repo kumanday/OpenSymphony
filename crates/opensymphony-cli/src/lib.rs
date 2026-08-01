@@ -2325,18 +2325,18 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         ));
     }
 
+    let persisted_run_manifest = workspace_manager
+        .load_run_manifest(&workspace)
+        .await
+        .map_err(|e| format!("failed to read persisted run manifest: {e}"))?;
     let persisted_runtime_envelope = if strict_recovery {
-        let persisted_run = workspace_manager
-            .load_run_manifest(&workspace)
-            .await
-            .map_err(|e| format!("failed to read persisted run manifest: {e}"))?
-            .ok_or_else(|| {
-                format!(
-                    "strict workspace {} has no persisted run manifest",
-                    workspace.identifier()
-                )
-            })?;
-        let run_envelope = persisted_run.runtime_envelope.ok_or_else(|| {
+        let persisted_run = persisted_run_manifest.as_ref().ok_or_else(|| {
+            format!(
+                "strict workspace {} has no persisted run manifest",
+                workspace.identifier()
+            )
+        })?;
+        let run_envelope = persisted_run.runtime_envelope.clone().ok_or_else(|| {
             format!(
                 "strict workspace {} has no persisted run runtime envelope",
                 workspace.identifier()
@@ -2405,8 +2405,11 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     // Create a minimal run descriptor for the rehydration
     use crate::opensymphony_workspace::RunDescriptor;
     let run_descriptor = RunDescriptor::new("rehydrate", 1);
-    let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
-    run_manifest.runtime_envelope = persisted_runtime_envelope;
+    let mut run_manifest = persisted_run_manifest.unwrap_or_else(|| {
+        let mut manifest = RunManifest::new(&workspace, &run_descriptor);
+        manifest.runtime_envelope = persisted_runtime_envelope.clone();
+        manifest
+    });
 
     // Create a minimal RunAttempt for the rehydration
     use crate::opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
