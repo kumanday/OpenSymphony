@@ -295,6 +295,12 @@ impl LinearClient {
                 .map(|slug| normalize_required_string("tracker.project_slugs", slug))
                 .collect::<Result<Vec<_>, _>>()?
         };
+        if !config.project_ids.is_empty() && config.project_ids.len() != config.project_slugs.len()
+        {
+            return Err(LinearError::InvalidConfiguration(
+                "tracker project ID and slug lists must have the same length".to_owned(),
+            ));
+        }
         if !config.project_ids.is_empty() {
             if config.project_id_slug_fallbacks.is_empty() {
                 config.project_id_slug_fallbacks = vec![false; config.project_ids.len()];

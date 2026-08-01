@@ -1140,6 +1140,20 @@ impl WorkspaceManager {
         let _ = fs::remove_dir_all(workspace.workspace_path()).await;
     }
 
+    async fn remove_incomplete_published_checkout(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<(), WorkspaceError> {
+        match fs::remove_dir_all(workspace_path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(WorkspaceError::RemoveWorkspace {
+                path: workspace_path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
     async fn run_git_clone(
         &self,
         repository: &CheckoutRepository,
@@ -2085,7 +2099,7 @@ impl WorkspaceManager {
             hook.stdout = redact_runtime_diagnostic(&hook.stdout);
             hook.stderr = redact_runtime_diagnostic(&hook.stderr);
         }
-        self.write_manifest(workspace, &workspace.run_manifest_path(), &sanitized)
+        self.write_manifest_atomically(workspace, &workspace.run_manifest_path(), &sanitized)
             .await
     }
 
@@ -2418,6 +2432,17 @@ impl WorkspaceManager {
         ensure_descendant(&canonical_root, &canonical_workspace)?;
 
         let issue_manifest_path = canonical_workspace.join(".opensymphony").join("issue.json");
+        if is_published_checkout_generation_directory(workspace_path)
+            && !path_exists(&issue_manifest_path).await?
+        {
+            tracing::warn!(
+                path = %canonical_workspace.display(),
+                "sweeping incomplete published checkout generation without issue ownership"
+            );
+            self.remove_incomplete_published_checkout(&canonical_workspace)
+                .await?;
+            return Ok(None);
+        }
         let raw = match fs::read_to_string(&issue_manifest_path).await {
             Ok(raw) => raw,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -3394,6 +3419,18 @@ fn is_generation_shaped_directory(path: &Path, workspace_key: &str) -> bool {
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix(&format!("{workspace_key}--")))
         .is_some_and(|generation| !generation.is_empty())
+}
+
+fn is_published_checkout_generation_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once("--"))
+        .is_some_and(|(_, generation)| {
+            generation.len() == 32
+                && generation
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        })
 }
 
 fn missing_manifest_error(path: PathBuf) -> WorkspaceError {

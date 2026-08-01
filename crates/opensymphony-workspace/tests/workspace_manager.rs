@@ -849,6 +849,32 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
         .expect("malformed generations should not abort legacy lookup")
         .expect("legacy workspace should still be found");
     assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
+    let sweep_root = temp_dir.path().join("sweep-workspaces");
+    let orphan_published_path =
+        sweep_root.join("orphan-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(orphan_published_path.join(".opensymphony"))
+        .await
+        .expect("orphan published generation directory should exist");
+    tokio::fs::write(
+        orphan_published_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("orphan published checkout marker should be written");
+    let sweep_manager = WorkspaceManager::new(manager_config(
+        &sweep_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("sweep manager should build");
+    sweep_manager
+        .list_all_workspaces()
+        .await
+        .expect("workspace discovery should sweep orphan generations");
+    assert!(
+        !orphan_published_path.exists(),
+        "orphan published generations should be swept during discovery"
+    );
 }
 
 #[tokio::test]

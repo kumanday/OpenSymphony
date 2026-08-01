@@ -130,6 +130,12 @@ fn resolve_tracker<E: Environment>(
     };
     reject_duplicate_tracker_values("tracker.project_ids", &project_ids, false)?;
     reject_duplicate_tracker_values("tracker.project_slugs", &project_slugs, true)?;
+    if !project_ids.is_empty() && project_ids.len() != project_slugs.len() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "tracker.project_slugs",
+            message: "must have the same length as project_ids".to_owned(),
+        });
+    }
     let project_id_slug_fallbacks = tracker
         .project_id_slug_fallbacks
         .clone()

@@ -857,6 +857,26 @@ impl RuntimeWorkspaceBackend {
                         }
                     }
                     Ok(manifest) => {
+                        let envelope_compatible = if handle.checkout_generation().is_some() {
+                            strict_conversation_manifest_is_bound(&self.manager, &handle, &manifest)
+                                .await
+                                .map_err(|error| {
+                                    CliWorkspaceError::OpenHandsLifecycle(error.to_string())
+                                })?
+                        } else {
+                            true
+                        };
+                        if !envelope_compatible {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                conversation_id = %manifest.conversation_id,
+                                "skipping terminal OpenHands archive for an untrusted runtime envelope"
+                            );
+                            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                                "terminal OpenHands conversation binding is not compatible with the checkout run envelope"
+                                    .to_owned(),
+                            ));
+                        }
                         if let Some(store) = self.openhands_conversation_store.as_ref() {
                             match store.move_conversation_to(
                                 manifest.conversation_id.as_str(),

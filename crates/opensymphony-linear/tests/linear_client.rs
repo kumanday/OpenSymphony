@@ -1036,6 +1036,25 @@ fn client_configuration_requires_project_slug() {
 }
 
 #[test]
+fn client_configuration_requires_project_id_and_slug_vectors_to_align() {
+    let mut config = LinearConfig::new("test-token", "e7b957855cb7");
+    config.project_ids = vec!["first".to_owned(), "second".to_owned()];
+    config.project_slugs = vec!["first".to_owned()];
+
+    let error = match LinearClient::new(config) {
+        Ok(_) => panic!("misaligned project vectors should fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        LinearError::InvalidConfiguration(message) => {
+            assert!(message.contains("same length"));
+        }
+        other => panic!("expected invalid configuration error, got {other:?}"),
+    }
+}
+
+#[test]
 fn client_configuration_requires_api_key() {
     let mut config = LinearConfig::new("   ", "e7b957855cb7");
     config.active_states = vec!["In Progress".to_string()];
