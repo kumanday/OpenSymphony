@@ -326,6 +326,10 @@ Current repository note:
 - queued retry recovery and frequent state reconciliation preserve the binding
   generation boundary: a changed repository binding removes the old workspace
   and prevents that retry from launching until the replacement is materialized.
+- when verification quarantines a retained checkout during `RetryQueued`, the
+  scheduler may attach the newly published generation when its deterministic
+  workspace key is unchanged; claimed and running executions keep their
+  existing workspace identity immutable.
   The same boundary applies when a tracker issue keeps its immutable ID but its
   identifier changes: because verified checkout keys include the identifier, the
   scheduler supersedes the old workspace generation before materializing the

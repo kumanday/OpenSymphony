@@ -101,7 +101,10 @@ is also part of conversation compatibility. The agent-server create contract
 does not provide a conversation MCP-config update operation, so a persisted
 conversation with an old grant is superseded and recreated with the current
 grant before it can receive another turn. The old conversation evidence is
-retained until remote deletion succeeds.
+retained until remote deletion succeeds. After daemon recovery, the
+supervised grant registry is reconstructed, so OpenHands forces this
+replacement path; ordinary in-process retries keep the existing conversation
+and refreshed grant.
 
 If a recovered trigger-pending run receives `409 Conflict`, the adapter waits
 for the active turn to stop, refreshes the recovered event baseline, and retries

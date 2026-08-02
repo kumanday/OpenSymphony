@@ -2050,10 +2050,20 @@ impl WorkspaceManager {
         if output.status.success() {
             return Ok(());
         }
-        Err(checkout_verification(
-            checkout,
-            "Git integrity check failed",
-        ))
+        if output.status.code().is_some() {
+            return Err(checkout_verification(
+                checkout,
+                "Git integrity check failed",
+            ));
+        }
+        Err(WorkspaceError::CheckoutOperation {
+            operation: "fsck".to_owned(),
+            path: checkout.to_path_buf(),
+            detail: format!(
+                "Git integrity check exited abnormally: {}",
+                redact_runtime_diagnostic(&String::from_utf8_lossy(&output.stderr))
+            ),
+        })
     }
 
     async fn git_is_ancestor(

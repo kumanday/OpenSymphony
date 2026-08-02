@@ -97,9 +97,10 @@ pub struct MemoryWorkerAccess {
     pub project_set: Option<String>,
     pub execution_repo: Option<String>,
     pub authorized_repositories: Vec<String>,
-    /// The token is issued by this process's memory server. The orchestrator
-    /// refreshes the corresponding issue grant in place before each retry, so
-    /// reusable conversations can keep the same MCP bearer across turns.
+    /// The token is issued by this process's memory server. A recovered
+    /// supervised server may require a replacement conversation because its
+    /// reconstructed grant registry cannot update the bearer stored by the
+    /// existing server-side MCP configuration.
     pub requires_fresh_conversation: bool,
 }
 

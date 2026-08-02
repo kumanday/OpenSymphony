@@ -457,7 +457,11 @@ impl IssueExecution {
             let expected_path = comparable_workspace_path(&current.path);
             let actual_path = comparable_workspace_path(&workspace.path);
 
-            if current.workspace_key != workspace.workspace_key || expected_path != actual_path {
+            let replacement_generation = matches!(self.state, SchedulerState::RetryQueued { .. })
+                && current.workspace_key == workspace.workspace_key;
+            if current.workspace_key != workspace.workspace_key
+                || (expected_path != actual_path && !replacement_generation)
+            {
                 return Err(StateTransitionError::WorkspaceIdentityMismatch {
                     expected_key: current.workspace_key.clone(),
                     actual_key: workspace.workspace_key.clone(),

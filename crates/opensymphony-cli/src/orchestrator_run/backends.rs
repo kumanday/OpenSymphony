@@ -2039,8 +2039,11 @@ impl RuntimeWorkerBackend {
             workflow: workflow.clone(),
             workspace_manager,
             openhands_conversation_store: None,
-            runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
-                .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
+            runner_config: IssueSessionRunnerConfig::from_workflow(&workflow).with_memory(
+                memory_env
+                    .as_ref()
+                    .map(|memory| memory_access_from_runtime(memory, false)),
+            ),
             memory_env,
             workpad_comment_source,
             worker_env,
@@ -2327,7 +2330,12 @@ impl RuntimeWorkerBackend {
                 client.clone(),
                 runner_config
                     .clone()
-                    .with_memory(worker_memory_env.as_ref().map(memory_access_from_runtime)),
+                    .with_memory(worker_memory_env.as_ref().map(|memory| {
+                        memory_access_from_runtime(
+                            memory,
+                            recovered && memory.scope_grants.is_some(),
+                        )
+                    })),
                 OverlayEnvironment {
                     overrides: worker_environment.clone(),
                     blocked: checkout_credential_envs.clone(),
@@ -2931,17 +2939,20 @@ fn memory_scope_prompt_from_environment(environment: &BTreeMap<String, String>) 
     ))
 }
 
-fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
+fn memory_access_from_runtime(
+    memory: &RuntimeMemoryEnv,
+    requires_fresh_conversation: bool,
+) -> MemoryWorkerAccess {
     MemoryWorkerAccess {
         endpoint: memory.endpoint.clone(),
         token: memory.token.clone(),
         project: Some(memory.project.clone()),
         execution_repo: Some(memory.execution_repo.clone()),
         authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
-        // The registry refreshes the issue-scoped grant in place before each
-        // retry, so the MCP bearer already stored in a reusable conversation
-        // remains valid without forcing a fresh conversation.
-        requires_fresh_conversation: false,
+        // A recovered supervised memory server has a newly reconstructed grant
+        // registry, so its bearer differs from the one stored in a reusable
+        // OpenHands conversation. In-process retries keep their conversation.
+        requires_fresh_conversation,
         project_set: memory.project_set.clone(),
     }
 }
@@ -3259,7 +3270,6 @@ async fn try_run_codex_stdio_issue(
     };
     let mut resume_terminal = None;
     let mut recovered_active_turn = false;
-    let mut recovered_terminal_turn = false;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
         Some(mut manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
@@ -3335,20 +3345,9 @@ async fn try_run_codex_stdio_issue(
                 .filter(|turn_id| !turn_id.trim().is_empty())
                 .or_else(|| read_state.pending_turn_id.take())
                 .or_else(|| codex_active_turn_id_from_resume_response(&resume_response));
-            resume_terminal = resume_turn_id
-                .as_deref()
-                .and_then(|turn_id| {
-                    codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
-                })
-                .or_else(|| {
-                    (recovered
-                        && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
-                        && resume_turn_id.is_none())
-                    .then(|| codex_latest_terminal_outcome_from_resume_response(&resume_response))
-                    .flatten()
-                });
-            recovered_terminal_turn =
-                recovered && resume_turn_id.is_none() && resume_terminal.is_some();
+            resume_terminal = resume_turn_id.as_deref().and_then(|turn_id| {
+                codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
+            });
             if recovered && let Some(turn_id) = resume_turn_id.as_deref() {
                 recovered_active_turn = true;
                 if manifest.last_turn_id.as_deref() != Some(turn_id) {
@@ -3572,30 +3571,6 @@ async fn try_run_codex_stdio_issue(
             )
         }
     };
-    if recovered_terminal_turn {
-        let terminal = resume_terminal.expect("recovered terminal turn should be present");
-        if let Some(sender) = launch_tx.take() {
-            let _ = sender.send(LaunchReport::Conversation(Box::new(
-                codex_conversation_metadata(conversation_id.clone(), route),
-            )));
-        }
-        let summary = format!(
-            "Codex app-server recovery reconciled completed turn with terminal event {:?}",
-            terminal.event_kind
-        );
-        let _ = child.kill().await;
-        stderr_task.abort();
-        return Ok((
-            WorkerOutcomeRecord::from_run(
-                run,
-                terminal.outcome,
-                now_timestamp(),
-                Some(summary),
-                None,
-            ),
-            terminal.status,
-        ));
-    }
     if recovered_active_turn {
         let turn_id = manifest
             .last_turn_id
@@ -4517,41 +4492,6 @@ fn codex_terminal_outcome_from_resume_response(
         event_kind: NormalizedCodexEventKind::TurnCompleted,
         outcome,
         status,
-    })
-}
-
-fn codex_latest_terminal_outcome_from_resume_response(
-    value: &serde_json::Value,
-) -> Option<CodexTerminalOutcome> {
-    let turns = value
-        .get("result")
-        .and_then(|result| {
-            result
-                .get("thread")
-                .and_then(|thread| thread.get("turns"))
-                .or_else(|| result.get("turns"))
-        })?
-        .as_array()?;
-    turns.iter().rev().find_map(|turn| {
-        let status = turn
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_ascii_lowercase)?;
-        let (outcome, status) = match status.as_str() {
-            "completed" | "succeeded" | "success" => {
-                (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
-            }
-            "failed" | "error" => (WorkerOutcomeKind::Failed, RunStatus::Failed),
-            "cancelled" | "canceled" | "interrupted" => {
-                (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
-            }
-            _ => return None,
-        };
-        Some(CodexTerminalOutcome {
-            event_kind: NormalizedCodexEventKind::TurnCompleted,
-            outcome,
-            status,
-        })
     })
 }
 
@@ -6312,21 +6252,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_resume_response_reconciles_latest_terminal_turn_without_id() {
-        let completed = codex_latest_terminal_outcome_from_resume_response(&serde_json::json!({
-            "result": {
-                "thread": {
-                    "turns": [{"id": "turn-7", "status": "completed"}]
-                }
-            }
-        }))
-        .expect("latest completed turn should be terminal");
-
-        assert_eq!(completed.outcome, WorkerOutcomeKind::Succeeded);
-        assert_eq!(completed.status, RunStatus::Succeeded);
-    }
-
-    #[test]
     fn recovered_harness_kind_preserves_codex_runtime_contract() {
         let manifest = IssueConversationManifest {
             transport_target: Some("remote".to_owned()),
@@ -7582,7 +7507,8 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn codex_stdio_worker_recovery_reconciles_completed_prepared_turn_without_turn_id() {
+    async fn codex_stdio_worker_recovery_submits_prepared_prompt_when_only_historical_turn_exists()
+    {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
         let workflow = sample_workflow(tempdir.path(), &workspace_root);
@@ -7630,7 +7556,7 @@ mod tests {
             8,
         );
         let log_path = tempdir.path().join("fake-codex-completed-recovery.log");
-        let fake_codex = tempdir.path().join("fake-codex-completed-recovery");
+        let fake_codex = tempdir.path().join("fake-codex-historical-turn-recovery");
         write_fake_codex_completed_recovery_child(&fake_codex, &log_path);
         let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
         let (launch_tx, launch_rx) = oneshot::channel();
@@ -7669,7 +7595,7 @@ mod tests {
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
         assert!(log.contains(r#""method":"thread/resume""#));
-        assert!(!log.contains(r#""method":"turn/start""#));
+        assert!(log.contains(r#""method":"turn/start""#));
     }
 
     #[cfg(unix)]
@@ -9861,8 +9787,8 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread","turns":[{{"id":"turn-1","status":"completed"}}]}}}}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
-      printf 'unexpected turn/start\n' >&2
-      exit 97
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-2","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-2","status":"completed"}}}}}}\n'
       ;;
   esac
 done
