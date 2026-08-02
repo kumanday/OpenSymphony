@@ -1480,6 +1480,7 @@ mod community_tests {
             labels: Vec::new(),
             tags: Vec::new(),
             areas: areas.iter().map(|area| area.to_string()).collect(),
+            area_source_ids: BTreeMap::new(),
             capsule_path: PathBuf::from(format!(".opensymphony/memory/issues/{key}.md")),
             visibility: MemoryVisibility::Public,
             source_hash: String::new(),

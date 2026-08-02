@@ -187,4 +187,31 @@ impl IndexedIssue {
     fn areas(&self) -> Vec<String> {
         self.areas.clone()
     }
+
+    fn areas_for_scope(&self, _config: &MemoryConfig, scope: &MemoryScopeFilter) -> Vec<String> {
+        let Some(repository_id) = scope.repo.as_deref() else {
+            return self.areas();
+        };
+        let live_owner = format!("__live_capture__:{repository_id}");
+        let repository_prefix = format!("{repository_id}:");
+        let issue_has_repository_scope = self.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == repository_id
+        });
+        self.area_source_ids
+            .iter()
+            .filter(|(_, source_ids)| {
+                let has_qualified_source = source_ids
+                    .iter()
+                    .any(|source_id| !source_id.is_empty() && source_id != LIVE_CAPTURE_OWNER);
+                source_ids.iter().any(|source_id| {
+                    source_id == &live_owner
+                        || source_id.starts_with(&repository_prefix)
+                        || ((source_id.is_empty() || source_id == LIVE_CAPTURE_OWNER)
+                            && !has_qualified_source
+                            && issue_has_repository_scope)
+                })
+            })
+            .map(|(area, _)| area.clone())
+            .collect()
+    }
 }

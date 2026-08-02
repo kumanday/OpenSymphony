@@ -1144,6 +1144,7 @@ struct IndexedIssue {
     labels: Vec<String>,
     tags: Vec<String>,
     areas: Vec<String>,
+    area_source_ids: BTreeMap<String, BTreeSet<String>>,
     capsule_path: PathBuf,
     visibility: MemoryVisibility,
     source_hash: String,
@@ -3375,6 +3376,12 @@ Reviews are triggered when you open a pull request for review.
                 duckdb::params![merged_scopes, "COE-123"],
             )
             .expect("merge scope refs");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
+                duckdb::params!["COE-123", "repo-b-only", "__live_capture__:repo-b"],
+            )
+            .expect("repository-specific area");
 
         let scoped = MemoryScopeFilter {
             repo: Some("repo-a".to_string()),
@@ -3391,6 +3398,12 @@ Reviews are triggered when you open a pull request for review.
                 .expect("scoped related")
                 .len(),
             1
+        );
+        assert_eq!(
+            related_by_area_with_scope(&config, "repo-b-only", 10, &scoped)
+                .expect("cross-repository area should be filtered")
+                .len(),
+            0
         );
         assert_eq!(
             related_by_issue_with_scope(&config, "COE-123", 10, &scoped)
@@ -4074,6 +4087,59 @@ Reviews are triggered when you open a pull request for review.
 
         assert_eq!(
             load_issue_capsule(&config, "COE-558").expect("indexed fallback body"),
+            "Indexed safe body"
+        );
+    }
+
+    #[test]
+    fn relative_capsule_paths_cannot_escape_owned_roots() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let source = TempDir::new().expect("source repo");
+        let outside = source
+            .path()
+            .parent()
+            .expect("temp parent")
+            .join("secret.md");
+        fs::write(&outside, "untrusted relative file").expect("outside file");
+        let mut config = config_for(catalog.path());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: source.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-560",
+                    "Relative path",
+                    "[]",
+                    "not_archived",
+                    "../../secret.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed safe body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-560",
+                    r#"[{"kind":"repository","id":"repo-a"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"repo-a"}]"#,
+                    r#"["repo-a:source-a"]"#,
+                ],
+            )
+            .expect("indexed issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-560").expect("indexed fallback body"),
             "Indexed safe body"
         );
     }

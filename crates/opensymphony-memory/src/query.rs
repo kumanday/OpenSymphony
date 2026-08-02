@@ -148,10 +148,16 @@ fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<P
                 .next()
                 .expect("one owning repository");
             if let Some(source) = config.repository_sources.get(repository_id) {
-                add_path(&mut paths, source.root.join(&indexed.capsule_path));
+                let candidate = source.root.join(&indexed.capsule_path);
+                if ensure_repo_contained(&source.root, &candidate).is_ok() {
+                    add_path(&mut paths, candidate);
+                }
             }
         }
-        add_path(&mut paths, config.memory_root.join(&indexed.capsule_path));
+        let candidate = config.memory_root.join(&indexed.capsule_path);
+        if ensure_repo_contained(&config.memory_root, &candidate).is_ok() {
+            add_path(&mut paths, candidate);
+        }
     }
     paths
 }
@@ -243,7 +249,7 @@ pub fn related_by_issue_with_scope(
         )));
     }
     let mut related = Vec::new();
-    let indexed_areas = indexed.areas();
+    let indexed_areas = indexed.areas_for_scope(config, scope);
     for candidate in load_indexed_issues(config)?
         .into_iter()
         .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
@@ -251,7 +257,7 @@ pub fn related_by_issue_with_scope(
         if candidate.issue_key == issue_key {
             continue;
         }
-        let candidate_areas = candidate.areas();
+        let candidate_areas = candidate.areas_for_scope(config, scope);
         let overlap = candidate_areas
             .iter()
             .filter(|area| indexed_areas.contains(area))
@@ -302,7 +308,7 @@ pub fn related_by_area_with_scope(
         .into_iter()
         .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
-        let areas = candidate.areas();
+        let areas = candidate.areas_for_scope(config, scope);
         if areas.iter().any(|candidate_area| candidate_area == &area) {
             results.push(SearchResult {
                 issue_key: candidate.issue_key.clone(),

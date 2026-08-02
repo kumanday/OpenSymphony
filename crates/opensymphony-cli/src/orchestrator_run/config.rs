@@ -413,6 +413,10 @@ pub enum CentralConfigError {
     UnsupportedRoutingMode { mode: &'static str },
     #[error("legacy_single repository `{repository}` must define checkout_path")]
     MissingLegacyCheckout { repository: String },
+    #[error(
+        "project_set repository `{repository}` must define checkout_path for memory source registration"
+    )]
+    MissingProjectSetCheckout { repository: String },
     #[error("central config path is outside the selected instance roots")]
     InvalidRoot,
 }
@@ -1332,9 +1336,6 @@ fn resolve_memory_sources(
     };
     let mut sources = BTreeMap::new();
     for (repository_key, repository) in &config.repositories {
-        let Some(checkout_path) = repository.checkout_path.as_deref() else {
-            continue;
-        };
         let repository_id = CanonicalRepositoryId::from_remote(
             &repository.remote.provider,
             repository.remote.provider_id.as_deref(),
@@ -1350,6 +1351,19 @@ fn resolve_memory_sources(
         {
             continue;
         }
+        let Some(checkout_path) = repository.checkout_path.as_deref() else {
+            return Err(
+                if repository_routing.mode == RepositoryRoutingMode::ProjectSet {
+                    CentralConfigError::MissingProjectSetCheckout {
+                        repository: repository_key.clone(),
+                    }
+                } else {
+                    CentralConfigError::MissingLegacyCheckout {
+                        repository: repository_key.clone(),
+                    }
+                },
+            );
+        };
         let resolved = ResolvedMemorySource {
             repository_id: repository_id.clone(),
             remote_locator: repository.remote.locator.clone(),
@@ -2570,6 +2584,23 @@ scheduler:
                 .contains_key("git:repository:example/repo")
         );
         assert_eq!(resolved.runtime.memory.auto_capture, Some(true));
+    }
+
+    #[test]
+    fn project_set_memory_sources_require_checkout_paths() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions");
+        let source = central_fixture(root.path()).replace(
+            &format!("    checkout_path: {}/checkout\n", root.path().display()),
+            "",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("active project-set source without checkout must fail");
+        assert!(matches!(
+            error,
+            CentralConfigError::MissingProjectSetCheckout { repository } if repository == "core-repo"
+        ));
     }
 
     #[test]

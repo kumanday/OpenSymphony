@@ -1037,6 +1037,11 @@ fn reject_project_set_memory_write(
         path: central_config_path.to_path_buf(),
         source,
     })?;
+    if central_routing_mode_is_project_set(&raw) {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory write operation `{operation}` does not support project_set central routing until strict routing is enabled"
+        )));
+    }
     let central = validate_central_config_text(central_config_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
     if central.mode == CentralRoutingMode::ProjectSet {
@@ -1045,6 +1050,15 @@ fn reject_project_set_memory_write(
         )));
     }
     Ok(())
+}
+
+fn central_routing_mode_is_project_set(raw: &str) -> bool {
+    serde_yaml::from_str::<serde_yaml::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("routing").cloned())
+        .and_then(|routing| routing.get("mode").cloned())
+        .and_then(|mode| mode.as_str().map(str::to_owned))
+        .is_some_and(|mode| mode.trim() == "project_set")
 }
 
 async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
@@ -1476,12 +1490,18 @@ async fn run_context(
         scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
     }
     let mut context_scope = scope.clone();
+    if context_scope.repo.is_none()
+        && (context_scope.project.is_some() || context_scope.project_set.is_some())
+    {
+        context_scope.repo = Some(unique_repository_for_memory_scope(config, &context_scope)?);
+    }
     context_scope.issue = None;
     options.scope = context_scope;
     for warning in warnings {
         println!("> Warning: {warning}\n");
     }
-    let mut context = context_for_issue_with_options(config, &source, &options)?;
+    let context_config = memory_config_for_repository(config, options.scope.repo.as_deref())?;
+    let mut context = context_for_issue_with_options(&context_config, &source, &options)?;
     if args.include_code_intel {
         let code_config = memory_config_for_repository(config, scope.repo.as_deref())?;
         append_code_intel_context(
@@ -1618,6 +1638,7 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 }),
             ),
         )),
+        MemoryCommand::Show(args) => Some(("memory.show", json!({ "issue": args.issue.clone() }))),
         MemoryCommand::Context(args) => Some((
             "memory.context",
             with_scope_json(
@@ -3033,6 +3054,7 @@ fn required_access_for_request(
 fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Vec<Value> {
     let mut tools = vec![
         json!({ "name": "memory.context", "description": "Build a pre-implementation memory context bundle", "access": "read" }),
+        json!({ "name": "memory.show", "description": "Return one issue capsule", "access": "read" }),
         json!({ "name": "memory.search", "description": "Search captured issue memory", "access": "read" }),
         json!({ "name": "memory.related", "description": "Find related issue memory by issue, area, or paths", "access": "read" }),
         json!({ "name": "memory.brief", "description": "Return a compact issue memory brief", "access": "read" }),
@@ -3316,6 +3338,14 @@ async fn call_memory_tool_with_workspace(
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
+            let mut context_scope = scope_filter_from_mcp(config, &arguments, true)?;
+            context_scope.issue = None;
+            if context_scope.repo.is_none()
+                && (context_scope.project.is_some() || context_scope.project_set.is_some())
+            {
+                context_scope.repo =
+                    Some(unique_repository_for_memory_scope(config, &context_scope)?);
+            }
             let options = MemoryContextOptions {
                 issue: issue.clone(),
                 explicit_includes: string_list_arg(&arguments, "include"),
@@ -3324,14 +3354,12 @@ async fn call_memory_tool_with_workspace(
                     .map(PathBuf::from)
                     .collect(),
                 limit: usize_arg(&arguments, "limit", 20),
-                scope: {
-                    let mut scope = scope_filter_from_mcp(config, &arguments, true)?;
-                    scope.issue = None;
-                    scope
-                },
+                scope: context_scope,
             };
             let source = context_source_from_mcp(&arguments);
-            let mut text = context_for_issue_with_options(config, &source, &options)?;
+            let context_config =
+                memory_config_for_repository(config, options.scope.repo.as_deref())?;
+            let mut text = context_for_issue_with_options(&context_config, &source, &options)?;
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {
@@ -3386,6 +3414,10 @@ async fn call_memory_tool_with_workspace(
             let issue = required_string_arg(&arguments, "issue")?;
             let scope = brief_scope_filter(config, &arguments)?;
             Ok(mcp_text(brief_with_scope(config, &issue, &scope)?))
+        }
+        "memory.show" => {
+            let issue = required_string_arg(&arguments, "issue")?;
+            Ok(mcp_text(load_issue_capsule(config, &issue)?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
@@ -5453,6 +5485,13 @@ fn memory_config_for_repository(
     let local_config = MemoryConfig::load(&source.root, None)?;
     resolved.enabled = local_config.enabled;
     resolved.code_intel = local_config.code_intel;
+    resolved.visibility = local_config.visibility;
+    resolved.confidence_threshold = local_config.confidence_threshold;
+    resolved.areas = local_config.areas;
+    resolved.docs = local_config.docs;
+    resolved.redaction = local_config.redaction;
+    resolved.markdown_indexes = local_config.markdown_indexes;
+    resolved.source_snapshot_policy = local_config.source_snapshot_policy;
     resolved.code_index_target_branch = source
         .target_branch
         .clone()
@@ -7037,6 +7076,12 @@ fn load_central_resolved_workflow(
         path: config_path.clone(),
         source,
     })?;
+    if central_routing_mode_is_project_set(&raw) {
+        return Err(MemoryError::InvalidInput(
+            "memory commands do not support project_set central routing until strict routing is enabled"
+                .to_string(),
+        ));
+    }
     let central = validate_central_config_text(&config_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
     if central.mode == CentralRoutingMode::ProjectSet {
@@ -7664,6 +7709,16 @@ mod tests {
         let (tool, arguments) = remote_memory_tool_request(&command).expect("remote brief request");
         assert_eq!(tool, "memory.brief");
         assert_eq!(arguments["repo"], "repo-b");
+        assert_eq!(arguments["issue"], "COE-550");
+    }
+
+    #[test]
+    fn remote_show_forwards_issue_to_central_memory_endpoint() {
+        let command = super::MemoryCommand::Show(super::ShowArgs {
+            issue: "COE-550".to_string(),
+        });
+        let (tool, arguments) = remote_memory_tool_request(&command).expect("remote show request");
+        assert_eq!(tool, "memory.show");
         assert_eq!(arguments["issue"], "COE-550");
     }
 

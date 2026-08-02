@@ -2590,6 +2590,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 labels: serde_json::from_str::<Vec<String>>(&labels_json).unwrap_or_default(),
                 tags: serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default(),
                 areas: Vec::new(),
+                area_source_ids: BTreeMap::new(),
                 capsule_path: PathBuf::from(row.get::<_, String>(5)?),
                 visibility: match row.get::<_, String>(6)?.as_str() {
                     "public" => MemoryVisibility::Public,
@@ -2633,12 +2634,14 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
     drop(statement);
 
     for issue in &mut issues {
-        issue.areas = load_issue_areas(&connection, &issue.issue_key).map_err(|source| {
+        let (areas, area_source_ids) = load_issue_areas(&connection, &issue.issue_key).map_err(|source| {
             MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             }
         })?;
+        issue.areas = areas;
+        issue.area_source_ids = area_source_ids;
         issue.changed_files =
             load_issue_changed_files(&connection, &issue.issue_key).map_err(|source| {
                 MemoryError::DuckDb {
@@ -2708,18 +2711,26 @@ fn load_pull_requests_by_issue(
     Ok(by_issue)
 }
 
+type IndexedIssueAreas = (Vec<String>, BTreeMap<String, BTreeSet<String>>);
+
 fn load_issue_areas(
     connection: &Connection,
     issue_key: &str,
-) -> Result<Vec<String>, duckdb::Error> {
+) -> Result<IndexedIssueAreas, duckdb::Error> {
     let mut statement =
-        connection.prepare("SELECT DISTINCT area FROM issue_areas WHERE issue_key = ? ORDER BY area")?;
-    let rows = statement.query_map(params![issue_key], |row| row.get::<_, String>(0))?;
-    let mut areas = Vec::new();
+        connection.prepare("SELECT area, source_id FROM issue_areas WHERE issue_key = ? ORDER BY area")?;
+    let rows = statement.query_map(params![issue_key], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut area_source_ids = BTreeMap::<String, BTreeSet<String>>::new();
     for row in rows {
-        areas.push(row?);
+        let (area, source_id) = row?;
+        area_source_ids
+            .entry(area)
+            .or_default()
+            .insert(source_id.unwrap_or_default());
     }
-    Ok(areas)
+    Ok((area_source_ids.keys().cloned().collect(), area_source_ids))
 }
 
 fn load_issue_changed_files(
@@ -5285,6 +5296,7 @@ mod index_tests {
             labels: Vec::new(),
             tags: Vec::new(),
             areas: Vec::new(),
+            area_source_ids: BTreeMap::new(),
             capsule_path: PathBuf::from(".opensymphony/memory/issues/COE-999.md"),
             visibility: MemoryVisibility::Private,
             source_hash: String::new(),
