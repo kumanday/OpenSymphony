@@ -46,11 +46,11 @@ use crate::{
         code_graph_context, code_graph_workspace_context_overlay, code_index_branch_for_config,
         code_repository_has_commit, code_repository_has_rows, context_for_issue_with_options,
         docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_issue_capsule, load_issue_capsule_with_scope, load_source_file,
-        mark_archived, merge_legacy_code_index, merge_legacy_memory_index,
-        merge_memory_index_from_okf, migrate_code_repository_identity,
-        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        lint_okf_bundle, load_issue_capsule_with_scope, load_source_file, mark_archived,
+        merge_legacy_code_index, merge_legacy_memory_index, merge_memory_index_from_okf,
+        migrate_code_repository_identity, persist_code_intel_documents,
+        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_hex,
@@ -1388,7 +1388,8 @@ fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError
 }
 
 fn run_show(config: &MemoryConfig, args: ShowArgs) -> Result<(), MemoryError> {
-    let contents = load_issue_capsule(config, &args.issue)?;
+    let scope = direct_scope_filter(config, &args.scope, Some(&args.issue), None, None)?;
+    let contents = load_issue_capsule_with_scope(config, &args.issue, &scope)?;
     println!("{contents}");
     Ok(())
 }
@@ -7417,6 +7418,7 @@ mod tests {
         IssueEvidence, IssueSelection, MemoryConfig, MemoryError, MemoryRepositorySource,
         MemoryScopeFilter, SourceFile, code_symbol_detail, code_symbol_neighborhood,
         code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
+        plan_capture, write_capture_plan,
     };
     use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -7733,6 +7735,60 @@ mod tests {
         assert_eq!(tool, "memory.show");
         assert_eq!(arguments["issue"], "COE-550");
         assert_eq!(arguments["repo"], "repo-a");
+    }
+
+    #[test]
+    fn direct_show_rejects_an_issue_outside_the_requested_repository() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let repo_a = TempDir::new().expect("repo a");
+        let repo_b = TempDir::new().expect("repo b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.default_repository_id = Some("repo-b".to_string());
+        for (repository_id, root) in [("repo-a", repo_a.path()), ("repo-b", repo_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-550".to_string(),
+                title: "Repository B memory".to_string(),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-550".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("capture");
+
+        let error = super::run_show(
+            &config,
+            super::ShowArgs {
+                scope: super::ScopeArgs {
+                    repo: Some("repo-a".to_string()),
+                    ..Default::default()
+                },
+                issue: "COE-550".to_string(),
+            },
+        )
+        .expect_err("direct show must enforce repository scope");
+        assert!(error.to_string().contains("requested scope"));
     }
 
     #[test]

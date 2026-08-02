@@ -428,6 +428,64 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
     Ok(())
 }
 
+fn preflight_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(());
+    };
+    if !table_has_columns(
+        &connection,
+        &config.index_path,
+        "issues",
+        &["title", "visibility", "body", "source_refs_json", "source_ids_json"],
+    )? {
+        return Ok(());
+    }
+    for issue_plan in &plan.selected {
+        let body = render_issue_capsule(config, issue_plan)?;
+        let existing = connection
+            .query_row(
+                "SELECT title, visibility, body, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
+                params![normalize_issue_key(&issue_plan.issue.identifier)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        let Some((title, visibility, existing_body, source_refs_json, source_ids_json)) = existing
+        else {
+            continue;
+        };
+        let source_ids = serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default();
+        let source_refs =
+            serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json).unwrap_or_default();
+        let has_registered_owner = source_ids.iter().any(|owner| !is_live_capture_owner(owner))
+            || source_refs
+                .iter()
+                .any(|source_ref| source_ref.registration_source_id.is_some());
+        let title_matches = title == issue_title(&issue_plan.issue);
+        let visibility_matches = visibility == config.visibility.as_str();
+        let body_matches = live_capture_payload_body(&existing_body)
+            == live_capture_payload_body(&body);
+        if has_registered_owner && (!title_matches || !visibility_matches || !body_matches) {
+            return Err(MemoryError::InvalidInput(format!(
+                "conflicting live capture payload for registered memory source `{}` (title_match={title_matches}, visibility_match={visibility_matches}, body_match={body_matches})",
+                normalize_issue_key(&issue_plan.issue.identifier)
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
     let mut refs = vec![KnowledgeScope {
         kind: KnowledgeScopeKind::WorkItem,

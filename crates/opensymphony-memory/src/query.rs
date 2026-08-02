@@ -220,7 +220,7 @@ pub fn search_with_scope(
                     issue_key: indexed.issue_key.clone(),
                     title: indexed.title.clone(),
                     capsule_path: PathBuf::from(display_capsule_path(config, &indexed)),
-                    areas: indexed.areas(),
+                    areas: indexed.areas_for_scope(config, scope),
                     snippet: snippet_for_terms(&indexed.body, &terms),
                 },
             ));
@@ -384,15 +384,23 @@ pub fn docs_for_area_with_scope(
         let mut scoped = scope.clone();
         scoped.area = Some(area.slug.clone());
         let issues = load_indexed_issues(config)?;
-        let area_issues = issues
-            .iter()
-            .filter(|issue| issue.areas().iter().any(|candidate| candidate == &area.slug))
-            .collect::<Vec<_>>();
         let selected_repository = config
             .repository_sources
             .values()
             .find(|source| source.root == config.repo_root)
             .map(|source| source.repository_id.clone());
+        if scoped.repo.is_none() {
+            scoped.repo = selected_repository.clone();
+        }
+        let area_issues = issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .areas_for_scope(config, &scoped)
+                    .iter()
+                    .any(|candidate| candidate == &area.slug)
+            })
+            .collect::<Vec<_>>();
         let scoped_area_issues = selected_repository
             .as_deref()
             .map(|repository_id| {

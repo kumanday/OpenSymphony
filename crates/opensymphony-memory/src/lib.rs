@@ -3597,6 +3597,12 @@ Reviews are triggered when you open a pull request for review.
                 duckdb::params![repo_b_scopes, "COE-124"],
             )
             .expect("repo-b scope refs");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
+                duckdb::params!["COE-123", "area-b-only", "repo-b:public_docs"],
+            )
+            .expect("repository-b-only area relation");
 
         let mut selected_config = config.clone();
         selected_config.repo_root = first.path().to_path_buf();
@@ -3606,17 +3612,41 @@ Reviews are triggered when you open a pull request for review.
             .get_mut("openhands-runtime")
             .expect("runtime area")
             .docs_target = first.path().join("docs/openhands-runtime.md");
+        fs::write(first.path().join("docs/area-b-only.md"), "# B-only\n")
+            .expect("b-only topic doc");
         let docs = docs_for_area_with_scope(
             &selected_config,
             "openhands-runtime",
             &MemoryScopeFilter {
-                project: Some("project-a".to_string()),
+                repo: Some("repo-a".to_string()),
                 ..MemoryScopeFilter::default()
             },
         )
         .expect("repository-local docs should ignore other repository records");
 
         assert!(docs.contains("# OpenHands Runtime"));
+        let search = search_with_scope(
+            &selected_config,
+            "WebSocket",
+            10,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("scoped search");
+        assert_eq!(search.len(), 1);
+        assert!(!search[0].areas.iter().any(|area| area == "area-b-only"));
+        let docs_error = docs_for_area_with_scope(
+            &selected_config,
+            "area-b-only",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect_err("docs must reject an area owned only by repository B");
+        assert!(docs_error.to_string().contains("no captured memory"));
     }
 
     #[test]
@@ -3944,6 +3974,8 @@ Reviews are triggered when you open a pull request for review.
         };
         let plan = plan_capture(&config, &source, &selection, true, false).expect("capture plan");
         write_capture_plan(&config, &plan, false).expect("initial capture");
+        let original_capsule =
+            fs::read_to_string(&plan.selected[0].capsule_path).expect("initial capsule");
 
         let connection = open_index(&config).expect("index");
         connection
@@ -3962,6 +3994,11 @@ Reviews are triggered when you open a pull request for review.
             .expect_err("live capture must not replace a divergent registered payload");
         assert!(
             matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting live capture payload"))
+        );
+        assert_eq!(
+            fs::read_to_string(&plan.selected[0].capsule_path).expect("capsule after rejection"),
+            original_capsule,
+            "registered capture conflicts must be rejected before replacing the capsule"
         );
         let issue = load_indexed_issues(&config)
             .expect("indexed issues")
