@@ -3654,7 +3654,7 @@ async fn call_memory_tool_with_workspace(
                 .get("currentIssue")
                 .and_then(|current| optional_string_arg(current, "identifier"))
         });
-        Some(
+        Some(if workspace_root.is_some() {
             resolve_code_intel_config_async(
                 config,
                 &scope,
@@ -3662,8 +3662,10 @@ async fn call_memory_tool_with_workspace(
                 issue.as_deref(),
                 worker_grant,
             )
-            .await?,
-        )
+            .await?
+        } else {
+            memory_config_for_code_intel_scope(config, &arguments)?
+        })
     } else {
         None
     };
@@ -3701,7 +3703,10 @@ async fn call_memory_tool_with_workspace(
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {
-                let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+                let code_config = match code_intel_config.clone() {
+                    Some(code_config) => code_config,
+                    None => memory_config_for_code_intel_scope(config, &arguments)?,
+                };
                 let mut code_scope = scope_filter_from_mcp(config, &arguments, true)?;
                 if code_scope.repo.is_none()
                     && (code_scope.project.is_some() || code_scope.project_set.is_some())
@@ -3861,7 +3866,10 @@ async fn call_memory_tool_with_workspace(
             call_code_ast_query_tool(code_config, arguments.clone()).await
         }
         "code.ast.context" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = match code_intel_config.as_ref() {
+                Some(code_config) => code_config.clone(),
+                None => memory_config_for_code_intel_scope(config, &arguments)?,
+            };
             call_code_ast_context_tool(&code_config, &arguments).await
         }
         "code.ast.diagnostics" => {
@@ -6624,22 +6632,40 @@ fn scope_filter_from_mcp(
     arguments: &Value,
     include_issue: bool,
 ) -> Result<MemoryScopeFilter, MemoryError> {
+    scope_filter_from_mcp_with_env(config, arguments, include_issue, env_scope_value)
+}
+
+fn scope_filter_from_mcp_with_env<F>(
+    config: &MemoryConfig,
+    arguments: &Value,
+    include_issue: bool,
+    mut read_env: F,
+) -> Result<MemoryScopeFilter, MemoryError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
     let all_accessible =
         bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible");
     let mut scope = MemoryScopeFilter {
         project_set: optional_string_arg(arguments, "projectSet").or_else(|| {
             (!all_accessible)
-                .then(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
+                .then(|| read_env("OPENSYMPHONY_MEMORY_PROJECT_SET"))
                 .flatten()
         }),
-        project: optional_string_arg(arguments, "project")
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT")),
+        project: optional_string_arg(arguments, "project").or_else(|| {
+            (!all_accessible)
+                .then(|| read_env("OPENSYMPHONY_MEMORY_PROJECT"))
+                .flatten()
+        }),
         milestone: optional_string_arg(arguments, "milestone"),
         issue: include_issue
             .then(|| optional_string_arg(arguments, "issue"))
             .flatten(),
-        repo: optional_string_arg(arguments, "repo")
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO")),
+        repo: optional_string_arg(arguments, "repo").or_else(|| {
+            (!all_accessible)
+                .then(|| read_env("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
+                .flatten()
+        }),
         area: optional_string_arg(arguments, "area"),
         all_accessible,
     };
@@ -8530,6 +8556,24 @@ mod tests {
         assert_eq!(explicit_filter.project.as_deref(), Some("explicit-project"));
         assert!(explicit_filter.project_set.is_none());
         assert!(explicit_filter.repo.is_none());
+    }
+
+    #[test]
+    fn mcp_all_accessible_scope_ignores_worker_environment_defaults() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let scope = super::scope_filter_from_mcp_with_env(
+            &config,
+            &json!({"allAccessible": true, "issue": "COE-550"}),
+            true,
+            |name| Some(format!("worker-{name}")),
+        )
+        .expect("all-accessible MCP scope should resolve");
+        assert!(scope.all_accessible);
+        assert!(scope.project_set.is_none());
+        assert!(scope.project.is_none());
+        assert!(scope.repo.is_none());
+        assert_eq!(scope.issue.as_deref(), Some("COE-550"));
     }
 
     #[test]

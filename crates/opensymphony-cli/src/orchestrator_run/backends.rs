@@ -143,6 +143,7 @@ pub(super) struct ManagedLocalPreparation {
 pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
     openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
+    openhands_persistence_dir_relative: PathBuf,
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
@@ -633,6 +634,7 @@ async fn archive_superseded_harness_sessions(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     store: Option<&OpenHandsConversationStorePaths>,
+    persistence_dir_relative: &Path,
     codex_bin: &str,
     checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), CliWorkspaceError> {
@@ -657,7 +659,7 @@ async fn archive_superseded_harness_sessions(
         };
         if manifest.issue_id.as_str() != workspace.issue_id()
             || manifest.identifier.as_str() != workspace.identifier()
-            || manifest.persistence_dir != workspace.metadata_dir()
+            || manifest.persistence_dir != workspace.workspace_path().join(persistence_dir_relative)
             || envelope.checkout_generation != checkout.generation
             || envelope.checkout_path != workspace.workspace_path()
             || envelope.repository_binding != checkout.repository_binding
@@ -905,6 +907,12 @@ impl RuntimeWorkspaceBackend {
         Self {
             manager,
             openhands_conversation_store: None,
+            openhands_persistence_dir_relative: workflow
+                .extensions
+                .openhands
+                .conversation
+                .persistence_dir_relative
+                .clone(),
             active_states: workflow
                 .config
                 .tracker
@@ -994,6 +1002,7 @@ impl RuntimeWorkspaceBackend {
                                 &self.manager,
                                 &handle,
                                 self.openhands_conversation_store.as_ref(),
+                                &self.openhands_persistence_dir_relative,
                                 &self.codex_bin,
                                 self.manager.checkout_credential_envs(),
                             )
@@ -1032,6 +1041,7 @@ impl RuntimeWorkspaceBackend {
                             &self.manager,
                             &handle,
                             self.openhands_conversation_store.as_ref(),
+                            &self.openhands_persistence_dir_relative,
                             &self.codex_bin,
                             self.manager.checkout_credential_envs(),
                         )
