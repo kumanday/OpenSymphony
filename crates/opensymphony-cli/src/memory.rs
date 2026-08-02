@@ -59,7 +59,7 @@ use crate::{
     opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
         CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
-        workspace_path_for_root,
+        checkout_workspace_key, workspace_path_for_root,
     },
 };
 
@@ -2906,7 +2906,7 @@ fn resolve_code_graph_overlay(
             "invalid run workspace ownership manifest: {source}"
         ))
     })?;
-    let workspace_key = workspace_candidate
+    let workspace_name = workspace_candidate
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
@@ -2918,8 +2918,17 @@ fn resolve_code_graph_overlay(
                 path: manifest.workspace_path.clone(),
                 source,
             })?;
+    let workspace_ownership_matches = if strict_checkout {
+        let generation = workspace_name
+            .strip_prefix(&format!("{}--", manifest.sanitized_workspace_key))
+            .filter(|generation| !generation.is_empty());
+        generation.is_some()
+            && checkout_generation.is_none_or(|expected| generation == Some(expected))
+    } else {
+        manifest.sanitized_workspace_key == workspace_name
+    };
     if (manifest.identifier != run_id && manifest.issue_id != run_id)
-        || manifest.sanitized_workspace_key != workspace_key
+        || !workspace_ownership_matches
         || manifest_workspace_path != workspace_path
     {
         return Err(MemoryError::InvalidInput(
@@ -4765,6 +4774,33 @@ fn find_verified_checkout_for_code_intel(
         else {
             continue;
         };
+        let Some(found_issue_id) = checkout.get("issue_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(found_identifier) = checkout.get("identifier").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(found_generation) = checkout.get("generation").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(found_workspace_key) = checkout
+            .get("sanitized_workspace_key")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(expected_workspace_key) =
+            checkout_workspace_key(found_identifier, found_issue_id, found_repository_id)
+        else {
+            continue;
+        };
+        let expected_workspace_name = format!("{expected_workspace_key}--{found_generation}");
+        if found_workspace_key != expected_workspace_key
+            || candidate.file_name().and_then(|name| name.to_str())
+                != Some(expected_workspace_name.as_str())
+        {
+            continue;
+        }
         if repository_id.is_some_and(|repository_id| found_repository_id != repository_id)
             || checkout
                 .get("quarantined")
@@ -4773,9 +4809,7 @@ fn find_verified_checkout_for_code_intel(
         {
             continue;
         }
-        if checkout_generation.is_some_and(|generation| {
-            checkout.get("generation").and_then(Value::as_str) != Some(generation)
-        }) {
+        if checkout_generation.is_some_and(|generation| found_generation != generation) {
             continue;
         }
         if let Some(issue) = issue
@@ -6243,7 +6277,7 @@ mod tests {
         MemoryConfig, MemoryError, code_symbol_detail, code_symbol_neighborhood,
         code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
     };
-    use crate::opensymphony_workspace::IssueManifest;
+    use crate::opensymphony_workspace::{IssueManifest, checkout_workspace_key};
     use axum::http::{HeaderMap, HeaderValue, header};
     use chrono::Utc;
     use duckdb::{Connection, params};
@@ -9650,7 +9684,12 @@ Public memory concept.
     #[test]
     fn code_intel_repo_resolution_maps_a_canonical_worker_repository_to_its_checkout() {
         let workspace_root = TempDir::new().expect("workspace root");
-        let checkout = workspace_root.path().join("COE-123--generation");
+        let workspace_key =
+            checkout_workspace_key("COE-123", "issue-123", "github:github.com:repository:123")
+                .expect("fixture workspace key should be valid");
+        let checkout = workspace_root
+            .path()
+            .join(format!("{workspace_key}--generation"));
         let metadata = checkout.join(".opensymphony");
         std::fs::create_dir_all(&metadata).expect("checkout metadata should exist");
         std::fs::write(
@@ -9659,6 +9698,7 @@ Public memory concept.
                 "generation": "generation",
                 "issue_id": "issue-123",
                 "identifier": "COE-123",
+                "sanitized_workspace_key": workspace_key,
                 "workspace_path": checkout,
                 "quarantined": false,
                 "repository_binding": {

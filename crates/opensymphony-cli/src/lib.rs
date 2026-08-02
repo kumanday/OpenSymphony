@@ -2312,8 +2312,16 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 
     // Setup workspace manager
     let workspace_config = build_rehydrate_workspace_config(&workflow);
+    let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
+        routing
+            .legacy_repository
+            .as_ref()
+            .and_then(|alias| routing.inventory.get(alias))
+            .map(|entry| entry.identity.id.clone())
+    });
     let workspace_manager = WorkspaceManager::new(workspace_config)
         .map_err(|e| format!("failed to create workspace manager: {}", e))?
+        .with_legacy_repository(legacy_repository)
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
 
     // Find workspace by issue reference
@@ -2799,7 +2807,8 @@ fn build_rehydrate_client(
             .openhands
             .local_server
             .env
-            .contains_key(variable)
+            .keys()
+            .any(|configured| environment_variable_names_equal(variable, configured))
     });
     config.startup_timeout = Duration::from_millis(
         workflow

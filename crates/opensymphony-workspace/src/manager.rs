@@ -265,7 +265,6 @@ impl WorkspaceManager {
             .repository_binding
             .as_ref()
             .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
-            && !self.checkout_repositories.is_empty()
         {
             let repository = self.checkout_repository_for_binding(binding)?;
             return self
@@ -291,7 +290,6 @@ impl WorkspaceManager {
             .repository_binding
             .as_ref()
             .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
-            && !self.checkout_repositories.is_empty()
         {
             let repository = self.checkout_repository_for_binding(binding)?;
             return self
@@ -1741,9 +1739,7 @@ impl WorkspaceManager {
         if enforce_worktree_state && !status.is_empty() {
             return Err(checkout_verification(checkout, "worktree is dirty"));
         }
-        self.git(checkout, &["fsck", "--no-dangling"])
-            .await
-            .map_err(|_| checkout_verification(checkout, "Git integrity check failed"))?;
+        self.git_fsck(checkout).await?;
         Ok(GitFacts {
             branch,
             head,
@@ -1868,6 +1864,53 @@ impl WorkspaceManager {
             });
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    async fn git_fsck(&self, checkout: &Path) -> Result<(), WorkspaceError> {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(checkout)
+            .args(["fsck", "--no-dangling"]);
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
+        command.env_remove("GIT_OBJECT_DIRECTORY");
+        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command.env("GIT_NO_REPLACE_OBJECTS", "1");
+        configure_process_group(&mut command);
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
+            .spawn()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "fsck".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let process_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(process_id);
+        let output =
+            child
+                .wait_with_output()
+                .await
+                .map_err(|source| WorkspaceError::CheckoutOperation {
+                    operation: "fsck".to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: source.to_string(),
+                })?;
+        #[cfg(unix)]
+        process_group_guard.disarm();
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(checkout_verification(
+            checkout,
+            "Git integrity check failed",
+        ))
     }
 
     async fn git_is_ancestor(
@@ -3729,7 +3772,7 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                 continue;
             }
             if file_type.is_dir() {
-                if !matches!(
+                let generated_tree = matches!(
                     entry.file_name().to_str(),
                     Some(
                         ".git"
@@ -3742,9 +3785,14 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                             | "build"
                             | "dist"
                     )
-                ) {
-                    pending.push(path);
+                );
+                if generated_tree
+                    && let Ok(relative) = path.strip_prefix(root)
+                    && !tracked_instruction_tree(root, relative).await
+                {
+                    continue;
                 }
+                pending.push(path);
             } else if file_type.is_file()
                 && entry.file_name() == "AGENTS.md"
                 && let Ok(relative) = path.strip_prefix(root)
@@ -3762,6 +3810,17 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
     }
     paths.sort();
     Ok(paths)
+}
+
+async fn tracked_instruction_tree(root: &Path, relative: &Path) -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--cached", "--"])
+        .arg(relative)
+        .output()
+        .await;
+    output.is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
 async fn read_child_pipe<R>(pipe: Option<R>) -> io::Result<Vec<u8>>
@@ -4126,6 +4185,37 @@ mod tests {
             .await
             .expect("instruction discovery should succeed");
         assert_eq!(paths, vec![PathBuf::from("src/AGENTS.md")]);
+    }
+
+    #[tokio::test]
+    async fn discover_agents_keeps_tracked_instructions_in_generated_named_trees() {
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let tracked = root.path().join("vendor").join("AGENTS.md");
+        tokio::fs::create_dir_all(tracked.parent().expect("tracked parent should exist"))
+            .await
+            .expect("tracked parent should exist");
+        tokio::fs::write(&tracked, "tracked vendor instructions")
+            .await
+            .expect("tracked instructions should exist");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init should launch");
+        assert!(status.success(), "git init should succeed");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["add", "--", "vendor/AGENTS.md"])
+            .status()
+            .expect("git add should launch");
+        assert!(status.success(), "git add should succeed");
+
+        let paths = discover_agents(root.path())
+            .await
+            .expect("instruction discovery should succeed");
+        assert_eq!(paths, vec![PathBuf::from("vendor/AGENTS.md")]);
     }
 
     #[cfg(unix)]

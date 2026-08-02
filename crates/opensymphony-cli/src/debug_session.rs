@@ -373,7 +373,15 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         runtime.repository_routing.as_ref(),
         runtime.repository_checkouts.as_ref(),
     );
+    let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
+        routing
+            .legacy_repository
+            .as_ref()
+            .and_then(|alias| routing.inventory.get(alias))
+            .map(|entry| entry.identity.id.clone())
+    });
     let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?
+        .with_legacy_repository(legacy_repository)
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
     let (workspace, strict_recovery) = if configured_strict {
         (
@@ -406,7 +414,26 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     };
     let manifest_path = workspace.conversation_manifest_path();
     let raw_manifest = load_conversation_manifest_raw(&manager, &workspace).await?;
-    verify_strict_recovery_envelope(&manager, &workspace, &raw_manifest, strict_recovery).await?;
+    let desired_envelope = if strict_recovery {
+        Some(
+            current_debug_runtime_envelope(
+                &manager,
+                &workspace,
+                &runtime.workflow,
+                runtime.repository_routing.as_ref(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    verify_strict_recovery_envelope(
+        &manager,
+        &workspace,
+        &raw_manifest,
+        desired_envelope.as_ref(),
+    )
+    .await?;
     if let Some(mut codex) = codex_debug_metadata_from_raw_manifest(
         &raw_manifest,
         &manifest_path,
@@ -982,11 +1009,11 @@ async fn verify_strict_recovery_envelope(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     raw_manifest: &str,
-    strict_recovery: bool,
+    desired: Option<&TerminalRuntimeEnvelope>,
 ) -> Result<(), DebugCommandError> {
-    if !strict_recovery {
+    let Some(desired) = desired else {
         return Ok(());
-    }
+    };
     let run_envelope = manager
         .load_run_manifest(workspace)
         .await?
@@ -1024,6 +1051,19 @@ async fn verify_strict_recovery_envelope(
             detail: "run and conversation runtime envelopes disagree".to_owned(),
         });
     }
+    if run.harness != desired.harness
+        || run.model_profile != desired.model_profile
+        || run.model != desired.model
+        || run.repository_binding != desired.repository_binding
+        || run.config_generation != desired.config_generation
+        || run.inventory_generation != desired.inventory_generation
+        || run.policy_generation != desired.policy_generation
+    {
+        return Err(DebugCommandError::StrictRecovery {
+            detail: "runtime envelope does not match the current repository, harness, or model configuration"
+                .to_owned(),
+        });
+    }
     let expected = run;
     if expected.conversation_binding.as_deref() != Some(conversation_id) {
         return Err(DebugCommandError::StrictRecovery {
@@ -1038,6 +1078,58 @@ async fn verify_strict_recovery_envelope(
         .map_err(|error| DebugCommandError::StrictRecovery {
             detail: format!("verified checkout/runtime envelope mismatch: {error}"),
         })
+}
+
+async fn current_debug_runtime_envelope(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    workflow: &ResolvedWorkflow,
+    routing: Option<&crate::opensymphony_domain::RepositoryRouting>,
+) -> Result<TerminalRuntimeEnvelope, DebugCommandError> {
+    let run = manager
+        .load_run_manifest(workspace)
+        .await?
+        .and_then(|manifest| manifest.runtime_envelope)
+        .ok_or_else(|| DebugCommandError::StrictRecovery {
+            detail: "strict checkout requires a persisted run runtime envelope".to_owned(),
+        })?;
+    let routing = routing.ok_or_else(|| DebugCommandError::StrictRecovery {
+        detail: "strict checkout requires current repository routing metadata".to_owned(),
+    })?;
+    let entry = routing
+        .inventory
+        .values()
+        .find(|entry| entry.identity.id == run.repository_binding.repository.id)
+        .ok_or_else(|| DebugCommandError::StrictRecovery {
+            detail: "persisted repository is absent from the current repository inventory"
+                .to_owned(),
+        })?;
+    let mut desired = run;
+    desired.repository_binding.alias = entry.alias.clone();
+    desired.repository_binding.repository = entry.identity.clone();
+    desired.repository_binding.config_generation = routing.config_generation.clone();
+    desired.repository_binding.inventory_generation = routing.inventory_generation.clone();
+    desired.config_generation = routing.config_generation.clone();
+    desired.inventory_generation = routing.inventory_generation.clone();
+    desired.policy_generation = routing.config_generation.clone();
+    desired.harness = workflow.config.routing.harness.clone();
+    desired.model_profile = workflow
+        .config
+        .routing
+        .model_profile
+        .clone()
+        .unwrap_or_else(|| "default".to_owned());
+    desired.model = workflow.config.routing.model.clone().or_else(|| {
+        workflow
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.model.clone())
+    });
+    Ok(desired)
 }
 
 fn resolve_config_path(

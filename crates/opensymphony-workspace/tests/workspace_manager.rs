@@ -1244,22 +1244,7 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
         CleanupConfig::default(),
     ))
     .expect("manager should build");
-    let mut issue = sample_issue("COE-263-after-create-receipt");
-    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(RepositoryBinding {
-        alias: "core".to_string(),
-        repository: RepositoryIdentity {
-            id: CanonicalRepositoryId::new("github:repository:core")
-                .expect("repository id should be valid"),
-            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
-                "github",
-                Some("core"),
-                "owner/repository",
-            )
-            .expect("fingerprint should be valid"),
-        },
-        config_generation: "config-1".to_string(),
-        inventory_generation: "inventory-1".to_string(),
-    }));
+    let issue = sample_issue("COE-263-after-create-receipt");
 
     let first_error = manager
         .ensure(&issue)
@@ -1281,10 +1266,10 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
     let receipt = tokio::fs::read_to_string(workspace_path.join(".opensymphony.after_create.json"))
         .await
         .expect("after_create receipt should be readable");
-    assert_eq!(
+    assert!(
         serde_json::from_str::<serde_json::Value>(&receipt).expect("receipt should be valid JSON")
-            ["repository_binding"]["repository"]["id"],
-        "github:repository:core"
+            ["repository_binding"]
+            .is_null()
     );
 
     tokio::fs::remove_file(workspace_path.join(".opensymphony"))
@@ -1420,18 +1405,13 @@ async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
         HookConfig::default(),
         CleanupConfig::default(),
     ))
-    .expect("manager should build")
-    .with_legacy_repository(Some(binding.repository.id.clone()));
-    let mut issue = sample_issue("COE-548");
-    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    .expect("manager should build");
+    let issue = sample_issue("COE-548");
     let ensured = manager
         .ensure(&issue)
         .await
         .expect("workspace should exist");
-    assert_eq!(
-        ensured.issue_manifest.repository_binding,
-        Some(RepositoryBindingOutcome::Resolved(binding.clone()))
-    );
+    assert_eq!(ensured.issue_manifest.repository_binding, None);
 
     let manifest = manager
         .start_run(
@@ -1444,7 +1424,7 @@ async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
 }
 
 #[tokio::test]
-async fn existing_workspace_rejects_a_changed_repository_identity() {
+async fn resolved_repository_binding_without_checkout_policy_fails_closed() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
@@ -1466,30 +1446,25 @@ async fn existing_workspace_rejects_a_changed_repository_identity() {
         config_generation: "config-1".to_string(),
         inventory_generation: "inventory-1".to_string(),
     };
-    let first_binding = binding("core", "github:repository:core");
-    let second_binding = binding("web", "github:repository:web");
-    let mut first_issue = sample_issue("COE-548-rebind");
-    first_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(first_binding));
-    manager
-        .ensure(&first_issue)
-        .await
-        .expect("initial workspace should exist");
-
-    let mut changed_issue = first_issue;
-    changed_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(second_binding));
+    let mut changed_issue = sample_issue("COE-548-rebind");
+    changed_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding(
+        "core",
+        "github:repository:core",
+    )));
     let error = manager
         .ensure(&changed_issue)
         .await
-        .expect_err("changed repository identity must not reuse the old workspace");
+        .expect_err("resolved bindings must not fall back to legacy workspaces");
 
     assert!(matches!(
         error,
-        WorkspaceError::RepositoryBindingMismatch { .. }
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
     ));
 }
 
 #[tokio::test]
-async fn legacy_workspace_backfills_a_new_repository_identity() {
+async fn legacy_workspace_requires_checkout_policy_for_repository_backfill() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let binding = RepositoryBinding {
         alias: "core".to_string(),
@@ -1527,15 +1502,16 @@ async fn legacy_workspace_backfills_a_new_repository_identity() {
 
     let mut upgraded_issue = legacy_issue;
     upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
-    let ensured = manager
+    let error = manager
         .ensure(&upgraded_issue)
         .await
-        .expect("legacy workspace should accept a safe repository backfill");
+        .expect_err("repository backfill must require a checkout policy");
 
-    assert_eq!(
-        ensured.issue_manifest.repository_binding,
-        Some(RepositoryBindingOutcome::Resolved(binding))
-    );
+    assert!(matches!(
+        error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
+    ));
 }
 
 #[tokio::test]
@@ -1576,7 +1552,8 @@ async fn legacy_workspace_rejects_unproven_repository_backfill() {
 
     assert!(matches!(
         error,
-        WorkspaceError::RepositoryBindingMismatch { .. }
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
     ));
 }
 
