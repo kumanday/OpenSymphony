@@ -4360,7 +4360,111 @@ fn refresh_memory_index_from_okf_inner(
                     .collect::<Vec<_>>();
                 let has_surviving_live_owner =
                     source_ids.iter().any(|owner| is_live_capture_owner(owner));
-                if has_surviving_live_owner || !surviving_reimport_sources.is_empty() {
+                if has_surviving_live_owner {
+                    let surviving_source_scopes = {
+                        let mut statement = transaction
+                            .prepare(
+                                "SELECT source_id, scope_kind, scope_id, label FROM source_scope_refs WHERE concept_id = ?",
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                        statement
+                            .query_map([&concept_id], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, Option<String>>(3)?,
+                                ))
+                            })
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                    };
+                    let mut scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|scope| {
+                            matches!(
+                                scope.kind,
+                                KnowledgeScopeKind::LocalInstance
+                                    | KnowledgeScopeKind::Organization
+                                    | KnowledgeScopeKind::WorkItem
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    for (owner, kind, id, label) in surviving_source_scopes {
+                        if source_ids.contains(&owner)
+                            && let Some(kind) = parse_scope_kind(&kind)
+                        {
+                            let scope = KnowledgeScope { kind, id, label };
+                            if !scopes.contains(&scope) {
+                                scopes.push(scope);
+                            }
+                        }
+                    }
+                    let sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|source| {
+                            source.registration_source_id.as_deref() != Some(source_id)
+                                && !(source.registration_source_id.is_none()
+                                    && source.id == source_id)
+                        })
+                        .collect::<Vec<_>>();
+                    transaction
+                        .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    for scope in &scopes {
+                        transaction
+                            .execute(
+                                "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                                params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = ?",
+                            params![
+                                serde_json::to_string(&source_ids)?,
+                                serde_json::to_string(&scopes)?,
+                                serde_json::to_string(&sources)?,
+                                issue_key,
+                            ],
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    for surviving_source_id in surviving_reimport_sources {
+                        transaction
+                            .execute(
+                                "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
+                                [&surviving_source_id],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    continue;
+                }
+                if !surviving_reimport_sources.is_empty() {
                     transaction
                         .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
                         .map_err(|source| MemoryError::DuckDb {
@@ -5900,7 +6004,7 @@ mod index_tests {
     }
 
     #[test]
-    fn stale_registered_source_drops_payload_before_surviving_live_owner_reads_it() {
+    fn stale_registered_source_preserves_surviving_live_owner_payload() {
         let root = tempfile::TempDir::new().expect("catalog root");
         let mut config = MemoryConfig::load(root.path(), None).expect("catalog config");
         config = config.with_repository_source(MemoryRepositorySource {
@@ -5928,7 +6032,7 @@ mod index_tests {
         .expect("bundle index");
         fs::write(
             source.root.join("issues/COE-550.md"),
-            "---\ntype: issue-capsule\ntitle: \"COE-550: Registered payload\"\nopensymphony:\n  visibility: private\n  kind: issue_capsule\n---\n\n# COE-550: Registered payload\n\nRegistered source body.\n",
+            "---\ntype: issue-capsule\ntitle: \"COE-550: Registered payload\"\nopensymphony:\n  visibility: private\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: Registered payload\n\nRegistered source body.\n",
         )
         .expect("bundle issue");
 
@@ -5957,10 +6061,24 @@ mod index_tests {
         )
             .expect("refresh after source issue removal");
 
-        assert!(load_indexed_issues(&config)
+        let issue = load_indexed_issues(&config)
             .expect("catalog issues")
             .into_iter()
-            .all(|issue| issue.issue_key != "COE-550"));
+            .find(|issue| issue.issue_key == "COE-550")
+            .expect("live-owned issue survives source refresh");
+        assert_eq!(issue.title, "COE-550: Registered payload");
+        assert_eq!(issue.body, "# COE-550: Registered payload\n\nRegistered source body.\n");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index exists");
+        let source_ids: String = connection
+            .query_row(
+                "SELECT source_ids_json FROM issues WHERE issue_key = 'COE-550'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("surviving source ids");
+        assert_eq!(source_ids, r#"["__live_capture__:github:repository:b"]"#);
     }
 
     #[test]

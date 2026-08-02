@@ -1880,12 +1880,21 @@ fn run_reindex(config: &MemoryConfig, args: ReindexArgs) -> Result<(), MemoryErr
             .map(|path| repo_existing_path_from_path(config, path))
             .transpose()?
             .unwrap_or_else(|| config.memory_root.clone());
-        refresh_memory_index_from_okf(config, &bundle_root)?
+        refresh_memory_index_from_okf_and_reimport_pending(config, &bundle_root)?
     } else {
         refresh_memory_index(config)?
     };
     print_reindex_report(report);
     Ok(())
+}
+
+fn refresh_memory_index_from_okf_and_reimport_pending(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+) -> Result<MemoryReindexReport, MemoryError> {
+    let report = refresh_memory_index_from_okf(config, bundle_root)?;
+    reimport_pending_memory_sources(config)?;
+    Ok(report)
 }
 
 fn run_export_okf(config: &MemoryConfig, args: ExportOkfArgs) -> Result<(), MemoryError> {
@@ -4565,7 +4574,7 @@ fn call_memory_reindex_tool(
             .map(|path| repo_existing_path(config, &path))
             .transpose()?
             .unwrap_or_else(|| config.memory_root.clone());
-        refresh_memory_index_from_okf(config, &bundle_root)?
+        refresh_memory_index_from_okf_and_reimport_pending(config, &bundle_root)?
     } else {
         refresh_memory_index(config)?
     };
@@ -7523,17 +7532,20 @@ mod tests {
         call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
         load_memory_config, memory_server_health, memory_server_health_payload,
         memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        remote_memory_tool_request, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
-        sha256_file_hex, trim_auto_memory_status_log,
+        refresh_memory_index_from_okf_and_reimport_pending, remote_memory_tool_request,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, sha256_file_hex,
+        trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
         IssueEvidence, IssueSelection, MemoryConfig, MemoryError, MemoryRepositorySource,
-        MemoryScopeFilter, SourceFile, code_symbol_detail, code_symbol_neighborhood,
-        code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
-        plan_capture, write_capture_plan,
+        MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
+        RegisteredMemorySource, SourceFile, code_symbol_detail, code_symbol_neighborhood,
+        code_symbols_containing_span, compare_code_symbols, load_issue_capsule_with_scope,
+        persist_code_intel_documents, plan_capture, register_memory_source,
+        registered_memory_sources, write_capture_plan,
     };
     use crate::opensymphony_workspace::IssueManifest;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -11919,6 +11931,69 @@ Public memory concept.
 
         let axum::Json(payload) = memory_server_health(axum::extract::State(state)).await;
         assert_eq!(payload["configGeneration"], "sha256:pinned-generation");
+    }
+
+    #[test]
+    fn okf_reindex_reimports_pending_registered_sources_before_returning() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository = TempDir::new().expect("repository");
+        let replacement = catalog.path().join("replacement");
+        std::fs::create_dir_all(&replacement).expect("replacement bundle");
+        let source_bundle = repository.path().join("okf");
+        std::fs::create_dir_all(source_bundle.join("issues")).expect("source issues");
+        std::fs::write(
+            source_bundle.join("issues/COE-551.md"),
+            "---\ntype: issue-capsule\ntitle: \"COE-551: Replayed source\"\nstate: Done\nopensymphony:\n  visibility: private\n  scope_refs:\n    - kind: work_item\n      id: COE-551\n---\n\n# COE-551: Replayed source\n\nSource payload.\n",
+        )
+        .expect("source capsule");
+
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "github:repository:repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "github:repository:repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: Some("commit-a".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        register_memory_source(
+            &config,
+            &RegisteredMemorySource {
+                source_id: "github:repository:repo-a:okf".to_string(),
+                repository_id: "github:repository:repo-a".to_string(),
+                commit_sha: "commit-a".to_string(),
+                kind: MemorySourceKind::OkfBundle,
+                root: source_bundle,
+                status: MemorySourceRegistrationStatus::Registered,
+                generation: "generation-a".to_string(),
+            },
+        )
+        .expect("source registration");
+
+        refresh_memory_index_from_okf_and_reimport_pending(&config, &replacement)
+            .expect("replacement reindex should replay registered sources");
+
+        let issue = load_issue_capsule_with_scope(
+            &config,
+            "COE-551",
+            &MemoryScopeFilter {
+                repo: Some("github:repository:repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("replayed source should be readable before restart");
+        assert!(issue.contains("Source payload."));
+        assert_eq!(
+            registered_memory_sources(&config)
+                .expect("registrations")
+                .into_iter()
+                .find(|source| source.source_id == "github:repository:repo-a:okf")
+                .expect("replayed source")
+                .status,
+            MemorySourceRegistrationStatus::Registered
+        );
     }
 
     #[test]
