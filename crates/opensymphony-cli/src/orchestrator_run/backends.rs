@@ -3259,6 +3259,7 @@ async fn try_run_codex_stdio_issue(
     };
     let mut resume_terminal = None;
     let mut recovered_active_turn = false;
+    let mut recovered_terminal_turn = false;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
         Some(mut manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
@@ -3334,6 +3335,20 @@ async fn try_run_codex_stdio_issue(
                 .filter(|turn_id| !turn_id.trim().is_empty())
                 .or_else(|| read_state.pending_turn_id.take())
                 .or_else(|| codex_active_turn_id_from_resume_response(&resume_response));
+            resume_terminal = resume_turn_id
+                .as_deref()
+                .and_then(|turn_id| {
+                    codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
+                })
+                .or_else(|| {
+                    (recovered
+                        && manifest.active_run_id.as_deref() == Some(run_manifest.run_id.as_str())
+                        && resume_turn_id.is_none())
+                    .then(|| codex_latest_terminal_outcome_from_resume_response(&resume_response))
+                    .flatten()
+                });
+            recovered_terminal_turn =
+                recovered && resume_turn_id.is_none() && resume_terminal.is_some();
             if recovered && let Some(turn_id) = resume_turn_id.as_deref() {
                 recovered_active_turn = true;
                 if manifest.last_turn_id.as_deref() != Some(turn_id) {
@@ -3349,9 +3364,6 @@ async fn try_run_codex_stdio_issue(
                         })?;
                 }
             }
-            resume_terminal = resume_turn_id.as_deref().and_then(|turn_id| {
-                codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
-            });
             let prompt_kind = if manifest.workflow_prompt_seeded {
                 IssueSessionPromptKind::Continuation
             } else {
@@ -3560,6 +3572,30 @@ async fn try_run_codex_stdio_issue(
             )
         }
     };
+    if recovered_terminal_turn {
+        let terminal = resume_terminal.expect("recovered terminal turn should be present");
+        if let Some(sender) = launch_tx.take() {
+            let _ = sender.send(LaunchReport::Conversation(Box::new(
+                codex_conversation_metadata(conversation_id.clone(), route),
+            )));
+        }
+        let summary = format!(
+            "Codex app-server recovery reconciled completed turn with terminal event {:?}",
+            terminal.event_kind
+        );
+        let _ = child.kill().await;
+        stderr_task.abort();
+        return Ok((
+            WorkerOutcomeRecord::from_run(
+                run,
+                terminal.outcome,
+                now_timestamp(),
+                Some(summary),
+                None,
+            ),
+            terminal.status,
+        ));
+    }
     if recovered_active_turn {
         let turn_id = manifest
             .last_turn_id
@@ -4481,6 +4517,41 @@ fn codex_terminal_outcome_from_resume_response(
         event_kind: NormalizedCodexEventKind::TurnCompleted,
         outcome,
         status,
+    })
+}
+
+fn codex_latest_terminal_outcome_from_resume_response(
+    value: &serde_json::Value,
+) -> Option<CodexTerminalOutcome> {
+    let turns = value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("thread")
+                .and_then(|thread| thread.get("turns"))
+                .or_else(|| result.get("turns"))
+        })?
+        .as_array()?;
+    turns.iter().rev().find_map(|turn| {
+        let status = turn
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)?;
+        let (outcome, status) = match status.as_str() {
+            "completed" | "succeeded" | "success" => {
+                (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+            }
+            "failed" | "error" => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+            "cancelled" | "canceled" | "interrupted" => {
+                (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+            }
+            _ => return None,
+        };
+        Some(CodexTerminalOutcome {
+            event_kind: NormalizedCodexEventKind::TurnCompleted,
+            outcome,
+            status,
+        })
     })
 }
 
@@ -6241,6 +6312,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_resume_response_reconciles_latest_terminal_turn_without_id() {
+        let completed = codex_latest_terminal_outcome_from_resume_response(&serde_json::json!({
+            "result": {
+                "thread": {
+                    "turns": [{"id": "turn-7", "status": "completed"}]
+                }
+            }
+        }))
+        .expect("latest completed turn should be terminal");
+
+        assert_eq!(completed.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(completed.status, RunStatus::Succeeded);
+    }
+
+    #[test]
     fn recovered_harness_kind_preserves_codex_runtime_contract() {
         let manifest = IssueConversationManifest {
             transport_target: Some("remote".to_owned()),
@@ -7492,6 +7578,98 @@ mod tests {
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
         assert!(log.contains(r#""method":"thread/resume""#));
         assert!(log.contains(r#""method":"turn/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_recovery_reconciles_completed_prepared_turn_without_turn_id() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-completed-codex-without-turn", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest = sample_conversation_manifest("fake-thread");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.persistence_dir = ensured.handle.metadata_dir();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        conversation_manifest.runtime_contract_version =
+            Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        conversation_manifest.active_run_id = Some(run_manifest.run_id.clone());
+        conversation_manifest.last_turn_id = None;
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-completed-recovery")
+                .expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-completed-recovery.log");
+        let fake_codex = tempdir.path().join("fake-codex-completed-recovery");
+        write_fake_codex_completed_recovery_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            None,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            true,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
+        assert!(!log.contains(r#""method":"turn/start""#));
     }
 
     #[cfg(unix)]
@@ -9632,6 +9810,55 @@ while IFS= read -r line; do
     *'"method":"thread/resume"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
       printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-1","status":"interrupted"}}}}}}\n'
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'unexpected turn/start\n' >&2
+      exit 97
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA,
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_completed_recovery_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/list"'*)
+      if printf '%s' "$line" | grep -q '"archived":true'; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      fi
+      ;;
+    *'"method":"thread/unarchive"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread","turns":[{{"id":"turn-1","status":"completed"}}]}}}}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
       printf 'unexpected turn/start\n' >&2

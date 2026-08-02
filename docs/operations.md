@@ -565,7 +565,10 @@ require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token`. When only the
 admin token is configured, it also gates read tools; do not inject that token
 into ordinary worker or shared managed-server environments. A configured
 read token is likewise injected only as the per-conversation worker grant, not
-into the shared managed-server environment. When `code_intel.enabled` is true,
+into the shared managed-server environment. Authenticated operator calls using
+the configured read or admin bearer may still perform ordinary read calls on a
+supervised server; only unauthenticated unscoped reads are rejected as worker
+requests. When `code_intel.enabled` is true,
 `tools/list` exposes the read-only `code.graph.context` indexed discovery tool;
 when `code_intel.ast.enabled` is true, it also exposes `code.ast.*` inspection
 tools. The graph tool is bounded and can use the

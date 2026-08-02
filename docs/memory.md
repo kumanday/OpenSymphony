@@ -467,6 +467,11 @@ token-gated deployments can restrict ad hoc query execution. Admin tools are
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
 `opensymphony memory serve`. If an admin token is configured without a separate
 read token, the admin token also protects read tools.
+On a supervised server with a configured workspace root, unauthenticated
+unscoped reads are still rejected as worker requests; an operator using the
+configured read or admin bearer may perform ordinary read calls without a
+worker grant. Worker calls remain bound to their server-issued project,
+repository, issue, and checkout-generation grant.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include code-intelligence artifacts alongside selected memory. For requested
 Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,

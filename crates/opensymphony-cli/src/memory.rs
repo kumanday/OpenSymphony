@@ -3158,6 +3158,7 @@ async fn memory_server_mcp(
         && request.method == "tools/call"
         && required_access == MemoryServerAccess::Read
         && scoped_grant.is_none()
+        && !memory_operator_authenticated(bearer, &state.auth)
     {
         return memory_scope_forbidden(
             "strict memory workers require a server-issued per-worker scope grant",
@@ -3550,6 +3551,14 @@ fn authorize_memory_request_with_scoped_grant(
             })),
         ))
     }
+}
+
+fn memory_operator_authenticated(bearer: Option<&str>, auth: &MemoryServerAuth) -> bool {
+    let Some(bearer) = bearer else {
+        return false;
+    };
+    non_empty_str(auth.read_token.as_deref()).is_some_and(|token| token == bearer)
+        || non_empty_str(auth.admin_token.as_deref()).is_some_and(|token| token == bearer)
 }
 
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
@@ -3966,7 +3975,10 @@ fn validate_worker_memory_scope(
                     .and_then(|current| optional_string_arg(current, "identifier"))
             })
         };
-        if requested_issue.as_deref() != Some(grant.issue.as_str()) {
+        if requested_issue
+            .as_deref()
+            .is_some_and(|issue| issue != grant.issue)
+        {
             return Err(MemoryError::InvalidInput(format!(
                 "worker memory grant is bound to issue `{}`; requested code scope is not permitted",
                 grant.issue
@@ -12487,6 +12499,28 @@ Public memory concept.
     }
 
     #[test]
+    fn strict_memory_server_distinguishes_authenticated_operator_reads() {
+        let auth = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("admin-token".to_string()),
+        };
+
+        assert!(super::memory_operator_authenticated(
+            Some("read-token"),
+            &auth
+        ));
+        assert!(super::memory_operator_authenticated(
+            Some("admin-token"),
+            &auth
+        ));
+        assert!(!super::memory_operator_authenticated(
+            Some("worker-token"),
+            &auth
+        ));
+        assert!(!super::memory_operator_authenticated(None, &auth));
+    }
+
+    #[test]
     fn read_authorization_requires_admin_token_when_only_admin_auth_is_configured() {
         let auth = MemoryServerAuth {
             read_token: None,
@@ -12770,6 +12804,8 @@ Public memory concept.
             &grant,
         )
         .expect("code scope should remain bound to the worker issue");
+        validate_worker_memory_scope("code.graph.context", &json!({"repo": "repo-alpha"}), &grant)
+            .expect("baseline graph scope should not require a run overlay");
     }
 
     #[test]

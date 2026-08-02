@@ -136,7 +136,9 @@ opensymphony memory context --issue COE-123 \
 Use `code.graph.context` to find likely symbols, callers, references, related
 tests, and diagnostics without injecting the full repository graph into a
 prompt. It returns bounded source citations and provenance for either the
-indexed baseline or the supplied run's workspace overlay. The server resolves
+indexed baseline or the supplied run's workspace overlay. The `runId` argument
+is optional: omit it for a worker-granted baseline query, and supply it only
+when the verified checkout overlay is needed. The server resolves
 the repository and workspace; tool arguments cannot widen filesystem,
 visibility, or snippet policies. Then read the cited files and run targeted
 `memory.context --include-code-intel --paths ...` live scanning before changing
