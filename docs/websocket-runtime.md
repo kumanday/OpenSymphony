@@ -275,7 +275,8 @@ For each turn:
    - if the server returns `409 Conflict`, first surface launch metadata if it
      has not been reported yet, reconcile the attached backlog so the mirror can
      observe the already-active turn, wait for that active turn to finish, then
-     retry `POST /run` on the same conversation
+     refresh the recovered event baseline before retrying `POST /run` on the
+     same conversation; events consumed while waiting remain historical
 6. Observe progress through the WebSocket event stream
 
 ## 7.2 Waiting for completion

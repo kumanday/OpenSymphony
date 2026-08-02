@@ -326,6 +326,10 @@ Current repository note:
 - queued retry recovery and frequent state reconciliation preserve the binding
   generation boundary: a changed repository binding removes the old workspace
   and prevents that retry from launching until the replacement is materialized.
+  The same boundary applies when a tracker issue keeps its immutable ID but its
+  identifier changes: because verified checkout keys include the identifier, the
+  scheduler supersedes the old workspace generation before materializing the
+  replacement.
   The frequent state read also refreshes child presence, so a running issue that
   becomes a parent is made repository-neutral and its old generation is stopped
   before dispatch can continue it.

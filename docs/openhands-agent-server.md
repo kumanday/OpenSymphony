@@ -104,11 +104,15 @@ grant before it can receive another turn. The old conversation evidence is
 retained until remote deletion succeeds.
 
 If a recovered trigger-pending run receives `409 Conflict`, the adapter waits
-for the active turn to stop and retries `POST /run` on the same conversation;
+for the active turn to stop, refreshes the recovered event baseline, and retries
+`POST /run` on the same conversation;
 the conflict alone does not prove that the recovered prompt was accepted.
 Untrusted conversation envelopes are preserved as evidence but are never used
 to retire a remote conversation. Codex evidence uses the workspace metadata
 directory, while OpenHands evidence uses its configured persistence directory.
+Condenser tool-matching recovery follows the same evidence rule: it preserves
+the old manifest before creating a replacement, and clears that evidence only
+after remote retirement succeeds.
 
 ## 6. Conversation model
 

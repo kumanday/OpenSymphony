@@ -266,7 +266,10 @@ and login -> Enable device code authorization for Codex before retrying.
 - runtime rejection of unsupported reuse-policy values
 - persisted policy-drift resets
 - recovered trigger-pending `/run` retry after a `409 Conflict`
+- recovered `409 Conflict` baseline refresh after the previous turn drains
 - preservation of untrusted superseded conversations without remote retirement
+- condenser replacement evidence persistence and post-retirement clearing
+- identifier-derived workspace-key supersession for same-ID tracker changes
 - same-harness Codex supersession evidence and harness-specific persistence paths
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict

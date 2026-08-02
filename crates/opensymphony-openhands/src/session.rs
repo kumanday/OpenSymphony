@@ -1483,7 +1483,7 @@ impl IssueSessionRunner {
         // keep a prior `finished` state in the baseline so the stale mirror
         // cannot complete the recovered turn before its post-trigger events
         // arrive.
-        let pre_trigger_baseline_event_ids =
+        let mut pre_trigger_baseline_event_ids =
             trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
             match recovery_client.run_conversation(conversation_id).await {
@@ -1506,6 +1506,11 @@ impl IssueSessionRunner {
                             "previous OpenHands turn did not finish before recovered run retry: {error}"
                         )));
                     }
+                    // The wait may consume terminal events from the previous
+                    // turn. Refresh the baseline before retrying /run so those
+                    // historical events cannot finalize the recovered turn.
+                    pre_trigger_baseline_event_ids =
+                        Some(all_event_ids(active_session.stream.event_cache().items()));
                     // A recovered 409 only proves that some turn was active;
                     // it does not prove that this run's queued prompt was
                     // accepted. Once that turn finishes, retry /run on the
@@ -1696,6 +1701,21 @@ impl IssueSessionRunner {
                 );
 
                 let _ = active_session.stream.close().await;
+                if let Err(preserve_error) = self
+                    .preserve_superseded_conversation_manifest(
+                        workspace_manager,
+                        workspace,
+                        &active_session.manifest,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %preserve_error,
+                        conversation_id = %active_session.manifest.conversation_id,
+                        "condenser tool-matching recovery could not preserve the old conversation before replacement"
+                    );
+                    break (active_session, outcome);
+                }
                 let replacement = self
                     .create_fresh_session(
                         workspace_manager,
@@ -1709,16 +1729,35 @@ impl IssueSessionRunner {
                     .await;
                 match replacement {
                     Ok(Step::Continue(fresh_session)) => {
-                        if let Err(retirement_error) = self
+                        let retired = match self
                             .retire_conversation(
                                 &active_session.manifest,
                                 "condenser tool-matching recovery",
                             )
                             .await
                         {
+                            Ok(()) => true,
+                            Err(retirement_error) => {
+                                tracing::warn!(
+                                    %retirement_error,
+                                    "condenser tool-matching recovery could not retire the old conversation after replacement"
+                                );
+                                false
+                            }
+                        };
+                        if retired
+                            && let Err(clear_error) = self
+                                .clear_superseded_conversation_manifest(
+                                    workspace_manager,
+                                    workspace,
+                                    &active_session.manifest.conversation_id,
+                                )
+                                .await
+                        {
                             tracing::warn!(
-                                %retirement_error,
-                                "condenser tool-matching recovery could not retire the old conversation after replacement"
+                                %clear_error,
+                                conversation_id = %active_session.manifest.conversation_id,
+                                "condenser tool-matching recovery could not clear retired conversation evidence"
                             );
                         }
                         tracing::info!(

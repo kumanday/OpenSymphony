@@ -18,6 +18,7 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
+use crate::opensymphony_workspace::{checkout_workspace_key, sanitize_workspace_key};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -37,6 +38,31 @@ const TERMINAL_REFRESH_INTERVAL_MS: u64 = 300_000;
 const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
 const HUMAN_REVIEW_STATE: &str = "human review";
 const MERGING_STATE: &str = "merging";
+
+fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &NormalizedIssue) -> bool {
+    let Some(workspace) = execution.workspace() else {
+        return false;
+    };
+    // Repository binding drift is handled separately. This guard keeps legacy
+    // recovered workspaces with the same identifier compatible while still
+    // fencing a verified checkout when the tracker identifier changes.
+    if execution.issue().identifier == issue.identifier {
+        return false;
+    }
+
+    let expected_key = match issue.repository_binding.as_ref() {
+        Some(RepositoryBindingOutcome::Resolved(binding)) => checkout_workspace_key(
+            issue.identifier.as_str(),
+            issue.id.as_str(),
+            binding.repository_id().as_str(),
+        ),
+        _ => sanitize_workspace_key(issue.identifier.as_str()),
+    };
+
+    expected_key
+        .ok()
+        .is_some_and(|expected| expected != workspace.workspace_key.as_str())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
@@ -1584,10 +1610,10 @@ where
                 .get(&normalized.id)
                 .is_some_and(|execution| {
                     execution.workspace().is_some()
-                        && RepositoryBindingOutcome::binding_changed_opt(
+                        && (RepositoryBindingOutcome::binding_changed_opt(
                             execution.issue().repository_binding.as_ref(),
                             normalized.repository_binding.as_ref(),
-                        )
+                        ) || workspace_key_changed_for_issue(execution, &normalized))
                 })
             {
                 self.supersede_binding(normalized.id.clone(), normalized, observed_at)
