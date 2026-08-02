@@ -1783,34 +1783,41 @@ fn path_strings(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-fn with_scope_json(scope: &ScopeArgs, mut arguments: Value) -> Value {
+fn with_scope_json(scope: &ScopeArgs, arguments: Value) -> Value {
+    with_scope_json_from_env(scope, arguments, env_scope_value)
+}
+
+fn with_scope_json_from_env<F>(scope: &ScopeArgs, mut arguments: Value, mut read_env: F) -> Value
+where
+    F: FnMut(&str) -> Option<String>,
+{
     if let Value::Object(map) = &mut arguments {
         map.insert(
             "projectSet".to_string(),
-            json!(
-                scope
-                    .project_set
-                    .clone()
-                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
-            ),
+            json!(scope_arg_or_env(
+                scope,
+                scope.project_set.clone(),
+                "OPENSYMPHONY_MEMORY_PROJECT_SET",
+                &mut read_env,
+            )),
         );
         map.insert(
             "project".to_string(),
-            json!(
-                scope
-                    .project
-                    .clone()
-                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT"))
-            ),
+            json!(scope_arg_or_env(
+                scope,
+                scope.project.clone(),
+                "OPENSYMPHONY_MEMORY_PROJECT",
+                &mut read_env,
+            )),
         );
         map.insert(
             "repo".to_string(),
-            json!(
-                scope
-                    .repo
-                    .clone()
-                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
-            ),
+            json!(scope_arg_or_env(
+                scope,
+                scope.repo.clone(),
+                "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+                &mut read_env,
+            )),
         );
         map.insert("allAccessible".to_string(), json!(scope.all_accessible));
     }
@@ -5800,24 +5807,40 @@ fn scope_filter(
     milestone: Option<&str>,
     area: Option<&str>,
 ) -> MemoryScopeFilter {
+    scope_filter_with_env(scope, issue, milestone, area, env_scope_value)
+}
+
+fn scope_filter_with_env<F>(
+    scope: &ScopeArgs,
+    issue: Option<&str>,
+    milestone: Option<&str>,
+    area: Option<&str>,
+    mut read_env: F,
+) -> MemoryScopeFilter
+where
+    F: FnMut(&str) -> Option<String>,
+{
     MemoryScopeFilter {
-        project_set: scope
-            .project_set
-            .as_deref()
-            .and_then(non_empty)
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET")),
-        project: scope
-            .project
-            .as_deref()
-            .and_then(non_empty)
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT")),
+        project_set: scope_arg_or_env(
+            scope,
+            scope.project_set.as_deref().and_then(non_empty),
+            "OPENSYMPHONY_MEMORY_PROJECT_SET",
+            &mut read_env,
+        ),
+        project: scope_arg_or_env(
+            scope,
+            scope.project.as_deref().and_then(non_empty),
+            "OPENSYMPHONY_MEMORY_PROJECT",
+            &mut read_env,
+        ),
         milestone: milestone.and_then(non_empty),
         issue: issue.and_then(non_empty),
-        repo: scope
-            .repo
-            .as_deref()
-            .and_then(non_empty)
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO")),
+        repo: scope_arg_or_env(
+            scope,
+            scope.repo.as_deref().and_then(non_empty),
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+            &mut read_env,
+        ),
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
     }
@@ -5855,6 +5878,22 @@ fn direct_scope_filter(
 
 fn env_scope_value(name: &str) -> Option<String> {
     env::var(name).ok().and_then(|value| non_empty(&value))
+}
+
+fn scope_arg_or_env<F>(
+    scope: &ScopeArgs,
+    explicit: Option<String>,
+    env_name: &str,
+    read_env: &mut F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if explicit.is_some() || scope.all_accessible {
+        explicit
+    } else {
+        read_env(env_name)
+    }
 }
 
 fn scope_filter_from_mcp(
@@ -7588,6 +7627,42 @@ mod tests {
         assert_eq!(tool, "memory.brief");
         assert_eq!(arguments["repo"], "repo-b");
         assert_eq!(arguments["issue"], "COE-550");
+    }
+
+    #[test]
+    fn all_accessible_scope_ignores_worker_environment_defaults() {
+        let broad_scope = super::ScopeArgs {
+            all_accessible: true,
+            ..Default::default()
+        };
+        let worker_env = |name: &str| Some(format!("worker-{name}"));
+        let filter =
+            super::scope_filter_with_env(&broad_scope, Some("COE-550"), None, None, worker_env);
+        assert!(filter.all_accessible);
+        assert!(filter.project_set.is_none());
+        assert!(filter.project.is_none());
+        assert!(filter.repo.is_none());
+
+        let request = super::with_scope_json_from_env(&broad_scope, json!({}), |name| {
+            Some(format!("worker-{name}"))
+        });
+        assert_eq!(request["projectSet"], serde_json::Value::Null);
+        assert_eq!(request["project"], serde_json::Value::Null);
+        assert_eq!(request["repo"], serde_json::Value::Null);
+        assert_eq!(request["allAccessible"], true);
+
+        let explicit_scope = super::ScopeArgs {
+            all_accessible: true,
+            project: Some("explicit-project".to_string()),
+            ..Default::default()
+        };
+        let explicit_filter =
+            super::scope_filter_with_env(&explicit_scope, Some("COE-550"), None, None, |name| {
+                Some(format!("worker-{name}"))
+            });
+        assert_eq!(explicit_filter.project.as_deref(), Some("explicit-project"));
+        assert!(explicit_filter.project_set.is_none());
+        assert!(explicit_filter.repo.is_none());
     }
 
     #[test]
