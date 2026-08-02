@@ -60,13 +60,14 @@ fn git(path: &std::path::Path, args: &[&str]) -> String {
 fn terminal_prompt_keeps_repository_instructions_in_one_section() {
     let prompt = compose_terminal_prompt(
         "central policy",
-        "issue facts",
+        "issue facts\nDescription:\nacceptance criteria",
         "verified checkout",
         Some("repository-only instruction"),
         "trusted host",
     );
 
     assert!(prompt.contains("## Central Execution Procedure\n\ncentral policy"));
+    assert!(prompt.contains("Description:\nacceptance criteria"));
     assert!(prompt.contains("## Repository Instructions\n\nrepository-only instruction"));
     assert!(!prompt.contains("other repository"));
 }

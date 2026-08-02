@@ -2141,8 +2141,15 @@ impl RuntimeWorkerBackend {
                 Some(compose_terminal_prompt(
                     &central_procedure,
                     &format!(
-                        "Issue: {}\nTitle: {}\nAttempt: {}",
-                        issue.identifier, issue.title, attempt
+                        "Issue: {}\nTitle: {}\nAttempt: {}\nDescription:\n{}",
+                        issue.identifier,
+                        issue.title,
+                        attempt,
+                        issue
+                            .description
+                            .as_deref()
+                            .filter(|description| !description.trim().is_empty())
+                            .unwrap_or("No tracker description provided."),
                     ),
                     &checkout_facts,
                     repository_instructions.as_deref(),
