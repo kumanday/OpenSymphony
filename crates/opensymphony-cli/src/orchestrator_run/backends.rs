@@ -8,7 +8,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use crate::opensymphony_cli::BlockedEnvironment;
+use crate::opensymphony_cli::{BlockedEnvironment, memory::MemoryScopeGrantRegistry};
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
     CodexAppServerSchemaValidator, CodexContractGeneration, CodexJsonRpcSession,
@@ -143,6 +143,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
     openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     openhands_persistence_dir_relative: PathBuf,
+    scope_grants: Option<MemoryScopeGrantRegistry>,
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
@@ -168,6 +169,7 @@ pub(super) struct RuntimeWorkerBackend {
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
     tasks: HashMap<String, ActiveWorkerTask>,
+    worker_issue_ids: HashMap<String, String>,
 }
 
 type CodexSchemaValidatorCache = Arc<AsyncMutex<HashMap<String, CodexAppServerSchemaValidator>>>;
@@ -664,9 +666,14 @@ async fn archive_superseded_harness_sessions(
                 "superseded OpenHands conversation evidence has no runtime envelope".to_owned(),
             ));
         };
+        let expected_persistence_dir = if conversation_manifest_is_codex(manifest) {
+            workspace.metadata_dir()
+        } else {
+            workspace.workspace_path().join(persistence_dir_relative)
+        };
         if manifest.issue_id.as_str() != workspace.issue_id()
             || manifest.identifier.as_str() != workspace.identifier()
-            || manifest.persistence_dir != workspace.workspace_path().join(persistence_dir_relative)
+            || manifest.persistence_dir != expected_persistence_dir
             || envelope.checkout_generation != checkout.generation
             || envelope.checkout_path != workspace.workspace_path()
             || envelope.repository_binding != checkout.repository_binding
@@ -920,6 +927,7 @@ impl RuntimeWorkspaceBackend {
                 .conversation
                 .persistence_dir_relative
                 .clone(),
+            scope_grants: None,
             active_states: workflow
                 .config
                 .tracker
@@ -948,6 +956,14 @@ impl RuntimeWorkspaceBackend {
         self.openhands_conversation_store = store;
         self
     }
+
+    pub(super) fn with_scope_grants(
+        mut self,
+        scope_grants: Option<MemoryScopeGrantRegistry>,
+    ) -> Self {
+        self.scope_grants = scope_grants;
+        self
+    }
 }
 
 impl RuntimeWorkspaceBackend {
@@ -969,6 +985,9 @@ impl RuntimeWorkspaceBackend {
             else {
                 return Ok(());
             };
+            if let Some(scope_grants) = &self.scope_grants {
+                scope_grants.revoke_issue(handle.identifier());
+            }
             let removes_workspace = force_remove
                 || self.manager.cleanup_decision(IssueLifecycleState::Terminal)
                     == crate::opensymphony_workspace::CleanupDecision::Remove;
@@ -2033,6 +2052,7 @@ impl RuntimeWorkerBackend {
             updates_tx,
             updates_rx,
             tasks: HashMap::new(),
+            worker_issue_ids: HashMap::new(),
         }
     }
 
@@ -2107,6 +2127,11 @@ impl RuntimeWorkerBackend {
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
         let worker_id = request.run.worker_id.clone();
+        let issue_identifier = issue.identifier.to_string();
+        self.worker_issue_ids
+            .retain(|_, existing| existing != &issue_identifier);
+        self.worker_issue_ids
+            .insert(worker_id.to_string(), issue_identifier);
         let observer_worker_id = worker_id.clone();
         let finished_worker_id = worker_id.clone();
         let (launch_tx, launch_rx) = oneshot::channel();
@@ -3162,6 +3187,16 @@ async fn try_run_codex_stdio_issue(
                 })
             });
     if conversation_envelope_untrusted && let Some(incompatible) = existing_manifest.take() {
+        persist_superseded_harness_manifest(workspace_manager, workspace, &incompatible)
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(incompatible.conversation_id.as_str()),
+                    "superseded manifest persistence",
+                    error,
+                )
+            })?;
         tracing::warn!(
             conversation_id = %incompatible.conversation_id,
             "deferring retirement of Codex thread with an untrusted runtime envelope until replacement is durable"
@@ -3502,6 +3537,19 @@ async fn try_run_codex_stdio_issue(
                     replacement_conversation_id = %conversation_id,
                     "archived superseded Codex conversation after replacement binding became durable"
                 );
+                if let Err(error) = clear_superseded_harness_manifest(
+                    workspace_manager,
+                    workspace,
+                    &superseded.conversation_id,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        conversation_id = %superseded.conversation_id,
+                        %error,
+                        "failed to clear archived superseded Codex evidence"
+                    );
+                }
             }
             (
                 conversation_id,
@@ -5350,8 +5398,29 @@ impl WorkerBackend for RuntimeWorkerBackend {
     async fn abort_worker(
         &mut self,
         worker_id: &crate::opensymphony_domain::WorkerId,
-        _reason: WorkerAbortReason,
+        reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
+        let issue_identifier = self
+            .worker_issue_ids
+            .remove(worker_id.as_str())
+            .or_else(|| {
+                self.tasks
+                    .get(worker_id.as_str())
+                    .map(|task| task.run.issue_identifier.to_string())
+            });
+        if matches!(
+            reason,
+            WorkerAbortReason::TrackerInactive
+                | WorkerAbortReason::TrackerTerminal
+                | WorkerAbortReason::BindingSuperseded
+        ) && let Some(issue_identifier) = issue_identifier
+            && let Some(scope_grants) = self
+                .memory_env
+                .as_ref()
+                .and_then(|memory| memory.scope_grants.as_ref())
+        {
+            scope_grants.revoke_issue(&issue_identifier);
+        }
         self.abort_tracked_task(worker_id.as_str());
         Ok(())
     }

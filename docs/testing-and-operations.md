@@ -246,6 +246,8 @@ and login -> Enable device code authorization for Codex before retrying.
 - reject symlink-based `cwd` escapes for hooks
 - reject symlinked `.opensymphony` manifest reads and writes
 - cleanup on terminal issue state
+- revoke worker memory grants at terminal, inactive, and binding-supersession
+  boundaries
 
 ## 3.3 OpenHands adapter
 
@@ -263,6 +265,9 @@ and login -> Enable device code authorization for Codex before retrying.
 - `fresh_each_run` reset/new-conversation behavior
 - runtime rejection of unsupported reuse-policy values
 - persisted policy-drift resets
+- recovered trigger-pending `/run` retry after a `409 Conflict`
+- preservation of untrusted superseded conversations without remote retirement
+- same-harness Codex supersession evidence and harness-specific persistence paths
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
 - recreation of a missing conversation with persisted history

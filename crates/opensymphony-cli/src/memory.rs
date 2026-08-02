@@ -1995,6 +1995,20 @@ impl MemoryScopeGrantRegistry {
         token
     }
 
+    pub(crate) fn revoke_issue(&self, issue: &str) -> bool {
+        let mut grants = self.grants.write().expect("memory grant registry poisoned");
+        let tokens = grants
+            .iter()
+            .filter(|(_, grant)| grant.issue == issue)
+            .map(|(token, _)| token.clone())
+            .collect::<Vec<_>>();
+        let revoked = !tokens.is_empty();
+        for token in tokens {
+            grants.remove(&token);
+        }
+        revoked
+    }
+
     fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
         token.and_then(|token| {
             self.grants
@@ -12785,6 +12799,22 @@ Public memory concept.
                 .as_deref(),
             Some("generation-2")
         );
+    }
+
+    #[test]
+    fn worker_memory_grant_can_be_revoked_at_issue_lifecycle_boundary() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let token = registry.issue_or_refresh(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+
+        assert!(registry.revoke_issue("COE-549"));
+        assert!(registry.get(Some(&token)).is_none());
+        assert!(!registry.revoke_issue("COE-549"));
     }
 
     #[test]

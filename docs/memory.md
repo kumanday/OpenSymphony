@@ -485,8 +485,11 @@ worker's project, execution repository, authorized repository set, issue, and
 checkout generation. Retry and recovery refresh that registry entry in place so
 the default reusable OpenHands conversation retains its MCP bearer while its
 verified checkout scope changes. The grant is server-local, non-persisted, and
-replaced with the latest verified scope; it must not become a process-wide
-authorization. This project scope applies to direct `memory.show` capsule reads
+replaced with the latest verified scope. Terminal, inactive, and binding-
+superseded worker lifecycles revoke the issue entry so an old worker
+environment cannot reuse it after the issue leaves execution. It must not
+become a process-wide authorization. This project scope applies to direct
+`memory.show` capsule reads
 as well as search, context, brief, related, docs, and status tools, and worker
 project matching uses canonical project IDs rather than display labels.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,

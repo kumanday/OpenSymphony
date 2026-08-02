@@ -1506,9 +1506,16 @@ impl IssueSessionRunner {
                             "previous OpenHands turn did not finish before recovered run retry: {error}"
                         )));
                     }
-                    // The trigger was accepted before the crash, so a
-                    // recovered 409 is evidence of the already-running turn.
-                    // Do not issue /run again after it finishes.
+                    // A recovered 409 only proves that some turn was active;
+                    // it does not prove that this run's queued prompt was
+                    // accepted. Once that turn finishes, retry /run on the
+                    // same conversation so the recovered prompt is actually
+                    // executed.
+                    if let Err(error) = recovery_client.run_conversation(conversation_id).await {
+                        return Err(IssueSessionError::RehydrationFailed(format!(
+                            "failed to retry recovered OpenHands run after conflict: {error}"
+                        )));
+                    }
                 }
                 Err(error) => {
                     return Err(IssueSessionError::RehydrationFailed(format!(
@@ -1892,13 +1899,6 @@ impl IssueSessionRunner {
                                 Some("conversation runtime envelope binding changed; superseding conversation".into()),
                             )
                             .await?;
-                            self.retire_replaced_conversation(
-                                workspace_manager,
-                                workspace,
-                                &manifest,
-                                &replacement,
-                            )
-                            .await;
                             Ok(replacement)
                         }
                     Some(manifest)
@@ -1927,13 +1927,6 @@ impl IssueSessionRunner {
                                 Some("terminal runtime envelope changed; superseding conversation".into()),
                             )
                             .await?;
-                            self.retire_replaced_conversation(
-                                workspace_manager,
-                                workspace,
-                                &manifest,
-                                &replacement,
-                            )
-                            .await;
                             Ok(replacement)
                         }
                     Some(manifest) => match self

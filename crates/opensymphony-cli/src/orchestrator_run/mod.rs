@@ -1003,7 +1003,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .root
             .join(".opensymphony-retry-state")
     });
-    let workspace = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
+    let mut workspace = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
         workspace_manager.clone(),
         &runtime.workflow,
         runtime.retain_failed,
@@ -1043,6 +1043,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     let mut memory_server = start_runtime_memory_server(&runtime).await?;
+    if let Some(server) = &memory_server {
+        workspace = workspace.with_scope_grants(Some(server.scope_grant_registry()));
+    }
     let execution_repo = runtime
         .memory_sources
         .values()
