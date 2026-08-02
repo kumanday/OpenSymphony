@@ -46,11 +46,11 @@ use crate::{
         code_graph_context, code_graph_workspace_context_overlay, code_index_branch_for_config,
         code_repository_has_commit, code_repository_has_rows, context_for_issue_with_options,
         docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_issue_capsule, load_source_file, mark_archived,
-        merge_legacy_code_index, merge_legacy_memory_index, merge_memory_index_from_okf,
-        migrate_code_repository_identity, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        lint_okf_bundle, load_issue_capsule, load_issue_capsule_with_scope, load_source_file,
+        mark_archived, merge_legacy_code_index, merge_legacy_memory_index,
+        merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_hex,
@@ -253,6 +253,8 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct ShowArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
     #[arg(help = "Issue identifier")]
     issue: String,
 }
@@ -1638,7 +1640,10 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 }),
             ),
         )),
-        MemoryCommand::Show(args) => Some(("memory.show", json!({ "issue": args.issue.clone() }))),
+        MemoryCommand::Show(args) => Some((
+            "memory.show",
+            with_scope_json(&args.scope, json!({ "issue": args.issue.clone() })),
+        )),
         MemoryCommand::Context(args) => Some((
             "memory.context",
             with_scope_json(
@@ -3417,7 +3422,10 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.show" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            Ok(mcp_text(load_issue_capsule(config, &issue)?))
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            Ok(mcp_text(load_issue_capsule_with_scope(
+                config, &issue, &scope,
+            )?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
@@ -7715,11 +7723,16 @@ mod tests {
     #[test]
     fn remote_show_forwards_issue_to_central_memory_endpoint() {
         let command = super::MemoryCommand::Show(super::ShowArgs {
+            scope: super::ScopeArgs {
+                repo: Some("repo-a".to_string()),
+                ..Default::default()
+            },
             issue: "COE-550".to_string(),
         });
         let (tool, arguments) = remote_memory_tool_request(&command).expect("remote show request");
         assert_eq!(tool, "memory.show");
         assert_eq!(arguments["issue"], "COE-550");
+        assert_eq!(arguments["repo"], "repo-a");
     }
 
     #[test]

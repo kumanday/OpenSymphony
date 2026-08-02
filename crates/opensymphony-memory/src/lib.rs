@@ -3328,7 +3328,7 @@ Reviews are triggered when you open a pull request for review.
                 repository_id: "repo-a".to_string(),
                 root: first.path().to_path_buf(),
                 commit_sha: None,
-                project_scope_ids: BTreeSet::new(),
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
                 target_branch: None,
             },
         );
@@ -3338,7 +3338,7 @@ Reviews are triggered when you open a pull request for review.
                 repository_id: "repo-b".to_string(),
                 root: second.path().to_path_buf(),
                 commit_sha: None,
-                project_scope_ids: BTreeSet::new(),
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
                 target_branch: None,
             },
         );
@@ -3365,6 +3365,16 @@ Reviews are triggered when you open a pull request for review.
             KnowledgeScope {
                 kind: KnowledgeScopeKind::Repository,
                 id: "repo-b".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-a".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-b".to_string(),
                 label: None,
             },
         ])
@@ -3405,6 +3415,37 @@ Reviews are triggered when you open a pull request for review.
                 .len(),
             0
         );
+        assert_eq!(
+            search_with_scope(
+                &config,
+                "websocket",
+                10,
+                &MemoryScopeFilter {
+                    repo: Some("repo-a".to_string()),
+                    project: Some("project-b".to_string()),
+                    ..MemoryScopeFilter::default()
+                },
+            )
+            .expect("mismatched repository and project scope")
+            .len(),
+            0
+        );
+        assert_eq!(
+            status_with_scope(
+                &config,
+                &IssueSelection {
+                    area: Some("repo-b-only".to_string()),
+                    ..IssueSelection::default()
+                },
+                &scoped,
+            )
+            .expect("scoped status")
+            .issue_count,
+            0
+        );
+        let status = status_with_scope(&config, &IssueSelection::default(), &scoped)
+            .expect("scoped status output");
+        assert!(!status.issues[0].areas.contains(&"repo-b-only".to_string()));
         assert_eq!(
             related_by_issue_with_scope(&config, "COE-123", 10, &scoped)
                 .expect("scoped issue")

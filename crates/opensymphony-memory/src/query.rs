@@ -3,9 +3,22 @@ pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryErr
 }
 
 pub fn load_issue_capsule(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryError> {
+    load_issue_capsule_with_scope(config, issue_key, &MemoryScopeFilter::default())
+}
+
+pub fn load_issue_capsule_with_scope(
+    config: &MemoryConfig,
+    issue_key: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    if !indexed_issue_matches_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested scope"
+        )));
+    }
     for path in indexed_capsule_paths(config, &indexed) {
         match fs::read_to_string(&path) {
             Ok(contents) => return Ok(contents),
@@ -881,7 +894,7 @@ pub fn status_with_scope(
     let mut issues = load_indexed_issues(config)?;
     issues.retain(|issue| indexed_issue_visible_in_scope(config, issue, scope));
     if let Some(area) = selection.area.as_ref().map(|area| slugify(area)) {
-        issues.retain(|issue| issue.areas().contains(&area));
+        issues.retain(|issue| issue.areas_for_scope(config, scope).contains(&area));
     }
     if let Some(milestone) = selection
         .milestone
@@ -899,7 +912,7 @@ pub fn status_with_scope(
     let status_issues = issues
         .into_iter()
         .map(|issue| {
-            let areas = issue.areas();
+            let areas = issue.areas_for_scope(config, scope);
             let capsule_path = PathBuf::from(display_capsule_path(config, &issue));
             StatusIssue {
                 issue_key: issue.issue_key,
@@ -958,6 +971,18 @@ fn indexed_issue_matches_scope(
     }
     if let Some(repo) = scope.repo.as_ref().and_then(|value| normalize_optional(value))
         && !indexed_issue_matches_repo(config, issue, &repo)
+    {
+        return false;
+    }
+    if let (Some(repo), Some(project)) = (
+        scope.repo.as_ref().and_then(|value| normalize_optional(value)),
+        scope.project.as_ref().and_then(|value| normalize_optional(value)),
+    ) && let Some(source) = config.repository_sources.get(&repo)
+        && !source.project_scope_ids.is_empty()
+        && !source
+            .project_scope_ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(&project))
     {
         return false;
     }
