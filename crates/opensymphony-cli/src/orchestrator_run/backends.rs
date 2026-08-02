@@ -808,6 +808,9 @@ impl RuntimeWorkspaceBackend {
             else {
                 return Ok(());
             };
+            let removes_workspace = force_remove
+                || self.manager.cleanup_decision(IssueLifecycleState::Terminal)
+                    == crate::opensymphony_workspace::CleanupDecision::Remove;
             let manifest_path = handle.conversation_manifest_path();
             if let Some(raw_manifest) = self
                 .manager
@@ -864,6 +867,13 @@ impl RuntimeWorkspaceBackend {
                         }
                     }
                     Ok(manifest) => {
+                        if !removes_workspace {
+                            self.manager
+                                .cleanup(&handle, IssueLifecycleState::Terminal)
+                                .await?;
+                            self.terminal_cleanup_paths.insert(workspace.path.clone());
+                            return Ok(());
+                        }
                         let envelope_compatible = if handle.checkout_generation().is_some() {
                             strict_conversation_manifest_is_bound(&self.manager, &handle, &manifest)
                                 .await
@@ -6640,6 +6650,66 @@ mod tests {
                 .trim(),
             "before_remove"
         );
+    }
+
+    #[tokio::test]
+    async fn retained_terminal_cleanup_keeps_openhands_conversation_active() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let tool_dir = tempdir.path().join("openhands-tool");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+                ..build_workspace_manager_config(&workflow)
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let conversation_id = "11111111-1111-4111-8111-111111111111";
+        let store = OpenHandsConversationStorePaths::for_tool_dir(&tool_dir, tempdir.path())
+            .expect("conversation store should resolve");
+        store
+            .ensure_active_and_archived()
+            .expect("conversation stores should exist");
+        fs::create_dir_all(store.active.join(conversation_id))
+            .expect("active OpenHands conversation should exist");
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &sample_conversation_manifest(conversation_id),
+            )
+            .await
+            .expect("OpenHands conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow)
+            .with_openhands_conversation_store(Some(store.clone()));
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("retained terminal cleanup should succeed");
+
+        assert!(ensured.handle.workspace_path().is_dir());
+        assert!(store.active.join(conversation_id).is_dir());
+        assert!(ensured.handle.conversation_manifest_path().is_file());
     }
 
     #[cfg(unix)]

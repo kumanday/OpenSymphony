@@ -1331,7 +1331,7 @@ impl WorkspaceManager {
             staging_cleanup.register(path.clone());
             fs::write(
                 &path,
-                b"#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ;;\nesac\n",
+                b"#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_USERNAME\" ;;\n  *) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ;;\nesac\n",
             )
             .await
             .map_err(|source| WorkspaceError::CheckoutOperation {
@@ -1367,6 +1367,10 @@ impl WorkspaceManager {
         {
             command.env("OPENSYMPHONY_CHECKOUT_CREDENTIAL", value);
         }
+        command.env(
+            "OPENSYMPHONY_CHECKOUT_USERNAME",
+            git_askpass_username(&repository.provider),
+        );
         if let Some(path) = askpass_path.as_ref() {
             command
                 .env("GIT_ASKPASS", path)
@@ -3360,6 +3364,16 @@ fn remote_contains_credentials(remote: &str) -> bool {
         || username.eq_ignore_ascii_case("token")
 }
 
+fn git_askpass_username(provider: &str) -> &str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "github" => "x-access-token",
+        "gitlab" => "oauth2",
+        "bitbucket" => "x-token-auth",
+        _ if !provider.trim().is_empty() => provider.trim(),
+        _ => "git",
+    }
+}
+
 fn is_proven_checkout_invalid(error: &WorkspaceError) -> bool {
     matches!(
         error,
@@ -3754,7 +3768,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{
-        WorkspaceError, build_shell_command, discover_agents, remote_contains_credentials,
+        WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
+        remote_contains_credentials,
     };
 
     #[cfg(unix)]
@@ -3817,5 +3832,13 @@ mod tests {
         assert!(!remote_contains_credentials(
             "https://example.com/org/repo.git"
         ));
+    }
+
+    #[test]
+    fn git_askpass_username_matches_repository_provider() {
+        assert_eq!(git_askpass_username("github"), "x-access-token");
+        assert_eq!(git_askpass_username("GitLab"), "oauth2");
+        assert_eq!(git_askpass_username("bitbucket"), "x-token-auth");
+        assert_eq!(git_askpass_username("gitea"), "gitea");
     }
 }

@@ -2377,6 +2377,29 @@ async fn call_memory_tool_with_workspace(
             "indexed code graph tools are disabled".to_string(),
         ));
     }
+    let code_intel_config = if name == "code.ast.status" {
+        None
+    } else if AST_MCP_TOOL_NAMES.contains(&name)
+        || name == "memory.ingest_code_intel"
+        || (name == "memory.context"
+            && (bool_arg(&arguments, "includeCodeIntel")
+                || bool_arg(&arguments, "include_code_intel")))
+    {
+        let scope = scope_filter_from_mcp(&arguments, true);
+        let issue = optional_string_arg(&arguments, "issue").or_else(|| {
+            arguments
+                .get("currentIssue")
+                .and_then(|current| optional_string_arg(current, "identifier"))
+        });
+        Some(resolve_code_intel_config(
+            config,
+            &scope,
+            workspace_root,
+            issue.as_deref(),
+        )?)
+    } else {
+        None
+    };
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
@@ -2397,7 +2420,7 @@ async fn call_memory_tool_with_workspace(
                 || bool_arg(&arguments, "include_code_intel")
             {
                 text = append_code_intel_context_blocking(
-                    config.clone(),
+                    code_intel_config.clone().unwrap_or_else(|| config.clone()),
                     text,
                     scope_filter_from_mcp(&arguments, true),
                     options.paths.clone(),
@@ -2483,15 +2506,44 @@ async fn call_memory_tool_with_workspace(
             .await
         }
         "code.ast.status" => call_code_ast_status_tool(config),
-        "code.ast.outline" => call_code_ast_outline_tool(config.clone(), arguments.clone()).await,
-        "code.ast.symbols" => call_code_ast_symbols_tool(config.clone(), arguments.clone()).await,
-        "code.ast.references" => {
-            call_code_ast_references_tool(config.clone(), arguments.clone()).await
+        "code.ast.outline" => {
+            call_code_ast_outline_tool(
+                code_intel_config.clone().unwrap_or_else(|| config.clone()),
+                arguments.clone(),
+            )
+            .await
         }
-        "code.ast.query" => call_code_ast_query_tool(config.clone(), arguments.clone()).await,
-        "code.ast.context" => call_code_ast_context_tool(config, &arguments).await,
+        "code.ast.symbols" => {
+            call_code_ast_symbols_tool(
+                code_intel_config.clone().unwrap_or_else(|| config.clone()),
+                arguments.clone(),
+            )
+            .await
+        }
+        "code.ast.references" => {
+            call_code_ast_references_tool(
+                code_intel_config.clone().unwrap_or_else(|| config.clone()),
+                arguments.clone(),
+            )
+            .await
+        }
+        "code.ast.query" => {
+            call_code_ast_query_tool(
+                code_intel_config.clone().unwrap_or_else(|| config.clone()),
+                arguments.clone(),
+            )
+            .await
+        }
+        "code.ast.context" => {
+            call_code_ast_context_tool(code_intel_config.as_ref().unwrap_or(config), &arguments)
+                .await
+        }
         "code.ast.diagnostics" => {
-            call_code_ast_diagnostics_tool(config.clone(), arguments.clone()).await
+            call_code_ast_diagnostics_tool(
+                code_intel_config.clone().unwrap_or_else(|| config.clone()),
+                arguments.clone(),
+            )
+            .await
         }
         "memory.capture" => {
             call_memory_capture_tool(config, &arguments, central_config_path, resolved_workflow)
@@ -2502,7 +2554,13 @@ async fn call_memory_tool_with_workspace(
         "memory.reindex" => call_memory_reindex_tool(config, &arguments),
         "memory.export_okf" => call_memory_export_okf_tool(config, &arguments),
         "memory.import_okf" => call_memory_import_okf_tool(config, &arguments),
-        "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments).await,
+        "memory.ingest_code_intel" => {
+            call_memory_ingest_code_intel_tool(
+                code_intel_config.as_ref().unwrap_or(config),
+                &arguments,
+            )
+            .await
+        }
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported memory tool `{other}`"
         ))),
@@ -4362,6 +4420,113 @@ fn resolve_code_intel_repo(
     Ok(resolved)
 }
 
+fn resolve_code_intel_config(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+    workspace_root: Option<&Path>,
+    issue: Option<&str>,
+) -> Result<MemoryConfig, MemoryError> {
+    let Some(repo) = scope.repo.as_deref().and_then(non_empty) else {
+        return Ok(config.clone());
+    };
+    if resolve_code_intel_repo(config, Some(&repo)).is_ok() {
+        return Ok(config.clone());
+    }
+    let Some(workspace_root) = workspace_root else {
+        return resolve_code_intel_repo(config, Some(&repo)).map(|repo_root| {
+            let mut scoped = config.clone();
+            scoped.repo_root = repo_root;
+            scoped
+        });
+    };
+    let repo_root = find_verified_checkout_for_code_intel(workspace_root, &repo, issue)?;
+    let mut scoped = config.clone();
+    scoped.repo_root = repo_root;
+    Ok(scoped)
+}
+
+fn find_verified_checkout_for_code_intel(
+    workspace_root: &Path,
+    repository_id: &str,
+    issue: Option<&str>,
+) -> Result<PathBuf, MemoryError> {
+    let canonical_root =
+        workspace_root
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: workspace_root.to_path_buf(),
+                source,
+            })?;
+    let mut matches = Vec::new();
+    let entries = fs::read_dir(&canonical_root).map_err(|source| MemoryError::ReadFile {
+        path: canonical_root.clone(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: canonical_root.clone(),
+            source,
+        })?;
+        let candidate = entry.path();
+        if !candidate.is_dir() {
+            continue;
+        }
+        let checkout_path = candidate.join(".opensymphony/checkout.json");
+        let Ok(raw_checkout) = fs::read_to_string(&checkout_path) else {
+            continue;
+        };
+        let Ok(checkout) = serde_json::from_str::<Value>(&raw_checkout) else {
+            continue;
+        };
+        let Some(found_repository_id) = checkout
+            .pointer("/repository_binding/repository/id")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if found_repository_id != repository_id
+            || checkout
+                .get("quarantined")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        if let Some(issue) = issue
+            && checkout.get("issue_id").and_then(Value::as_str) != Some(issue)
+            && checkout.get("identifier").and_then(Value::as_str) != Some(issue)
+        {
+            continue;
+        }
+        let Ok(canonical_candidate) = candidate.canonicalize() else {
+            continue;
+        };
+        let Some(manifest_path) = checkout.get("workspace_path").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(canonical_manifest_path) = Path::new(manifest_path).canonicalize() else {
+            continue;
+        };
+        if canonical_manifest_path != canonical_candidate
+            || !canonical_manifest_path.starts_with(&canonical_root)
+        {
+            continue;
+        }
+        matches.push(canonical_candidate);
+    }
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(MemoryError::InvalidInput(format!(
+            "no verified checkout for repository `{repository_id}` and issue `{}`",
+            issue.unwrap_or("<unspecified>")
+        ))),
+        _ => Err(MemoryError::InvalidInput(format!(
+            "multiple verified checkouts for repository `{repository_id}` and issue `{}`",
+            issue.unwrap_or("<unspecified>")
+        ))),
+    }
+}
+
 fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<CodeIntelScope> {
     let mut refs = Vec::new();
     push_scope_ref(
@@ -5766,11 +5931,11 @@ mod tests {
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
         authorize_memory_request, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
-        call_memory_tool, context_source_from_mcp, load_memory_config, memory_server_health,
-        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_repo, run_init,
-        trim_auto_memory_status_log,
+        call_memory_tool, context_source_from_mcp, find_verified_checkout_for_code_intel,
+        load_memory_config, memory_server_health, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -9048,6 +9213,41 @@ Public memory concept.
         )
         .expect_err("outside repo must be rejected");
         assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn code_intel_repo_resolution_maps_a_canonical_worker_repository_to_its_checkout() {
+        let workspace_root = TempDir::new().expect("workspace root");
+        let checkout = workspace_root.path().join("COE-123--generation");
+        let metadata = checkout.join(".opensymphony");
+        std::fs::create_dir_all(&metadata).expect("checkout metadata should exist");
+        std::fs::write(
+            metadata.join("checkout.json"),
+            serde_json::to_vec(&json!({
+                "issue_id": "issue-123",
+                "identifier": "COE-123",
+                "workspace_path": checkout,
+                "quarantined": false,
+                "repository_binding": {
+                    "repository": { "id": "github:github.com:repository:123" }
+                }
+            }))
+            .expect("checkout manifest should serialize"),
+        )
+        .expect("checkout manifest should write");
+
+        let resolved = find_verified_checkout_for_code_intel(
+            workspace_root.path(),
+            "github:github.com:repository:123",
+            Some("COE-123"),
+        )
+        .expect("canonical repository should resolve through the issue checkout");
+        assert_eq!(
+            resolved,
+            checkout
+                .canonicalize()
+                .expect("checkout should canonicalize")
+        );
     }
 
     #[test]
