@@ -1,4 +1,37 @@
 const UNDATED_LOG_DATE: &str = "1970-01-01";
+const LIVE_CAPTURE_OWNER: &str = "__live_capture__";
+const LIVE_CAPTURE_OWNER_PREFIX: &str = "__live_capture__:";
+
+fn live_capture_owner(repository_id: Option<&str>) -> String {
+    repository_id
+        .map(|repository_id| format!("{LIVE_CAPTURE_OWNER_PREFIX}{repository_id}"))
+        .unwrap_or_else(|| LIVE_CAPTURE_OWNER.to_string())
+}
+
+fn is_live_capture_owner(owner: &str) -> bool {
+    owner == LIVE_CAPTURE_OWNER || owner.starts_with(LIVE_CAPTURE_OWNER_PREFIX)
+}
+
+fn live_capture_payload_body(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with("captured_at:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn live_capture_owner_matches_repository(owner: &str, repository_id: &str) -> bool {
+    owner == LIVE_CAPTURE_OWNER || owner == live_capture_owner(Some(repository_id))
+}
+
+fn source_owner_repository_id<'a>(
+    registered_source_repositories: &'a BTreeMap<String, String>,
+    owner: &'a str,
+) -> Option<&'a str> {
+    registered_source_repositories
+        .get(owner)
+        .map(String::as_str)
+        .or_else(|| owner.strip_prefix(LIVE_CAPTURE_OWNER_PREFIX))
+}
 
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
     let mut connection = open_index(config)?;
@@ -17,7 +50,137 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let body = read_to_string(&issue_plan.capsule_path)?;
         let labels_json = serde_json::to_string(&issue_plan.issue.labels)?;
         let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
-        let empty_json = serde_json::to_string(&Vec::<String>::new())?;
+        let live_owner = live_capture_owner(config.default_repository_id.as_deref());
+        let existing = transaction
+            .query_row(
+                "SELECT title, visibility, body, scope_refs_json, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
+                params![issue_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        let (mut scope_refs, mut source_refs, mut source_ids) = existing
+            .as_ref()
+            .map(|(_, _, _, scope_refs_json, source_refs_json, source_ids_json)| {
+                (
+                    serde_json::from_str::<Vec<KnowledgeScope>>(scope_refs_json)
+                        .unwrap_or_default(),
+                    serde_json::from_str::<Vec<MemorySourceRef>>(source_refs_json)
+                        .unwrap_or_default(),
+                    serde_json::from_str::<Vec<String>>(source_ids_json).unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        if let Some((title, visibility, existing_body, _, existing_source_refs, _)) = existing {
+            let has_registered_owner = source_ids
+                .iter()
+                .any(|owner| !is_live_capture_owner(owner))
+                || serde_json::from_str::<Vec<MemorySourceRef>>(&existing_source_refs)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|source_ref| source_ref.registration_source_id.is_some());
+            let title_matches = title == issue_title(&issue_plan.issue);
+            let visibility_matches = visibility == config.visibility.as_str();
+            let body_matches = live_capture_payload_body(&existing_body)
+                == live_capture_payload_body(&body);
+            if has_registered_owner && (!title_matches || !visibility_matches || !body_matches) {
+                return Err(MemoryError::InvalidInput(format!(
+                    "conflicting live capture payload for registered memory source `{issue_key}` (title_match={title_matches}, visibility_match={visibility_matches}, body_match={body_matches})"
+                )));
+            }
+        }
+        let concept_id = format!("issues/{issue_key}");
+        let previous_source_scopes = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT source_id, scope_kind, scope_id FROM source_scope_refs WHERE concept_id = ?",
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map(params![&concept_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
+        let live_scope_refs = capture_scope_refs(config, issue_plan);
+        let other_source_scopes = previous_source_scopes
+            .iter()
+            .filter(|(source_id, _, _)| !is_live_capture_owner(source_id))
+            .map(|(_, scope_kind, scope_id)| (scope_kind.as_str(), scope_id.as_str()))
+            .collect::<Vec<_>>();
+        let current_live_scopes = previous_source_scopes
+            .iter()
+            .filter(|(source_id, _, _)| is_live_capture_owner(source_id))
+            .map(|(_, scope_kind, scope_id)| (scope_kind.as_str(), scope_id.as_str()))
+            .collect::<Vec<_>>();
+        scope_refs.retain(|scope| {
+            let key = (scope_kind_name(&scope.kind), scope.id.as_str());
+            !current_live_scopes.contains(&key) || other_source_scopes.contains(&key)
+        });
+        for scope_ref in &live_scope_refs {
+            if !scope_refs.contains(scope_ref) {
+                scope_refs.push(scope_ref.clone());
+            }
+        }
+        let had_legacy_live_owner = source_ids.iter().any(|owner| is_live_capture_owner(owner));
+        source_refs.retain(|source_ref| {
+            source_ref.registration_source_id.is_some()
+                || (source_ref.repo_id.is_none() && !had_legacy_live_owner)
+        });
+        let live_source_refs = issue_plan
+            .prs
+            .iter()
+            .map(|pr| MemorySourceRef {
+                kind: "github_pr".to_string(),
+                id: pr.number.to_string(),
+                url: pr.url.clone(),
+                repo_id: config.default_repository_id.clone(),
+                symbol_key: None,
+                registration_source_id: None,
+            })
+            .collect::<Vec<_>>();
+        for source_ref in live_source_refs {
+            if !source_refs.contains(&source_ref) {
+                source_refs.push(source_ref);
+            }
+        }
+        let previous_live_owners = source_ids
+            .iter()
+            .filter(|owner| is_live_capture_owner(owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        source_ids.retain(|owner| !is_live_capture_owner(owner));
+        source_ids.push(live_owner.clone());
+        let scope_refs_json = serde_json::to_string(&scope_refs)?;
+        let source_refs_json = serde_json::to_string(&source_refs)?;
+        let source_ids_json = serde_json::to_string(&source_ids)?;
         let freshness = MemoryFreshness::Current;
         transaction
             .execute("DELETE FROM issues WHERE issue_key = ?", params![issue_key])
@@ -27,7 +190,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             })?;
         transaction
             .execute(
-                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, source_ids_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     issue_key,
                     issue_title(&issue_plan.issue),
@@ -51,10 +214,11 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     "issue-capsule",
                     issue_plan.issue.description.clone(),
                     labels_json.clone(),
-                    empty_json.clone(),
-                    empty_json.clone(),
-                    empty_json.clone(),
-                    empty_json.clone(),
+                    scope_refs_json,
+                    source_refs_json,
+                    source_ids_json,
+                    serde_json::to_string(&Vec::<String>::new())?,
+                    serde_json::to_string(&Vec::<String>::new())?,
                     freshness.as_str(),
                     warnings_json,
                 ],
@@ -63,20 +227,99 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 path: config.index_path.clone(),
                 source,
             })?;
+
         transaction
             .execute(
-                "DELETE FROM issue_areas WHERE issue_key = ?",
-                params![issue_key],
+                "DELETE FROM scope_refs WHERE concept_id = ?",
+                params![format!("issues/{issue_key}")],
             )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
+        for scope_ref in &scope_refs {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    params![
+                        format!("issues/{issue_key}"),
+                        scope_kind_name(&scope_ref.kind),
+                        scope_ref.id,
+                        scope_ref.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for source_id in previous_source_scopes
+            .iter()
+            .filter(|(source_id, _, _)| is_live_capture_owner(source_id))
+            .map(|(source_id, _, _)| source_id)
+        {
+            transaction
+                .execute(
+                    "DELETE FROM source_scope_refs WHERE concept_id = ? AND source_id = ?",
+                    params![&concept_id, source_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for scope_ref in &live_scope_refs {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
+                    params![
+                        format!("issues/{issue_key}"),
+                        live_owner.clone(),
+                        scope_kind_name(&scope_ref.kind),
+                        scope_ref.id,
+                        scope_ref.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            for previous_live_owner in &previous_live_owners {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
+                        params![issue_key, previous_live_owner],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+            if had_legacy_live_owner {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
+                        params![issue_key],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
         for area in &issue_plan.areas {
             transaction
                 .execute(
-                    "INSERT INTO issue_areas (issue_key, area) VALUES (?, ?)",
-                    params![issue_key, area],
+                    "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
+                    params![issue_key, area, live_owner.clone()],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -84,44 +327,10 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 })?;
         }
 
-        transaction
-            .execute(
-                "DELETE FROM pull_requests WHERE issue_key = ?",
-                params![issue_key],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        transaction
-            .execute(
-                "DELETE FROM changed_files WHERE issue_key = ?",
-                params![issue_key],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        transaction
-            .execute("DELETE FROM checks WHERE issue_key = ?", params![issue_key])
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        transaction
-            .execute(
-                "DELETE FROM reviews WHERE issue_key = ?",
-                params![issue_key],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-
         for pr in &issue_plan.prs {
             transaction
                 .execute(
-                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         issue_key,
                         pr.number as i64,
@@ -130,6 +339,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                         pr.branch.clone(),
                         pr.merge_sha.clone(),
                         pr.merged_at.map(|value| value.to_rfc3339()),
+                        live_owner.clone(),
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -139,12 +349,13 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             for file in &pr.changed_files {
                 transaction
                     .execute(
-                        "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind, source_id) VALUES (?, ?, ?, ?, ?)",
                         params![
                             issue_key,
                             pr.number as i64,
                             file.path.to_string_lossy().to_string(),
                             file.change_kind.clone(),
+                            live_owner.clone(),
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -155,13 +366,14 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             for check in &pr.checks {
                 transaction
                     .execute(
-                        "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at, source_id) VALUES (?, ?, ?, ?, ?, ?)",
                         params![
                             issue_key,
                             pr.number as i64,
                             check.name.clone(),
                             check.conclusion.clone(),
                             check.completed_at.map(|value| value.to_rfc3339()),
+                            live_owner.clone(),
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -172,7 +384,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             for review in &pr.reviews {
                 transaction
                     .execute(
-                        "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition) VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition, source_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         params![
                             issue_key,
                             pr.number as i64,
@@ -180,6 +392,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                             review.state.clone(),
                             review.submitted_at.map(|value| value.to_rfc3339()),
                             review.disposition.clone(),
+                            live_owner.clone(),
                         ],
                     )
                     .map_err(|source| MemoryError::DuckDb {
@@ -220,6 +433,145 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             source,
         })?;
     Ok(())
+}
+
+fn preflight_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
+    let Some(connection) = open_existing_index_read_only(config)? else {
+        return Ok(());
+    };
+    if !table_has_columns(
+        &connection,
+        &config.index_path,
+        "issues",
+        &["title", "visibility", "body", "source_refs_json", "source_ids_json"],
+    )? {
+        return Ok(());
+    }
+    for issue_plan in &plan.selected {
+        let body = render_issue_capsule(config, issue_plan)?;
+        let existing = connection
+            .query_row(
+                "SELECT title, visibility, body, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
+                params![normalize_issue_key(&issue_plan.issue.identifier)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        let Some((title, visibility, existing_body, source_refs_json, source_ids_json)) = existing
+        else {
+            continue;
+        };
+        let source_ids = serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default();
+        let source_refs =
+            serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json).unwrap_or_default();
+        let has_registered_owner = source_ids.iter().any(|owner| !is_live_capture_owner(owner))
+            || source_refs
+                .iter()
+                .any(|source_ref| source_ref.registration_source_id.is_some());
+        let title_matches = title == issue_title(&issue_plan.issue);
+        let visibility_matches = visibility == config.visibility.as_str();
+        let body_matches = live_capture_payload_body(&existing_body)
+            == live_capture_payload_body(&body);
+        if has_registered_owner && (!title_matches || !visibility_matches || !body_matches) {
+            return Err(MemoryError::InvalidInput(format!(
+                "conflicting live capture payload for registered memory source `{}` (title_match={title_matches}, visibility_match={visibility_matches}, body_match={body_matches})",
+                normalize_issue_key(&issue_plan.issue.identifier)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<KnowledgeScope> {
+    let mut refs = vec![KnowledgeScope {
+        kind: KnowledgeScopeKind::WorkItem,
+        id: normalize_issue_key(&plan.issue.identifier),
+        label: Some(issue_title(&plan.issue)),
+    }];
+    if let Some(milestone) = plan.issue.milestone_id.as_ref().or(plan.issue.milestone.as_ref()) {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Milestone,
+            id: milestone.clone(),
+            label: plan.issue.milestone.clone(),
+        });
+    }
+    refs.extend(plan.areas.iter().map(|area| KnowledgeScope {
+        kind: KnowledgeScopeKind::Area,
+        id: area.clone(),
+        label: None,
+    }));
+    if let Some(project_set_id) = config.default_project_set_id.as_deref() {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::ProjectSet,
+            id: project_set_id.to_string(),
+            label: None,
+        });
+    }
+    for project_id in [plan.issue.project_id.as_ref(), plan.issue.project_slug.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !refs
+            .iter()
+            .any(|scope| scope.kind == KnowledgeScopeKind::Project && scope.id == *project_id)
+        {
+            refs.push(KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: project_id.clone(),
+                label: None,
+            });
+        }
+    }
+    let issue_projects = [plan.issue.project_id.as_ref(), plan.issue.project_slug.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    let routed_repository_id = {
+        let candidates = config
+            .repository_sources
+            .values()
+            .filter(|source| {
+                !issue_projects.is_empty()
+                    && source
+                        .project_scope_ids
+                        .iter()
+                        .any(|project| issue_projects.contains(project))
+            })
+            .map(|source| source.repository_id.clone())
+            .collect::<BTreeSet<_>>();
+        (candidates.len() == 1)
+            .then(|| candidates.into_iter().next())
+            .flatten()
+            .or_else(|| config.default_repository_id.clone())
+    }
+        .or_else(|| {
+            (config.repository_sources.len() == 1)
+                .then(|| config.repository_sources.keys().next().cloned())
+                .flatten()
+        });
+    if let Some(repository_id) = routed_repository_id.as_deref()
+        && !refs
+            .iter()
+            .any(|scope| scope.kind == KnowledgeScopeKind::Repository)
+    {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Repository,
+            id: repository_id.to_string(),
+            label: None,
+        });
+    }
+    refs
 }
 
 fn open_index(config: &MemoryConfig) -> Result<Connection, MemoryError> {
@@ -359,6 +711,7 @@ CREATE TABLE IF NOT EXISTS issues (
   tags_json TEXT NOT NULL DEFAULT '[]',
   scope_refs_json TEXT NOT NULL DEFAULT '[]',
   source_refs_json TEXT NOT NULL DEFAULT '[]',
+  source_ids_json TEXT NOT NULL DEFAULT '[]',
   links_json TEXT NOT NULL DEFAULT '[]',
   citations_json TEXT NOT NULL DEFAULT '[]',
   freshness TEXT NOT NULL DEFAULT 'unknown',
@@ -385,6 +738,10 @@ ALTER TABLE issues ADD COLUMN IF NOT EXISTS source_refs_json TEXT DEFAULT '[]';
 UPDATE issues SET source_refs_json = '[]' WHERE source_refs_json IS NULL;
 ALTER TABLE issues ALTER COLUMN source_refs_json SET DEFAULT '[]';
 ALTER TABLE issues ALTER COLUMN source_refs_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS source_ids_json TEXT DEFAULT '[]';
+UPDATE issues SET source_ids_json = '[]' WHERE source_ids_json IS NULL;
+ALTER TABLE issues ALTER COLUMN source_ids_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN source_ids_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS links_json TEXT DEFAULT '[]';
 UPDATE issues SET links_json = '[]' WHERE links_json IS NULL;
 ALTER TABLE issues ALTER COLUMN links_json SET DEFAULT '[]';
@@ -431,6 +788,10 @@ CREATE TABLE IF NOT EXISTS reviews (
   submitted_at TEXT,
   disposition TEXT
 );
+ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE changed_files ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE checks ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS source_id TEXT;
 CREATE TABLE IF NOT EXISTS areas (
   area TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -439,6 +800,43 @@ CREATE TABLE IF NOT EXISTS areas (
 CREATE TABLE IF NOT EXISTS issue_areas (
   issue_key TEXT NOT NULL,
   area TEXT NOT NULL
+);
+ALTER TABLE issue_areas ADD COLUMN IF NOT EXISTS source_id TEXT;
+CREATE TABLE IF NOT EXISTS scope_refs (
+  concept_id TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  label TEXT,
+  PRIMARY KEY (concept_id, scope_kind, scope_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scope_refs_lookup ON scope_refs(scope_kind, scope_id);
+CREATE TABLE IF NOT EXISTS source_scope_refs (
+  concept_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  label TEXT,
+  PRIMARY KEY (concept_id, source_id, scope_kind, scope_id)
+);
+CREATE INDEX IF NOT EXISTS idx_source_scope_refs_lookup
+  ON source_scope_refs(concept_id, source_id, scope_kind);
+CREATE TABLE IF NOT EXISTS registered_memory_sources (
+  source_id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  source_root TEXT NOT NULL,
+  status TEXT NOT NULL,
+  generation TEXT NOT NULL,
+  registered_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_registered_memory_sources_repository
+  ON registered_memory_sources(repository_id, commit_sha);
+CREATE TABLE IF NOT EXISTS legacy_code_imports (
+  source_index_path TEXT NOT NULL,
+  canonical_repo_id TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  PRIMARY KEY (source_index_path, canonical_repo_id)
 );
 CREATE TABLE IF NOT EXISTS doc_sync_runs (
   run_id TEXT PRIMARY KEY,
@@ -728,11 +1126,21 @@ CREATE INDEX IF NOT EXISTS idx_code_skipped_files_staging_repo ON code_skipped_f
     ))?;
     for table in [
         "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
         "code_symbols",
         "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
         "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
     ] {
         ensure_worktree_dirty_column(connection, table)?;
+        ensure_legacy_source_column(connection, table)?;
     }
     Ok(())
 }
@@ -756,10 +1164,26 @@ fn ensure_worktree_dirty_column(connection: &Connection, table: &str) -> Result<
     Ok(())
 }
 
+fn ensure_legacy_source_column(connection: &Connection, table: &str) -> Result<(), duckdb::Error> {
+    connection.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS legacy_source_path TEXT"),
+        [],
+    )?;
+    Ok(())
+}
+
 pub fn persist_code_intel_documents(
     config: &MemoryConfig,
     batch: CodeIntelPersistBatch,
 ) -> Result<CodeIntelPersistReport, MemoryError> {
+    if !config.repository_sources.is_empty()
+        && !config.repository_sources.contains_key(&batch.repo_id)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "code-intelligence repository `{}` is not a registered canonical repository",
+            batch.repo_id
+        )));
+    }
     persist_code_intel_documents_with_freshness(config, batch, "current", true)
 }
 
@@ -780,6 +1204,34 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             path: config.index_path.clone(),
             source,
         })?;
+    if freshness == "current"
+        && !batch.worktree_dirty
+        && !config.repository_sources.is_empty()
+        && let Some(commit_sha) = batch.commit_sha.as_deref()
+    {
+        let registered_commit = match transaction.query_row(
+            "SELECT commit_sha FROM registered_memory_sources WHERE repository_id = ? ORDER BY registered_at DESC LIMIT 1",
+            params![batch.repo_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(commit) => Some(commit),
+            Err(duckdb::Error::QueryReturnedNoRows) => None,
+            Err(source) => {
+                return Err(MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                });
+            }
+        };
+        if let Some(registered_commit) = registered_commit
+            && registered_commit != commit_sha
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "code-intelligence commit `{commit_sha}` does not match registered source generation `{registered_commit}` for `{}`",
+                batch.repo_id
+            )));
+        }
+    }
     let indexed_at = Utc::now().to_rfc3339();
     let mut report = CodeIntelPersistReport {
         parsed_files: batch.documents.len(),
@@ -1180,6 +1632,11 @@ pub fn persist_code_intel_skipped_files(
     worktree_dirty: bool,
     skipped_files: &[CodeIntelSkippedFileInput],
 ) -> Result<usize, MemoryError> {
+    if !config.repository_sources.is_empty() && !config.repository_sources.contains_key(repo_id) {
+        return Err(MemoryError::InvalidInput(format!(
+            "code-intelligence repository `{repo_id}` is not a registered canonical repository"
+        )));
+    }
     persist_code_intel_skipped_files_with_freshness(
         config,
         repo_id,
@@ -1217,6 +1674,29 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
             path: config.index_path.clone(),
             source,
         })?;
+    if freshness == "current" && !config.repository_sources.is_empty() {
+        let registered_commit = match transaction.query_row(
+            "SELECT commit_sha FROM registered_memory_sources WHERE repository_id = ? ORDER BY registered_at DESC LIMIT 1",
+            params![repo_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(commit) => Some(commit),
+            Err(duckdb::Error::QueryReturnedNoRows) => None,
+            Err(source) => {
+                return Err(MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                });
+            }
+        };
+        if let Some(registered_commit) = registered_commit
+            && registered_commit != commit_sha
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "code-intelligence commit `{commit_sha}` does not match registered source generation `{registered_commit}` for `{repo_id}`"
+            )));
+        }
+    }
     let indexed_at = Utc::now().to_rfc3339();
     for skipped in skipped_files {
         let path = skipped.path.to_string_lossy().to_string();
@@ -2199,6 +2679,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 labels: serde_json::from_str::<Vec<String>>(&labels_json).unwrap_or_default(),
                 tags: serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default(),
                 areas: Vec::new(),
+                area_source_ids: BTreeMap::new(),
                 capsule_path: PathBuf::from(row.get::<_, String>(5)?),
                 visibility: match row.get::<_, String>(6)?.as_str() {
                     "public" => MemoryVisibility::Public,
@@ -2212,6 +2693,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 changed_files: Vec::new(),
                 scope_refs: serde_json::from_str::<Vec<KnowledgeScope>>(&scope_refs_json)
                     .unwrap_or_default(),
+                source_scope_refs: BTreeMap::new(),
                 source_refs: serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json)
                     .unwrap_or_default(),
                 links: serde_json::from_str::<Vec<OkfLink>>(&links_json).unwrap_or_default(),
@@ -2242,7 +2724,15 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
     drop(statement);
 
     for issue in &mut issues {
-        issue.areas = load_issue_areas(&connection, &issue.issue_key).map_err(|source| {
+        let (areas, area_source_ids) = load_issue_areas(&connection, &issue.issue_key).map_err(|source| {
+            MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }
+        })?;
+        issue.areas = areas;
+        issue.area_source_ids = area_source_ids;
+        issue.source_scope_refs = load_issue_source_scopes(&connection, &issue.concept_id).map_err(|source| {
             MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
@@ -2271,7 +2761,7 @@ fn load_pull_requests_by_issue(
     let connection = open_index_read_only(config)?;
     let mut statement = connection
         .prepare(
-            "SELECT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests ORDER BY issue_key, number",
+            "SELECT DISTINCT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests ORDER BY issue_key, number, merged_at NULLS LAST",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -2307,23 +2797,80 @@ fn load_pull_requests_by_issue(
             path: config.index_path.clone(),
             source,
         })?;
-        by_issue.entry(issue_key).or_default().push(pr);
+        let entries = by_issue.entry(issue_key).or_default();
+        // Source ownership is retained in DuckDB, but identical evidence from
+        // two owners is one logical read-model item.
+        if !entries.iter().any(|existing| existing == &pr) {
+            entries.push(pr);
+        }
     }
     Ok(by_issue)
 }
 
+type IndexedIssueAreas = (Vec<String>, BTreeMap<String, BTreeSet<String>>);
+
 fn load_issue_areas(
     connection: &Connection,
     issue_key: &str,
-) -> Result<Vec<String>, duckdb::Error> {
+) -> Result<IndexedIssueAreas, duckdb::Error> {
     let mut statement =
-        connection.prepare("SELECT area FROM issue_areas WHERE issue_key = ? ORDER BY area")?;
-    let rows = statement.query_map(params![issue_key], |row| row.get::<_, String>(0))?;
-    let mut areas = Vec::new();
+        connection.prepare("SELECT area, source_id FROM issue_areas WHERE issue_key = ? ORDER BY area")?;
+    let rows = statement.query_map(params![issue_key], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut area_source_ids = BTreeMap::<String, BTreeSet<String>>::new();
     for row in rows {
-        areas.push(row?);
+        let (area, source_id) = row?;
+        area_source_ids
+            .entry(area)
+            .or_default()
+            .insert(source_id.unwrap_or_default());
     }
-    Ok(areas)
+    Ok((area_source_ids.keys().cloned().collect(), area_source_ids))
+}
+
+fn load_issue_source_scopes(
+    connection: &Connection,
+    concept_id: &str,
+) -> Result<BTreeMap<String, Vec<KnowledgeScope>>, duckdb::Error> {
+    let mut statement = connection.prepare(
+        "SELECT source_id, scope_kind, scope_id, label FROM source_scope_refs WHERE concept_id = ? ORDER BY source_id, scope_kind, scope_id",
+    )?;
+    let rows = statement.query_map(params![concept_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut source_scopes = BTreeMap::new();
+    for row in rows {
+        let (source_id, kind, id, label) = row?;
+        let Some(kind) = parse_scope_kind(&kind) else {
+            continue;
+        };
+        source_scopes
+            .entry(source_id)
+            .or_insert_with(Vec::new)
+            .push(KnowledgeScope { kind, id, label });
+    }
+    Ok(source_scopes)
+}
+
+fn parse_scope_kind(value: &str) -> Option<KnowledgeScopeKind> {
+    Some(match value {
+        "local_instance" => KnowledgeScopeKind::LocalInstance,
+        "organization" => KnowledgeScopeKind::Organization,
+        "project_set" => KnowledgeScopeKind::ProjectSet,
+        "project" => KnowledgeScopeKind::Project,
+        "milestone" => KnowledgeScopeKind::Milestone,
+        "work_item" => KnowledgeScopeKind::WorkItem,
+        "repository" => KnowledgeScopeKind::Repository,
+        "code_path" => KnowledgeScopeKind::CodePath,
+        "area" => KnowledgeScopeKind::Area,
+        _ => return None,
+    })
 }
 
 fn load_issue_changed_files(
@@ -2331,7 +2878,7 @@ fn load_issue_changed_files(
     issue_key: &str,
 ) -> Result<Vec<PathBuf>, duckdb::Error> {
     let mut statement = connection
-        .prepare("SELECT file_path FROM changed_files WHERE issue_key = ? ORDER BY file_path")?;
+        .prepare("SELECT DISTINCT file_path FROM changed_files WHERE issue_key = ? ORDER BY file_path")?;
     let rows = statement.query_map(params![issue_key], |row| {
         Ok(PathBuf::from(row.get::<_, String>(0)?))
     })?;
@@ -2438,8 +2985,1043 @@ pub fn refresh_memory_index_from_okf(
     config: &MemoryConfig,
     bundle_root: &Path,
 ) -> Result<MemoryReindexReport, MemoryError> {
-    ensure_repo_contained(&config.repo_root, bundle_root)?;
+    refresh_memory_index_from_okf_inner(config, bundle_root, true, None, None)
+}
+
+pub fn merge_memory_index_from_okf(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+    repository_id: &str,
+    source_id: &str,
+) -> Result<MemoryReindexReport, MemoryError> {
+    refresh_memory_index_from_okf_inner(
+        config,
+        bundle_root,
+        false,
+        Some(repository_id),
+        Some(source_id),
+    )
+}
+
+pub fn merge_legacy_code_index(
+    config: &MemoryConfig,
+    source_config: &MemoryConfig,
+    legacy_repo_id: &str,
+    canonical_repo_id: &str,
+) -> Result<(), MemoryError> {
+    if source_config.index_path == config.index_path {
+        return Ok(());
+    }
+    let Some(source_connection) = open_existing_index_read_only(source_config)? else {
+        return withdraw_imported_legacy_code(config, source_config, canonical_repo_id);
+    };
+    let tables: &[(&str, &[&str])] = &[
+        (
+            "code_documents",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_id",
+                "parser_version",
+                "query_pack_version",
+                "byte_len",
+                "line_count",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_documents_staging",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_id",
+                "parser_version",
+                "query_pack_version",
+                "byte_len",
+                "line_count",
+                "indexed_at",
+            ],
+        ),
+        (
+            "code_document_revisions",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_id",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_symbols",
+            &[
+                "symbol_id",
+                "symbol_key",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "kind",
+                "name",
+                "container_symbol_id",
+                "container_chain",
+                "signature",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "selection_start_line",
+                "selection_end_line",
+                "content_sha256",
+                "snippet_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_edges",
+            &[
+                "edge_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "edge_kind",
+                "source_symbol_id",
+                "source_symbol_key",
+                "target_symbol_id",
+                "target_symbol_key",
+                "target_hint",
+                "confidence",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_edge_revisions",
+            &[
+                "edge_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "edge_kind",
+                "source_symbol_id",
+                "source_symbol_key",
+                "target_symbol_id",
+                "target_symbol_key",
+                "target_hint",
+                "confidence",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_skipped_files",
+            &[
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "reason",
+                "content_sha256",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_skipped_files_staging",
+            &[
+                "repo_id",
+                "commit_sha",
+                "path",
+                "reason",
+                "content_sha256",
+                "indexed_at",
+            ],
+        ),
+        (
+            "code_diagnostics",
+            &[
+                "diagnostic_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "kind",
+                "severity",
+                "message",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_diagnostic_revisions",
+            &[
+                "diagnostic_id",
+                "repo_id",
+                "commit_sha",
+                "worktree_dirty",
+                "path",
+                "language",
+                "kind",
+                "severity",
+                "message",
+                "start_line",
+                "start_col",
+                "end_line",
+                "end_col",
+                "start_byte",
+                "end_byte",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "indexed_at",
+                "freshness",
+            ],
+        ),
+        (
+            "code_index_snapshots",
+            &[
+                "repo_id",
+                "commit_sha",
+                "target_branch",
+                "status",
+                "total_files",
+                "parsed_files",
+                "skipped_files",
+                "deleted_files",
+                "config_fingerprint",
+                "indexed_at",
+            ],
+        ),
+        (
+            "code_snapshot_membership",
+            &[
+                "repo_id",
+                "commit_sha",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "analyzed",
+                "skip_reason",
+            ],
+        ),
+        (
+            "code_snapshot_membership_staging",
+            &[
+                "run_id",
+                "repo_id",
+                "commit_sha",
+                "path",
+                "language",
+                "content_sha256",
+                "parser_version",
+                "query_pack_version",
+                "analyzed",
+                "skip_reason",
+            ],
+        ),
+    ];
+    let mut tables_to_copy = Vec::new();
+    for (table, columns) in tables {
+        if !table_has_columns(&source_connection, &source_config.index_path, table, &["repo_id"])? {
+            continue;
+        }
+        let count: i64 = source_connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repo_id = ?"),
+                [legacy_repo_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        if count == 0 {
+            continue;
+        }
+        if !table_has_columns(&source_connection, &source_config.index_path, table, columns)? {
+            return Err(MemoryError::InvalidInput(format!(
+                "legacy code index `{}` has an unsupported `{table}` schema",
+                source_config.index_path.display()
+            )));
+        }
+        tables_to_copy.push((*table, columns.join(", ")));
+    }
+    if tables_to_copy.is_empty() {
+        drop(source_connection);
+        return withdraw_imported_legacy_code(config, source_config, canonical_repo_id);
+    }
+
+    withdraw_imported_legacy_code(config, source_config, canonical_repo_id)?;
+
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let escaped_source_path = source_config
+        .index_path
+        .to_string_lossy()
+        .replace('\'', "''");
+    connection
+        .execute_batch(&format!(
+            "ATTACH '{}' AS legacy_memory_source (READ_ONLY)",
+            escaped_source_path
+        ))
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let copy_result = (|| {
+        let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+        for (table, _) in tables {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE repo_id = ?"),
+                    [legacy_repo_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for (table, columns) in &tables_to_copy {
+            transaction
+                .execute(
+                    &format!(
+                        "INSERT OR IGNORE INTO {table} ({columns}) SELECT {columns} FROM legacy_memory_source.{table} WHERE repo_id = ?"
+                    ),
+                    [legacy_repo_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    &format!("UPDATE {table} SET legacy_source_path = ? WHERE repo_id = ?"),
+                    params![source_config.index_path.to_string_lossy().to_string(), legacy_repo_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO legacy_code_imports (source_index_path, canonical_repo_id, imported_at) VALUES (?, ?, CAST(current_timestamp AS TEXT))",
+                params![source_config.index_path.to_string_lossy().to_string(), canonical_repo_id],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction.commit().map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })
+    })();
+    let detach_result = connection
+        .execute_batch("DETACH legacy_memory_source")
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        });
+    copy_result?;
+    detach_result?;
+    drop(source_connection);
+    drop(connection);
+    migrate_code_repository_identity(config, legacy_repo_id, canonical_repo_id)
+}
+
+fn withdraw_imported_legacy_code(
+    config: &MemoryConfig,
+    source_config: &MemoryConfig,
+    canonical_repo_id: &str,
+) -> Result<(), MemoryError> {
+    let source_index_path = source_config.index_path.to_string_lossy().to_string();
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let imported = connection
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_code_imports WHERE source_index_path = ? AND canonical_repo_id = ?",
+            params![source_index_path, canonical_repo_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    if imported == 0 {
+        return Ok(());
+    }
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE repo_id = ? AND legacy_source_path = ?"),
+                params![canonical_repo_id, source_config.index_path.to_string_lossy().to_string()],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM legacy_code_imports WHERE source_index_path = ? AND canonical_repo_id = ?",
+            params![source_config.index_path.to_string_lossy().to_string(), canonical_repo_id],
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
+pub fn merge_legacy_memory_index(
+    config: &MemoryConfig,
+    source_config: &MemoryConfig,
+    source_id: &str,
+) -> Result<(), MemoryError> {
+    let Some(source_connection) = open_existing_index_read_only(source_config)? else {
+        return Ok(());
+    };
+    let areas = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, area FROM issue_areas")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let pull_requests = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, number, title, url, branch, merge_sha, merged_at FROM pull_requests")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let changed_files = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, pr_number, file_path, change_kind FROM changed_files")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let checks = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, pr_number, name, conclusion, completed_at FROM checks")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+    let reviews = {
+        let mut statement = source_connection
+            .prepare("SELECT issue_key, pr_number, reviewer, state, submitted_at, disposition FROM reviews")
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: source_config.index_path.clone(),
+                source,
+            })?
+    };
+
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let owned = {
+        let mut statement = transaction
+            .prepare("SELECT issue_key, source_ids_json FROM issues")
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .into_iter()
+            .filter_map(|(issue_key, encoded)| {
+                serde_json::from_str::<Vec<String>>(&encoded)
+                    .ok()
+                    .filter(|ids| ids.iter().any(|id| id == source_id))
+                    .map(|ids| (issue_key, ids))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    for (issue_key, source_ids) in &owned {
+        if source_ids.len() <= 1 {
+            continue;
+        }
+        let preserves_live_relations = source_ids.iter().any(|owner| is_live_capture_owner(owner));
+        let source_ids = source_ids
+            .iter()
+            .filter(|owner| source_id_belongs_to_configured_repository(config, owner))
+            .collect::<Vec<_>>();
+        for owner in source_ids {
+            transaction
+                .execute(
+                    "INSERT INTO issue_areas (issue_key, area, source_id) SELECT issue_key, area, ? FROM issue_areas WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM issue_areas AS existing WHERE existing.issue_key = issue_areas.issue_key AND existing.area = issue_areas.area AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) SELECT issue_key, number, title, url, branch, merge_sha, merged_at, ? FROM pull_requests WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM pull_requests AS existing WHERE existing.issue_key = pull_requests.issue_key AND existing.number = pull_requests.number AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind, source_id) SELECT issue_key, pr_number, file_path, change_kind, ? FROM changed_files WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM changed_files AS existing WHERE existing.issue_key = changed_files.issue_key AND existing.pr_number = changed_files.pr_number AND existing.file_path = changed_files.file_path AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at, source_id) SELECT issue_key, pr_number, name, conclusion, completed_at, ? FROM checks WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM checks AS existing WHERE existing.issue_key = checks.issue_key AND existing.pr_number = checks.pr_number AND existing.name = checks.name AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition, source_id) SELECT issue_key, pr_number, reviewer, state, submitted_at, disposition, ? FROM reviews WHERE issue_key = ? AND source_id IS NULL AND NOT EXISTS (SELECT 1 FROM reviews AS existing WHERE existing.issue_key = reviews.issue_key AND existing.pr_number = reviews.pr_number AND existing.reviewer IS NOT DISTINCT FROM reviews.reviewer AND existing.submitted_at IS NOT DISTINCT FROM reviews.submitted_at AND existing.source_id = ?)",
+                    params![owner, issue_key, owner],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        if !preserves_live_relations {
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id IS NULL"),
+                        [issue_key],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+    }
+    for table in [
+        "issue_areas",
+        "pull_requests",
+        "changed_files",
+        "checks",
+        "reviews",
+    ] {
+        transaction
+            .execute(&format!("DELETE FROM {table} WHERE source_id = ?"), [source_id])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    for (issue_key, source_ids) in &owned {
+        if source_ids.len() == 1 {
+            for table in [
+                "issue_areas",
+                "pull_requests",
+                "changed_files",
+                "checks",
+                "reviews",
+            ] {
+                transaction
+                    .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [issue_key])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+    }
+    for (issue_key, area) in areas.into_iter().filter(|(key, _)| owned.contains_key(key)) {
+        transaction.execute(
+            "INSERT INTO issue_areas (issue_key, area, source_id) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ? AND source_id IS NOT DISTINCT FROM ?)",
+            params![issue_key, area, source_id, issue_key, area, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, title, url, branch, merge_sha, merged_at) in pull_requests.into_iter().filter(|row| owned.contains_key(&row.0)) {
+        transaction.execute(
+            "UPDATE pull_requests SET title = ?, url = ?, branch = ?, merge_sha = ?, merged_at = ? WHERE issue_key = ? AND number = ? AND source_id = ?",
+            params![title, url, branch, merge_sha, merged_at, issue_key, number, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
+            "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ? AND source_id = ?)",
+            params![issue_key, number, title, url, branch, merge_sha, merged_at, source_id, issue_key, number, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, path, kind) in changed_files.into_iter().filter(|row| owned.contains_key(&row.0)) {
+        transaction.execute(
+            "UPDATE changed_files SET change_kind = ? WHERE issue_key = ? AND pr_number = ? AND file_path = ? AND source_id = ?",
+            params![kind, issue_key, number, path, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
+            "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind, source_id) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM changed_files WHERE issue_key = ? AND pr_number = ? AND file_path = ? AND source_id = ?)",
+            params![issue_key, number, path, kind, source_id, issue_key, number, path, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, name, conclusion, completed_at) in checks.into_iter().filter(|row| owned.contains_key(&row.0)) {
+        transaction.execute(
+            "UPDATE checks SET conclusion = ?, completed_at = ? WHERE issue_key = ? AND pr_number = ? AND name = ? AND source_id = ?",
+            params![conclusion, completed_at, issue_key, number, name, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
+            "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at, source_id) SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM checks WHERE issue_key = ? AND pr_number = ? AND name = ? AND source_id = ?)",
+            params![issue_key, number, name, conclusion, completed_at, source_id, issue_key, number, name, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    for (issue_key, number, reviewer, state, submitted_at, disposition) in reviews.into_iter().filter(|row| owned.contains_key(&row.0)) {
+        transaction.execute(
+            "UPDATE reviews SET state = ?, disposition = ? WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ? AND source_id = ?",
+            params![state, disposition, issue_key, number, reviewer, submitted_at, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+        transaction.execute(
+            "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition, source_id) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM reviews WHERE issue_key = ? AND pr_number = ? AND reviewer IS NOT DISTINCT FROM ? AND submitted_at IS NOT DISTINCT FROM ? AND source_id = ?)",
+            params![issue_key, number, reviewer, state, submitted_at, disposition, source_id, issue_key, number, reviewer, submitted_at, source_id],
+        ).map_err(|source| MemoryError::DuckDb { path: config.index_path.clone(), source })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
+pub fn backfill_legacy_memory_source_scopes(
+    config: &MemoryConfig,
+    repository_id: &str,
+    source_id: &str,
+) -> Result<(), MemoryError> {
+    let project_scope_ids = config
+        .repository_sources
+        .get(repository_id)
+        .map(|source| source.project_scope_ids.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_else(|| config.project_scope_ids.iter().cloned().collect());
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    transaction
+        .execute(
+            "DELETE FROM source_scope_refs WHERE source_id = ?",
+            [source_id],
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT issue_key, concept_id, scope_refs_json, source_refs_json, source_ids_json FROM issues")
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?
+    };
+    for (issue_key, concept_id, encoded_scopes, encoded_sources, encoded_source_ids) in rows {
+        let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
+        let has_registered_owner = source_ids.iter().any(|value| !is_live_capture_owner(value));
+        if has_registered_owner && !source_ids.iter().any(|value| value == source_id) {
+            continue;
+        }
+        if !has_registered_owner {
+            let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes).unwrap_or_default();
+            let source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources).unwrap_or_default();
+            let repository_scopes = scopes
+                .iter()
+                .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+                .map(|scope| scope.id.as_str())
+                .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+                .collect::<BTreeSet<_>>();
+            let evidenced_repositories = if repository_scopes.is_empty() {
+                let mut repositories = source_refs
+                    .iter()
+                    .filter_map(|source| source.repo_id.as_deref())
+                    .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+                    .collect::<BTreeSet<_>>();
+                for source in config.repository_sources.values() {
+                    if scopes.iter().any(|scope| {
+                        scope.kind == KnowledgeScopeKind::Project
+                            && source.project_scope_ids.contains(&scope.id)
+                    }) {
+                        repositories.insert(source.repository_id.as_str());
+                    }
+                }
+                repositories
+            } else {
+                repository_scopes
+            };
+            if evidenced_repositories.len() > 1 {
+                return Err(MemoryError::InvalidInput(format!(
+                    "ambiguous ownerless legacy memory row `{issue_key}` cannot be assigned to `{repository_id}`"
+                )));
+            }
+            if let Some(evidenced_repository) = evidenced_repositories.first()
+                && *evidenced_repository != repository_id
+            {
+                continue;
+            }
+            if evidenced_repositories.is_empty() && config.repository_sources.len() > 1 {
+                return Err(MemoryError::InvalidInput(format!(
+                    "ambiguous ownerless legacy memory row `{issue_key}` cannot be assigned while multiple repositories share the catalog"
+                )));
+            }
+        }
+        if !source_ids.iter().any(|value| value == source_id) {
+            source_ids.push(source_id.to_string());
+        }
+        let mut scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes).unwrap_or_default();
+        let mut add_scope = |kind: KnowledgeScopeKind, id: String| {
+            if !scopes.iter().any(|scope| scope.kind == kind && scope.id == id) {
+                scopes.push(KnowledgeScope { kind, id, label: None });
+            }
+        };
+        add_scope(KnowledgeScopeKind::Repository, repository_id.to_string());
+        if let Some(project_set_id) = config.default_project_set_id.as_deref() {
+            add_scope(KnowledgeScopeKind::ProjectSet, project_set_id.to_string());
+        }
+        for project_id in &project_scope_ids {
+            add_scope(KnowledgeScopeKind::Project, project_id.clone());
+        }
+        let source_scopes = scopes
+            .iter()
+            .filter(|scope| match &scope.kind {
+                KnowledgeScopeKind::Repository => scope.id == repository_id,
+                KnowledgeScopeKind::ProjectSet => config
+                    .default_project_set_id
+                    .as_deref()
+                    .is_some_and(|id| id == scope.id),
+                KnowledgeScopeKind::Project => project_scope_ids.iter().any(|id| id == &scope.id),
+                _ => false,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources).unwrap_or_default();
+        let source_ref = MemorySourceRef {
+            kind: "legacy_store".to_string(),
+            id: source_id.to_string(),
+            url: None,
+            repo_id: Some(repository_id.to_string()),
+            symbol_key: None,
+            registration_source_id: Some(source_id.to_string()),
+        };
+        if !source_refs.contains(&source_ref) {
+            source_refs.push(source_ref);
+        }
+        let scopes_json = serde_json::to_string(&scopes)?;
+        transaction
+            .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        for scope in &scopes {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    duckdb::params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        for scope in &source_scopes {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
+                    duckdb::params![
+                        concept_id,
+                        source_id,
+                        scope_kind_name(&scope.kind),
+                        scope.id,
+                        scope.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        transaction
+            .execute(
+                "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![
+                    serde_json::to_string(&source_ids)?,
+                    scopes_json,
+                    serde_json::to_string(&source_refs)?,
+                    issue_key,
+                ],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
+fn source_id_belongs_to_configured_repository(config: &MemoryConfig, source_id: &str) -> bool {
+    config
+        .repository_sources
+        .values()
+        .any(|source| {
+            source_id.starts_with(&format!("{}:", source.repository_id))
+                || source_id == live_capture_owner(Some(&source.repository_id))
+        })
+}
+
+fn refresh_memory_index_from_okf_inner(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+    replace_existing: bool,
+    repository_id: Option<&str>,
+    source_id: Option<&str>,
+) -> Result<MemoryReindexReport, MemoryError> {
     let bundle_root = canonicalize_existing_path(bundle_root)?;
+    let is_central_catalog_bundle = canonicalize_existing_prefix(&config.memory_root)
+        .is_ok_and(|memory_root| bundle_root == memory_root);
+    let containment_root = if is_central_catalog_bundle {
+        config.containment_root.as_deref().unwrap_or(&config.repo_root)
+    } else {
+        &config.repo_root
+    };
+    ensure_repo_contained(containment_root, &bundle_root)?;
     let lint = lint_okf_bundle_with_codes(&bundle_root, false)?;
     let errors = lint
         .findings
@@ -2482,19 +4064,100 @@ pub fn refresh_memory_index_from_okf(
     let mut rows = Vec::new();
     for path in files {
         let relative = bundle_relative_path(&bundle_root, &path)?;
-        let bundle_path = OkfBundlePath::new(relative)?;
+        let bundle_path = OkfBundlePath::new(&relative)?;
         if bundle_path.reserved_file().is_some() {
             continue;
         }
         let contents = read_to_string(&path)?;
         let concept = parse_okf_concept(&bundle_root, &path, &contents)?;
-        rows.push(OkfIndexRow::from_concept(
+        let has_work_item_identity = okf_has_work_item_identity(&concept, &concept.frontmatter.opensymphony);
+        let mut row = OkfIndexRow::from_concept(
             config,
-            path.clone(),
+            relative.clone(),
             concept,
             contents,
             warnings_by_path.remove(&path).unwrap_or_default(),
-        )?);
+        )?;
+        if let Some(source_id) = source_id
+            && !has_work_item_identity
+        {
+            row.issue_key = format!("{source_id}:{}", row.issue_key);
+            row.concept_id = format!("{source_id}:{}", row.concept_id);
+        }
+        if let Some(repository_id) = repository_id {
+            let mut scope_refs =
+                serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+                    .unwrap_or_default();
+            if !scope_refs.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Repository && scope.id == repository_id
+            }) {
+                scope_refs.push(KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: repository_id.to_string(),
+                    label: None,
+                });
+                row.scope_refs_json = serde_json::to_string(&scope_refs)?;
+            }
+        }
+        if let Some(source_id) = source_id {
+            let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(
+                &row.source_refs_json,
+            )
+            .unwrap_or_default();
+            for source_ref in &mut source_refs {
+                source_ref.registration_source_id = Some(source_id.to_string());
+            }
+            row.source_refs_json = serde_json::to_string(&source_refs)?;
+        }
+        let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+            .unwrap_or_default();
+        if let Some(repository_id) = repository_id {
+            let project_scope_ids = config
+                .repository_sources
+                .get(repository_id)
+                .map(|source| &source.project_scope_ids);
+            scope_refs.retain(|scope| match &scope.kind {
+                KnowledgeScopeKind::Project => project_scope_ids
+                    .is_some_and(|project_scope_ids| project_scope_ids.contains(&scope.id)),
+                KnowledgeScopeKind::ProjectSet => config
+                    .default_project_set_id
+                    .as_deref()
+                    .is_some_and(|project_set_id| project_set_id == scope.id),
+                _ => true,
+            });
+        }
+        if let Some(project_set_id) = config.default_project_set_id.as_deref()
+            && !scope_refs
+                .iter()
+                .any(|scope| scope.kind == KnowledgeScopeKind::ProjectSet)
+        {
+            scope_refs.push(KnowledgeScope {
+                kind: KnowledgeScopeKind::ProjectSet,
+                id: project_set_id.to_string(),
+                label: None,
+            });
+        }
+        let project_scope_ids = repository_id
+            .and_then(|repository_id| config.repository_sources.get(repository_id))
+            .map(|source| &source.project_scope_ids)
+            .unwrap_or(&config.project_scope_ids);
+        if !scope_refs
+            .iter()
+            .any(|scope| scope.kind == KnowledgeScopeKind::Project)
+        {
+            for project_id in project_scope_ids {
+                scope_refs.push(KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: project_id.clone(),
+                    label: None,
+                });
+            }
+        }
+        row.scope_refs_json = serde_json::to_string(&scope_refs)?;
+        if let Some(source_id) = source_id {
+            row.source_ids_json = serde_json::to_string(&vec![source_id])?;
+        }
+        rows.push(row);
     }
 
     let mut connection = open_index(config)?;
@@ -2502,33 +4165,623 @@ pub fn refresh_memory_index_from_okf(
         path: config.index_path.clone(),
         source,
     })?;
+    if let Some(source_id) = source_id
+        && !replace_existing
+    {
+        preflight_merge_conflicts(&connection, &rows, source_id, config)?;
+    }
     let transaction = connection
         .transaction()
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
         })?;
-    for table in [
-        "issues",
-        "issue_areas",
-        "pull_requests",
-        "changed_files",
-        "checks",
-        "reviews",
-        "areas",
-    ] {
+    if let Some(source_id) = source_id {
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            transaction
+                .execute(&format!("DELETE FROM {table} WHERE source_id = ?"), [source_id])
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+            })?;
+        }
         transaction
-            .execute(&format!("DELETE FROM {table}"), [])
+            .execute(
+                "DELETE FROM source_scope_refs WHERE source_id = ?",
+                [source_id],
+            )
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
     }
-
-    for row in &rows {
+    if replace_existing {
         transaction
             .execute(
-                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "UPDATE registered_memory_sources SET status = 'pending'",
+                [],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction
+            .execute(
+                "DELETE FROM scope_refs WHERE concept_id IN (SELECT concept_id FROM issues)",
+                [],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        transaction
+            .execute("DELETE FROM source_scope_refs", [])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        for table in [
+            "issues",
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+            "areas",
+        ] {
+            transaction
+                .execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+    }
+
+    let issue_insert = if replace_existing {
+        "INSERT INTO"
+    } else {
+        "INSERT OR REPLACE INTO"
+    };
+    if let Some(source_id) = source_id {
+        let registered_source_repositories = {
+            let mut statement = transaction
+                .prepare("SELECT source_id, repository_id FROM registered_memory_sources")
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
+        let registered_reimport_sources = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT source_id FROM registered_memory_sources WHERE source_kind IN ('legacy_store', 'okf_bundle')",
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
+        let incoming = rows
+            .iter()
+            .map(|row| row.concept_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let stale = {
+            let mut statement = transaction
+                .prepare("SELECT issue_key, concept_id, source_ids_json, scope_refs_json, source_refs_json FROM issues")
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        };
+        for (issue_key, concept_id, encoded_source_ids, encoded_scopes, encoded_sources) in stale {
+            let mut source_ids = serde_json::from_str::<Vec<String>>(&encoded_source_ids)
+                .unwrap_or_default();
+            if incoming.contains(concept_id.as_str())
+                || !source_ids.iter().any(|value| value == source_id)
+            {
+                continue;
+            }
+            source_ids.retain(|value| value != source_id);
+            if source_ids.is_empty() {
+                transaction
+                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                transaction
+                    .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                for table in [
+                    "issue_areas",
+                    "pull_requests",
+                    "changed_files",
+                    "checks",
+                    "reviews",
+                ] {
+                    transaction
+                        .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                }
+            } else {
+                let surviving_reimport_sources = source_ids
+                    .iter()
+                    .filter(|owner| registered_reimport_sources.contains(*owner))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let has_surviving_live_owner =
+                    source_ids.iter().any(|owner| is_live_capture_owner(owner));
+                if has_surviving_live_owner {
+                    let surviving_source_scopes = {
+                        let mut statement = transaction
+                            .prepare(
+                                "SELECT source_id, scope_kind, scope_id, label FROM source_scope_refs WHERE concept_id = ?",
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                        statement
+                            .query_map([&concept_id], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, Option<String>>(3)?,
+                                ))
+                            })
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                    };
+                    let mut scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|scope| {
+                            matches!(
+                                scope.kind,
+                                KnowledgeScopeKind::LocalInstance
+                                    | KnowledgeScopeKind::Organization
+                                    | KnowledgeScopeKind::WorkItem
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    for (owner, kind, id, label) in surviving_source_scopes {
+                        if source_ids.contains(&owner)
+                            && let Some(kind) = parse_scope_kind(&kind)
+                        {
+                            let scope = KnowledgeScope { kind, id, label };
+                            if !scopes.contains(&scope) {
+                                scopes.push(scope);
+                            }
+                        }
+                    }
+                    let sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|source| {
+                            source.registration_source_id.as_deref() != Some(source_id)
+                                && !(source.registration_source_id.is_none()
+                                    && source.id == source_id)
+                        })
+                        .collect::<Vec<_>>();
+                    transaction
+                        .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    for scope in &scopes {
+                        transaction
+                            .execute(
+                                "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                                params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = ?",
+                            params![
+                                serde_json::to_string(&source_ids)?,
+                                serde_json::to_string(&scopes)?,
+                                serde_json::to_string(&sources)?,
+                                issue_key,
+                            ],
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    for surviving_source_id in surviving_reimport_sources {
+                        transaction
+                            .execute(
+                                "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
+                                [&surviving_source_id],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    continue;
+                }
+                if !surviving_reimport_sources.is_empty() {
+                    transaction
+                        .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    transaction
+                        .execute(
+                            "DELETE FROM source_scope_refs WHERE concept_id = ?",
+                            [&concept_id],
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    transaction
+                        .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    for table in [
+                        "issue_areas",
+                        "pull_requests",
+                        "changed_files",
+                        "checks",
+                        "reviews",
+                    ] {
+                        transaction
+                            .execute(
+                                &format!("DELETE FROM {table} WHERE issue_key = ?"),
+                                [&issue_key],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    for surviving_source_id in surviving_reimport_sources {
+                        transaction
+                            .execute(
+                                "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
+                                [&surviving_source_id],
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                    }
+                    continue;
+                }
+                let source_scope_rows = {
+                    let mut statement = transaction
+                        .prepare(
+                            "SELECT source_id, scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                    statement
+                        .query_map([&concept_id], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?
+                };
+                let remaining_project_scopes = if source_scope_rows.is_empty() {
+                    source_ids
+                        .iter()
+                        .filter_map(|owner| {
+                            source_owner_repository_id(&registered_source_repositories, owner)
+                        })
+                        .filter_map(|repository_id| config.repository_sources.get(repository_id))
+                        .flat_map(|source| source.project_scope_ids.iter())
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                } else {
+                    source_scope_rows
+                        .into_iter()
+                        .filter(|(owner, _)| source_ids.contains(owner))
+                        .map(|(_, scope_id)| scope_id)
+                        .collect::<BTreeSet<_>>()
+                };
+                let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|scope| match &scope.kind {
+                        KnowledgeScopeKind::Repository => source_ids.iter().any(|owner| {
+                            source_owner_repository_id(&registered_source_repositories, owner)
+                                .is_some_and(|repository_id| repository_id == scope.id)
+                        }),
+                        KnowledgeScopeKind::Project => {
+                            remaining_project_scopes.contains(&scope.id)
+                        }
+                        KnowledgeScopeKind::ProjectSet => config
+                            .default_project_set_id
+                            .as_deref()
+                            .is_some_and(|id| id == scope.id),
+                        _ => true,
+                    })
+                    .collect::<Vec<_>>();
+                let sources = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|source| {
+                        source.registration_source_id.as_deref() != Some(source_id)
+                            && !(source.registration_source_id.is_none()
+                                && source.id == source_id)
+                    })
+                    .collect::<Vec<_>>();
+                transaction
+                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+                for scope in &scopes {
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                            params![concept_id, scope_kind_name(&scope.kind), scope.id, scope.label],
+                        )
+                        .map_err(|source| MemoryError::DuckDb {
+                            path: config.index_path.clone(),
+                            source,
+                        })?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = ?",
+                        params![
+                            serde_json::to_string(&source_ids)?,
+                            serde_json::to_string(&scopes)?,
+                            serde_json::to_string(&sources)?,
+                            issue_key
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+    }
+    for row in &rows {
+        let mut scope_refs = serde_json::from_str::<Vec<KnowledgeScope>>(&row.scope_refs_json)
+            .unwrap_or_default();
+        let incoming_source_scopes = scope_refs.clone();
+        let mut source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&row.source_refs_json)
+            .unwrap_or_default();
+        if let Some(repository_id) = repository_id {
+            // OKF frontmatter historically omitted repository provenance from
+            // source refs. Stamp newly imported refs so a later refresh can
+            // replace this source's references without retaining withdrawn
+            // URLs or IDs.
+            for source_ref in &mut source_refs {
+                if source_ref.repo_id.is_none() {
+                    source_ref.repo_id = Some(repository_id.to_string());
+                }
+            }
+        }
+        let mut source_ids = serde_json::from_str::<Vec<String>>(&row.source_ids_json)
+            .unwrap_or_default();
+        if !replace_existing {
+            let existing = transaction
+                .query_row(
+                    "SELECT scope_refs_json, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
+                    params![row.issue_key],
+                    |query_row| {
+                        Ok((
+                            query_row.get::<_, String>(0)?,
+                            query_row.get::<_, String>(1)?,
+                            query_row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            if let Some((existing_scopes, existing_sources, existing_source_ids)) = existing {
+                let existing_source_ids = serde_json::from_str::<Vec<String>>(&existing_source_ids)
+                    .unwrap_or_default();
+                let source_only = source_id.is_some_and(|source_id| {
+                    !existing_source_ids.is_empty()
+                        && existing_source_ids.iter().all(|id| id == source_id)
+                });
+                if !source_only {
+                    let refreshed_project_scopes = repository_id
+                        .and_then(|repository_id| config.repository_sources.get(repository_id))
+                        .map(|source| &source.project_scope_ids)
+                        .unwrap_or(&config.project_scope_ids);
+                    let other_owner_project_scopes = {
+                        let source_id = source_id.unwrap_or_default();
+                        let mut statement = transaction
+                            .prepare(
+                                "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND source_id <> ? AND scope_kind = 'project'",
+                            )
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?;
+                        statement
+                            .query_map(params![row.concept_id, source_id], |row| row.get(0))
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                            .collect::<Result<BTreeSet<String>, _>>()
+                            .map_err(|source| MemoryError::DuckDb {
+                                path: config.index_path.clone(),
+                                source,
+                            })?
+                    };
+                    let incoming_project_set_ids = scope_refs
+                        .iter()
+                        .filter(|scope| scope.kind == KnowledgeScopeKind::ProjectSet)
+                        .map(|scope| scope.id.clone())
+                        .collect::<BTreeSet<_>>();
+                    for scope in serde_json::from_str::<Vec<KnowledgeScope>>(&existing_scopes)
+                        .unwrap_or_default()
+                    {
+                        let source_scope = source_id.is_some_and(|source_id| {
+                            existing_source_ids.iter().any(|id| id == source_id)
+                        });
+                        let replaced_scope = source_scope
+                            && ((repository_id.is_some_and(|repository_id| {
+                                scope.kind == KnowledgeScopeKind::Repository
+                                    && scope.id == repository_id
+                                }))
+                                || (scope.kind == KnowledgeScopeKind::ProjectSet
+                                    && !incoming_project_set_ids.contains(&scope.id))
+                                || (scope.kind == KnowledgeScopeKind::Project
+                                    && refreshed_project_scopes.contains(&scope.id)
+                                    && !other_owner_project_scopes.contains(&scope.id)));
+                        let stale_project_scope = scope.kind == KnowledgeScopeKind::Project
+                            && !other_owner_project_scopes.contains(&scope.id)
+                            && !scope_refs.contains(&scope);
+                        if replaced_scope || stale_project_scope {
+                            continue;
+                        }
+                        if !scope_refs.contains(&scope) {
+                            scope_refs.push(scope);
+                        }
+                    }
+                }
+                for source in serde_json::from_str::<Vec<MemorySourceRef>>(&existing_sources)
+                    .unwrap_or_default()
+                {
+                    if source_id.is_some_and(|source_id| {
+                        source.registration_source_id.as_deref() == Some(source_id)
+                    }) {
+                        continue;
+                    }
+                    if !source_refs.contains(&source) {
+                        source_refs.push(source);
+                    }
+                }
+                for existing_source_id in existing_source_ids {
+                    if !source_ids.contains(&existing_source_id) {
+                        source_ids.push(existing_source_id);
+                    }
+                }
+            }
+        }
+        let source_ids_json = serde_json::to_string(&source_ids)?;
+        let scope_refs_json = serde_json::to_string(&scope_refs)?;
+        let source_refs_json = serde_json::to_string(&source_refs)?;
+        if let Some(source_id) = source_id {
+            for scope_ref in &incoming_source_scopes {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?, ?)",
+                        params![
+                            row.concept_id,
+                            source_id,
+                            scope_kind_name(&scope_ref.kind),
+                            scope_ref.id,
+                            scope_ref.label,
+                        ],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+        if !replace_existing {
+            transaction
+                .execute(
+                    "DELETE FROM scope_refs WHERE concept_id = ?",
+                    params![row.concept_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+        transaction
+            .execute(
+                &format!("{issue_insert} issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, source_ids_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
                 params![
                     row.issue_key,
                     row.title,
@@ -2548,8 +4801,9 @@ pub fn refresh_memory_index_from_okf(
                     row.concept_type,
                     row.description,
                     row.tags_json,
-                    row.scope_refs_json,
-                    row.source_refs_json,
+                    scope_refs_json,
+                    source_refs_json,
+                    source_ids_json,
                     row.links_json,
                     row.citations_json,
                     row.freshness.as_str(),
@@ -2560,6 +4814,22 @@ pub fn refresh_memory_index_from_okf(
                 path: config.index_path.clone(),
                 source,
             })?;
+        for scope_ref in scope_refs {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES (?, ?, ?, ?)",
+                    params![
+                        row.concept_id,
+                        scope_kind_name(&scope_ref.kind),
+                        scope_ref.id,
+                        scope_ref.label,
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
         for area in &row.areas {
             let area_config = config.area_or_default(area);
             transaction
@@ -2577,8 +4847,8 @@ pub fn refresh_memory_index_from_okf(
                 })?;
             transaction
                 .execute(
-                    "INSERT INTO issue_areas (issue_key, area) VALUES (?, ?)",
-                    params![row.issue_key, area],
+                    "INSERT INTO issue_areas (issue_key, area, source_id) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM issue_areas WHERE issue_key = ? AND area = ? AND source_id IS NOT DISTINCT FROM ?)",
+                    params![row.issue_key, area, source_id, row.issue_key, area, source_id],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -2588,7 +4858,7 @@ pub fn refresh_memory_index_from_okf(
         for pr in &row.prs {
             transaction
                 .execute(
-                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at, source_id) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE issue_key = ? AND number = ? AND source_id IS NOT DISTINCT FROM ?)",
                     params![
                         row.issue_key,
                         pr.number as i64,
@@ -2597,6 +4867,10 @@ pub fn refresh_memory_index_from_okf(
                         pr.branch.clone(),
                         pr.merge_sha.clone(),
                         pr.merged_at.map(|value| value.to_rfc3339()),
+                        source_id,
+                        row.issue_key,
+                        pr.number as i64,
+                        source_id,
                     ],
                 )
                 .map_err(|source| MemoryError::DuckDb {
@@ -2626,6 +4900,64 @@ pub fn refresh_memory_index_from_okf(
     })
 }
 
+fn preflight_merge_conflicts(
+    connection: &Connection,
+    rows: &[OkfIndexRow],
+    source_id: &str,
+    config: &MemoryConfig,
+) -> Result<(), MemoryError> {
+    for row in rows {
+        let Some((concept_id, title, visibility, source_hash, body, encoded_source_ids)) =
+            connection
+                .query_row(
+                    "SELECT concept_id, title, visibility, source_hash, body, source_ids_json FROM issues WHERE issue_key = ?",
+                    params![row.issue_key],
+                    |query_row| {
+                        Ok((
+                            query_row.get::<_, String>(0)?,
+                            query_row.get::<_, String>(1)?,
+                            query_row.get::<_, String>(2)?,
+                            query_row.get::<_, String>(3)?,
+                            query_row.get::<_, String>(4)?,
+                            query_row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?
+        else {
+            continue;
+        };
+        let existing_source_ids =
+            serde_json::from_str::<Vec<String>>(&encoded_source_ids).unwrap_or_default();
+        if existing_source_ids.len() <= 1
+            && existing_source_ids.iter().any(|existing| existing == source_id)
+        {
+            continue;
+        }
+        let payload_matches = concept_id == row.concept_id
+            && title == row.title
+            && visibility == row.visibility.as_str()
+            && source_hash == row.source_hash
+            && body == row.body;
+        if !payload_matches {
+            return Err(MemoryError::InvalidInput(format!(
+                "conflicting memory source `{source_id}` for `{}`; existing owners: {}",
+                row.issue_key,
+                if existing_source_ids.is_empty() {
+                    "<unknown>".to_string()
+                } else {
+                    existing_source_ids.join(", ")
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
 struct OkfIndexRow {
     issue_key: String,
     concept_id: String,
@@ -2646,6 +4978,7 @@ struct OkfIndexRow {
     tags_json: String,
     scope_refs_json: String,
     source_refs_json: String,
+    source_ids_json: String,
     links_json: String,
     citations_json: String,
     freshness: MemoryFreshness,
@@ -2710,6 +5043,7 @@ impl OkfIndexRow {
             tags_json: serde_json::to_string(&tags)?,
             scope_refs_json: serde_json::to_string(&scope_refs)?,
             source_refs_json: serde_json::to_string(&source_refs)?,
+            source_ids_json: "[]".to_string(),
             links_json: serde_json::to_string(&links)?,
             citations_json: serde_json::to_string(&citations)?,
             freshness: okf_index_freshness(&concept),
@@ -2755,6 +5089,25 @@ fn okf_issue_key(
                 .map(|source| normalize_issue_key(&source.id))
         })
         .unwrap_or_else(|| normalize_issue_key(&concept.id))
+}
+
+fn okf_has_work_item_identity(
+    concept: &OkfConcept,
+    metadata: &Option<OpenSymphonyOkfMetadata>,
+) -> bool {
+    metadata
+        .as_ref()
+        .is_some_and(|metadata| {
+            metadata
+                .scope_refs
+                .iter()
+                .any(|scope| scope.kind == KnowledgeScopeKind::WorkItem)
+                || metadata
+                    .source_refs
+                    .iter()
+                    .any(|source| source.kind == "linear_issue")
+        })
+        || string_extra(&concept.frontmatter, "issue").is_some()
 }
 
 fn okf_index_concept_type(concept_type: &str) -> String {
@@ -3273,6 +5626,7 @@ mod index_tests {
             labels: Vec::new(),
             tags: Vec::new(),
             areas: Vec::new(),
+            area_source_ids: BTreeMap::new(),
             capsule_path: PathBuf::from(".opensymphony/memory/issues/COE-999.md"),
             visibility: MemoryVisibility::Private,
             source_hash: String::new(),
@@ -3282,6 +5636,7 @@ mod index_tests {
             captured_at: "also-not-a-date".to_string(),
             changed_files: Vec::new(),
             scope_refs: Vec::new(),
+            source_scope_refs: BTreeMap::new(),
             source_refs: Vec::new(),
             links: Vec::new(),
             citations: Vec::new(),
@@ -3291,6 +5646,521 @@ mod index_tests {
         };
 
         assert_eq!(issue_log_date(&issue), UNDATED_LOG_DATE);
+    }
+
+    #[test]
+    fn backfill_legacy_source_scopes_migrates_unscoped_rows_in_place() {
+        let repo = tempfile::TempDir::new().expect("repository tempdir");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config = config
+            .with_default_project_set_id("set-alpha")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: "repo-alpha".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: Some("commit-alpha".to_string()),
+                project_scope_ids: BTreeSet::from(["project-alpha".to_string()]),
+                target_branch: Some("develop".to_string()),
+            });
+        let connection = open_index(&config).expect("index should open");
+        migrate_index(&connection).expect("index should migrate");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-550",
+                    "Legacy memory",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-550.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-07-31T00:00:00Z",
+                    "issues/COE-550",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("legacy issue should insert");
+
+        backfill_legacy_memory_source_scopes(&config, "repo-alpha", "repo-alpha:legacy_store")
+            .expect("legacy scopes should backfill");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues should load")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-550")
+            .expect("backfilled issue should exist");
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == "repo-alpha"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::ProjectSet && scope.id == "set-alpha"
+        }));
+        assert!(issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project && scope.id == "project-alpha"
+        }));
+        assert!(issue
+            .source_refs
+            .iter()
+            .any(|source| source.id == "repo-alpha:legacy_store"));
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index should exist");
+        let source_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-550' AND source_id = 'repo-alpha:legacy_store'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source scope refs");
+        assert_eq!(source_scope_count, 3);
+    }
+
+    #[test]
+    fn backfill_rejects_ambiguous_ownerless_rows_in_shared_catalog() {
+        let catalog = tempfile::TempDir::new().expect("catalog root");
+        let repo_a = tempfile::TempDir::new().expect("repo a");
+        let repo_b = tempfile::TempDir::new().expect("repo b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo_a.path().to_path_buf(),
+                commit_sha: Some("commit-a".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repo_b.path().to_path_buf(),
+                commit_sha: Some("commit-b".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let connection = open_index(&config).expect("index should open");
+        migrate_index(&connection).expect("index should migrate");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-559",
+                    "Ownerless legacy memory",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-559.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-559",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("legacy issue should insert");
+        drop(connection);
+
+        let error = backfill_legacy_memory_source_scopes(&config, "repo-a", "repo-a:legacy_store")
+            .expect_err("shared ownerless rows must be rejected");
+        assert!(error.to_string().contains("ambiguous ownerless legacy memory row"));
+    }
+
+    #[test]
+    fn merge_legacy_memory_index_preserves_live_relation_rows() {
+        let catalog_root = tempfile::TempDir::new().expect("catalog root");
+        let source_root = tempfile::TempDir::new().expect("source root");
+        let mut config = MemoryConfig::load(catalog_root.path(), None).expect("catalog config");
+        config = config.with_repository_source(MemoryRepositorySource {
+            repository_id: "repo-a".to_string(),
+            root: source_root.path().to_path_buf(),
+            commit_sha: None,
+            project_scope_ids: BTreeSet::new(),
+            target_branch: None,
+        });
+        let source_config = MemoryConfig::load(source_root.path(), None).expect("source config");
+        let connection = open_index(&config).expect("catalog index");
+        migrate_index(&connection).expect("catalog index migration");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-550",
+                    "Live capture",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-550.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-550",
+                    "[]",
+                    "[]",
+                    r#"["__live_capture__","repo-a:legacy"]"#,
+                ],
+            )
+            .expect("catalog issue");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area) VALUES ('COE-550', 'memory')",
+                [],
+            )
+            .expect("live relation");
+        drop(connection);
+
+        let source_connection = open_index(&source_config).expect("source index");
+        migrate_index(&source_connection).expect("source index migration");
+        source_connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area) VALUES ('COE-550', 'memory')",
+                [],
+            )
+            .expect("source relation");
+        drop(source_connection);
+
+        merge_legacy_memory_index(&config, &source_config, "repo-a:legacy")
+            .expect("legacy merge");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("catalog index should reopen")
+            .expect("catalog index exists");
+        let live_relations: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-550' AND source_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("live relation count");
+        let imported_relations: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-550' AND source_id = 'repo-a:legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported relation count");
+        assert_eq!(live_relations, 1);
+        assert_eq!(imported_relations, 1);
+    }
+
+    #[test]
+    fn merge_legacy_code_index_imports_and_rekeys_code_rows() {
+        let catalog_root = tempfile::TempDir::new().expect("catalog root");
+        let source_root = tempfile::TempDir::new().expect("source root");
+        let config = MemoryConfig::load(catalog_root.path(), None).expect("catalog config");
+        let source_config = MemoryConfig::load(source_root.path(), None).expect("source config");
+        let legacy_repo_id = source_root
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("source repo id")
+            .to_string();
+
+        let mut document = test_code_document_with_edges_and_diagnostics(
+            "src/lib.rs",
+            "legacy-content",
+        );
+        document.symbols.push(CodeIntelSymbolInput {
+            kind: "function".to_string(),
+            name: "main".to_string(),
+            container_chain: Vec::new(),
+            signature: Some("fn main()".to_string()),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 10,
+            start_byte: 0,
+            end_byte: 9,
+            selection_start_line: 1,
+            selection_end_line: 1,
+            snippet_sha256: "legacy-snippet".to_string(),
+        });
+        persist_code_intel_documents(
+            &source_config,
+            CodeIntelPersistBatch {
+                repo_id: legacy_repo_id.clone(),
+                commit_sha: Some("legacy-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![document],
+            },
+        )
+        .expect("legacy code index");
+        persist_code_intel_skipped_files_with_freshness(
+            &source_config,
+            &legacy_repo_id,
+            Some("legacy-commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/skipped.rs"),
+                reason: "unsupported".to_string(),
+                content_sha256: "legacy-skipped".to_string(),
+            }],
+            "staged",
+            false,
+        )
+        .expect("legacy staged skipped file");
+
+        merge_legacy_code_index(
+            &config,
+            &source_config,
+            &legacy_repo_id,
+            "github.com/team/repo",
+        )
+        .expect("legacy code import");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("catalog index should reopen")
+            .expect("catalog index exists");
+        let document_repo: String = connection
+            .query_row(
+                "SELECT repo_id FROM code_documents WHERE path = 'src/lib.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported code document");
+        assert_eq!(document_repo, "github.com/team/repo");
+        let symbol_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = 'github.com/team/repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported code symbols");
+        assert!(symbol_count > 0);
+        drop(connection);
+
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "github.com/team/repo".to_string(),
+                commit_sha: Some("central-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/central.rs", "central-content")],
+            },
+        )
+        .expect("central code index");
+
+        let source_connection = open_index(&source_config).expect("source index");
+        migrate_index(&source_connection).expect("source index schema");
+        for table in [
+            "code_documents",
+            "code_document_revisions",
+            "code_symbols",
+            "code_edges",
+            "code_edge_revisions",
+            "code_diagnostics",
+            "code_diagnostic_revisions",
+        ] {
+            source_connection
+                .execute(
+                    &format!("DELETE FROM {table} WHERE repo_id = ?"),
+                    [legacy_repo_id.as_str()],
+                )
+                .expect("remove legacy code rows");
+        }
+        drop(source_connection);
+
+        merge_legacy_code_index(
+            &config,
+            &source_config,
+            &legacy_repo_id,
+            "github.com/team/repo",
+        )
+        .expect("empty legacy refresh withdraws code rows");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("catalog index should reopen after withdrawal")
+            .expect("catalog index exists after withdrawal");
+        let remaining_documents: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = 'github.com/team/repo' AND commit_sha = 'legacy-commit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("remaining imported documents");
+        let remaining_symbols: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = 'github.com/team/repo' AND commit_sha = 'legacy-commit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("remaining imported symbols");
+        assert_eq!(remaining_documents, 0);
+        assert_eq!(remaining_symbols, 0);
+        let central_documents: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = 'github.com/team/repo' AND commit_sha = 'central-commit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("central documents survive legacy withdrawal");
+        assert_eq!(central_documents, 1);
+    }
+
+    #[test]
+    fn stale_registered_source_preserves_surviving_live_owner_payload() {
+        let root = tempfile::TempDir::new().expect("catalog root");
+        let mut config = MemoryConfig::load(root.path(), None).expect("catalog config");
+        config = config.with_repository_source(MemoryRepositorySource {
+            repository_id: "github:repository:a".to_string(),
+            root: root.path().join("repo-a"),
+            commit_sha: Some("commit-a".to_string()),
+            project_scope_ids: BTreeSet::new(),
+            target_branch: None,
+        });
+        let source = RegisteredMemorySource {
+            source_id: "github:repository:a:okf".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "commit-a".to_string(),
+            kind: MemorySourceKind::OkfBundle,
+            root: root.path().join("okf-a"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:before".to_string(),
+        };
+        register_memory_source(&config, &source).expect("source registration");
+        fs::create_dir_all(source.root.join("issues")).expect("bundle issues");
+        fs::write(
+            source.root.join("index.md"),
+            "---\nokf_version: \"0.1\"\n---\n\n# Index\n",
+        )
+        .expect("bundle index");
+        fs::write(
+            source.root.join("issues/COE-550.md"),
+            "---\ntype: issue-capsule\ntitle: \"COE-550: Registered payload\"\nopensymphony:\n  visibility: private\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: Registered payload\n\nRegistered source body.\n",
+        )
+        .expect("bundle issue");
+
+        merge_memory_index_from_okf(
+            &config,
+            &source.root,
+            "github:repository:a",
+            &source.source_id,
+        )
+            .expect("initial source import");
+        let connection = open_index(&config).expect("catalog index");
+        connection
+            .execute(
+                "UPDATE issues SET source_ids_json = ? WHERE issue_key = 'COE-550'",
+                [r#"["github:repository:a:okf","__live_capture__:github:repository:b"]"#],
+            )
+            .expect("shared ownership");
+        drop(connection);
+        fs::remove_file(source.root.join("issues/COE-550.md")).expect("drop source issue");
+
+        merge_memory_index_from_okf(
+            &config,
+            &source.root,
+            "github:repository:a",
+            &source.source_id,
+        )
+            .expect("refresh after source issue removal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("catalog issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-550")
+            .expect("live-owned issue survives source refresh");
+        assert_eq!(issue.title, "COE-550: Registered payload");
+        assert_eq!(issue.body, "# COE-550: Registered payload\n\nRegistered source body.\n");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index exists");
+        let source_ids: String = connection
+            .query_row(
+                "SELECT source_ids_json FROM issues WHERE issue_key = 'COE-550'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("surviving source ids");
+        assert_eq!(source_ids, r#"["__live_capture__:github:repository:b"]"#);
+    }
+
+    #[test]
+    fn merge_preflights_conflicting_same_key_payloads_before_replacement() {
+        let root = tempfile::TempDir::new().expect("catalog root");
+        let config = MemoryConfig::load(root.path(), None).expect("catalog config");
+        let bundle_a = root.path().join("bundle-a");
+        let bundle_b = root.path().join("bundle-b");
+        for (bundle, title, body) in [
+            (&bundle_a, "Source A", "Body from source A."),
+            (&bundle_b, "Source B", "Body from source B."),
+        ] {
+            fs::create_dir_all(bundle.join("issues")).expect("bundle issues");
+            fs::write(
+                bundle.join("index.md"),
+                "---\nokf_version: \"0.1\"\n---\n\n# Index\n",
+            )
+            .expect("bundle index");
+            fs::write(
+                bundle.join("issues/COE-550.md"),
+                format!(
+                    "---\ntype: issue-capsule\ntitle: \"COE-550: {title}\"\nopensymphony:\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: {title}\n\n{body}\n"
+                ),
+            )
+            .expect("bundle issue");
+        }
+
+        merge_memory_index_from_okf(&config, &bundle_a, "repo-a", "repo-a:okf")
+            .expect("first source import");
+        let error = merge_memory_index_from_okf(&config, &bundle_b, "repo-b", "repo-b:okf")
+            .expect_err("different same-key payloads must be rejected");
+        assert!(matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting memory source")));
+
+        let issues = load_indexed_issues(&config).expect("catalog issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].title, "COE-550: Source A");
+        assert_eq!(issues[0].body, "# COE-550: Source A\n\nBody from source A.\n");
+    }
+
+    #[test]
+    fn merge_rejects_changed_payload_from_one_of_multiple_owners() {
+        let root = tempfile::TempDir::new().expect("catalog root");
+        let config = MemoryConfig::load(root.path(), None).expect("catalog config");
+        let bundle_a = root.path().join("bundle-a");
+        let bundle_b = root.path().join("bundle-b");
+        for bundle in [&bundle_a, &bundle_b] {
+            fs::create_dir_all(bundle.join("issues")).expect("bundle issues");
+            fs::write(
+                bundle.join("index.md"),
+                "---\nokf_version: \"0.1\"\n---\n\n# Index\n",
+            )
+            .expect("bundle index");
+            fs::write(
+                bundle.join("issues/COE-550.md"),
+                "---\ntype: issue-capsule\ntitle: \"COE-550: Shared\"\nopensymphony:\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: Shared\n\nShared body.\n",
+            )
+            .expect("bundle issue");
+        }
+
+        merge_memory_index_from_okf(&config, &bundle_a, "repo-a", "repo-a:okf")
+            .expect("first source import");
+        merge_memory_index_from_okf(&config, &bundle_b, "repo-b", "repo-b:okf")
+            .expect("second identical source import");
+        fs::write(
+            bundle_a.join("issues/COE-550.md"),
+            "---\ntype: issue-capsule\ntitle: \"COE-550: Changed\"\nopensymphony:\n  kind: issue_capsule\n  scope_refs:\n    - kind: work_item\n      id: COE-550\n---\n\n# COE-550: Changed\n\nChanged body.\n",
+        )
+        .expect("changed source issue");
+
+        let error = merge_memory_index_from_okf(&config, &bundle_a, "repo-a", "repo-a:okf")
+            .expect_err("one shared owner cannot replace another owner's payload");
+        assert!(matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting memory source")));
+        let issues = load_indexed_issues(&config).expect("catalog issues");
+        assert_eq!(issues[0].title, "COE-550: Shared");
+        assert_eq!(issues[0].body, "# COE-550: Shared\n\nShared body.\n");
     }
 
     #[test]

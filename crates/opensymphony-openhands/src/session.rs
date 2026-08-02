@@ -94,6 +94,7 @@ pub struct MemoryWorkerAccess {
     pub endpoint: String,
     pub token: Option<String>,
     pub project: Option<String>,
+    pub project_set: Option<String>,
     pub execution_repo: Option<String>,
     pub authorized_repositories: Vec<String>,
     /// The token is issued by this process's memory server and cannot be
@@ -3872,6 +3873,9 @@ async fn fetch_memory_context_from_server(
         if let Some(project) = &memory.project {
             map.insert("project".to_string(), json!(project));
         }
+        if let Some(project_set) = &memory.project_set {
+            map.insert("projectSet".to_string(), json!(project_set));
+        }
         if let Some(repo) = &memory.execution_repo {
             map.insert("repo".to_string(), json!(repo));
         }
@@ -4598,6 +4602,7 @@ mod tests {
             endpoint: format!("http://{address}/mcp"),
             token: Some("read-token".to_string()),
             project: Some("project-alpha".to_string()),
+            project_set: Some("set-alpha".to_string()),
             execution_repo: Some("/tmp/repo-alpha".to_string()),
             authorized_repositories: vec!["repo-alpha".to_string()],
             requires_fresh_conversation: false,
@@ -4663,7 +4668,7 @@ mod tests {
             "COE-100"
         );
         assert_eq!(request["params"]["arguments"]["project"], "project-alpha");
-        assert!(request["params"]["arguments"].get("projectSet").is_none());
+        assert_eq!(request["params"]["arguments"]["projectSet"], "set-alpha");
         assert_eq!(request["params"]["arguments"]["repo"], "/tmp/repo-alpha");
         task.abort();
     }
@@ -4676,6 +4681,7 @@ mod tests {
                 endpoint: "http://127.0.0.1:8765/mcp".to_owned(),
                 token: None,
                 project: Some("project-alpha".to_owned()),
+                project_set: None,
                 execution_repo: Some("repo-alpha".to_owned()),
                 authorized_repositories: vec!["repo-alpha".to_owned()],
                 requires_fresh_conversation: false,
@@ -4693,6 +4699,7 @@ mod tests {
             endpoint: "http://127.0.0.1:8765/mcp".to_owned(),
             token: Some("worker-secret".to_owned()),
             project: Some("project-alpha".to_owned()),
+            project_set: None,
             execution_repo: Some("repo-alpha".to_owned()),
             authorized_repositories: vec!["repo-alpha".to_owned(), "repo-beta".to_owned()],
             requires_fresh_conversation: false,

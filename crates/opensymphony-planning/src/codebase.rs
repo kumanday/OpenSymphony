@@ -10,6 +10,8 @@ use crate::opensymphony_code_intel::{
     CodeIntelArtifact, CodeIntelError, CodeIntelProvider, CodeIntelScope, CodeIntelSourceRef,
 };
 
+const DEFAULT_MAX_FILE_BYTES: u64 = 2_097_152;
+
 /// Result of scanning a repository for structural analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodebaseAnalysis {
@@ -129,11 +131,19 @@ pub enum RiskSeverity {
 /// Scans a repository path and produces a structured codebase analysis.
 pub struct CodebaseAnalyzer {
     root: PathBuf,
+    max_file_bytes: u64,
 }
 
 impl CodebaseAnalyzer {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::with_max_file_bytes(root, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    pub fn with_max_file_bytes(root: impl Into<PathBuf>, max_file_bytes: u64) -> Self {
+        Self {
+            root: root.into(),
+            max_file_bytes,
+        }
     }
 
     pub fn analyze(&self) -> Result<CodebaseAnalysis, CodebaseAnalysisError> {
@@ -147,7 +157,7 @@ impl CodebaseAnalyzer {
         let file_inventory = walker.walk()?;
 
         let languages = detect_languages(&file_inventory);
-        let packages = detect_packages(&self.root, &file_inventory)?;
+        let packages = detect_packages(&self.root, &file_inventory, self.max_file_bytes)?;
         let build_systems = detect_build_systems(&self.root);
         let ownership_files = detect_ownership_signals(&self.root, &file_inventory);
         let integration_points = detect_integration_points(&self.root, &packages, &file_inventory);
@@ -463,6 +473,7 @@ fn detect_languages(inventory: &BTreeMap<PathBuf, usize>) -> Vec<LanguageSignatu
 fn detect_packages(
     root: &Path,
     _inventory: &BTreeMap<PathBuf, usize>,
+    max_file_bytes: u64,
 ) -> Result<Vec<PackageInfo>, CodebaseAnalysisError> {
     let mut packages = Vec::new();
 
@@ -482,6 +493,12 @@ fn detect_packages(
             }
             let cargo_toml = entry.path().join("Cargo.toml");
             if !cargo_toml.exists() {
+                continue;
+            }
+            if !cargo_toml
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() <= max_file_bytes)
+            {
                 continue;
             }
 
@@ -537,6 +554,12 @@ fn detect_packages(
             }
             let pkg_json = entry.path().join("package.json");
             if !pkg_json.exists() {
+                continue;
+            }
+            if !pkg_json
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() <= max_file_bytes)
+            {
                 continue;
             }
 
@@ -1066,6 +1089,29 @@ serde = {{ workspace = true }}"#
                 .iter()
                 .any(|p| p.name == "opensymphony-linear"),
             "should detect opensymphony-linear crate"
+        );
+    }
+
+    #[test]
+    fn analyzer_skips_manifests_above_the_configured_file_limit() {
+        let tmp = TempDir::new().expect("temp dir");
+        let root = create_test_repo(&tmp);
+        let oversized = root.join("crates/oversized");
+        fs::create_dir_all(&oversized).expect("oversized crate");
+        fs::write(
+            oversized.join("Cargo.toml"),
+            "[package]\nname = \"oversized\"\nversion = \"0.1.0\"\n".repeat(4),
+        )
+        .expect("oversized manifest");
+
+        let analysis = CodebaseAnalyzer::with_max_file_bytes(&root, 16)
+            .analyze()
+            .expect("analysis should succeed");
+        assert!(
+            !analysis
+                .packages
+                .iter()
+                .any(|package| package.name == "oversized")
         );
     }
 

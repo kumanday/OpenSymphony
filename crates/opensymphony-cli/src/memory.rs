@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -18,6 +18,7 @@ use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{Mutex, OwnedMutexGuard, watch},
     task::JoinHandle,
@@ -40,17 +41,22 @@ use crate::{
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSkippedFileInput, CodeIntelSymbolInput,
         CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
-        MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
-        archive_blocking_warning_count, brief, brief_with_scope, code_graph_context,
-        code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
+        MemoryReindexReport, MemoryRepositorySource, MemoryScopeFilter, MemorySourceKind,
+        MemorySourceRegistrationStatus, MemoryVisibility, RegisteredMemorySource, SourceFile,
+        archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief_with_scope,
+        code_graph_context, code_graph_workspace_context_overlay, code_index_branch_for_config,
+        code_repository_has_commit, code_repository_has_rows, context_for_issue_with_options,
         context_for_issue_with_options_and_scope, docs_for_area_with_scope, expand_issue_range,
-        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
-        mark_archived, persist_code_intel_documents, persist_code_intel_skipped_files,
-        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
-        refresh_memory_index_from_okf, related_by_area_with_scope, related_by_issue_with_scope,
-        related_by_paths_with_scope, render_archive_plan, render_capture_dry_run,
-        search_with_scope, sha256_bytes_hex, sha256_hex, status_with_scope, write_capture_plan,
-        write_docs_sync_plan, write_memory_init_plan,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_issue_capsule_with_scope,
+        load_source_file, mark_archived, merge_legacy_code_index, merge_legacy_memory_index,
+        merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
+        related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
+        render_archive_plan, render_capture_dry_run, search_with_scope, sha256_hex,
+        status_with_scope, withdraw_code_repository, write_capture_plan, write_docs_sync_plan,
+        write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -130,7 +136,7 @@ enum MemoryCommand {
     #[command(about = "Show one issue capsule")]
     Show(ShowArgs),
     #[command(about = "Show a compact issue memory brief")]
-    Brief(ShowArgs),
+    Brief(BriefArgs),
     #[command(about = "Search captured issue memory")]
     Search(SearchArgs),
     #[command(about = "Find related issue memory")]
@@ -248,6 +254,16 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct ShowArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
+    #[arg(help = "Issue identifier")]
+    issue: String,
+}
+
+#[derive(Debug, Args)]
+struct BriefArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
     #[arg(help = "Issue identifier")]
     issue: String,
 }
@@ -519,17 +535,55 @@ pub(crate) async fn auto_capture_terminal(
         .cloned()
         .map(Ok)
         .unwrap_or_else(|| load_memory_config(repo_root, None))?;
-    let _coordination_lock = acquire_memory_writer_guard(&config, writer_gate).await?;
     let client = match resolved_workflow {
         Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
         None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
     };
     let source = load_linear_source_from_client(&client, &identifiers).await?;
+    let repository_groups = auto_capture_repository_groups(&config, &source, &identifiers)?;
+    if repository_groups.len() > 1 {
+        let mut aggregate = AutoMemoryReport {
+            capture_completed: true,
+            docs_sync_completed: true,
+            archive_completed: true,
+            ..AutoMemoryReport::default()
+        };
+        for group in repository_groups.into_values() {
+            let report = Box::pin(auto_capture_terminal(
+                repo_root,
+                workflow_path,
+                resolved_workflow,
+                &group,
+                conversation_store,
+                auto_archive,
+                Some(&config),
+                writer_gate.clone(),
+            ))
+            .await?;
+            aggregate
+                .completed_issue_keys
+                .extend(report.completed_issue_keys);
+            aggregate
+                .captured_issue_keys
+                .extend(report.captured_issue_keys);
+            aggregate
+                .archived_issue_keys
+                .extend(report.archived_issue_keys);
+            aggregate.docs_written.extend(report.docs_written);
+            aggregate.capture_completed &= report.capture_completed;
+            aggregate.docs_sync_completed &= report.docs_sync_completed;
+            aggregate.archive_completed &= report.archive_completed;
+            aggregate.warnings.extend(report.warnings);
+        }
+        return Ok(aggregate);
+    }
+    let _coordination_lock = acquire_memory_writer_guard(&config, writer_gate).await?;
     let selection = IssueSelection {
         identifiers,
         ..IssueSelection::default()
     };
-    let mut capture_plan = plan_capture(&config, &source, &selection, true, true)?;
+    let capture_config = resolve_auto_capture_repository_config(&config, &source, &selection)?;
+    let mut capture_plan = plan_capture(&capture_config, &source, &selection, true, true)?;
     let issue_keys = capture_plan
         .selected
         .iter()
@@ -550,12 +604,21 @@ pub(crate) async fn auto_capture_terminal(
     let mut warnings = Vec::new();
     let mut capture_completed = true;
     let evolved_config = if capture_plan.selected.is_empty() {
-        config.clone()
+        let mut evolved = config.clone();
+        evolved.repo_root = capture_config.repo_root.clone();
+        evolved.default_repository_id = capture_config.default_repository_id.clone();
+        evolved.code_index_target_branch = capture_config.code_index_target_branch.clone();
+        apply_repository_memory_policy(&mut evolved, &capture_config);
+        evolved
     } else {
-        let capture_report = write_capture_plan(&config, &capture_plan, false)?;
+        let capture_report = write_capture_plan(&capture_config, &capture_plan, false)?;
         warnings.extend(capture_report.warnings);
         match reload_memory_config(&config) {
-            Ok(config) => config,
+            Ok(mut evolved) => {
+                evolved.repo_root = capture_config.repo_root.clone();
+                apply_repository_memory_policy(&mut evolved, &capture_config);
+                evolved
+            }
             Err(error) => {
                 capture_completed = false;
                 warnings.push(format!(
@@ -695,6 +758,136 @@ pub(crate) async fn auto_capture_terminal(
     })
 }
 
+fn apply_repository_memory_policy(target: &mut MemoryConfig, source: &MemoryConfig) {
+    target.enabled = source.enabled;
+    target.code_intel = source.code_intel.clone();
+    target.visibility = source.visibility;
+    target.confidence_threshold = source.confidence_threshold;
+    target.source_snapshot_policy = source.source_snapshot_policy;
+    target.markdown_indexes = source.markdown_indexes;
+    target.docs = source.docs.clone();
+    target.areas = source.areas.clone();
+    target.redaction = source.redaction.clone();
+}
+
+fn resolve_auto_capture_repository_config(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    selection: &IssueSelection,
+) -> Result<MemoryConfig, MemoryError> {
+    let issue_ids = selection
+        .identifiers
+        .iter()
+        .map(|identifier| identifier.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let candidate_repositories = source
+        .issues
+        .iter()
+        .filter(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()))
+        .flat_map(|issue| auto_capture_candidate_repositories(config, issue))
+        .collect::<BTreeSet<_>>();
+    let repository_id = if candidate_repositories.len() == 1 {
+        candidate_repositories.into_iter().next()
+    } else if candidate_repositories.is_empty() {
+        let selected_issue_is_known = source
+            .issues
+            .iter()
+            .any(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()));
+        if selected_issue_is_known && config.repository_sources.len() > 1 {
+            return Err(MemoryError::InvalidInput(
+                "cannot auto-capture a terminal issue without a unique repository source"
+                    .to_string(),
+            ));
+        }
+        config.default_repository_id.clone().or_else(|| {
+            (config.repository_sources.len() == 1)
+                .then(|| config.repository_sources.keys().next().cloned())
+                .flatten()
+        })
+    } else {
+        None
+    };
+    let Some(repository_id) = repository_id else {
+        return Ok(config.clone());
+    };
+    let Some(repository) = config.repository_sources.get(&repository_id) else {
+        return Ok(config.clone());
+    };
+    let mut routed = MemoryConfig::load(&repository.root, None)?;
+    routed.repo_root = repository.root.clone();
+    routed.memory_root = config.memory_root.clone();
+    routed.index_path = config.index_path.clone();
+    routed.containment_root = config.containment_root.clone();
+    routed.repository_sources = config.repository_sources.clone();
+    routed.default_repository_id = Some(repository_id);
+    routed.default_project_set_id = config.default_project_set_id.clone();
+    routed.project_scope_ids = config.project_scope_ids.clone();
+    routed.code_index_target_branch = config.code_index_target_branch.clone();
+    routed.repository_remote_locators = config.repository_remote_locators.clone();
+    Ok(routed)
+}
+
+fn auto_capture_candidate_repositories(
+    config: &MemoryConfig,
+    issue: &IssueEvidence,
+) -> BTreeSet<String> {
+    [issue.project_id.as_ref(), issue.project_slug.as_ref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|project_id| {
+            config
+                .repository_sources
+                .values()
+                .filter(move |repository| repository.project_scope_ids.contains(project_id))
+                .map(|repository| repository.repository_id.clone())
+        })
+        .collect()
+}
+
+fn auto_capture_repository_groups(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    identifiers: &[String],
+) -> Result<BTreeMap<Option<String>, Vec<String>>, MemoryError> {
+    let mut groups = BTreeMap::new();
+    for identifier in identifiers {
+        let repository_id = source
+            .issues
+            .iter()
+            .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+            .and_then(|issue| {
+                let candidates = auto_capture_candidate_repositories(config, issue);
+                if candidates.len() > 1 {
+                    return None;
+                }
+                (candidates.len() == 1)
+                    .then(|| candidates.into_iter().next())
+                    .flatten()
+            });
+        groups
+            .entry(repository_id)
+            .or_insert_with(Vec::new)
+            .push(identifier.clone());
+    }
+    for identifier in identifiers {
+        let Some(issue) = source
+            .issues
+            .iter()
+            .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+        else {
+            continue;
+        };
+        let candidates = auto_capture_candidate_repositories(config, issue);
+        if candidates.len() > 1 {
+            return Err(MemoryError::InvalidInput(format!(
+                "cannot auto-capture `{}` because its project scope matches multiple repository sources",
+                issue.identifier
+            )));
+        }
+    }
+    Ok(groups)
+}
+
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
     let repo_root = env::current_dir().map_err(|source| MemoryError::ReadFile {
         path: PathBuf::from("."),
@@ -758,11 +951,11 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         }
         MemoryCommand::Show(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_show(&config, args, ShowMode::Full)
+            run_show(&config, args)
         }
         MemoryCommand::Brief(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
-            run_show(&config, args, ShowMode::Brief)
+            run_brief(&config, args)
         }
         MemoryCommand::Search(args) => {
             let config = load_memory_config(&repo_root, config_path.as_deref())?;
@@ -847,6 +1040,11 @@ fn reject_project_set_memory_write(
         path: central_config_path.to_path_buf(),
         source,
     })?;
+    if central_routing_mode_is_project_set(&raw) {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory write operation `{operation}` does not support project_set central routing until strict routing is enabled"
+        )));
+    }
     let central = validate_central_config_text(central_config_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
     if central.mode == CentralRoutingMode::ProjectSet {
@@ -855,6 +1053,15 @@ fn reject_project_set_memory_write(
         )));
     }
     Ok(())
+}
+
+fn central_routing_mode_is_project_set(raw: &str) -> bool {
+    serde_yaml::from_str::<serde_yaml::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("routing").cloned())
+        .and_then(|routing| routing.get("mode").cloned())
+        .and_then(|mode| mode.as_str().map(str::to_owned))
+        .is_some_and(|mode| mode.trim() == "project_set")
 }
 
 async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
@@ -930,9 +1137,44 @@ fn apply_central_memory_root(
     })?;
     let central = validate_central_config_text(central_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
-    if let Some(memory_root) = central.memory_catalog_root {
+    if let Some(memory_root) = &central.memory_catalog_root {
         config.memory_root = memory_root.clone();
         config.index_path = memory_root.join("memory.duckdb");
+    }
+    for source in central.memory_sources.values() {
+        *config = config
+            .clone()
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: source.repository_id.clone(),
+                root: source.checkout_path.clone(),
+                commit_sha: None,
+                project_scope_ids: source.project_scope_ids.clone(),
+                target_branch: Some(source.target_branch.clone()),
+            });
+        *config = config.clone().with_repository_remote_locator(
+            source.repository_id.clone(),
+            source.remote_locator.clone(),
+        );
+    }
+    if let Some(project_set_id) = central.project_set_id.clone() {
+        *config = config.clone().with_default_project_set_id(project_set_id);
+    }
+    *config = config
+        .clone()
+        .with_project_scope_ids(central.repository_routing.active_projects.iter().cloned());
+    let active_repository_id = central.target_repo().and_then(|target| {
+        central
+            .memory_sources
+            .values()
+            .find(|source| source.checkout_path == target)
+            .map(|source| source.repository_id.clone())
+    });
+    if let Some(repository_id) = active_repository_id.or_else(|| {
+        (central.memory_sources.len() == 1)
+            .then(|| central.memory_sources.keys().next().cloned())
+            .flatten()
+    }) {
+        *config = config.clone().with_default_repository_id(repository_id);
     }
     config.containment_root = Some(central.state_root);
     Ok(())
@@ -947,6 +1189,12 @@ fn reload_memory_config(config: &MemoryConfig) -> Result<MemoryConfig, MemoryErr
     evolved.memory_root = config.memory_root.clone();
     evolved.index_path = config.index_path.clone();
     evolved.containment_root = config.containment_root.clone();
+    evolved.repository_sources = config.repository_sources.clone();
+    evolved.repository_remote_locators = config.repository_remote_locators.clone();
+    evolved.default_repository_id = config.default_repository_id.clone();
+    evolved.default_project_set_id = config.default_project_set_id.clone();
+    evolved.project_scope_ids = config.project_scope_ids.clone();
+    evolved.code_index_target_branch = config.code_index_target_branch.clone();
     Ok(evolved)
 }
 
@@ -1107,12 +1355,13 @@ fn run_sync_docs(config: &MemoryConfig, args: SyncDocsArgs) -> Result<(), Memory
 }
 
 fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     let report = status_with_scope(
         config,
         &IssueSelection {
@@ -1139,48 +1388,40 @@ fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ShowMode {
-    Full,
-    Brief,
+fn run_show(config: &MemoryConfig, args: ShowArgs) -> Result<(), MemoryError> {
+    let scope = direct_scope_filter(config, &args.scope, Some(&args.issue), None, None)?;
+    let contents = load_issue_capsule_with_scope(config, &args.issue, &scope)?;
+    println!("{contents}");
+    Ok(())
 }
 
-fn run_show(config: &MemoryConfig, args: ShowArgs, mode: ShowMode) -> Result<(), MemoryError> {
-    match mode {
-        ShowMode::Brief => {
-            println!("{}", brief(config, &args.issue)?);
-        }
-        ShowMode::Full => {
-            let path = config.issue_capsule_path(&args.issue);
-            let contents = fs::read_to_string(&path).map_err(|source| MemoryError::ReadFile {
-                path: path.clone(),
-                source,
-            })?;
-            println!("{contents}");
-        }
-    }
+fn run_brief(config: &MemoryConfig, args: BriefArgs) -> Result<(), MemoryError> {
+    let scope = direct_scope_filter(config, &args.scope, Some(&args.issue), None, None)?;
+    println!("{}", brief_with_scope(config, &args.issue, &scope)?);
     Ok(())
 }
 
 fn run_search(config: &MemoryConfig, args: SearchArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     let results = search_with_scope(config, &args.query, args.limit, &scope)?;
     print_search_results(config, &results);
     Ok(())
 }
 
 fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         None,
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
     let results = if let Some(issue) = args.issue {
         related_by_issue_with_scope(config, &issue, args.limit, &scope)?
     } else if let Some(area) = args.area {
@@ -1197,13 +1438,18 @@ fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryErr
 }
 
 fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
-    let scope = scope_filter(
+    let scope = direct_scope_filter(
+        config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         Some(args.area.as_str()),
+    )?;
+    let docs_config = memory_config_for_docs_scope(config, &scope, &args.area)?;
+    println!(
+        "{}",
+        docs_for_area_with_scope(&docs_config, &args.area, &scope)?
     );
-    println!("{}", docs_for_area_with_scope(config, &args.area, &scope)?);
     Ok(())
 }
 
@@ -1227,24 +1473,48 @@ async fn run_context(
                 SourceFile::default()
             }
         };
-    let options = MemoryContextOptions {
+    let mut options = MemoryContextOptions {
         issue: args.issue,
         explicit_includes: args.include,
         paths: args.paths,
         limit: args.limit,
+        scope: MemoryScopeFilter::default(),
     };
-    let scope = scope_filter(
+    let mut scope = direct_scope_filter(
+        config,
         &args.scope,
         Some(options.issue.as_str()),
         args.milestone.as_deref(),
         args.area.as_deref(),
-    );
+    )?;
+    if args.include_code_intel
+        && scope.repo.is_none()
+        && (scope.project.is_some() || scope.project_set.is_some())
+    {
+        scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+    }
+    let mut context_scope = scope.clone();
+    if context_scope.repo.is_none()
+        && (context_scope.project.is_some() || context_scope.project_set.is_some())
+    {
+        context_scope.repo = Some(unique_repository_for_memory_scope(config, &context_scope)?);
+    }
+    context_scope.issue = None;
+    options.scope = context_scope;
     for warning in warnings {
         println!("> Warning: {warning}\n");
     }
-    let mut context = context_for_issue_with_options(config, &source, &options)?;
+    let context_config = memory_config_for_repository(config, options.scope.repo.as_deref())?;
+    let mut context = context_for_issue_with_options(&context_config, &source, &options)?;
     if args.include_code_intel {
-        append_code_intel_context(config, &mut context, &scope, &options.paths, options.limit)?;
+        let code_config = memory_config_for_repository(config, scope.repo.as_deref())?;
+        append_code_intel_context(
+            &code_config,
+            &mut context,
+            &scope,
+            &options.paths,
+            options.limit,
+        )?;
     }
     println!("{context}");
     Ok(())
@@ -1320,9 +1590,10 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 "force": args.force
             }),
         )),
-        MemoryCommand::Brief(args) => {
-            Some(("memory.brief", json!({ "issue": args.issue.clone() })))
-        }
+        MemoryCommand::Brief(args) => Some((
+            "memory.brief",
+            with_scope_json(&args.scope, json!({ "issue": args.issue.clone() })),
+        )),
         MemoryCommand::Search(args) => Some((
             "memory.search",
             with_scope_json(
@@ -1370,6 +1641,10 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                     "milestone": args.milestone.clone()
                 }),
             ),
+        )),
+        MemoryCommand::Show(args) => Some((
+            "memory.show",
+            with_scope_json(&args.scope, json!({ "issue": args.issue.clone() })),
         )),
         MemoryCommand::Context(args) => Some((
             "memory.context",
@@ -1522,34 +1797,41 @@ fn path_strings(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-fn with_scope_json(scope: &ScopeArgs, mut arguments: Value) -> Value {
+fn with_scope_json(scope: &ScopeArgs, arguments: Value) -> Value {
+    with_scope_json_from_env(scope, arguments, env_scope_value)
+}
+
+fn with_scope_json_from_env<F>(scope: &ScopeArgs, mut arguments: Value, mut read_env: F) -> Value
+where
+    F: FnMut(&str) -> Option<String>,
+{
     if let Value::Object(map) = &mut arguments {
         map.insert(
             "projectSet".to_string(),
-            json!(
-                scope
-                    .project_set
-                    .clone()
-                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
-            ),
+            json!(scope_arg_or_env(
+                scope,
+                scope.project_set.clone(),
+                "OPENSYMPHONY_MEMORY_PROJECT_SET",
+                &mut read_env,
+            )),
         );
         map.insert(
             "project".to_string(),
-            json!(
-                scope
-                    .project
-                    .clone()
-                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT"))
-            ),
+            json!(scope_arg_or_env(
+                scope,
+                scope.project.clone(),
+                "OPENSYMPHONY_MEMORY_PROJECT",
+                &mut read_env,
+            )),
         );
         map.insert(
             "repo".to_string(),
-            json!(
-                scope
-                    .repo
-                    .clone()
-                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
-            ),
+            json!(scope_arg_or_env(
+                scope,
+                scope.repo.clone(),
+                "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+                &mut read_env,
+            )),
         );
         map.insert("allAccessible".to_string(), json!(scope.all_accessible));
     }
@@ -1599,12 +1881,21 @@ fn run_reindex(config: &MemoryConfig, args: ReindexArgs) -> Result<(), MemoryErr
             .map(|path| repo_existing_path_from_path(config, path))
             .transpose()?
             .unwrap_or_else(|| config.memory_root.clone());
-        refresh_memory_index_from_okf(config, &bundle_root)?
+        refresh_memory_index_from_okf_and_reimport_pending(config, &bundle_root)?
     } else {
         refresh_memory_index(config)?
     };
     print_reindex_report(report);
     Ok(())
+}
+
+fn refresh_memory_index_from_okf_and_reimport_pending(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+) -> Result<MemoryReindexReport, MemoryError> {
+    let report = refresh_memory_index_from_okf(config, bundle_root)?;
+    reimport_pending_memory_sources(config)?;
+    Ok(report)
 }
 
 fn run_export_okf(config: &MemoryConfig, args: ExportOkfArgs) -> Result<(), MemoryError> {
@@ -1880,13 +2171,22 @@ async fn start_memory_server_with_auth(
 ) -> Result<MemoryServerHandle, MemoryError> {
     let activity_marker = memory_activity_marker_path(&config.memory_root);
     let coordination_root = memory_coordination_root(&config);
-    let coordination_lock =
-        acquire_memory_coordination_lock(&coordination_root).map_err(|source| {
-            MemoryError::InvalidInput(format!(
-                "memory migration or server activity is already active at {}; {source}",
-                memory_migration_lock_path(&coordination_root).display()
-            ))
-        })?;
+    let registration_config = config.clone();
+    let coordination_lock = tokio::task::spawn_blocking(move || {
+        let coordination_lock =
+            acquire_memory_coordination_lock(&coordination_root).map_err(|source| {
+                MemoryError::InvalidInput(format!(
+                    "memory migration or server activity is already active at {}; {source}",
+                    memory_migration_lock_path(&coordination_root).display()
+                ))
+            })?;
+        register_configured_memory_sources(&registration_config)?;
+        Ok::<_, MemoryError>(coordination_lock)
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("memory source registration task failed: {error}"))
+    })??;
     fs::create_dir_all(&config.memory_root).map_err(|source| MemoryError::CreateDir {
         path: config.memory_root.clone(),
         source,
@@ -1968,6 +2268,678 @@ async fn start_memory_server_with_auth(
         writer_gate,
         scope_grants,
     })
+}
+
+fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
+    let mut source_ids = BTreeSet::new();
+    let source_id_for = |repository_id: &str, kind: MemorySourceKind, root: &Path| {
+        if kind == MemorySourceKind::OkfBundle {
+            let bundle_name = root
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
+            format!(
+                "{}:{}:{}",
+                repository_id,
+                kind.as_str(),
+                sha256_hex(&bundle_name)
+            )
+        } else {
+            format!("{}:{}", repository_id, kind.as_str())
+        }
+    };
+    let mut legacy_repository_names = BTreeMap::<String, usize>::new();
+    for source in config.repository_sources.values() {
+        if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str()) {
+            *legacy_repository_names
+                .entry(legacy_repo_id.to_string())
+                .or_default() += 1;
+        }
+    }
+    for (legacy_repo_id, count) in &legacy_repository_names {
+        if *count > 1 && code_repository_has_rows(config, legacy_repo_id)? {
+            return Err(MemoryError::InvalidInput(format!(
+                "ambiguous legacy repository basename `{legacy_repo_id}`; canonical migration requires unique checkout names"
+            )));
+        }
+    }
+    let mut configured_source_generations = BTreeMap::new();
+    let mut source_memory_locks = BTreeMap::<PathBuf, MemoryCoordinationLock>::new();
+    for source in config.repository_sources.values() {
+        if !git_remote_matches_repository_id(
+            &source.root,
+            &source.repository_id,
+            config
+                .repository_remote_locators
+                .get(&source.repository_id)
+                .map(String::as_str),
+        ) {
+            return Err(MemoryError::InvalidInput(format!(
+                "configured repository `{}` at {} does not match its origin remote",
+                source.repository_id,
+                source.root.display()
+            )));
+        }
+        let commit_sha = source
+            .commit_sha
+            .clone()
+            .or_else(|| git_commit_sha_for_repo(&source.root))
+            .ok_or_else(|| {
+                MemoryError::InvalidInput(format!(
+                    "cannot resolve an exact Git commit for configured repository `{}` at {}",
+                    source.repository_id,
+                    source.root.display()
+                ))
+            })?;
+        let local_config = MemoryConfig::load(&source.root, None)?;
+        let include_okf_exports = !local_config.index_path.is_file()
+            && !memory_source_has_live_markdown(&local_config.memory_root)?;
+        let mut roots = vec![
+            (MemorySourceKind::Repository, source.root.clone()),
+            (MemorySourceKind::Policy, local_config.config_path.clone()),
+            (
+                MemorySourceKind::PublicDocs,
+                local_config.docs.public_root.clone(),
+            ),
+            (
+                MemorySourceKind::LegacyStore,
+                local_config.memory_root.clone(),
+            ),
+        ];
+        if include_okf_exports {
+            for export_name in ["okf-export-public", "okf-export-private"] {
+                roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+            }
+        }
+        for (kind, root) in roots {
+            let same_catalog = if kind == MemorySourceKind::LegacyStore {
+                match (
+                    fs::canonicalize(&root),
+                    fs::canonicalize(&config.memory_root),
+                ) {
+                    (Ok(root), Ok(catalog)) => root == catalog,
+                    _ => root == config.memory_root,
+                }
+            } else {
+                false
+            };
+            if !root.exists() {
+                if kind == MemorySourceKind::LegacyStore
+                    && !same_catalog
+                    && let Some(legacy_repo_id) =
+                        source.root.file_name().and_then(|name| name.to_str())
+                {
+                    merge_legacy_code_index(
+                        config,
+                        &local_config,
+                        legacy_repo_id,
+                        &source.repository_id,
+                    )?;
+                }
+                continue;
+            }
+            source_ids.insert(source_id_for(&source.repository_id, kind, &root));
+            if kind == MemorySourceKind::LegacyStore && !same_catalog {
+                let lock_key = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    source_memory_locks.entry(lock_key)
+                {
+                    entry.insert(acquire_source_memory_writer_lock(&local_config)?);
+                }
+            }
+            let source_id = if kind == MemorySourceKind::OkfBundle {
+                let bundle_name = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default();
+                format!(
+                    "{}:{}:{}",
+                    source.repository_id,
+                    kind.as_str(),
+                    sha256_hex(&bundle_name)
+                )
+            } else {
+                format!("{}:{}", source.repository_id, kind.as_str())
+            };
+            if matches!(
+                kind,
+                MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+            ) {
+                configured_source_generations.insert(
+                    source_id,
+                    memory_source_registration_generation(
+                        &root,
+                        source,
+                        kind,
+                        &commit_sha,
+                        config,
+                        &local_config,
+                    )?,
+                );
+            }
+        }
+    }
+    reconcile_memory_sources(config, &source_ids)?;
+    let registered_sources = registered_memory_sources(config)?;
+    let source_reimport_pending = registered_sources.iter().any(|existing| {
+        matches!(
+            existing.kind,
+            MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+        ) && (existing.status != MemorySourceRegistrationStatus::Registered
+            || configured_source_generations
+                .get(&existing.source_id)
+                .is_none_or(|generation| generation != &existing.generation))
+    }) || configured_source_generations.iter().any(
+        |(source_id, generation)| {
+            registered_sources
+                .iter()
+                .find(|existing| existing.source_id == *source_id)
+                .is_none_or(|existing| {
+                    existing.status != MemorySourceRegistrationStatus::Registered
+                        || existing.generation != *generation
+                })
+        },
+    );
+    for source in config.repository_sources.values() {
+        if let Some(legacy_repo_id) = source.root.file_name().and_then(|name| name.to_str())
+            && code_repository_has_rows(config, legacy_repo_id)?
+        {
+            let commit_sha = source
+                .commit_sha
+                .clone()
+                .or_else(|| git_commit_sha_for_repo(&source.root))
+                .ok_or_else(|| {
+                    MemoryError::InvalidInput(format!(
+                        "cannot resolve an exact Git commit for configured repository `{}` at {}",
+                        source.repository_id,
+                        source.root.display()
+                    ))
+                })?;
+            if legacy_code_repository_matches_source(
+                config,
+                legacy_repo_id,
+                &source.root,
+                &source.repository_id,
+                &commit_sha,
+            )? {
+                migrate_code_repository_identity(config, legacy_repo_id, &source.repository_id)?;
+            } else {
+                withdraw_code_repository(config, legacy_repo_id)?;
+            }
+        }
+        let commit_sha = source
+            .commit_sha
+            .clone()
+            .or_else(|| git_commit_sha_for_repo(&source.root))
+            .ok_or_else(|| {
+                MemoryError::InvalidInput(format!(
+                    "cannot resolve an exact Git commit for configured repository `{}` at {}",
+                    source.repository_id,
+                    source.root.display()
+                ))
+            })?;
+        let local_config = MemoryConfig::load(&source.root, None)?;
+        let include_okf_exports = !local_config.index_path.is_file()
+            && !memory_source_has_live_markdown(&local_config.memory_root)?;
+        let mut roots = vec![
+            (MemorySourceKind::Repository, source.root.clone()),
+            (MemorySourceKind::Policy, local_config.config_path.clone()),
+            (
+                MemorySourceKind::PublicDocs,
+                local_config.docs.public_root.clone(),
+            ),
+            (
+                MemorySourceKind::LegacyStore,
+                local_config.memory_root.clone(),
+            ),
+        ];
+        if include_okf_exports {
+            for export_name in ["okf-export-public", "okf-export-private"] {
+                roots.push((MemorySourceKind::OkfBundle, source.root.join(export_name)));
+            }
+        }
+        for (kind, root) in roots {
+            if !root.exists() {
+                continue;
+            }
+            let same_catalog = if kind == MemorySourceKind::LegacyStore {
+                match (
+                    fs::canonicalize(&root),
+                    fs::canonicalize(&config.memory_root),
+                ) {
+                    (Ok(root), Ok(catalog)) => root == catalog,
+                    _ => root == config.memory_root,
+                }
+            } else {
+                false
+            };
+            let source_lock_key = if kind == MemorySourceKind::LegacyStore && !same_catalog {
+                Some(fs::canonicalize(&root).unwrap_or_else(|_| root.clone()))
+            } else {
+                None
+            };
+            let _source_memory_lock = if let Some(lock_key) = source_lock_key {
+                if let Some(lock) = source_memory_locks.remove(&lock_key) {
+                    Some(lock)
+                } else {
+                    Some(acquire_source_memory_writer_lock(&local_config)?)
+                }
+            } else {
+                None
+            };
+            let source_id = source_id_for(&source.repository_id, kind, &root);
+            source_ids.insert(source_id.clone());
+            let registration = RegisteredMemorySource {
+                source_id,
+                repository_id: source.repository_id.clone(),
+                commit_sha: commit_sha.clone(),
+                kind,
+                root: root.clone(),
+                status: MemorySourceRegistrationStatus::Pending,
+                generation: memory_source_registration_generation(
+                    &root,
+                    source,
+                    kind,
+                    &commit_sha,
+                    config,
+                    &local_config,
+                )?,
+            };
+            let already_imported = registered_memory_sources(config)?.iter().any(|existing| {
+                existing.source_id == registration.source_id
+                    && existing.generation == registration.generation
+                    && existing.status == MemorySourceRegistrationStatus::Registered
+            });
+            if !already_imported || source_reimport_pending {
+                register_memory_source(config, &registration)?;
+                let import_result: Result<(), MemoryError> = if same_catalog {
+                    backfill_legacy_memory_source_scopes(
+                        config,
+                        &source.repository_id,
+                        &registration.source_id,
+                    )
+                } else if matches!(
+                    kind,
+                    MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+                ) {
+                    let mut import_config = config.clone();
+                    import_config.repo_root = source.root.clone();
+                    import_config.visibility = local_config.visibility;
+                    import_config.docs.default_visibility = local_config.docs.default_visibility;
+                    import_config.areas = local_config.areas.clone();
+                    merge_memory_index_from_okf(
+                        &import_config,
+                        &root,
+                        &source.repository_id,
+                        &registration.source_id,
+                    )
+                    .and_then(|_| {
+                        if kind == MemorySourceKind::LegacyStore {
+                            merge_legacy_memory_index(
+                                config,
+                                &local_config,
+                                &registration.source_id,
+                            )
+                            .and_then(|_| {
+                                source
+                                    .root
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .map(|legacy_repo_id| {
+                                        merge_legacy_code_index(
+                                            config,
+                                            &local_config,
+                                            legacy_repo_id,
+                                            &source.repository_id,
+                                        )
+                                    })
+                                    .unwrap_or(Ok(()))
+                            })
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .map(|_| ())
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = import_result {
+                    let _ = register_memory_source(
+                        config,
+                        &RegisteredMemorySource {
+                            status: MemorySourceRegistrationStatus::Failed,
+                            ..registration.clone()
+                        },
+                    );
+                    return Err(error);
+                }
+                register_memory_source(
+                    config,
+                    &RegisteredMemorySource {
+                        status: MemorySourceRegistrationStatus::Registered,
+                        ..registration
+                    },
+                )?;
+            } else if same_catalog {
+                if let Err(error) = backfill_legacy_memory_source_scopes(
+                    config,
+                    &source.repository_id,
+                    &registration.source_id,
+                ) {
+                    let _ = register_memory_source(
+                        config,
+                        &RegisteredMemorySource {
+                            status: MemorySourceRegistrationStatus::Failed,
+                            ..registration.clone()
+                        },
+                    );
+                    return Err(error);
+                }
+                register_memory_source(
+                    config,
+                    &RegisteredMemorySource {
+                        status: MemorySourceRegistrationStatus::Registered,
+                        ..registration
+                    },
+                )?;
+            }
+        }
+    }
+    reimport_pending_memory_sources(config)?;
+    Ok(())
+}
+
+fn reimport_pending_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
+    let pending = registered_memory_sources(config)?
+        .into_iter()
+        .filter(|source| {
+            matches!(
+                source.kind,
+                MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+            ) && source.status != MemorySourceRegistrationStatus::Registered
+        })
+        .collect::<Vec<_>>();
+    for registration in pending {
+        let Some(source) = config.repository_sources.get(&registration.repository_id) else {
+            continue;
+        };
+        if !registration.root.exists() {
+            continue;
+        }
+        let local_config = MemoryConfig::load(&source.root, None)?;
+        let same_catalog = registration.kind == MemorySourceKind::LegacyStore
+            && match (
+                fs::canonicalize(&registration.root),
+                fs::canonicalize(&config.memory_root),
+            ) {
+                (Ok(root), Ok(catalog)) => root == catalog,
+                _ => registration.root == config.memory_root,
+            };
+        let _source_memory_lock =
+            if registration.kind == MemorySourceKind::LegacyStore && !same_catalog {
+                Some(acquire_source_memory_writer_lock(&local_config)?)
+            } else {
+                None
+            };
+        let import_result = if same_catalog {
+            backfill_legacy_memory_source_scopes(
+                config,
+                &source.repository_id,
+                &registration.source_id,
+            )
+        } else {
+            let mut import_config = config.clone();
+            import_config.repo_root = source.root.clone();
+            import_config.visibility = local_config.visibility;
+            import_config.docs.default_visibility = local_config.docs.default_visibility;
+            import_config.areas = local_config.areas.clone();
+            merge_memory_index_from_okf(
+                &import_config,
+                &registration.root,
+                &source.repository_id,
+                &registration.source_id,
+            )
+            .and_then(|_| {
+                if registration.kind == MemorySourceKind::LegacyStore {
+                    merge_legacy_memory_index(config, &local_config, &registration.source_id)
+                        .and_then(|_| {
+                            source
+                                .root
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .map_or(Ok(()), |legacy_repo_id| {
+                                    merge_legacy_code_index(
+                                        config,
+                                        &local_config,
+                                        legacy_repo_id,
+                                        &source.repository_id,
+                                    )
+                                })
+                        })
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        import_result?;
+        register_memory_source(
+            config,
+            &RegisteredMemorySource {
+                status: MemorySourceRegistrationStatus::Registered,
+                ..registration
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn acquire_source_memory_writer_lock(
+    config: &MemoryConfig,
+) -> Result<MemoryCoordinationLock, MemoryError> {
+    let lock = acquire_memory_writer_lock(config)?;
+    let marker = memory_activity_marker_path(&config.memory_root);
+    match memory_activity_status(&config.memory_root).map_err(|source| {
+        MemoryError::InvalidInput(format!(
+            "failed to inspect repository memory activity marker {}: {source}",
+            marker.display()
+        ))
+    })? {
+        MemoryActivityStatus::Absent => {}
+        MemoryActivityStatus::Stale => {
+            fs::remove_file(&marker).map_err(|source| {
+                MemoryError::InvalidInput(format!(
+                    "failed to remove stale repository memory activity marker {}: {source}",
+                    marker.display()
+                ))
+            })?;
+        }
+        MemoryActivityStatus::Live => {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository memory store is already active at {}",
+                marker.display()
+            )));
+        }
+    }
+    Ok(lock)
+}
+
+fn memory_source_generation(root: &Path) -> Result<String, MemoryError> {
+    memory_source_generation_with_excluded_index(root, None)
+}
+
+fn memory_source_generation_with_excluded_index(
+    root: &Path,
+    excluded_index: Option<&Path>,
+) -> Result<String, MemoryError> {
+    let metadata = fs::metadata(root).map_err(|source| MemoryError::ReadFile {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut entries = Vec::new();
+    if metadata.file_type().is_file() {
+        entries.push((
+            root.file_name()
+                .map(|name| name.to_string_lossy().as_bytes().to_vec())
+                .unwrap_or_default(),
+            root.to_path_buf(),
+        ));
+    } else if metadata.file_type().is_dir() {
+        collect_memory_source_entries(root, root, &mut entries, excluded_index)?;
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    for (relative, path) in entries {
+        digest.update(&relative);
+        digest.update([0]);
+        let mut file = fs::File::open(&path).map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read =
+                io::Read::read(&mut file, &mut buffer).map_err(|source| MemoryError::ReadFile {
+                    path: path.clone(),
+                    source,
+                })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        digest.update([0]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn memory_source_registration_generation(
+    root: &Path,
+    source: &MemoryRepositorySource,
+    kind: MemorySourceKind,
+    commit_sha: &str,
+    config: &MemoryConfig,
+    local_config: &MemoryConfig,
+) -> Result<String, MemoryError> {
+    let content_generation = if kind == MemorySourceKind::Repository {
+        format!("commit:{commit_sha}")
+    } else {
+        if kind == MemorySourceKind::LegacyStore
+            && fs::canonicalize(root).ok() == fs::canonicalize(&config.memory_root).ok()
+        {
+            memory_source_generation_with_excluded_index(root, Some(&config.index_path))?
+        } else {
+            memory_source_generation(root)?
+        }
+    };
+    let routing_scopes = serde_json::to_string(&(
+        config.default_project_set_id.as_deref(),
+        source.project_scope_ids.iter().collect::<Vec<_>>(),
+    ))?;
+    let policy_generation = if kind == MemorySourceKind::Repository {
+        String::new()
+    } else if local_config.config_path.is_file() {
+        memory_source_generation(&local_config.config_path)?
+    } else {
+        "absent".to_string()
+    };
+    Ok(sha256_hex(&format!(
+        "source-registration-v5\0{}\0{}\0{}\0{}\0{}",
+        kind.as_str(),
+        commit_sha,
+        content_generation,
+        policy_generation,
+        routing_scopes
+    )))
+}
+
+fn collect_memory_source_entries(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<(Vec<u8>, PathBuf)>,
+    excluded_index: Option<&Path>,
+) -> Result<(), MemoryError> {
+    for entry in fs::read_dir(current).map_err(|source| MemoryError::ReadFile {
+        path: current.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: current.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            collect_memory_source_entries(root, &path, entries, excluded_index)?;
+        } else if file_type.is_file() {
+            if excluded_index.is_some_and(|index| {
+                path == index
+                    || path
+                        .file_name()
+                        .zip(index.file_name())
+                        .is_some_and(|(path, index)| {
+                            path.to_string_lossy()
+                                .starts_with(&format!("{}.", index.to_string_lossy()))
+                        })
+            }) {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec();
+            let is_runtime_file =
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name == MEMORY_MIGRATION_LOCK || name == MEMORY_ACTIVITY_MARKER
+                    });
+            if !is_runtime_file {
+                entries.push((relative, path));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn memory_source_has_live_markdown(root: &Path) -> Result<bool, MemoryError> {
+    if !root.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(root).map_err(|source| MemoryError::ReadFile {
+        path: root.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| MemoryError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            if path.file_name().is_some_and(|name| name == "indexes") {
+                continue;
+            }
+            if memory_source_has_live_markdown(&path)? {
+                return Ok(true);
+            }
+        } else if file_type.is_file()
+            && path.extension().is_some_and(|extension| extension == "md")
+            && path
+                .file_name()
+                .is_some_and(|name| name != "index.md" && name != "log.md")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn memory_activity_marker_path(memory_root: &Path) -> PathBuf {
@@ -2138,6 +3110,7 @@ fn memory_server_health_payload(auth: &MemoryServerAuth) -> Value {
         "status": "ok",
         "protocol": "mcp-streamable-http-2025-06-18",
         "mode": if admin_tools { "read_write" } else { "read_only" },
+        "catalog": "per_instance",
         "adminTools": admin_tools
     })
 }
@@ -2174,42 +3147,82 @@ async fn memory_server_mcp(
             .get("name")
             .and_then(Value::as_str)
             .is_some_and(is_memory_writer_tool);
-    let _writer_guard = if writer_request {
+    let writer_guard = if writer_request {
         Some(state.writer_gate.clone().lock_owned().await)
     } else {
         None
     };
-    let result = match request.method.as_str() {
-        "initialize" => Ok(json!({
-            "protocolVersion": "2025-06-18",
-            "serverInfo": { "name": "opensymphony-memory", "version": env!("CARGO_PKG_VERSION") },
-            "capabilities": { "tools": {} }
-        })),
-        "tools/list" => Ok(json!({
-            "tools": memory_tool_descriptors(&state.config, &state.auth)
-        })),
-        "tools/call" => match tokio::time::timeout(
-            MEMORY_MCP_TOOL_TIMEOUT,
+    let result = if let Some(writer_guard) = writer_guard {
+        let config = state.config.clone();
+        let params = request.params;
+        let workspace_root = state.workspace_root.clone();
+        let central_config_path = state.central_config_path.clone();
+        let resolved_workflow = state.resolved_workflow.clone();
+        let worker_grant = scoped_grant.clone();
+        let task = tokio::spawn(async move {
+            let _writer_guard = writer_guard;
             call_memory_tool_with_workspace(
-                &state.config,
-                request.params,
-                state.workspace_root.as_deref(),
-                state.central_config_path.as_deref(),
-                state.resolved_workflow.as_ref(),
-                scoped_grant.as_ref(),
-            ),
-        )
-        .await
-        {
-            Ok(result) => result,
+                &config,
+                params,
+                workspace_root.as_deref(),
+                central_config_path.as_deref(),
+                resolved_workflow.as_ref(),
+                worker_grant.as_ref(),
+            )
+            .await
+        });
+        match tokio::time::timeout(MEMORY_MCP_TOOL_TIMEOUT, task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(MemoryError::InvalidInput(format!(
+                "memory writer task failed: {error}"
+            ))),
             Err(_) => Err(MemoryError::InvalidInput(format!(
                 "memory tool call exceeded {} second timeout",
                 MEMORY_MCP_TOOL_TIMEOUT.as_secs()
             ))),
-        },
-        other => Err(MemoryError::InvalidInput(format!(
-            "unsupported MCP method `{other}`"
-        ))),
+        }
+    } else {
+        match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2025-06-18",
+                "serverInfo": { "name": "opensymphony-memory", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "tools": {} }
+            })),
+            "tools/list" => {
+                let config = state.config.clone();
+                let auth = state.auth.clone();
+                match tokio::task::spawn_blocking(move || memory_tool_descriptors(&config, &auth))
+                    .await
+                {
+                    Ok(tools) => Ok(json!({ "tools": tools })),
+                    Err(error) => Err(MemoryError::InvalidInput(format!(
+                        "memory tool discovery task failed: {error}"
+                    ))),
+                }
+            }
+            "tools/call" => match tokio::time::timeout(
+                MEMORY_MCP_TOOL_TIMEOUT,
+                call_memory_tool_with_workspace(
+                    &state.config,
+                    request.params,
+                    state.workspace_root.as_deref(),
+                    state.central_config_path.as_deref(),
+                    state.resolved_workflow.as_ref(),
+                    scoped_grant.as_ref(),
+                ),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(MemoryError::InvalidInput(format!(
+                    "memory tool call exceeded {} second timeout",
+                    MEMORY_MCP_TOOL_TIMEOUT.as_secs()
+                ))),
+            },
+            other => Err(MemoryError::InvalidInput(format!(
+                "unsupported MCP method `{other}`"
+            ))),
+        }
     };
 
     match result {
@@ -2248,6 +3261,7 @@ fn required_access_for_request(
 fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Vec<Value> {
     let mut tools = vec![
         json!({ "name": "memory.context", "description": "Build a pre-implementation memory context bundle", "access": "read" }),
+        json!({ "name": "memory.show", "description": "Return one issue capsule", "access": "read" }),
         json!({ "name": "memory.search", "description": "Search captured issue memory", "access": "read" }),
         json!({ "name": "memory.related", "description": "Find related issue memory by issue, area, or paths", "access": "read" }),
         json!({ "name": "memory.brief", "description": "Return a compact issue memory brief", "access": "read" }),
@@ -2261,7 +3275,7 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
         json!({ "name": "memory.import_okf", "description": "Import an OKF memory bundle", "access": "admin" }),
         json!({ "name": "memory.ingest_code_intel", "description": "Generate code-intelligence artifacts for future ingestion", "access": "admin" }),
     ];
-    if config.code_intel.enabled {
+    if code_graph_tools_enabled(config) {
         tools.push(json!({
             "name": "code.graph.context",
             "description": "Bounded read-only indexed code discovery with optional workspace overlay",
@@ -2271,6 +3285,8 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
                 "additionalProperties": false,
                 "properties": {
                     "repository": { "type": "string", "description": "Indexed repository id" },
+                    "project": { "type": "string", "description": "Project scope used to select one repository" },
+                    "projectSet": { "type": "string", "description": "Project-set scope used to select one repository" },
                     "query": { "type": "string", "description": "Case-insensitive symbol/path search" },
                     "path": { "type": "string", "description": "Repository-relative path or directory" },
                     "symbol": { "type": "string", "description": "Symbol name or stable symbol key" },
@@ -2281,7 +3297,7 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
             }
         }));
     }
-    if ast_tools_enabled(config) {
+    if ast_tools_available(config) {
         tools.extend(AST_MCP_TOOL_NAMES.iter().map(|name| {
             json!({
                 "name": name,
@@ -2311,6 +3327,22 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
         }));
     }
     tools
+}
+
+fn code_graph_tools_enabled(config: &MemoryConfig) -> bool {
+    config.enabled && config.code_intel.enabled
+        || config.repository_sources.values().any(|source| {
+            MemoryConfig::load(&source.root, None)
+                .is_ok_and(|local| local.enabled && local.code_intel.enabled)
+        })
+}
+
+fn ast_tools_available(config: &MemoryConfig) -> bool {
+    ast_tools_enabled(config)
+        || config.repository_sources.values().any(|source| {
+            MemoryConfig::load(&source.root, None)
+                .is_ok_and(|local| local.enabled && ast_tools_enabled(&local))
+        })
 }
 
 fn is_admin_memory_tool(name: &str) -> bool {
@@ -2349,7 +3381,75 @@ fn required_access_for_tool(name: &str, auth: &MemoryServerAuth) -> MemoryServer
 }
 
 fn ast_tools_enabled(config: &MemoryConfig) -> bool {
-    config.code_intel.enabled && config.code_intel.ast.enabled
+    config.enabled && config.code_intel.enabled && config.code_intel.ast.enabled
+}
+
+fn memory_config_for_code_intel_scope(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryConfig, MemoryError> {
+    let (_, resolved) = resolve_memory_config_for_code_intel_scope(config, arguments)?;
+    if !ast_tools_enabled(&resolved) {
+        return Err(MemoryError::InvalidInput(
+            "AST code-intelligence tools are disabled for the selected repository".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
+fn resolve_memory_config_for_code_intel_scope(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<(MemoryScopeFilter, MemoryConfig), MemoryError> {
+    let mut scope = scope_filter_from_mcp(config, arguments, false)?;
+    if let Some(repository_id) = optional_string_arg(arguments, "repository") {
+        scope.repo = Some(repository_id);
+    }
+    if scope.repo.is_none() && (scope.project.is_some() || scope.project_set.is_some()) {
+        scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+    }
+    if let Some(repository_id) = scope.repo.as_deref()
+        && !repository_matches_memory_scope(config, repository_id, &scope)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "repository `{repository_id}` is not accessible in the requested memory scope"
+        )));
+    }
+    let mut resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if let Some(repository_id) = scope.repo.clone() {
+        resolved.default_repository_id = Some(repository_id);
+    }
+    Ok((scope, resolved))
+}
+
+fn memory_config_for_code_graph_scope(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryConfig, MemoryError> {
+    let mut scope = scope_filter_from_mcp(config, arguments, true)?;
+    if let Some(repository_id) = optional_string_arg(arguments, "repository") {
+        scope.repo = Some(repository_id);
+    }
+    if scope.repo.is_none() && (scope.project.is_some() || scope.project_set.is_some()) {
+        scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+    }
+    if let Some(repository_id) = scope.repo.as_deref()
+        && !repository_matches_memory_scope(config, repository_id, &scope)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "repository `{repository_id}` is not accessible in the requested memory scope"
+        )));
+    }
+    let mut resolved = memory_config_for_repository(config, scope.repo.as_deref())?;
+    if let Some(repository_id) = scope.repo {
+        resolved.default_repository_id = Some(repository_id);
+    }
+    if !resolved.enabled || !resolved.code_intel.enabled {
+        return Err(MemoryError::InvalidInput(
+            "indexed code graph tools are disabled for the selected repository".to_string(),
+        ));
+    }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -2493,7 +3593,7 @@ async fn call_memory_tool_with_workspace(
         reject_project_set_memory_write(central_config_path, name)?;
     }
     if name == "memory.context" {
-        let scope = scope_filter_from_mcp(&arguments, false);
+        let scope = scope_filter_from_mcp(config, &arguments, false)?;
         if workspace_root.is_some()
             && !scope.all_accessible
             && scope.project.is_none()
@@ -2504,11 +3604,6 @@ async fn call_memory_tool_with_workspace(
                     .to_owned(),
             ));
         }
-    }
-    if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
-        return Err(MemoryError::InvalidInput(
-            "AST code-intelligence tools are disabled".to_string(),
-        ));
     }
     if name == "code.graph.context" && !config.code_intel.enabled {
         return Err(MemoryError::InvalidInput(
@@ -2523,7 +3618,13 @@ async fn call_memory_tool_with_workspace(
             && (bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")))
     {
-        let scope = scope_filter_from_mcp(&arguments, true);
+        let mut scope = scope_filter_from_mcp(config, &arguments, true)?;
+        if workspace_root.is_none()
+            && scope.repo.is_none()
+            && (scope.project.is_some() || scope.project_set.is_some())
+        {
+            scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+        }
         let issue = optional_string_arg(&arguments, "issue").or_else(|| {
             arguments
                 .get("currentIssue")
@@ -2545,6 +3646,14 @@ async fn call_memory_tool_with_workspace(
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
+            let mut context_scope = scope_filter_from_mcp(config, &arguments, true)?;
+            context_scope.issue = None;
+            if context_scope.repo.is_none()
+                && (context_scope.project.is_some() || context_scope.project_set.is_some())
+            {
+                context_scope.repo =
+                    Some(unique_repository_for_memory_scope(config, &context_scope)?);
+            }
             let options = MemoryContextOptions {
                 issue: issue.clone(),
                 explicit_includes: string_list_arg(&arguments, "include"),
@@ -2553,18 +3662,33 @@ async fn call_memory_tool_with_workspace(
                     .map(PathBuf::from)
                     .collect(),
                 limit: usize_arg(&arguments, "limit", 20),
+                scope: context_scope,
             };
             let source = context_source_from_mcp(&arguments);
-            let scope = scope_filter_from_mcp(&arguments, false);
-            let mut text =
-                context_for_issue_with_options_and_scope(config, &source, &options, &scope)?;
+            let context_config =
+                memory_config_for_repository(config, options.scope.repo.as_deref())?;
+            let scope = scope_filter_from_mcp(config, &arguments, false)?;
+            let mut text = context_for_issue_with_options_and_scope(
+                &context_config,
+                &source,
+                &options,
+                &scope,
+            )?;
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {
+                let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+                let mut code_scope = scope_filter_from_mcp(config, &arguments, true)?;
+                if code_scope.repo.is_none()
+                    && (code_scope.project.is_some() || code_scope.project_set.is_some())
+                {
+                    code_scope.repo =
+                        Some(unique_repository_for_memory_scope(config, &code_scope)?);
+                }
                 text = append_code_intel_context_blocking(
-                    code_intel_config.clone().unwrap_or_else(|| config.clone()),
+                    code_config,
                     text,
-                    scope_filter_from_mcp(&arguments, true),
+                    code_scope,
                     options.paths.clone(),
                     options.limit,
                 )
@@ -2574,14 +3698,14 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.search" => {
             let query = required_string_arg(&arguments, "query")?;
-            let scope = scope_filter_from_mcp(&arguments, true);
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
             let results =
                 search_with_scope(config, &query, usize_arg(&arguments, "limit", 10), &scope)?;
             Ok(json!({ "results": search_results_json(config, &results) }))
         }
         "memory.related" => {
             let limit = usize_arg(&arguments, "limit", 10);
-            let scope = scope_filter_from_mcp(&arguments, false);
+            let scope = scope_filter_from_mcp(config, &arguments, false)?;
             let results = if let Some(issue) = optional_string_arg(&arguments, "issue") {
                 related_by_issue_with_scope(config, &issue, limit, &scope)?
             } else if let Some(area) = optional_string_arg(&arguments, "area") {
@@ -2602,22 +3726,37 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.brief" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            Ok(mcp_text(brief_with_scope(
-                config,
-                &issue,
-                &scope_filter_from_mcp(&arguments, true),
+            let scope = brief_scope_filter(config, &arguments)?;
+            Ok(mcp_text(brief_with_scope(config, &issue, &scope)?))
+        }
+        "memory.show" => {
+            let issue = required_string_arg(&arguments, "issue")?;
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            Ok(mcp_text(load_issue_capsule_with_scope(
+                config, &issue, &scope,
             )?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let docs_config = memory_config_for_docs_scope(config, &scope, &area)?;
             Ok(mcp_text(docs_for_area_with_scope(
-                config,
+                &docs_config,
                 &area,
-                &scope_filter_from_mcp(&arguments, false),
+                &scope,
             )?))
         }
         "memory.status" => {
-            let scope = scope_filter_from_mcp(&arguments, true);
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let effective_scope = if scope.all_accessible
+                && (scope.project_set.is_some() || scope.project.is_some() || scope.repo.is_some())
+            {
+                let mut narrowed = scope.clone();
+                narrowed.all_accessible = false;
+                narrowed
+            } else {
+                scope.clone()
+            };
             let report = status_with_scope(
                 config,
                 &IssueSelection {
@@ -2625,12 +3764,26 @@ async fn call_memory_tool_with_workspace(
                     milestone: optional_string_arg(&arguments, "milestone"),
                     ..IssueSelection::default()
                 },
-                &scope,
+                &effective_scope,
             )?;
+            let sources = registered_memory_sources(config)?
+                .into_iter()
+                .filter(|source| {
+                    repository_matches_memory_scope(config, &source.repository_id, &effective_scope)
+                })
+                .collect::<Vec<_>>();
             Ok(json!({
                 "issueCount": report.issue_count,
                 "warningCount": report.warning_count,
                 "docsPendingCount": report.docs_pending_count,
+                "sources": sources.into_iter().map(|source| json!({
+                    "sourceId": source.source_id,
+                    "repositoryId": source.repository_id,
+                    "commit": source.commit_sha,
+                    "kind": source.kind.as_str(),
+                    "status": source.status,
+                    "generation": source.generation,
+                })).collect::<Vec<_>>(),
                 "issues": report.issues.into_iter().map(|issue| json!({
                     "issueKey": issue.issue_key,
                     "title": issue.title,
@@ -2644,53 +3797,54 @@ async fn call_memory_tool_with_workspace(
             }))
         }
         "code.graph.context" => {
+            let graph_config = memory_config_for_code_graph_scope(config, &arguments)?;
             call_code_graph_context_tool(
-                config.clone(),
+                graph_config,
                 arguments.clone(),
                 workspace_root.map(Path::to_path_buf),
                 worker_grant,
             )
             .await
         }
-        "code.ast.status" => call_code_ast_status_tool(config),
+        "code.ast.status" => {
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            call_code_ast_status_tool(&code_config)
+        }
         "code.ast.outline" => {
-            call_code_ast_outline_tool(
-                code_intel_config.clone().unwrap_or_else(|| config.clone()),
-                arguments.clone(),
-            )
-            .await
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            call_code_ast_outline_tool(code_config, arguments.clone()).await
         }
         "code.ast.symbols" => {
-            call_code_ast_symbols_tool(
-                code_intel_config.clone().unwrap_or_else(|| config.clone()),
-                arguments.clone(),
-            )
-            .await
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            call_code_ast_symbols_tool(code_config, arguments.clone()).await
         }
         "code.ast.references" => {
-            call_code_ast_references_tool(
-                code_intel_config.clone().unwrap_or_else(|| config.clone()),
-                arguments.clone(),
-            )
-            .await
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            call_code_ast_references_tool(code_config, arguments.clone()).await
         }
         "code.ast.query" => {
-            call_code_ast_query_tool(
-                code_intel_config.clone().unwrap_or_else(|| config.clone()),
-                arguments.clone(),
-            )
-            .await
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            call_code_ast_query_tool(code_config, arguments.clone()).await
         }
         "code.ast.context" => {
-            call_code_ast_context_tool(code_intel_config.as_ref().unwrap_or(config), &arguments)
-                .await
+            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            call_code_ast_context_tool(&code_config, &arguments).await
         }
         "code.ast.diagnostics" => {
-            call_code_ast_diagnostics_tool(
-                code_intel_config.clone().unwrap_or_else(|| config.clone()),
-                arguments.clone(),
-            )
-            .await
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            call_code_ast_diagnostics_tool(code_config, arguments.clone()).await
         }
         "memory.capture" => {
             call_memory_capture_tool(config, &arguments, central_config_path, resolved_workflow)
@@ -2804,9 +3958,11 @@ async fn call_code_graph_context_tool(
 ) -> Result<Value, MemoryError> {
     let strict_checkout = worker_grant.is_some();
     let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
+    let mut scope = scope_filter_from_mcp(&config, &arguments, true)?;
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = optional_string_arg(&arguments, "repository")
             .or_else(|| optional_string_arg(&arguments, "repo"))
+            .or_else(|| config.default_repository_id.clone())
             .unwrap_or_else(|| {
                 config
                     .repo_root
@@ -2815,6 +3971,10 @@ async fn call_code_graph_context_tool(
                     .unwrap_or("repo")
                     .to_string()
             });
+        scope.repo = Some(repo_id.clone());
+        if !config.repository_sources.is_empty() {
+            resolve_code_intel_repo_for_scope(&config, &scope)?;
+        }
         let context_query = CodeGraphContextQuery {
             repo_id: repo_id.clone(),
             query: optional_string_arg(&arguments, "query"),
@@ -2827,8 +3987,15 @@ async fn call_code_graph_context_tool(
         let overlay = optional_string_arg(&arguments, "runId")
             .or_else(|| optional_string_arg(&arguments, "run"))
             .map(|run_id| {
+                let overlay_config = memory_config_for_repository(&config, Some(&repo_id))?;
+                if !ast_tools_enabled(&overlay_config) {
+                    return Err(MemoryError::InvalidInput(
+                        "workspace code graph overlays are disabled for the selected repository"
+                            .to_string(),
+                    ));
+                }
                 resolve_code_graph_overlay(
-                    &config,
+                    &overlay_config,
                     workspace_root.as_deref(),
                     &repo_id,
                     &run_id,
@@ -2906,6 +4073,28 @@ fn resolve_code_graph_overlay(
             "invalid run workspace ownership manifest: {source}"
         ))
     })?;
+    if let Some(bound_repository_id) = manifest
+        .repository_binding
+        .as_ref()
+        .and_then(|binding| binding.repository_id())
+        && bound_repository_id.to_string() != repo_id
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace repository binding does not match the requested repository".to_string(),
+        ));
+    } else if manifest
+        .repository_binding
+        .as_ref()
+        .and_then(|binding| binding.repository_id())
+        .is_none()
+        && !config.repository_sources.is_empty()
+        && let Some(source) = config.repository_sources.get(repo_id)
+        && !workspace_matches_registered_repository(&workspace_path, &source.root)
+    {
+        return Err(MemoryError::InvalidInput(
+            "run workspace has no repository binding and does not resolve to the requested repository".to_string(),
+        ));
+    }
     let workspace_name = workspace_candidate
         .file_name()
         .and_then(|name| name.to_str())
@@ -2935,7 +4124,7 @@ fn resolve_code_graph_overlay(
             "run workspace ownership manifest does not match the requested run".to_string(),
         ));
     }
-    let branch = code_index_branch(&config.repo_root)
+    let branch = code_index_branch_for_config(config)
         .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
     let base_revision = workspace_merge_base(&workspace_path, &branch)?;
     code_graph_workspace_context_overlay(
@@ -2993,8 +4182,8 @@ struct AstDocuments {
     warnings: Vec<String>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn call_code_ast_status_tool(config: &MemoryConfig) -> Result<Value, MemoryError> {
-    let _ = resolve_code_intel_repo(config, None)?;
     Ok(json!({
         "provider": "tree-sitter-ast",
         "available": true,
@@ -3204,11 +4393,11 @@ async fn call_code_ast_context_tool(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
-    let scope = scope_filter_from_mcp(arguments, true);
+    let scope = scope_filter_from_mcp(config, arguments, true)?;
     let paths = ast_path_args(arguments)?;
     let limit = ast_limit(config, arguments);
     let symbol_kinds = normalized_string_set_args(arguments, &["symbols"]);
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
     let artifacts = code_intel_artifacts_with_symbol_kinds_blocking(
         repo_root,
@@ -3216,6 +4405,7 @@ async fn call_code_ast_context_tool(
         scope_refs,
         limit,
         symbol_kinds,
+        config.code_intel.ast.max_file_bytes,
     )
     .await?;
     let trace = artifacts
@@ -3278,8 +4468,8 @@ where
 }
 
 fn ast_documents(config: &MemoryConfig, arguments: &Value) -> Result<AstDocuments, MemoryError> {
-    let scope = scope_filter_from_mcp(arguments, false);
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    let repo_root = resolve_code_intel_repo_for_scope(config, &scope)?;
     let paths = ast_path_args(arguments)?;
     let mut files = Vec::new();
     let mut warnings = Vec::new();
@@ -3694,7 +4884,7 @@ fn call_memory_reindex_tool(
             .map(|path| repo_existing_path(config, &path))
             .transpose()?
             .unwrap_or_else(|| config.memory_root.clone());
-        refresh_memory_index_from_okf(config, &bundle_root)?
+        refresh_memory_index_from_okf_and_reimport_pending(config, &bundle_root)?
     } else {
         refresh_memory_index(config)?
     };
@@ -3728,14 +4918,23 @@ async fn call_memory_ingest_code_intel_tool(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
-    let scope = scope_filter_from_mcp(arguments, false);
+    let (scope, resolved_config) = resolve_memory_config_for_code_intel_scope(config, arguments)?;
     let paths = string_list_arg(arguments, "paths")
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let limit = usize_arg(arguments, "limit", 10);
-    let scope_refs = scope_refs_for_context(&scope, &paths);
     let persist = bool_arg(arguments, "persist");
+    let paths = paths
+        .into_iter()
+        .take(resolved_config.code_intel.ast.max_files_per_request)
+        .collect::<Vec<_>>();
+    let scope_refs = scope_refs_for_context(&scope, &paths);
+    if !resolved_config.enabled || !resolved_config.code_intel.enabled {
+        return Err(MemoryError::InvalidInput(
+            "code-intelligence ingestion is disabled for the selected repository".to_string(),
+        ));
+    }
     let (artifacts, persist_report) = if persist {
         let languages = normalized_string_set_args(arguments, &["languages"]);
         let symbols = normalized_string_set_args(arguments, &["symbols"]);
@@ -3744,7 +4943,7 @@ async fn call_memory_ingest_code_intel_tool(
             &["queryPack", "queryPacks", "query_pack", "query_packs"],
         );
         let (artifacts, report) = code_intel_persist_artifacts_blocking(CodeIntelPersistRequest {
-            config: config.clone(),
+            config: resolved_config,
             scope: scope.clone(),
             paths,
             scope_refs,
@@ -3756,8 +4955,15 @@ async fn call_memory_ingest_code_intel_tool(
         .await?;
         (artifacts, Some(report))
     } else {
-        let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
-        let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+        let repo_root = resolve_code_intel_repo_for_scope(&resolved_config, &scope)?;
+        let artifacts = code_intel_artifacts_blocking(
+            repo_root,
+            paths,
+            scope_refs,
+            limit.min(resolved_config.code_intel.ast.max_matches_per_request),
+            resolved_config.code_intel.ast.max_file_bytes,
+        )
+        .await?;
         (artifacts, None)
     };
     let (parsed_files, persisted_rows, stale_rows, skipped_files, diagnostics) =
@@ -3829,7 +5035,7 @@ async fn code_intel_persist_artifacts_blocking(
     MemoryError,
 > {
     tokio::task::spawn_blocking(move || {
-        let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+        let repo_root = resolve_code_intel_repo_for_scope(&request.config, &request.scope)?;
         let plan = code_intel_documents_for_persistence(&request)?;
         let repo_id = repo_id_for_code_intel(&request.config, &request.scope);
         let commit_sha = git_commit_sha_for_repo(&repo_root);
@@ -3865,7 +5071,7 @@ async fn code_intel_persist_artifacts_blocking(
 fn code_intel_documents_for_persistence(
     request: &CodeIntelPersistRequest,
 ) -> Result<CodeIntelPersistencePlan, MemoryError> {
-    let repo_root = resolve_code_intel_repo(&request.config, request.scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(&request.config, &request.scope)?;
     let repo_id = repo_id_for_code_intel(&request.config, &request.scope);
     let mut artifacts = Vec::new();
     let mut documents = Vec::new();
@@ -3888,6 +5094,24 @@ fn code_intel_documents_for_persistence(
         let relative_display = relative.to_string_lossy().to_string();
         if resolved.is_dir() {
             skipped_files.push(format!("{relative_display}: directory"));
+            continue;
+        }
+        let metadata = fs::metadata(&resolved).map_err(|source| MemoryError::ReadFile {
+            path: resolved.clone(),
+            source,
+        })?;
+        if metadata.len() > request.config.code_intel.ast.max_file_bytes {
+            record_skipped_code_intel_file(
+                &mut skipped_files,
+                &mut skipped_file_inputs,
+                &relative,
+                &relative_display,
+                &resolved,
+                &format!(
+                    "exceeds AST max_file_bytes {}",
+                    request.config.code_intel.ast.max_file_bytes
+                ),
+            )?;
             continue;
         }
         let Some(language) = crate::opensymphony_code_intel::detect_language(&relative) else {
@@ -3995,17 +5219,35 @@ fn record_skipped_code_intel_file(
     resolved: &Path,
     reason: &str,
 ) -> Result<(), MemoryError> {
-    let bytes = fs::read(resolved).map_err(|source| MemoryError::ReadFile {
-        path: resolved.to_path_buf(),
-        source,
-    })?;
+    let content_sha256 = sha256_file_hex(resolved)?;
     skipped_files.push(format!("{relative_display}: {reason}"));
     skipped_file_inputs.push(CodeIntelSkippedFileInput {
         path: relative.to_path_buf(),
         reason: reason.to_string(),
-        content_sha256: sha256_bytes_hex(&bytes),
+        content_sha256,
     });
     Ok(())
+}
+
+fn sha256_file_hex(path: &Path) -> Result<String, MemoryError> {
+    let mut file = fs::File::open(path).map_err(|source| MemoryError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read =
+            io::Read::read(&mut file, &mut buffer).map_err(|source| MemoryError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn code_intel_artifacts_for_summary(
@@ -4262,14 +5504,18 @@ fn normalized_string_set_args(arguments: &Value, keys: &[&str]) -> BTreeSet<Stri
 }
 
 fn repo_id_for_code_intel(config: &MemoryConfig, scope: &MemoryScopeFilter) -> String {
-    scope.repo.clone().unwrap_or_else(|| {
-        config
-            .repo_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("repo")
-            .to_string()
-    })
+    scope
+        .repo
+        .clone()
+        .or_else(|| config.default_repository_id.clone())
+        .unwrap_or_else(|| {
+            config
+                .repo_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("repo")
+                .to_string()
+        })
 }
 
 fn git_commit_sha_for_repo(repo_root: &Path) -> Option<String> {
@@ -4282,6 +5528,147 @@ fn git_commit_sha_for_repo(repo_root: &Path) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn legacy_code_repository_matches_source(
+    config: &MemoryConfig,
+    legacy_repository_id: &str,
+    repository_root: &Path,
+    canonical_repository_id: &str,
+    commit_sha: &str,
+) -> Result<bool, MemoryError> {
+    if code_repository_has_commit(config, legacy_repository_id, commit_sha)? {
+        return Ok(true);
+    }
+    let Some(configured_locator) = config
+        .repository_remote_locators
+        .get(canonical_repository_id)
+    else {
+        return Ok(false);
+    };
+    Ok(git_remote_matches_repository_id(
+        repository_root,
+        canonical_repository_id,
+        Some(configured_locator),
+    ))
+}
+
+fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
+    let remote_output = git_remote_url(repo_root)?;
+    remote_output.rsplit(['/', ':']).next().map(str::to_string)
+}
+
+fn git_remote_matches_repository_id(
+    repo_root: &Path,
+    repository_id: &str,
+    configured_locator: Option<&str>,
+) -> bool {
+    if let Some(configured_locator) = configured_locator {
+        let Some(remote) = git_remote_url(repo_root) else {
+            return false;
+        };
+        let remote = normalize_git_remote_locator(&remote);
+        let locator = normalize_git_remote_locator(configured_locator);
+        if remote == locator {
+            return true;
+        }
+        let Some(host) = canonical_repository_host(repository_id) else {
+            return false;
+        };
+        let locator_path = locator
+            .strip_prefix(&format!("{host}/"))
+            .unwrap_or(locator.as_str());
+        return remote == format!("{host}/{locator_path}");
+    }
+    let Some(remote_repository_id) = git_remote_repository_slug(repo_root) else {
+        return false;
+    };
+    let Some(canonical_key) = repository_id.split(":repository:").nth(1) else {
+        return false;
+    };
+    let canonical_slug = canonical_key.rsplit('/').next().unwrap_or(canonical_key);
+    remote_repository_id.eq_ignore_ascii_case(canonical_slug)
+}
+
+fn canonical_repository_host(repository_id: &str) -> Option<String> {
+    let mut parts = repository_id.split(':');
+    let provider = parts.next()?.to_ascii_lowercase();
+    let authority = parts.next()?;
+    if authority.eq_ignore_ascii_case("repository") {
+        return match provider.as_str() {
+            "github" => Some("github.com".to_string()),
+            "gitlab" => Some("gitlab.com".to_string()),
+            "bitbucket" => Some("bitbucket.org".to_string()),
+            _ => None,
+        };
+    }
+    if parts.next()? != "repository" {
+        return None;
+    }
+    Some(authority.to_ascii_lowercase())
+}
+
+fn normalize_git_remote_locator(value: &str) -> String {
+    let mut value = value.trim().trim_end_matches('/').to_string();
+    for scheme in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(stripped) = value.strip_prefix(scheme) {
+            value = stripped.to_string();
+            break;
+        }
+    }
+    if let Some(stripped) = value.strip_prefix("git@").map(str::to_string) {
+        if let Some((host, path)) = stripped.split_once(':') {
+            value = format!("{host}/{path}");
+        } else if let Some((host, path)) = stripped.split_once('/') {
+            value = format!("{host}/{path}");
+        }
+    }
+    let Some((host, path)) = value.split_once('/') else {
+        return value.to_ascii_lowercase();
+    };
+    let path = match path.get(path.len().saturating_sub(4)..) {
+        Some(suffix) if suffix.eq_ignore_ascii_case(".git") => &path[..path.len() - 4],
+        _ => path,
+    };
+    format!("{}/{path}", host.to_ascii_lowercase())
+}
+
+fn git_remote_url(repo_root: &Path) -> Option<String> {
+    let output = process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_string(),
+    )
+}
+
+fn workspace_matches_registered_repository(workspace_root: &Path, repository_root: &Path) -> bool {
+    let Some(workspace_remote) = git_remote_url(workspace_root) else {
+        return false;
+    };
+    let workspace_remote_path = Path::new(&workspace_remote);
+    if workspace_remote_path.is_absolute()
+        && workspace_remote_path
+            .canonicalize()
+            .ok()
+            .zip(repository_root.canonicalize().ok())
+            .is_some_and(|(workspace, repository)| workspace == repository)
+    {
+        return true;
+    }
+    git_remote_url(repository_root).is_some_and(|repository_remote| {
+        normalize_git_remote_locator(&workspace_remote)
+            == normalize_git_remote_locator(&repository_remote)
+    })
 }
 
 fn git_worktree_dirty(repo_root: &Path) -> bool {
@@ -4512,6 +5899,49 @@ fn repo_existing_path_from_path(
     Ok(resolved)
 }
 
+fn memory_config_for_repository(
+    config: &MemoryConfig,
+    repository_id: Option<&str>,
+) -> Result<MemoryConfig, MemoryError> {
+    let repository_id = repository_id
+        .filter(|value| !value.trim().is_empty())
+        .or(config.default_repository_id.as_deref());
+    let Some(repository_id) = repository_id else {
+        if !config.repository_sources.is_empty() {
+            return Err(MemoryError::InvalidInput(
+                "a canonical repository id is required when multiple repository sources are registered"
+                    .to_string(),
+            ));
+        }
+        return Ok(config.clone());
+    };
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        if config.repository_sources.is_empty() {
+            return Ok(config.clone());
+        }
+        return Err(MemoryError::InvalidInput(format!(
+            "unknown canonical repository id `{repository_id}`"
+        )));
+    };
+    let mut resolved = config.clone();
+    resolved.repo_root = source.root.clone();
+    let local_config = MemoryConfig::load(&source.root, None)?;
+    resolved.enabled = local_config.enabled;
+    resolved.code_intel = local_config.code_intel;
+    resolved.visibility = local_config.visibility;
+    resolved.confidence_threshold = local_config.confidence_threshold;
+    resolved.areas = local_config.areas;
+    resolved.docs = local_config.docs;
+    resolved.redaction = local_config.redaction;
+    resolved.markdown_indexes = local_config.markdown_indexes;
+    resolved.source_snapshot_policy = local_config.source_snapshot_policy;
+    resolved.code_index_target_branch = source
+        .target_branch
+        .clone()
+        .or(resolved.code_index_target_branch);
+    Ok(resolved)
+}
+
 fn context_source_from_mcp(arguments: &Value) -> SourceFile {
     let Some(current_issue) = arguments.get("currentIssue") else {
         return SourceFile::default();
@@ -4563,10 +5993,22 @@ fn append_code_intel_context(
     paths: &[PathBuf],
     limit: usize,
 ) -> Result<(), MemoryError> {
-    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
-    let scope_refs = scope_refs_for_context(scope, paths);
-    let artifacts =
-        CompositeCodeIntelProvider::new(repo_root).code_context(paths, &scope_refs, limit)?;
+    let repo_root = resolve_code_intel_repo_for_scope(config, scope)?;
+    let paths = paths
+        .iter()
+        .take(config.code_intel.ast.max_files_per_request)
+        .cloned()
+        .collect::<Vec<_>>();
+    let scope_refs = scope_refs_for_context(scope, &paths);
+    let artifacts = CompositeCodeIntelProvider::with_max_file_bytes(
+        repo_root,
+        config.code_intel.ast.max_file_bytes,
+    )
+    .code_context(
+        &paths,
+        &scope_refs,
+        limit.min(config.code_intel.ast.max_matches_per_request),
+    )?;
     append_code_intel_artifacts(config, output, artifacts);
     Ok(())
 }
@@ -4578,9 +6020,20 @@ async fn append_code_intel_context_blocking(
     paths: Vec<PathBuf>,
     limit: usize,
 ) -> Result<String, MemoryError> {
-    let repo_root = resolve_code_intel_repo(&config, scope.repo.as_deref())?;
+    let repo_root = resolve_code_intel_repo_for_scope(&config, &scope)?;
+    let paths = paths
+        .into_iter()
+        .take(config.code_intel.ast.max_files_per_request)
+        .collect::<Vec<_>>();
     let scope_refs = scope_refs_for_context(&scope, &paths);
-    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    let artifacts = code_intel_artifacts_blocking(
+        repo_root,
+        paths,
+        scope_refs,
+        limit.min(config.code_intel.ast.max_matches_per_request),
+        config.code_intel.ast.max_file_bytes,
+    )
+    .await?;
     append_code_intel_artifacts(&config, &mut output, artifacts);
     Ok(output)
 }
@@ -4590,9 +6043,14 @@ async fn code_intel_artifacts_blocking(
     paths: Vec<PathBuf>,
     scope_refs: Vec<CodeIntelScope>,
     limit: usize,
+    max_file_bytes: u64,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
-        CompositeCodeIntelProvider::new(repo_root).code_context(&paths, &scope_refs, limit)
+        CompositeCodeIntelProvider::with_max_file_bytes(repo_root, max_file_bytes).code_context(
+            &paths,
+            &scope_refs,
+            limit,
+        )
     })
     .await
     .map_err(|error| {
@@ -4607,14 +6065,11 @@ async fn code_intel_artifacts_with_symbol_kinds_blocking(
     scope_refs: Vec<CodeIntelScope>,
     limit: usize,
     symbol_kinds: BTreeSet<String>,
+    max_file_bytes: u64,
 ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
     tokio::task::spawn_blocking(move || {
-        CompositeCodeIntelProvider::new(repo_root).code_context_with_symbol_kinds(
-            &paths,
-            &scope_refs,
-            limit,
-            &symbol_kinds,
-        )
+        CompositeCodeIntelProvider::with_max_file_bytes(repo_root, max_file_bytes)
+            .code_context_with_symbol_kinds(&paths, &scope_refs, limit, &symbol_kinds)
     })
     .await
     .map_err(|error| {
@@ -4662,8 +6117,28 @@ fn resolve_code_intel_repo(
     repo: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let Some(repo) = repo.and_then(non_empty) else {
-        return repo_existing_path(config, ".");
+        if !config.repository_sources.is_empty() && config.default_repository_id.is_none() {
+            return Err(MemoryError::InvalidInput(
+                "a canonical repository id is required when multiple repository sources are registered"
+                    .to_string(),
+            ));
+        }
+        return config
+            .default_repository_id
+            .as_deref()
+            .and_then(|id| config.repository_sources.get(id))
+            .map(|source| source.root.clone())
+            .map(Ok)
+            .unwrap_or_else(|| repo_existing_path(config, "."));
     };
+    if let Some(source) = config.repository_sources.get(&repo) {
+        return Ok(source.root.clone());
+    }
+    if !config.repository_sources.is_empty() {
+        return Err(MemoryError::InvalidInput(format!(
+            "unknown canonical repository id `{repo}`"
+        )));
+    }
     let resolved = repo_existing_path(config, &repo)?;
     if !resolved.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
@@ -4702,6 +6177,9 @@ fn resolve_code_intel_config(
     };
     let mut scoped = config.clone();
     scoped.repo_root = repo_root;
+    if let Some(repository_id) = scope.repo.as_deref().and_then(non_empty) {
+        scoped.default_repository_id = Some(repository_id.to_owned());
+    }
     Ok(scoped)
 }
 
@@ -4849,6 +6327,103 @@ fn find_verified_checkout_for_code_intel(
     }
 }
 
+fn resolve_code_intel_repo_for_scope(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+) -> Result<PathBuf, MemoryError> {
+    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    if scope.all_accessible
+        && scope.repo.is_none()
+        && scope.project.is_none()
+        && scope.project_set.is_none()
+    {
+        return Ok(repo_root);
+    }
+    let Some(repository_id) = scope.repo.as_deref() else {
+        return Ok(repo_root);
+    };
+    if !repository_matches_memory_scope(config, repository_id, scope) {
+        if let Some(project_set_id) = scope.project_set.as_deref().and_then(non_empty) {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository `{repository_id}` is not associated with project set `{project_set_id}`"
+            )));
+        }
+        if let Some(project_id) = scope.project.as_deref().and_then(non_empty) {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository `{repository_id}` is not associated with project `{project_id}`"
+            )));
+        }
+        return Err(MemoryError::InvalidInput(format!(
+            "repository `{repository_id}` is not accessible in the requested memory scope"
+        )));
+    }
+    Ok(repo_root)
+}
+
+fn repository_matches_memory_scope(
+    config: &MemoryConfig,
+    repository_id: &str,
+    scope: &MemoryScopeFilter,
+) -> bool {
+    if scope.all_accessible
+        && scope.repo.is_none()
+        && scope.project.is_none()
+        && scope.project_set.is_none()
+    {
+        return true;
+    }
+    if scope
+        .repo
+        .as_deref()
+        .and_then(non_empty)
+        .is_some_and(|requested| requested != repository_id)
+    {
+        return false;
+    }
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        return config.repository_sources.is_empty();
+    };
+    if let Some(project_set_id) = scope.project_set.as_deref().and_then(non_empty) {
+        if config.default_project_set_id.as_deref() != Some(project_set_id.as_str()) {
+            return false;
+        }
+        if !config.project_scope_ids.is_empty()
+            && source
+                .project_scope_ids
+                .is_disjoint(&config.project_scope_ids)
+        {
+            return false;
+        }
+    }
+    scope
+        .project
+        .as_deref()
+        .and_then(non_empty)
+        .is_none_or(|project_id| source.project_scope_ids.contains(&project_id))
+}
+
+fn unique_repository_for_memory_scope(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
+    let candidates = config
+        .repository_sources
+        .values()
+        .filter(|source| repository_matches_memory_scope(config, &source.repository_id, scope))
+        .map(|source| source.repository_id.as_str())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [repository_id] => Ok((*repository_id).to_string()),
+        [] => Err(MemoryError::InvalidInput(
+            "no repository source matches the requested memory scope".to_string(),
+        )),
+        _ => Err(MemoryError::InvalidInput(
+            "a canonical repository id is required when the requested memory scope matches multiple repository sources"
+                .to_string(),
+        )),
+    }
+}
+
 fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<CodeIntelScope> {
     let mut refs = Vec::new();
     push_scope_ref(
@@ -4903,45 +6478,130 @@ fn scope_filter(
     milestone: Option<&str>,
     area: Option<&str>,
 ) -> MemoryScopeFilter {
+    scope_filter_with_env(scope, issue, milestone, area, env_scope_value)
+}
+
+fn scope_filter_with_env<F>(
+    scope: &ScopeArgs,
+    issue: Option<&str>,
+    milestone: Option<&str>,
+    area: Option<&str>,
+    mut read_env: F,
+) -> MemoryScopeFilter
+where
+    F: FnMut(&str) -> Option<String>,
+{
     MemoryScopeFilter {
-        project_set: project_set_scope(scope),
-        project: scope
-            .project
-            .as_deref()
-            .and_then(non_empty)
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT")),
+        project_set: scope_arg_or_env(
+            scope,
+            scope.project_set.as_deref().and_then(non_empty),
+            "OPENSYMPHONY_MEMORY_PROJECT_SET",
+            &mut read_env,
+        ),
+        project: scope_arg_or_env(
+            scope,
+            scope.project.as_deref().and_then(non_empty),
+            "OPENSYMPHONY_MEMORY_PROJECT",
+            &mut read_env,
+        ),
         milestone: milestone.and_then(non_empty),
         issue: issue.and_then(non_empty),
-        repo: scope
-            .repo
-            .as_deref()
-            .and_then(non_empty)
-            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO")),
+        repo: scope_arg_or_env(
+            scope,
+            scope.repo.as_deref().and_then(non_empty),
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+            &mut read_env,
+        ),
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
     }
 }
 
-fn project_set_scope(scope: &ScopeArgs) -> Option<String> {
-    scope
-        .project_set
-        .as_deref()
-        .and_then(non_empty)
-        .or_else(|| {
-            (!scope.all_accessible)
-                .then(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
-                .flatten()
-        })
+fn direct_scope_filter(
+    config: &MemoryConfig,
+    scope: &ScopeArgs,
+    issue: Option<&str>,
+    milestone: Option<&str>,
+    area: Option<&str>,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let mut scope = scope_filter(scope, issue, milestone, area);
+    normalize_memory_scope_repository(config, &mut scope);
+    if scope.all_accessible
+        || scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.repo.is_some()
+    {
+        return Ok(scope);
+    }
+    if let Some(project_set_id) = &config.default_project_set_id {
+        scope.project_set = Some(project_set_id.clone());
+    } else if let Some(repository_id) = &config.default_repository_id {
+        scope.repo = Some(repository_id.clone());
+    } else if config.repository_sources.len() == 1 {
+        scope.repo = config.repository_sources.keys().next().cloned();
+    } else if config.repository_sources.len() > 1 {
+        return Err(MemoryError::InvalidInput(
+            "a projectSet, project, or repo scope is required when multiple repository sources are registered"
+                .to_string(),
+        ));
+    }
+    Ok(scope)
 }
 
 fn env_scope_value(name: &str) -> Option<String> {
     env::var(name).ok().and_then(|value| non_empty(&value))
 }
 
-fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeFilter {
+fn scope_arg_or_env<F>(
+    scope: &ScopeArgs,
+    explicit: Option<String>,
+    env_name: &str,
+    read_env: &mut F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if explicit.is_some() || scope.all_accessible {
+        explicit
+    } else {
+        read_env(env_name)
+    }
+}
+
+fn normalize_memory_scope_repository(config: &MemoryConfig, scope: &mut MemoryScopeFilter) {
+    let Some(requested) = scope.repo.clone() else {
+        return;
+    };
+    if config.repository_sources.is_empty() || config.repository_sources.contains_key(&requested) {
+        return;
+    }
+    let requested_path = Path::new(&requested);
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        config.repo_root.join(requested_path)
+    };
+    let Ok(requested_root) = candidate.canonicalize() else {
+        return;
+    };
+    if let Some((repository_id, _)) = config.repository_sources.iter().find(|(_, source)| {
+        source
+            .root
+            .canonicalize()
+            .is_ok_and(|root| root == requested_root)
+    }) {
+        scope.repo = Some(repository_id.clone());
+    }
+}
+
+fn scope_filter_from_mcp(
+    config: &MemoryConfig,
+    arguments: &Value,
+    include_issue: bool,
+) -> Result<MemoryScopeFilter, MemoryError> {
     let all_accessible =
         bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible");
-    MemoryScopeFilter {
+    let mut scope = MemoryScopeFilter {
         project_set: optional_string_arg(arguments, "projectSet").or_else(|| {
             (!all_accessible)
                 .then(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
@@ -4957,7 +6617,112 @@ fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeF
             .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO")),
         area: optional_string_arg(arguments, "area"),
         all_accessible,
+    };
+    if !scope.all_accessible
+        && scope.project_set.is_none()
+        && scope.project.is_none()
+        && scope.repo.is_none()
+    {
+        if let Some(project_set_id) = &config.default_project_set_id {
+            scope.project_set = Some(project_set_id.clone());
+        } else if let Some(repository_id) = &config.default_repository_id {
+            scope.repo = Some(repository_id.clone());
+        } else if config.repository_sources.len() == 1 {
+            scope.repo = config.repository_sources.keys().next().cloned();
+        } else if config.repository_sources.len() > 1 {
+            return Err(MemoryError::InvalidInput(
+                "a projectSet, project, or repo scope is required when multiple repository sources are registered"
+                    .to_string(),
+            ));
+        }
     }
+    normalize_memory_scope_repository(config, &mut scope);
+    Ok(scope)
+}
+
+fn brief_scope_filter(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    if scope.all_accessible
+        || scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.repo.is_some()
+    {
+        return Ok(scope);
+    }
+    Err(MemoryError::InvalidInput(
+        "memory.brief requires a projectSet, project, or repo scope".to_string(),
+    ))
+}
+
+fn memory_config_for_docs_scope(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+    area: &str,
+) -> Result<MemoryConfig, MemoryError> {
+    if config.repository_sources.is_empty() {
+        return Ok(config.clone());
+    }
+    let repository_id = match scope.repo.as_deref() {
+        Some(repository_id) if repository_matches_memory_scope(config, repository_id, scope) => {
+            Some(repository_id)
+        }
+        Some(repository_id) => {
+            return Err(MemoryError::InvalidInput(format!(
+                "repository `{repository_id}` is not accessible in the requested memory scope"
+            )));
+        }
+        None if scope.project.is_none() && scope.project_set.is_none() => return Ok(config.clone()),
+        None => {
+            let mut candidates = Vec::new();
+            for source in config.repository_sources.values() {
+                if !repository_matches_memory_scope(config, &source.repository_id, scope) {
+                    continue;
+                }
+                if scope.project_set.is_some() {
+                    let local_config = MemoryConfig::load(&source.root, None).map_err(|error| {
+                        MemoryError::InvalidInput(format!(
+                            "failed to load memory config for repository `{}`: {error}",
+                            source.repository_id
+                        ))
+                    })?;
+                    let area = area.trim().to_ascii_lowercase();
+                    if !local_config.areas.contains_key(&area)
+                        && !local_config.area_or_default(&area).docs_target.is_file()
+                    {
+                        continue;
+                    }
+                }
+                candidates.push(source.repository_id.as_str());
+            }
+            match candidates.as_slice() {
+                [repository_id] => Some(*repository_id),
+                [] if config.repository_sources.is_empty() => return Ok(config.clone()),
+                [] => return Err(MemoryError::InvalidInput(
+                    "no repository source contains the requested docs scope".to_string(),
+                )),
+                _ => return Err(MemoryError::InvalidInput(
+                    "a canonical repository id is required when the requested docs scope matches multiple repository sources".to_string(),
+                )),
+            }
+        }
+    };
+    let Some(repository_id) = repository_id else {
+        return Ok(config.clone());
+    };
+    let Some(source) = config.repository_sources.get(repository_id) else {
+        return Err(MemoryError::InvalidInput(format!(
+            "unknown canonical repository id `{repository_id}`"
+        )));
+    };
+    let local_config = MemoryConfig::load(&source.root, None)?;
+    let mut resolved = config.clone();
+    resolved.repo_root = source.root.clone();
+    resolved.docs = local_config.docs;
+    resolved.areas = local_config.areas;
+    Ok(resolved)
 }
 
 fn path_for_json(config: &MemoryConfig, path: &Path) -> String {
@@ -5947,6 +7712,12 @@ fn load_central_resolved_workflow(
         path: config_path.clone(),
         source,
     })?;
+    if central_routing_mode_is_project_set(&raw) {
+        return Err(MemoryError::InvalidInput(
+            "memory commands do not support project_set central routing until strict routing is enabled"
+                .to_string(),
+        ));
+    }
     let central = validate_central_config_text(&config_path, &raw)
         .map_err(|error| MemoryError::InvalidInput(format!("invalid central config: {error}")))?;
     if central.mode == CentralRoutingMode::ProjectSet {
@@ -6125,6 +7896,9 @@ fn issue_evidence_from_tracker(
         state: Some(issue.state),
         milestone: milestone.as_ref().map(|milestone| milestone.name.clone()),
         milestone_id: milestone.map(|milestone| milestone.id),
+        project_id: issue.project_id,
+        project_slug: issue.project_slug,
+        project_name: issue.project_name,
         parent,
         children,
         blocked_by,
@@ -6256,26 +8030,31 @@ fn print_search_results(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
 
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryScopeGrant,
         MemoryScopeGrantRegistry, MemoryServerAccess, MemoryServerAuth, MemoryServerState,
         RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock, authorize_memory_request,
-        call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
-        call_memory_tool_with_workspace, context_source_from_mcp,
+        brief_scope_filter, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
+        call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
         find_verified_checkout_for_code_intel, load_memory_config, memory_server_health,
         memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        parse_remote_memory_response, refresh_memory_index_from_okf_and_reimport_pending,
+        remote_memory_tool_request, remote_memory_tool_token, replace_or_append_managed_section,
         required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_config,
-        resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
+        resolve_code_intel_repo, run_init, sha256_file_hex, trim_auto_memory_status_log,
         validate_worker_memory_scope,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
-        MemoryConfig, MemoryError, code_symbol_detail, code_symbol_neighborhood,
-        code_symbols_containing_span, compare_code_symbols, persist_code_intel_documents,
+        IssueEvidence, IssueSelection, MemoryConfig, MemoryError, MemoryRepositorySource,
+        MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
+        RegisteredMemorySource, SourceFile, code_symbol_detail, code_symbol_neighborhood,
+        code_symbols_containing_span, compare_code_symbols, load_issue_capsule_with_scope,
+        persist_code_intel_documents, plan_capture, register_memory_source,
+        registered_memory_sources, write_capture_plan,
     };
     use crate::opensymphony_workspace::{IssueManifest, checkout_workspace_key};
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -6283,6 +8062,491 @@ mod tests {
     use duckdb::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn project_scoped_docs_resolve_the_unique_repository_source() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join(".opensymphony/memory"))
+            .expect("repository memory directory");
+        std::fs::write(
+            repository.path().join(".opensymphony/memory/memory.yaml"),
+            "areas:\n  ops:\n    docs_target: docs/ops.md\n",
+        )
+        .expect("repository memory config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let resolved = super::memory_config_for_docs_scope(
+            &config,
+            &MemoryScopeFilter {
+                project: Some("project-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+            "ops",
+        )
+        .expect("project should resolve to its unique repository");
+        assert_eq!(
+            resolved
+                .areas
+                .get("ops")
+                .expect("repository area")
+                .docs_target,
+            repository.path().join("docs/ops.md")
+        );
+        assert_eq!(resolved.repo_root, repository.path());
+    }
+
+    #[test]
+    fn auto_capture_routes_github_discovery_to_issue_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "areas:\n  routed:\n    aliases: [special-area]\n    docs_target: routed.md\n",
+        )
+        .expect("repository memory config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.default_repository_id = Some("repo-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: catalog.path().join("repo-a"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-550".to_string(),
+                project_id: Some("project-b".to_string()),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let routed = super::resolve_auto_capture_repository_config(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-550".to_string()],
+                ..IssueSelection::default()
+            },
+        )
+        .expect("routed config");
+        assert_eq!(routed.default_repository_id.as_deref(), Some("repo-b"));
+        assert_eq!(routed.repo_root, repository.path());
+        assert_eq!(
+            routed.config_path,
+            repository.path().join("opensymphony-memory.yaml")
+        );
+        assert!(routed.areas.contains_key("routed"));
+        assert!(!routed.areas.contains_key("special-area"));
+    }
+
+    #[test]
+    fn project_scoped_docs_reject_ambiguous_repository_sources() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        for (repository_id, root) in [("repo-a", first.path()), ("repo-b", second.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["shared-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+
+        let error = super::memory_config_for_docs_scope(
+            &config,
+            &MemoryScopeFilter {
+                project: Some("shared-project".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+            "ops",
+        )
+        .expect_err("ambiguous project docs should require a repository");
+        assert!(
+            error
+                .to_string()
+                .contains("matches multiple repository sources")
+        );
+    }
+
+    #[test]
+    fn project_set_scoped_docs_resolve_the_unique_active_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let active = TempDir::new().expect("active repository temp repo");
+        let inactive = TempDir::new().expect("inactive repository temp repo");
+        std::fs::create_dir_all(active.path().join(".opensymphony/memory"))
+            .expect("active memory directory");
+        std::fs::write(
+            active.path().join(".opensymphony/memory/memory.yaml"),
+            "areas:\n  ops:\n    docs_target: docs/ops.md\n",
+        )
+        .expect("active memory config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.default_project_set_id = Some("set-alpha".to_string());
+        config.project_scope_ids = BTreeSet::from(["project-a".to_string()]);
+        config.repository_sources.insert(
+            "repo-active".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-active".to_string(),
+                root: active.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-inactive".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-inactive".to_string(),
+                root: inactive.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let scope = MemoryScopeFilter {
+            project_set: Some("set-alpha".to_string()),
+            ..MemoryScopeFilter::default()
+        };
+        assert!(super::repository_matches_memory_scope(
+            &config,
+            "repo-active",
+            &scope
+        ));
+        assert!(!super::repository_matches_memory_scope(
+            &config,
+            "repo-inactive",
+            &scope
+        ));
+        let resolved = super::memory_config_for_docs_scope(&config, &scope, "ops")
+            .expect("project set should resolve to its unique active repository");
+        assert_eq!(
+            resolved
+                .areas
+                .get("ops")
+                .expect("active repository area")
+                .docs_target,
+            active.path().join("docs/ops.md")
+        );
+    }
+
+    #[test]
+    fn live_memory_markdown_detection_ignores_generated_indexes() {
+        let root = TempDir::new().expect("memory root");
+        std::fs::create_dir_all(root.path().join("indexes")).expect("indexes");
+        std::fs::write(root.path().join("indexes/index.md"), "# index\n").expect("index");
+        std::fs::write(root.path().join("indexes/log.md"), "# log\n").expect("log");
+        assert!(!super::memory_source_has_live_markdown(root.path()).expect("scan"));
+
+        std::fs::create_dir_all(root.path().join("issues")).expect("issues");
+        std::fs::write(root.path().join("issues/COE-550.md"), "# live\n").expect("issue");
+        assert!(super::memory_source_has_live_markdown(root.path()).expect("scan"));
+    }
+
+    #[test]
+    fn mcp_brief_requires_or_derives_a_catalog_scope() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let error = brief_scope_filter(&config, &json!({}))
+            .expect_err("unscoped brief must not expose the central catalog");
+        assert!(error.to_string().contains("requires a projectSet"));
+
+        let config = config.with_default_project_set_id("project-set");
+        let scope = brief_scope_filter(&config, &json!({})).expect("default scope");
+        assert_eq!(scope.project_set.as_deref(), Some("project-set"));
+
+        let scope = brief_scope_filter(&config, &json!({"allAccessible": true}))
+            .expect("explicit broad scope");
+        assert!(scope.all_accessible);
+    }
+
+    #[test]
+    fn direct_reads_use_configured_scope_defaults_and_explicit_repository() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.default_project_set_id = Some("project-set".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo.path().join("repo-a"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repo.path().join("repo-b"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let default_scope = super::direct_scope_filter(
+            &config,
+            &super::ScopeArgs::default(),
+            Some("COE-550"),
+            None,
+            None,
+        )
+        .expect("configured project-set scope");
+        assert_eq!(default_scope.project_set.as_deref(), Some("project-set"));
+        assert_eq!(default_scope.issue.as_deref(), Some("COE-550"));
+
+        let explicit_scope = super::direct_scope_filter(
+            &config,
+            &super::ScopeArgs {
+                repo: Some("repo-b".to_string()),
+                ..Default::default()
+            },
+            Some("COE-550"),
+            None,
+            None,
+        )
+        .expect("explicit repository scope");
+        assert_eq!(explicit_scope.repo.as_deref(), Some("repo-b"));
+        assert!(explicit_scope.project_set.is_none());
+    }
+
+    #[test]
+    fn remote_brief_forwards_repository_scope() {
+        let command = super::MemoryCommand::Brief(super::BriefArgs {
+            scope: super::ScopeArgs {
+                repo: Some("repo-b".to_string()),
+                ..Default::default()
+            },
+            issue: "COE-550".to_string(),
+        });
+        let (tool, arguments) = remote_memory_tool_request(&command).expect("remote brief request");
+        assert_eq!(tool, "memory.brief");
+        assert_eq!(arguments["repo"], "repo-b");
+        assert_eq!(arguments["issue"], "COE-550");
+    }
+
+    #[test]
+    fn remote_show_forwards_issue_to_central_memory_endpoint() {
+        let command = super::MemoryCommand::Show(super::ShowArgs {
+            scope: super::ScopeArgs {
+                repo: Some("repo-a".to_string()),
+                ..Default::default()
+            },
+            issue: "COE-550".to_string(),
+        });
+        let (tool, arguments) = remote_memory_tool_request(&command).expect("remote show request");
+        assert_eq!(tool, "memory.show");
+        assert_eq!(arguments["issue"], "COE-550");
+        assert_eq!(arguments["repo"], "repo-a");
+    }
+
+    #[test]
+    fn direct_show_rejects_an_issue_outside_the_requested_repository() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let repo_a = TempDir::new().expect("repo a");
+        let repo_b = TempDir::new().expect("repo b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.default_repository_id = Some("repo-b".to_string());
+        for (repository_id, root) in [("repo-a", repo_a.path()), ("repo-b", repo_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-550".to_string(),
+                title: "Repository B memory".to_string(),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-550".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("capture");
+
+        let error = super::run_show(
+            &config,
+            super::ShowArgs {
+                scope: super::ScopeArgs {
+                    repo: Some("repo-a".to_string()),
+                    ..Default::default()
+                },
+                issue: "COE-550".to_string(),
+            },
+        )
+        .expect_err("direct show must enforce repository scope");
+        assert!(error.to_string().contains("requested scope"));
+    }
+
+    #[test]
+    fn direct_scope_resolves_repository_paths_to_canonical_ids() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_a = repo.path().join("repo-a");
+        std::fs::create_dir_all(&repo_a).expect("repository source root");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "canonical/repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "canonical/repo-a".to_string(),
+                root: repo_a.clone(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let scope = super::direct_scope_filter(
+            &config,
+            &super::ScopeArgs {
+                repo: Some(repo_a.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("repository path scope");
+        assert_eq!(scope.repo.as_deref(), Some("canonical/repo-a"));
+    }
+
+    #[test]
+    fn remote_docs_preserves_issue_scope() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let scope = super::scope_filter_from_mcp(
+            &config,
+            &json!({"area": "memory", "issue": "COE-550", "allAccessible": true}),
+            true,
+        )
+        .expect("docs scope");
+        assert_eq!(scope.issue.as_deref(), Some("COE-550"));
+    }
+
+    #[test]
+    fn all_accessible_scope_ignores_worker_environment_defaults() {
+        let broad_scope = super::ScopeArgs {
+            all_accessible: true,
+            ..Default::default()
+        };
+        let worker_env = |name: &str| Some(format!("worker-{name}"));
+        let filter =
+            super::scope_filter_with_env(&broad_scope, Some("COE-550"), None, None, worker_env);
+        assert!(filter.all_accessible);
+        assert!(filter.project_set.is_none());
+        assert!(filter.project.is_none());
+        assert!(filter.repo.is_none());
+
+        let request = super::with_scope_json_from_env(&broad_scope, json!({}), |name| {
+            Some(format!("worker-{name}"))
+        });
+        assert_eq!(request["projectSet"], serde_json::Value::Null);
+        assert_eq!(request["project"], serde_json::Value::Null);
+        assert_eq!(request["repo"], serde_json::Value::Null);
+        assert_eq!(request["allAccessible"], true);
+
+        let explicit_scope = super::ScopeArgs {
+            all_accessible: true,
+            project: Some("explicit-project".to_string()),
+            ..Default::default()
+        };
+        let explicit_filter =
+            super::scope_filter_with_env(&explicit_scope, Some("COE-550"), None, None, |name| {
+                Some(format!("worker-{name}"))
+            });
+        assert_eq!(explicit_filter.project.as_deref(), Some("explicit-project"));
+        assert!(explicit_filter.project_set.is_none());
+        assert!(explicit_filter.repo.is_none());
+    }
+
+    #[test]
+    fn all_accessible_keeps_explicit_repository_and_project_constraints() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        for (repository_id, project_id) in [("repo-a", "project-a"), ("repo-b", "project-b")] {
+            let root = repo.path().join(repository_id);
+            std::fs::create_dir_all(&root).expect("repository source root");
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root,
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from([project_id.to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let project_scope = MemoryScopeFilter {
+            project: Some("project-a".to_string()),
+            all_accessible: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::unique_repository_for_memory_scope(&config, &project_scope)
+                .expect("project scope should select one source"),
+            "repo-a"
+        );
+        let mismatched_scope = MemoryScopeFilter {
+            repo: Some("repo-b".to_string()),
+            project: Some("project-a".to_string()),
+            all_accessible: true,
+            ..Default::default()
+        };
+        assert!(!super::repository_matches_memory_scope(
+            &config,
+            "repo-b",
+            &mismatched_scope
+        ));
+    }
 
     #[test]
     fn mcp_tool_list_exposes_context_admin_and_ast_tools_when_enabled() {
@@ -6323,6 +8587,16 @@ mod tests {
             graph_tool["inputSchema"]["properties"]
                 .get("repoRoot")
                 .is_none()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("project")
+                .is_some()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("projectSet")
+                .is_some()
         );
         assert!(names.contains(&"code.ast.status".to_string()));
         assert!(names.contains(&"code.ast.outline".to_string()));
@@ -6478,6 +8752,36 @@ mod tests {
         assert!(!names.iter().any(|name| name.starts_with("code.ast.")));
     }
 
+    #[test]
+    fn mcp_tool_list_advertises_secondary_repository_code_tools() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let repository = TempDir::new().expect("secondary repository");
+        std::fs::write(
+            catalog.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n  ast:\n    enabled: false\n",
+        )
+        .expect("catalog config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-secondary".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-secondary".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let tools = memory_tool_descriptors(&config, &MemoryServerAuth::default());
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "code.graph.context")
+        );
+        assert!(tools.iter().any(|tool| tool["name"] == "code.ast.status"));
+    }
+
     #[tokio::test]
     async fn code_graph_context_finds_symbols_callers_and_bounds_evidence() {
         let repo = TempDir::new().expect("temp repo");
@@ -6603,6 +8907,11 @@ mod tests {
             "pub fn answer() -> u8 { 42 }\n",
         )
         .expect("baseline source");
+        std::fs::write(
+            target.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 128\n",
+        )
+        .expect("repository memory config");
         init_test_git_repo(target.path(), "develop");
         let config = MemoryConfig::load(target.path(), None).expect("memory config");
         call_memory_ingest_code_intel_tool(
@@ -6617,6 +8926,17 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("repo id")
             .to_string();
+        let mut config = config.with_default_repository_id(repo_id.clone());
+        config.repository_sources.insert(
+            repo_id.clone(),
+            MemoryRepositorySource {
+                repository_id: repo_id.clone(),
+                root: target.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: Some("develop".to_string()),
+            },
+        );
 
         let workspaces = TempDir::new().expect("workspace root");
         let workspace = workspaces.path().join("COE-544");
@@ -6779,6 +9099,48 @@ mod tests {
                 .expect("unanalyzed files")
                 .iter()
                 .any(|path| path == "src/lib.rs")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_graph_context_rejects_disabled_selected_ast_overlay_policy() {
+        let target = TempDir::new().expect("target repo");
+        std::fs::write(
+            target.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    enabled: false\n",
+        )
+        .expect("repository memory config");
+        init_test_git_repo(target.path(), "develop");
+        let catalog = TempDir::new().expect("catalog");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        let repo_id = "github:repository:target".to_string();
+        config.repository_sources.insert(
+            repo_id.clone(),
+            MemoryRepositorySource {
+                repository_id: repo_id.clone(),
+                root: target.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: Some("develop".to_string()),
+            },
+        );
+
+        let error = call_code_graph_context_tool(
+            config,
+            json!({
+                "repository": repo_id,
+                "runId": "COE-550",
+                "query": "answer",
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect_err("disabled selected AST overlays must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("workspace code graph overlays are disabled")
         );
     }
 
@@ -7441,6 +9803,156 @@ mod tests {
                 .join(".opensymphony/memory/memory.duckdb")
                 .exists(),
             "non-persistent ingest should not create the DuckDB index"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_honors_selected_repository_policy_without_persistence() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "enabled: false\ncode_intel:\n  enabled: true\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "repo": "repo-a",
+                "paths": ["src/lib.rs"]
+            }),
+        )
+        .await
+        .expect_err("non-persistent ingest should honor selected repository policy");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("code-intelligence ingestion is disabled")));
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_uses_selected_repository_limits_without_persistence() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n    max_files_per_request: 1\n    max_matches_per_request: 1\n",
+        )
+        .expect("repository config");
+        std::fs::write(
+            repository.path().join("src/lib.rs"),
+            "pub fn selected_answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "repo": "repo-a",
+                "paths": ["src/lib.rs"]
+            }),
+        )
+        .await
+        .expect("non-persistent ingest should use selected limits");
+
+        assert!(
+            result["artifacts"]
+                .as_array()
+                .expect("artifacts")
+                .iter()
+                .any(|artifact| artifact["summary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.contains("max AST file size of 1 bytes")))
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_code_intel_persistence_honors_selected_limits() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n    max_files_per_request: 1\n",
+        )
+        .expect("repository config");
+        std::fs::write(
+            repository.path().join("src/big.rs"),
+            "pub fn oversized() {}\n",
+        )
+        .expect("oversized source");
+        std::fs::write(
+            repository.path().join("src/second.rs"),
+            "pub fn second() {}\n",
+        )
+        .expect("second source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository
+                    .path()
+                    .canonicalize()
+                    .expect("canonical repository"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_ingest_code_intel_tool(
+            &config,
+            &json!({
+                "repo": "repo-a",
+                "paths": ["src/big.rs", "src/second.rs"],
+                "persist": true,
+            }),
+        )
+        .await
+        .expect("persistent ingest succeeds");
+
+        assert_eq!(result["parsedFiles"], 0);
+        assert_eq!(result["persistedRows"], 0);
+        assert_eq!(
+            result["skippedFiles"]
+                .as_array()
+                .expect("skipped files")
+                .len(),
+            1
+        );
+        assert!(
+            result["skippedFiles"][0]
+                .as_str()
+                .expect("skip reason")
+                .contains("max_file_bytes 1")
+        );
+        assert_eq!(
+            sha256_file_hex(&repository.path().join("src/big.rs")).expect("skipped file hash"),
+            crate::opensymphony_memory::sha256_bytes_hex(b"pub fn oversized() {}\n")
         );
     }
 
@@ -9448,6 +11960,416 @@ Public memory concept.
             if message.contains("AST code-intelligence tools are disabled")));
     }
 
+    #[tokio::test]
+    async fn code_ast_tool_calls_honor_selected_repository_policy() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "enabled: false\ncode_intel:\n  ast:\n    enabled: true\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": { "repo": "repo-a" }
+            }),
+        )
+        .await
+        .expect_err("selected repository policy should disable AST tools");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("AST code-intelligence tools are disabled for the selected repository")));
+    }
+
+    #[tokio::test]
+    async fn code_ast_context_honors_selected_repository_file_limit() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n",
+        )
+        .expect("repository config");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let context = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.context",
+                "arguments": { "repo": "repo-a", "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect("context");
+
+        assert!(
+            context["markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("src/lib.rs exceeds max AST file size of 1 bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_reject_repository_outside_requested_project() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": { "repo": "repo-a", "project": "project-b" }
+            }),
+        )
+        .await
+        .expect_err("AST reads must honor project/repository isolation");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("repository `repo-a` is not accessible")));
+    }
+
+    #[tokio::test]
+    async fn code_ast_tools_resolve_project_only_scope_to_unique_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        std::fs::write(
+            first.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    enabled: false\n",
+        )
+        .expect("first repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.code_intel.enabled = false;
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.status",
+                "arguments": { "project": "project-b" }
+            }),
+        )
+        .await
+        .expect("project-only AST scope should select its repository");
+
+        assert_eq!(result["available"], true);
+    }
+
+    #[tokio::test]
+    async fn code_ast_path_tools_use_project_selected_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let first_root = first.path().canonicalize().expect("first root");
+        let second_root = second.path().canonicalize().expect("second root");
+        std::fs::create_dir_all(second_root.join("src")).expect("source directory");
+        std::fs::write(
+            second_root.join("src/lib.rs"),
+            "pub fn selected_answer() -> u8 { 42 }\n",
+        )
+        .expect("selected source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first_root,
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second_root,
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let result = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": { "project": "project-b", "paths": ["src/lib.rs"] }
+            }),
+        )
+        .await
+        .expect("project-only AST path should select its repository");
+
+        assert_eq!(result["documents"][0]["path"], "src/lib.rs");
+        assert_eq!(
+            result["documents"][0]["symbols"][0]["name"],
+            "selected_answer"
+        );
+    }
+
+    #[test]
+    fn code_graph_tools_resolve_project_only_scope_to_unique_repository() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: Some("repo-b-target".to_string()),
+            },
+        );
+
+        let resolved =
+            super::memory_config_for_code_graph_scope(&config, &json!({"project": "project-b"}))
+                .expect("project-only graph scope should select its repository");
+        assert_eq!(resolved.default_repository_id.as_deref(), Some("repo-b"));
+        assert_eq!(resolved.repo_root, second.path());
+        assert_eq!(
+            resolved.code_index_target_branch.as_deref(),
+            Some("repo-b-target")
+        );
+    }
+
+    #[test]
+    fn code_graph_tools_reject_repository_outside_requested_project_scope() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let first = TempDir::new().expect("first repository temp repo");
+        let second = TempDir::new().expect("second repository temp repo");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        let error = super::memory_config_for_code_graph_scope(
+            &config,
+            &json!({"project": "project-a", "repository": "repo-b"}),
+        )
+        .expect_err("foreign graph repository should be rejected");
+        assert!(error.to_string().contains("not accessible"));
+    }
+
+    #[tokio::test]
+    async fn memory_context_code_intel_uses_selected_repository_policy() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "memory.context",
+                "arguments": {
+                    "issue": "COE-550",
+                    "repo": "repo-a",
+                    "includeCodeIntel": true
+                }
+            }),
+        )
+        .await
+        .expect_err("context code intelligence should honor selected policy");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("AST code-intelligence tools are disabled for the selected repository")));
+    }
+
+    #[test]
+    fn memory_context_code_intel_uses_selected_repository_limits() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::create_dir_all(repository.path().join("src")).expect("source directory");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  ast:\n    max_file_bytes: 1\n    max_files_per_request: 1\n    max_matches_per_request: 1\n",
+        )
+        .expect("repository config");
+        std::fs::write(repository.path().join("src/one.rs"), "pub fn one() {}\n")
+            .expect("first source");
+        std::fs::write(repository.path().join("src/two.rs"), "pub fn two() {}\n")
+            .expect("second source");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let selected = super::memory_config_for_repository(&config, Some("repo-a"))
+            .expect("selected repository config");
+        let mut output = String::new();
+        super::append_code_intel_context(
+            &selected,
+            &mut output,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+            &[PathBuf::from("src/one.rs"), PathBuf::from("src/two.rs")],
+            50,
+        )
+        .expect("code context");
+
+        assert!(output.contains("max AST file size of 1 bytes"));
+        assert!(!output.contains("src/two.rs"));
+    }
+
+    #[tokio::test]
+    async fn code_graph_tool_calls_honor_selected_repository_policy() {
+        let catalog = TempDir::new().expect("catalog temp repo");
+        let repository = TempDir::new().expect("repository temp repo");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": "repo-a", "symbol": "answer" }
+            }),
+        )
+        .await
+        .expect_err("selected repository policy should disable graph tools");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+            if message.contains("indexed code graph tools are disabled for the selected repository")));
+    }
+
     #[test]
     fn admin_authorization_does_not_accept_worker_read_token() {
         let auth = MemoryServerAuth {
@@ -9531,6 +12453,69 @@ Public memory concept.
     }
 
     #[test]
+    fn okf_reindex_reimports_pending_registered_sources_before_returning() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository = TempDir::new().expect("repository");
+        let replacement = catalog.path().join("replacement");
+        std::fs::create_dir_all(&replacement).expect("replacement bundle");
+        let source_bundle = repository.path().join("okf");
+        std::fs::create_dir_all(source_bundle.join("issues")).expect("source issues");
+        std::fs::write(
+            source_bundle.join("issues/COE-551.md"),
+            "---\ntype: issue-capsule\ntitle: \"COE-551: Replayed source\"\nstate: Done\nopensymphony:\n  visibility: private\n  scope_refs:\n    - kind: work_item\n      id: COE-551\n---\n\n# COE-551: Replayed source\n\nSource payload.\n",
+        )
+        .expect("source capsule");
+
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "github:repository:repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "github:repository:repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: Some("commit-a".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        register_memory_source(
+            &config,
+            &RegisteredMemorySource {
+                source_id: "github:repository:repo-a:okf".to_string(),
+                repository_id: "github:repository:repo-a".to_string(),
+                commit_sha: "commit-a".to_string(),
+                kind: MemorySourceKind::OkfBundle,
+                root: source_bundle,
+                status: MemorySourceRegistrationStatus::Registered,
+                generation: "generation-a".to_string(),
+            },
+        )
+        .expect("source registration");
+
+        refresh_memory_index_from_okf_and_reimport_pending(&config, &replacement)
+            .expect("replacement reindex should replay registered sources");
+
+        let issue = load_issue_capsule_with_scope(
+            &config,
+            "COE-551",
+            &MemoryScopeFilter {
+                repo: Some("github:repository:repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("replayed source should be readable before restart");
+        assert!(issue.contains("Source payload."));
+        assert_eq!(
+            registered_memory_sources(&config)
+                .expect("registrations")
+                .into_iter()
+                .find(|source| source.source_id == "github:repository:repo-a:okf")
+                .expect("replayed source")
+                .status,
+            MemorySourceRegistrationStatus::Registered
+        );
+    }
+
+    #[test]
     fn localhost_origin_check_rejects_prefix_spoofing() {
         assert!(origin_is_localhost("http://localhost:3333"));
         assert!(origin_is_localhost("https://127.0.0.1"));
@@ -9564,7 +12549,7 @@ Public memory concept.
         let config = MemoryConfig::load(repo.path(), None).expect("config");
         let service = repo.path().join("service");
         std::fs::create_dir(&service).expect("service directory");
-        let scope = super::MemoryScopeFilter {
+        let scope = MemoryScopeFilter {
             repo: Some("service".to_owned()),
             ..Default::default()
         };
@@ -9721,6 +12706,279 @@ Public memory concept.
             checkout
                 .canonicalize()
                 .expect("checkout should canonicalize")
+        );
+    }
+
+    #[test]
+    fn code_intel_repo_resolution_uses_registered_canonical_identity() {
+        let instance = TempDir::new().expect("instance");
+        let repository = TempDir::new().expect("repository");
+        let config = MemoryConfig::load(instance.path(), None)
+            .expect("config")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: "github:repository:123".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: Some("abc123".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            })
+            .with_default_repository_id("github:repository:123");
+
+        assert_eq!(
+            resolve_code_intel_repo(&config, Some("github:repository:123"))
+                .expect("canonical source should resolve"),
+            repository.path()
+        );
+        let error = resolve_code_intel_repo(&config, Some("/tmp/not-a-repository"))
+            .expect_err("local paths must not select a central source");
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("canonical repository"))
+        );
+    }
+
+    #[test]
+    fn configured_memory_checkout_must_match_canonical_remote() {
+        let repository = TempDir::new().expect("repository");
+        std::fs::write(repository.path().join("README.md"), "repo-a\n").expect("readme");
+        init_test_git_repo(repository.path(), "develop");
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:example/repo-a.git"
+                ])
+                .current_dir(repository.path())
+                .status()
+                .expect("git remote add")
+                .success()
+        );
+
+        assert!(super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:repository:repo-a",
+            None,
+        ));
+        assert!(!super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:repository:repo-b",
+            None,
+        ));
+        assert!(super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:github.com:repository:repo-42",
+            Some("example/repo-a"),
+        ));
+        assert!(super::git_remote_matches_repository_id(
+            repository.path(),
+            "github:repository:repo-a",
+            Some("example/repo-a"),
+        ));
+        assert_eq!(
+            super::normalize_git_remote_locator("ssh://git@github.com/org/repo.git"),
+            "github.com/org/repo"
+        );
+        assert_ne!(
+            super::normalize_git_remote_locator("https://github.com/Team/Repo.git"),
+            super::normalize_git_remote_locator("https://github.com/team/repo.git")
+        );
+
+        let unrelated_repository = TempDir::new().expect("unrelated repository");
+        std::fs::write(unrelated_repository.path().join("README.md"), "other\n")
+            .expect("unrelated readme");
+        init_test_git_repo(unrelated_repository.path(), "develop");
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@evil.example:example/repo-a.git"
+                ])
+                .current_dir(unrelated_repository.path())
+                .status()
+                .expect("unrelated git remote add")
+                .success()
+        );
+        assert!(!super::git_remote_matches_repository_id(
+            unrelated_repository.path(),
+            "github:github.com:repository:repo-42",
+            Some("github.com/example/repo-a"),
+        ));
+        assert!(!super::git_remote_matches_repository_id(
+            unrelated_repository.path(),
+            "github:repository:repo-a",
+            Some("example/repo-a"),
+        ));
+    }
+
+    #[test]
+    fn legacy_code_migration_rejects_basename_only_remote_evidence() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository = TempDir::new().expect("repository");
+        std::fs::write(repository.path().join("README.md"), "repo-a\n").expect("readme");
+        init_test_git_repo(repository.path(), "develop");
+        assert!(
+            std::process::Command::new("git")
+                .args(["remote", "add", "origin", "git@github.com:org-a/api.git"])
+                .current_dir(repository.path())
+                .status()
+                .expect("git remote add")
+                .success()
+        );
+        let config = MemoryConfig::load(catalog.path(), None)
+            .expect("memory config")
+            .with_repository_remote_locator("github:repository:org-b/api", "org-b/api");
+
+        assert!(
+            !super::legacy_code_repository_matches_source(
+                &config,
+                "api",
+                repository.path(),
+                "github:repository:org-b/api",
+                "missing-commit",
+            )
+            .expect("migration provenance check")
+        );
+    }
+
+    #[test]
+    fn auto_capture_groups_terminal_issues_by_unique_repository_scope() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository_a.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repository_b.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let source = SourceFile {
+            issues: vec![
+                IssueEvidence {
+                    identifier: "COE-1".to_string(),
+                    project_id: Some("project-a".to_string()),
+                    ..IssueEvidence::default()
+                },
+                IssueEvidence {
+                    identifier: "COE-2".to_string(),
+                    project_id: Some("project-b".to_string()),
+                    ..IssueEvidence::default()
+                },
+            ],
+            ..SourceFile::default()
+        };
+
+        let groups = super::auto_capture_repository_groups(
+            &config,
+            &source,
+            &["COE-1".to_string(), "COE-2".to_string()],
+        )
+        .expect("unambiguous repository groups");
+        assert_eq!(
+            groups.get(&Some("repo-a".to_string())),
+            Some(&vec!["COE-1".to_string()])
+        );
+        assert_eq!(
+            groups.get(&Some("repo-b".to_string())),
+            Some(&vec!["COE-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn auto_capture_rejects_ambiguous_repository_scope() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        for (repository_id, root) in [
+            ("repo-a", repository_a.path()),
+            ("repo-b", repository_b.path()),
+        ] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["shared-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let error = super::auto_capture_repository_groups(
+            &config,
+            &SourceFile {
+                issues: vec![IssueEvidence {
+                    identifier: "COE-550".to_string(),
+                    project_id: Some("shared-project".to_string()),
+                    ..IssueEvidence::default()
+                }],
+                ..SourceFile::default()
+            },
+            &["COE-550".to_string()],
+        )
+        .expect_err("ambiguous repository scope must be rejected");
+        assert!(error.to_string().contains("multiple repository sources"));
+    }
+
+    #[test]
+    fn auto_capture_rejects_terminal_issue_without_repository_match() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        for (repository_id, root) in [
+            ("repo-a", repository_a.path()),
+            ("repo-b", repository_b.path()),
+        ] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["other-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let error = super::resolve_auto_capture_repository_config(
+            &config,
+            &SourceFile {
+                issues: vec![IssueEvidence {
+                    identifier: "COE-551".to_string(),
+                    project_id: Some("unmanaged-project".to_string()),
+                    ..IssueEvidence::default()
+                }],
+                ..SourceFile::default()
+            },
+            &IssueSelection {
+                identifiers: vec!["COE-551".to_string()],
+                ..IssueSelection::default()
+            },
+        )
+        .expect_err("unmatched multi-repository capture must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("without a unique repository source")
         );
     }
 

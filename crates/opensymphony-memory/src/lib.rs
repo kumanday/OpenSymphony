@@ -18,11 +18,12 @@ pub const FALLBACK_PRIVATE_MEMORY_CONFIG_FILE: &str = ".opensymphony/memory/conf
 pub const DEFAULT_MEMORY_ROOT: &str = ".opensymphony/memory";
 pub const DEFAULT_INDEX_FILE_NAME: &str = "memory.duckdb";
 pub const DEFAULT_PUBLIC_DOCS_ROOT: &str = "docs";
+pub const DEFAULT_AST_MAX_FILE_BYTES: u64 = 2_097_152;
 pub const ISSUE_CAPSULE_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const ISSUE_CAPSULE_END: &str = "<!-- END OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const TOPIC_DOC_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->";
 pub const TOPIC_DOC_END: &str = "<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->";
-const MEMORY_SCHEMA_VERSION: i64 = 3;
+const MEMORY_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -188,6 +189,8 @@ pub struct MemorySourceRef {
     pub repo_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +205,66 @@ pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<DateTime<Utc>>,
     pub freshness: MemoryFreshness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySourceKind {
+    Repository,
+    Policy,
+    PublicDocs,
+    OkfBundle,
+    LegacyStore,
+}
+
+impl MemorySourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Repository => "repository",
+            Self::Policy => "policy",
+            Self::PublicDocs => "public_docs",
+            Self::OkfBundle => "okf_bundle",
+            Self::LegacyStore => "legacy_store",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySourceRegistrationStatus {
+    Pending,
+    Registered,
+    Failed,
+}
+
+impl MemorySourceRegistrationStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Registered => "registered",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredMemorySource {
+    pub source_id: String,
+    pub repository_id: String,
+    pub commit_sha: String,
+    pub kind: MemorySourceKind,
+    pub root: PathBuf,
+    pub status: MemorySourceRegistrationStatus,
+    pub generation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRepositorySource {
+    pub repository_id: String,
+    pub root: PathBuf,
+    pub commit_sha: Option<String>,
+    pub project_scope_ids: BTreeSet<String>,
+    pub target_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +388,7 @@ impl From<CodeIntelSourceRef> for MemorySourceRef {
             url: source_ref.url,
             repo_id: source_ref.repo_id,
             symbol_key: source_ref.symbol_key,
+            registration_source_id: None,
         }
     }
 }
@@ -562,6 +626,12 @@ pub struct MemoryConfig {
     pub docs: DocsConfig,
     pub areas: BTreeMap<String, AreaConfig>,
     pub redaction: RedactionConfig,
+    pub repository_sources: BTreeMap<String, MemoryRepositorySource>,
+    pub repository_remote_locators: BTreeMap<String, String>,
+    pub default_repository_id: Option<String>,
+    pub default_project_set_id: Option<String>,
+    pub project_scope_ids: BTreeSet<String>,
+    pub code_index_target_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -779,6 +849,12 @@ pub struct IssueEvidence {
     pub milestone: Option<String>,
     #[serde(default)]
     pub milestone_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
     #[serde(default)]
     pub parent: Option<IssueLinkEvidence>,
     #[serde(default)]
@@ -1068,6 +1144,7 @@ struct IndexedIssue {
     labels: Vec<String>,
     tags: Vec<String>,
     areas: Vec<String>,
+    area_source_ids: BTreeMap<String, BTreeSet<String>>,
     capsule_path: PathBuf,
     visibility: MemoryVisibility,
     source_hash: String,
@@ -1077,6 +1154,7 @@ struct IndexedIssue {
     captured_at: String,
     changed_files: Vec<PathBuf>,
     scope_refs: Vec<KnowledgeScope>,
+    source_scope_refs: BTreeMap<String, Vec<KnowledgeScope>>,
     source_refs: Vec<MemorySourceRef>,
     links: Vec<OkfLink>,
     citations: Vec<OkfCitation>,
@@ -1086,6 +1164,7 @@ struct IndexedIssue {
 }
 
 include!("config.rs");
+include!("catalog.rs");
 include!("okf.rs");
 include!("capture.rs");
 include!("query.rs");
@@ -1167,6 +1246,7 @@ mod tests {
                 url: None,
                 repo_id: Some("opensymphony".to_string()),
                 symbol_key: Some("memory-source-ref".to_string()),
+                registration_source_id: None,
             }]
         );
     }
@@ -1894,9 +1974,32 @@ type: topic-doc
         let config = config_for(repo.path());
         let bundle = repo.path().join(".opensymphony/memory");
         copy_dir_recursive(&okf_fixture("okf-reindex"), &bundle);
+        register_memory_source(
+            &config,
+            &RegisteredMemorySource {
+                source_id: "github:repository:catalog:legacy_store".to_string(),
+                repository_id: "github:repository:catalog".to_string(),
+                commit_sha: "commit-before-reindex".to_string(),
+                kind: MemorySourceKind::LegacyStore,
+                root: bundle.clone(),
+                status: MemorySourceRegistrationStatus::Registered,
+                generation: "generation-before-reindex".to_string(),
+            },
+        )
+        .expect("configured source should register");
 
         let report =
             refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should work");
+        assert_eq!(
+            registered_memory_sources(&config)
+                .expect("source registrations")
+                .into_iter()
+                .find(|source| source.source_id == "github:repository:catalog:legacy_store")
+                .expect("configured source")
+                .status,
+            MemorySourceRegistrationStatus::Pending,
+            "catalog replacement must force configured sources through registration again",
+        );
         let related = related_by_issue(&config, "COE-123", 10).expect("related memory");
         let search_results = search(&config, "generic concept", 10).expect("search");
 
@@ -2001,6 +2104,9 @@ type: topic-doc
         config.memory_root = catalog.clone();
         config.index_path = catalog.join("memory.duckdb");
         config.containment_root = Some(state.clone());
+
+        refresh_memory_index_from_okf(&config, &catalog)
+            .expect("central catalog reindex should use state containment");
 
         let export = export_okf_bundle(
             &config,
@@ -3194,6 +3300,7 @@ Reviews are triggered when you open a pull request for review.
             explicit_includes: Vec::new(),
             paths: Vec::new(),
             limit: 20,
+            scope: MemoryScopeFilter::default(),
         };
 
         let context =
@@ -3225,6 +3332,7 @@ Reviews are triggered when you open a pull request for review.
             labels: Vec::new(),
             tags: Vec::new(),
             areas: Vec::new(),
+            area_source_ids: BTreeMap::new(),
             capsule_path: repo.path().join("COE-123.md"),
             visibility: MemoryVisibility::Private,
             source_hash: "hash".to_string(),
@@ -3245,6 +3353,7 @@ Reviews are triggered when you open a pull request for review.
                     label: Some("Repo One".to_string()),
                 },
             ],
+            source_scope_refs: BTreeMap::new(),
             source_refs: Vec::new(),
             links: Vec::new(),
             citations: Vec::new(),
@@ -3338,6 +3447,339 @@ Reviews are triggered when you open a pull request for review.
                 ..scope
             }
         ));
+    }
+
+    #[test]
+    fn scoped_context_includes_merged_multi_repository_payloads() {
+        let repo = TempDir::new().expect("temp repo");
+        let first = TempDir::new().expect("first source repo");
+        let second = TempDir::new().expect("second source repo");
+        let mut config = config_for(repo.path());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let source = sample_source();
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("write capture");
+
+        let merged_scopes = serde_json::to_string(&vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-a".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-b".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-a".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-b".to_string(),
+                label: None,
+            },
+        ])
+        .expect("scope refs");
+        let connection = Connection::open(&config.index_path).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![merged_scopes, "COE-123"],
+            )
+            .expect("merge scope refs");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
+                duckdb::params!["COE-123", "repo-b-only", "__live_capture__:repo-b"],
+            )
+            .expect("repository-specific area");
+
+        let scoped = MemoryScopeFilter {
+            repo: Some("repo-a".to_string()),
+            ..MemoryScopeFilter::default()
+        };
+        assert_eq!(
+            search_with_scope(&config, "websocket", 10, &scoped)
+                .expect("scoped search")
+                .len(),
+            1
+        );
+        assert_eq!(
+            related_by_area_with_scope(&config, "openhands-runtime", 10, &scoped)
+                .expect("scoped related")
+                .len(),
+            1
+        );
+        assert_eq!(
+            related_by_area_with_scope(&config, "repo-b-only", 10, &scoped)
+                .expect("cross-repository area should be filtered")
+                .len(),
+            0
+        );
+        assert_eq!(
+            search_with_scope(
+                &config,
+                "websocket",
+                10,
+                &MemoryScopeFilter {
+                    repo: Some("repo-a".to_string()),
+                    project: Some("project-b".to_string()),
+                    ..MemoryScopeFilter::default()
+                },
+            )
+            .expect("mismatched repository and project scope")
+            .len(),
+            0
+        );
+        assert_eq!(
+            status_with_scope(
+                &config,
+                &IssueSelection {
+                    area: Some("repo-b-only".to_string()),
+                    ..IssueSelection::default()
+                },
+                &scoped,
+            )
+            .expect("scoped status")
+            .issue_count,
+            0
+        );
+        let status = status_with_scope(&config, &IssueSelection::default(), &scoped)
+            .expect("scoped status output");
+        assert!(!status.issues[0].areas.contains(&"repo-b-only".to_string()));
+        assert_eq!(
+            related_by_issue_with_scope(&config, "COE-123", 10, &scoped)
+                .expect("scoped issue")
+                .len(),
+            0
+        );
+        assert_eq!(
+            status_with_scope(&config, &IssueSelection::default(), &scoped)
+                .expect("scoped status")
+                .issue_count,
+            1
+        );
+        assert_eq!(
+            search_with_scope(
+                &config,
+                "websocket",
+                10,
+                &MemoryScopeFilter {
+                    all_accessible: true,
+                    ..MemoryScopeFilter::default()
+                },
+            )
+            .expect("all-accessible search")
+            .len(),
+            1
+        );
+
+        let context_source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-200".to_string(),
+                title: "Scoped context request".to_string(),
+                labels: vec!["area:openhands-runtime".to_string()],
+                children: vec![IssueLinkEvidence {
+                    identifier: "COE-123".to_string(),
+                    state: Some("Done".to_string()),
+                    ..IssueLinkEvidence::default()
+                }],
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let context = context_for_issue_with_options(
+            &config,
+            &context_source,
+            &MemoryContextOptions {
+                issue: "COE-200".to_string(),
+                explicit_includes: Vec::new(),
+                paths: Vec::new(),
+                limit: 20,
+                scope: MemoryScopeFilter {
+                    repo: Some("repo-a".to_string()),
+                    ..MemoryScopeFilter::default()
+                },
+            },
+        )
+        .expect("scoped context should include merged repository payloads");
+
+        assert!(context.contains("COE-123: WebSocket reconnect recovery"));
+    }
+
+    #[test]
+    fn scoped_docs_ignore_other_repository_area_records() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let first = TempDir::new().expect("first source repo");
+        let second = TempDir::new().expect("second source repo");
+        let mut config = config_for(catalog.path());
+        fs::create_dir_all(first.path().join("docs")).expect("docs");
+        fs::write(
+            first.path().join("docs/openhands-runtime.md"),
+            "# OpenHands Runtime\n",
+        )
+        .expect("topic doc");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: first.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: second.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let mut source = sample_source();
+        source.issues.push(IssueEvidence {
+            identifier: "COE-124".to_string(),
+            title: "Other repository runtime record".to_string(),
+            labels: vec!["runtime".to_string()],
+            ..IssueEvidence::default()
+        });
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string(), "COE-124".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("write capture");
+
+        let repo_a_scopes = serde_json::to_string(&vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-a".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-a".to_string(),
+                label: None,
+            },
+        ])
+        .expect("repo-a scopes");
+        let repo_b_scopes = serde_json::to_string(&vec![
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: "repo-b".to_string(),
+                label: None,
+            },
+            KnowledgeScope {
+                kind: KnowledgeScopeKind::Project,
+                id: "project-b".to_string(),
+                label: None,
+            },
+        ])
+        .expect("repo-b scopes");
+        let connection = Connection::open(&config.index_path).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![repo_a_scopes, "COE-123"],
+            )
+            .expect("repo-a scope refs");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![repo_b_scopes, "COE-124"],
+            )
+            .expect("repo-b scope refs");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
+                duckdb::params!["COE-123", "area-b-only", "repo-b:public_docs"],
+            )
+            .expect("repository-b-only area relation");
+
+        let mut selected_config = config.clone();
+        selected_config.repo_root = first.path().to_path_buf();
+        selected_config.docs.public_root = first.path().join("docs");
+        selected_config
+            .areas
+            .get_mut("openhands-runtime")
+            .expect("runtime area")
+            .docs_target = first.path().join("docs/openhands-runtime.md");
+        fs::write(first.path().join("docs/area-b-only.md"), "# B-only\n")
+            .expect("b-only topic doc");
+        let docs = docs_for_area_with_scope(
+            &selected_config,
+            "openhands-runtime",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("repository-local docs should ignore other repository records");
+
+        assert!(docs.contains("# OpenHands Runtime"));
+        let search = search_with_scope(
+            &selected_config,
+            "WebSocket",
+            10,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("scoped search");
+        assert_eq!(search.len(), 1);
+        assert!(!search[0].areas.iter().any(|area| area == "area-b-only"));
+        let docs_error = docs_for_area_with_scope(
+            &selected_config,
+            "area-b-only",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect_err("docs must reject an area owned only by repository B");
+        assert!(docs_error.to_string().contains("no captured memory"));
     }
 
     #[test]
@@ -3517,6 +3959,683 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn live_capture_merges_registered_source_ownership_and_relations() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        let mut source = sample_source();
+        source.issues[0].project_id = Some("project-a".to_string());
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan = plan_capture(&config, &source, &selection, true, false).expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("initial capture");
+
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = 'COE-123'",
+                params![
+                    r#"["__live_capture__:repo-a","__live_capture__:repo-b","github:repository:b:okf"]"#,
+                    r#"[{"kind":"work_item","id":"COE-123"},{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-registered"}]"#,
+                    r#"[{"kind":"github_pr","id":"legacy","repo_id":"repo-b"},{"kind":"legacy_store","id":"b","repo_id":"repo-b","registration_source_id":"github:repository:b:okf"}]"#,
+                ],
+            )
+            .expect("registered ownership");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-123', 'area:registered', 'github:repository:b:okf')",
+                [],
+            )
+            .expect("registered relation");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-123', 'github:repository:b:okf', 'project', 'project-registered', NULL)",
+                [],
+            )
+            .expect("registered scope provenance");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-999', '__live_capture__:repo-a', 'project', 'project-other-issue', NULL)",
+                [],
+            )
+            .expect("other concept live scope provenance");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-123', '__live_capture__:repo-b', 'project', 'project-old-live', NULL)",
+                [],
+            )
+            .expect("previous live scope provenance");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-123', 'area:old-live', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live area");
+        connection
+            .execute(
+                "INSERT INTO pull_requests (issue_key, number, title, source_id) VALUES ('COE-123', 99, 'old live PR', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live pull request");
+        connection
+            .execute(
+                "INSERT INTO changed_files (issue_key, pr_number, file_path, source_id) VALUES ('COE-123', 99, 'old-live.rs', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live changed file");
+        connection
+            .execute(
+                "INSERT INTO checks (issue_key, pr_number, name, source_id) VALUES ('COE-123', 99, 'old-live-check', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live check");
+        connection
+            .execute(
+                "INSERT INTO reviews (issue_key, pr_number, reviewer, source_id) VALUES ('COE-123', 99, 'old-live-reviewer', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live review");
+        drop(connection);
+
+        source.issues[0].project_id = Some("project-live-new".to_string());
+        let refreshed_plan = plan_capture(&config, &source, &selection, true, false)
+            .expect("refreshed capture plan");
+        let refreshed_body = render_issue_capsule(
+            &config,
+            refreshed_plan.selected.first().expect("refreshed issue"),
+        )
+        .expect("refreshed capsule");
+        let connection = open_index(&config).expect("index for registered payload");
+        connection
+            .execute(
+                "UPDATE issues SET body = ? WHERE issue_key = 'COE-123'",
+                [refreshed_body.as_str()],
+            )
+            .expect("matching registered payload");
+        drop(connection);
+        write_capture_plan(&config, &refreshed_plan, false).expect("refresh capture");
+
+        let issue = load_indexed_issues(&config)
+            .expect("indexed issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-123")
+            .expect("captured issue");
+        assert!(
+            issue
+                .source_refs
+                .iter()
+                .any(|source| source.registration_source_id.as_deref()
+                    == Some("github:repository:b:okf"))
+        );
+        assert!(!issue.source_refs.iter().any(|source| source.id == "legacy"));
+        assert!(!issue.scope_refs.iter().any(|scope| scope.id == "project-a"));
+        assert!(
+            issue
+                .scope_refs
+                .iter()
+                .any(|scope| scope.id == "project-live-new")
+        );
+        assert!(
+            issue
+                .scope_refs
+                .iter()
+                .any(|scope| scope.id == "project-registered")
+        );
+        assert!(!issue.source_refs.iter().any(|source| {
+            source.repo_id.as_deref() == Some("repo-b") && source.registration_source_id.is_none()
+        }));
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index exists");
+        let source_ids: String = connection
+            .query_row(
+                "SELECT source_ids_json FROM issues WHERE issue_key = 'COE-123'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source ownership");
+        assert!(source_ids.contains("__live_capture__:repo-a"));
+        assert!(!source_ids.contains("__live_capture__:repo-b"));
+        assert!(source_ids.contains("github:repository:b:okf"));
+        let old_live_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-123' AND source_id = '__live_capture__:repo-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("old live scope provenance count");
+        assert_eq!(old_live_scope_count, 0);
+        let other_concept_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-999' AND source_id = '__live_capture__:repo-a' AND scope_id = 'project-other-issue'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("other concept scope provenance");
+        assert_eq!(other_concept_scope_count, 1);
+        let registered_relation_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM issue_areas WHERE issue_key = 'COE-123' AND source_id = 'github:repository:b:okf'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("registered relation");
+        assert_eq!(registered_relation_count, 1);
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            let stale_relation_count: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE issue_key = 'COE-123' AND source_id = '__live_capture__:repo-b'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("stale live relation count");
+            assert_eq!(stale_relation_count, 0, "stale relation table: {table}");
+        }
+    }
+
+    #[test]
+    fn scoped_reads_correlate_repository_project_and_area_provenance() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = config_for(repo.path());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from([
+                    "project-a".to_string(),
+                    "project-shared".to_string(),
+                ]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from([
+                    "project-b".to_string(),
+                    "project-shared".to_string(),
+                ]),
+                target_branch: None,
+            },
+        );
+        let plan = plan_capture(
+            &config,
+            &sample_source(),
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("capture");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = 'COE-123'",
+                [r#"[{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-b"},{"kind":"project","id":"project-shared"}]"#],
+            )
+            .expect("aggregate scopes");
+        connection
+            .execute("DELETE FROM issue_areas WHERE issue_key = 'COE-123'", [])
+            .expect("clear areas");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-123', 'area-a', 'repo-a:live'), ('COE-123', 'area-b', 'repo-b:live')",
+                [],
+            )
+            .expect("source areas");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id) VALUES ('issues/COE-123', 'repo-a:live', 'repository', 'repo-a'), ('issues/COE-123', 'repo-a:live', 'project', 'project-a'), ('issues/COE-123', 'repo-a:live', 'project', 'project-shared'), ('issues/COE-123', 'repo-b:live', 'repository', 'repo-b'), ('issues/COE-123', 'repo-b:live', 'project', 'project-b'), ('issues/COE-123', 'repo-b:live', 'project', 'project-shared')",
+                [],
+            )
+            .expect("source scopes");
+        drop(connection);
+
+        let area_results = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                area: Some("area-b".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("scoped search");
+        assert!(area_results.is_empty());
+        let project_results = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                project: Some("project-b".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("combined scoped search");
+        assert!(project_results.is_empty());
+
+        let project_area_results = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                project: Some("project-b".to_string()),
+                area: Some("area-b".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("project-only area search");
+        assert_eq!(project_area_results.len(), 1);
+        let project_area_mismatch = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                project: Some("project-b".to_string()),
+                area: Some("area-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("project-only mismatched area search");
+        assert!(project_area_mismatch.is_empty());
+    }
+
+    #[test]
+    fn live_capture_rejects_divergent_registered_payloads() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        let source = sample_source();
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan = plan_capture(&config, &source, &selection, true, false).expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("initial capture");
+        let original_capsule =
+            fs::read_to_string(&plan.selected[0].capsule_path).expect("initial capsule");
+
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET title = ?, source_refs_json = ?, source_ids_json = ? WHERE issue_key = 'COE-123'",
+                params![
+                    "Registered source title",
+                    r#"[{"kind":"legacy_store","id":"repo-b","repo_id":"repo-b","registration_source_id":"repo-b:legacy"}]"#,
+                    r#"["repo-b:legacy"]"#,
+                ],
+            )
+            .expect("registered payload");
+        drop(connection);
+
+        let error = write_capture_plan(&config, &plan, false)
+            .expect_err("live capture must not replace a divergent registered payload");
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting live capture payload"))
+        );
+        assert_eq!(
+            fs::read_to_string(&plan.selected[0].capsule_path).expect("capsule after rejection"),
+            original_capsule,
+            "registered capture conflicts must be rejected before replacing the capsule"
+        );
+        let issue = load_indexed_issues(&config)
+            .expect("indexed issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-123")
+            .expect("registered issue");
+        assert_eq!(issue.title, "Registered source title");
+    }
+
+    #[test]
+    fn indexed_source_capsule_reads_and_displays_its_path_owner() {
+        let repo = TempDir::new().expect("catalog repo");
+        let source_a = TempDir::new().expect("source a");
+        let source_b = TempDir::new().expect("source b");
+        let mut config = config_for(repo.path());
+        for (repository_id, root) in [("repo-a", source_a.path()), ("repo-b", source_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let source_contents = "---\ntype: issue-capsule\n---\n\n# COE-556\n\nSource B body.\n";
+        for (root, contents) in [
+            (
+                source_a.path(),
+                "---\ntype: issue-capsule\n---\n\n# COE-556\n\nSource A body.\n",
+            ),
+            (source_b.path(), source_contents),
+        ] {
+            let capsule_path = root.join("issues/COE-556.md");
+            fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+                .expect("capsule dir");
+            fs::write(capsule_path, contents).expect("source capsule");
+        }
+        let capsule_path = PathBuf::from("issues/COE-556.md");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-556",
+                    "Indexed source capsule",
+                    "[]",
+                    "not_archived",
+                    capsule_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed fallback body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-556",
+                    r#"[{"kind":"repository","id":"repo-b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source","repo_id":"repo-b"}]"#,
+                    r#"["repo-b:source"]"#,
+                ],
+            )
+            .expect("indexed source issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-556").expect("source capsule"),
+            source_contents
+        );
+        let rendered = brief(&config, "COE-556").expect("brief");
+        assert!(rendered.contains("- Capsule: repo-b:issues/COE-556.md"));
+        assert!(!rendered.contains("repo-a:issues/COE-556.md"));
+    }
+
+    #[test]
+    fn scoped_shared_capsule_does_not_display_sibling_path_owner() {
+        let repo = TempDir::new().expect("catalog repo");
+        let source_a = TempDir::new().expect("source a");
+        let source_b = TempDir::new().expect("source b");
+        let mut config = config_for(repo.path());
+        for (repository_id, root) in [("repo-a", source_a.path()), ("repo-b", source_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let capsule_path = source_b.path().join("issues/COE-561.md");
+        fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+            .expect("capsule directory");
+        fs::write(&capsule_path, "source b capsule").expect("source capsule");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-561",
+                    "Shared capsule",
+                    "[]",
+                    "not_archived",
+                    capsule_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed shared body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-561",
+                    r#"[{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"repo-a"},{"kind":"legacy_store","id":"source-b","repo_id":"repo-b"}]"#,
+                    r#"["repo-a:source-a","repo-b:source-b"]"#,
+                ],
+            )
+            .expect("shared issue");
+        drop(connection);
+
+        let rendered = brief_with_scope(
+            &config,
+            "COE-561",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("scoped brief");
+        assert!(!rendered.contains("repo-b:"));
+        assert!(rendered.contains("- Capsule: COE-561.md"));
+    }
+
+    #[test]
+    fn ownerless_capsule_reads_use_indexed_body_without_repository_probing() {
+        let repo = TempDir::new().expect("catalog repo");
+        let source_a = TempDir::new().expect("source a");
+        let source_b = TempDir::new().expect("source b");
+        let mut config = config_for(repo.path());
+        for (repository_id, root) in [("repo-a", source_a.path()), ("repo-b", source_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+            let capsule_path = root.join("issues/COE-557.md");
+            fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+                .expect("capsule dir");
+            fs::write(&capsule_path, format!("{repository_id} source body"))
+                .expect("source capsule");
+        }
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-557",
+                    "Ownerless capsule",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-557.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed ownerless body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-557",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("ownerless issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-557").expect("ownerless capsule"),
+            "Indexed ownerless body"
+        );
+    }
+
+    #[test]
+    fn absolute_capsule_paths_outside_allowed_roots_fall_back_to_indexed_body() {
+        let repo = TempDir::new().expect("catalog repo");
+        let outside = TempDir::new().expect("outside root");
+        let config = config_for(repo.path());
+        let outside_path = outside.path().join("secret.md");
+        fs::write(&outside_path, "untrusted file").expect("outside file");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-558",
+                    "Absolute path",
+                    "[]",
+                    "not_archived",
+                    outside_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed safe body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-558",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("indexed issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-558").expect("indexed fallback body"),
+            "Indexed safe body"
+        );
+    }
+
+    #[test]
+    fn relative_capsule_paths_cannot_escape_owned_roots() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let source = TempDir::new().expect("source repo");
+        let outside = source
+            .path()
+            .parent()
+            .expect("temp parent")
+            .join("secret.md");
+        fs::write(&outside, "untrusted relative file").expect("outside file");
+        let mut config = config_for(catalog.path());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: source.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-560",
+                    "Relative path",
+                    "[]",
+                    "not_archived",
+                    "../../secret.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed safe body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-560",
+                    r#"[{"kind":"repository","id":"repo-a"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"repo-a"}]"#,
+                    r#"["repo-a:source-a"]"#,
+                ],
+            )
+            .expect("indexed issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-560").expect("indexed fallback body"),
+            "Indexed safe body"
+        );
+    }
+
+    #[test]
+    fn absolute_capsule_paths_do_not_cross_repository_ownership() {
+        let repo = TempDir::new().expect("catalog repo");
+        let source_a = TempDir::new().expect("source a");
+        let source_b = TempDir::new().expect("source b");
+        let mut config = config_for(repo.path());
+        for (repository_id, root) in [("repo-a", source_a.path()), ("repo-b", source_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let capsule_path = source_b.path().join("issues/COE-559.md");
+        fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+            .expect("capsule directory");
+        fs::write(&capsule_path, "unowned repository body").expect("capsule");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-559",
+                    "Cross repository path",
+                    "[]",
+                    "not_archived",
+                    capsule_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed owned body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-559",
+                    r#"[{"kind":"repository","id":"repo-a"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"repo-a"}]"#,
+                    r#"["repo-a:source-a"]"#,
+                ],
+            )
+            .expect("indexed issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-559").expect("indexed fallback body"),
+            "Indexed owned body"
+        );
+    }
+
+    #[test]
     fn docs_sync_omits_private_capsule_links_for_public_docs() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
@@ -3641,6 +4760,167 @@ Reviews are triggered when you open a pull request for review.
     #[test]
     fn sanitized_issue_keys_avoid_separator_collisions() {
         assert_ne!(sanitize_issue_key("COE_123"), sanitize_issue_key("COE-123"));
+    }
+
+    #[test]
+    fn capture_scopes_keep_only_the_captured_issue_project_aliases() {
+        let repo = TempDir::new().expect("temp repo");
+        let source_repo = TempDir::new().expect("source repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: source_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from([
+                    "project-a".to_string(),
+                    "project-b".to_string(),
+                ]),
+                target_branch: None,
+            },
+        );
+        let mut issue = sample_source().issues[0].clone();
+        issue.project_id = Some("project-a".to_string());
+        issue.project_slug = Some("alpha-project".to_string());
+        let plan = CaptureIssuePlan {
+            issue,
+            prs: Vec::new(),
+            capsule_path: PathBuf::new(),
+            areas: Vec::new(),
+            docs_targets: Vec::new(),
+            source_hash: String::new(),
+            already_captured: false,
+            stale: false,
+            warnings: Vec::new(),
+        };
+
+        let scopes = capture_scope_refs(&config, &plan);
+        let projects = scopes
+            .iter()
+            .filter(|scope| scope.kind == KnowledgeScopeKind::Project)
+            .map(|scope| scope.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(projects, BTreeSet::from(["alpha-project", "project-a"]));
+        assert!(!projects.contains("project-b"));
+    }
+
+    #[test]
+    fn capture_scopes_prefer_issue_project_repository_over_default() {
+        let repo = TempDir::new().expect("temp repo");
+        let source_repo = TempDir::new().expect("source repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: source_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: source_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-b".to_string()]),
+                target_branch: None,
+            },
+        );
+        let mut issue = sample_source().issues[0].clone();
+        issue.project_id = Some("project-b".to_string());
+        let plan = CaptureIssuePlan {
+            issue,
+            prs: Vec::new(),
+            capsule_path: PathBuf::new(),
+            areas: Vec::new(),
+            docs_targets: Vec::new(),
+            source_hash: String::new(),
+            already_captured: false,
+            stale: false,
+            warnings: Vec::new(),
+        };
+
+        let scopes = capture_scope_refs(&config, &plan);
+        assert!(
+            scopes.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Repository && scope.id == "repo-b"
+            })
+        );
+        assert!(
+            !scopes.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::Repository && scope.id == "repo-a"
+            })
+        );
+    }
+
+    #[test]
+    fn okf_import_restricts_project_scopes_to_the_registered_repository() {
+        let repo = TempDir::new().expect("temp repo");
+        let bundle = repo.path().join("bundle");
+        fs::create_dir_all(bundle.join("issues")).expect("bundle");
+        fs::write(
+            bundle.join("issues/COE-550.md"),
+            r#"---
+type: issue
+title: "COE-550: Scoped import"
+opensymphony:
+  scope_refs:
+    - kind: work_item
+      id: COE-550
+    - kind: project
+      id: project-b
+    - kind: project_set
+      id: wrong-set
+---
+
+# COE-550: Scoped import
+"#,
+        )
+        .expect("concept");
+        let mut config = config_for(repo.path());
+        config.default_project_set_id = Some("set-a".to_string());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-a".to_string()]),
+                target_branch: None,
+            },
+        );
+
+        merge_memory_index_from_okf(&config, &bundle, "repo-a", "repo-a:okf")
+            .expect("scoped import");
+        let connection = Connection::open(&config.index_path).expect("index");
+        let scope_refs_json: String = connection
+            .query_row("SELECT scope_refs_json FROM issues", [], |row| row.get(0))
+            .expect("scope refs");
+
+        assert!(scope_refs_json.contains("project-a"));
+        assert!(scope_refs_json.contains("set-a"));
+        assert!(!scope_refs_json.contains("project-b"));
+        assert!(!scope_refs_json.contains("wrong-set"));
+        let mut source_scopes = connection
+            .prepare(
+                "SELECT scope_id FROM source_scope_refs WHERE concept_id = 'issues/COE-550' AND source_id = 'repo-a:okf' ORDER BY scope_id",
+            )
+            .expect("source scopes");
+        let source_scopes = source_scopes
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("source scope rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("source scope values");
+        assert_eq!(
+            source_scopes,
+            vec!["COE-550", "project-a", "repo-a", "set-a"]
+        );
     }
 
     fn config_for(repo_root: &Path) -> MemoryConfig {

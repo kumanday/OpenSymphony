@@ -136,6 +136,17 @@ deletions. A single process-wide writer owner serializes index mutations so
 DuckDB reads remain available during gateway jobs. Issue-workspace code remains
 an overlay concern rather than being folded into the shared baseline.
 
+### 3.8 Per-instance memory catalog
+
+Central configuration starts one supervised memory endpoint for the
+orchestrator instance, regardless of inventory size. The catalog keeps
+repository-owned source registrations and normalized scope references beside
+instance-private records. Source registration is keyed by canonical repository
+ID, source kind, and commit generation; reads use the existing DuckDB schema
+without migration side effects. Repository-local policy, public docs, OKF, and
+legacy stores remain provenance-bearing sources rather than becoming a second
+authoritative write target.
+
 ## 4. Component model
 
 ### Internal subsystem modules

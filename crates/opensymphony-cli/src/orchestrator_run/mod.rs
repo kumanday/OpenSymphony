@@ -1043,6 +1043,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     let mut memory_server = start_runtime_memory_server(&runtime).await?;
+    let execution_repo = runtime
+        .memory_sources
+        .values()
+        .find(|source| source.checkout_path == runtime.target_repo)
+        .map(|source| source.repository_id.clone());
     let memory_env = memory_server.as_ref().map(|server| RuntimeMemoryEnv {
         endpoint: server.endpoint().to_string(),
         token: runtime
@@ -1051,7 +1056,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .as_ref()
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
-        execution_repo: runtime.target_repo.display().to_string(),
+        project_set: runtime.project_set_id.clone(),
+        execution_repo: execution_repo.unwrap_or_else(|| runtime.target_repo.display().to_string()),
         authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
         authorized_repositories_by_project: runtime
             .repository_routing
@@ -1484,6 +1490,7 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) endpoint: String,
     pub(super) token: Option<String>,
     pub(super) project: String,
+    pub(super) project_set: Option<String>,
     pub(super) execution_repo: String,
     pub(super) authorized_repositories: BTreeSet<String>,
     pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,
@@ -1519,6 +1526,38 @@ fn load_runtime_memory_config(
         config.memory_root = memory_root.clone();
         config.index_path = memory_root.join(crate::opensymphony_memory::DEFAULT_INDEX_FILE_NAME);
         config.containment_root = runtime.state_root.clone();
+    }
+    for source in runtime.memory_sources.values() {
+        config =
+            config.with_repository_source(crate::opensymphony_memory::MemoryRepositorySource {
+                repository_id: source.repository_id.clone(),
+                root: source.checkout_path.clone(),
+                commit_sha: None,
+                project_scope_ids: source.project_scope_ids.clone(),
+                target_branch: Some(source.target_branch.clone()),
+            });
+        config = config.with_repository_remote_locator(
+            source.repository_id.clone(),
+            source.remote_locator.clone(),
+        );
+    }
+    if let Some(project_set_id) = runtime.project_set_id.clone() {
+        config = config.with_default_project_set_id(project_set_id);
+    }
+    if let Some(repository_routing) = runtime.repository_routing.as_ref() {
+        config = config.with_project_scope_ids(repository_routing.active_projects.iter().cloned());
+    }
+    let active_repository_id = runtime
+        .memory_sources
+        .values()
+        .find(|source| source.checkout_path == runtime.target_repo)
+        .map(|source| source.repository_id.clone());
+    if let Some(repository_id) = active_repository_id.or_else(|| {
+        (runtime.memory_sources.len() == 1)
+            .then(|| runtime.memory_sources.keys().next().cloned())
+            .flatten()
+    }) {
+        config = config.with_default_repository_id(repository_id.clone());
     }
     Ok(config)
 }
@@ -1807,6 +1846,8 @@ mod tests {
             repository_checkouts: None,
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
+            memory_sources: BTreeMap::new(),
+            project_set_id: None,
             retain_failed: true,
             preserve_terminal_workspaces: true,
             memory: config::RunMemoryConfig {

@@ -1115,6 +1115,15 @@ pub fn code_graph_repos(
         })?;
 
     let mut repos = BTreeMap::<String, CodeRepoAccumulator>::new();
+    for repo_id in config.repository_sources.keys() {
+        repos.insert(
+            repo_id.clone(),
+            CodeRepoAccumulator {
+                repo_id: repo_id.clone(),
+                ..CodeRepoAccumulator::default()
+            },
+        );
+    }
     for (repo_id, path, language, indexed_at, freshness, commit_sha, dirty) in rows {
         let entry = repos.entry(repo_id.clone()).or_insert_with(|| {
             CodeRepoAccumulator {
@@ -1244,6 +1253,28 @@ pub fn code_graph_repos(
 }
 
 fn unindexed_code_repo_list(config: &MemoryConfig) -> CodeRepoList {
+    if !config.repository_sources.is_empty() {
+        return CodeRepoList {
+            schema_version: SchemaVersion::v1(),
+            repos: config
+                .repository_sources
+                .keys()
+                .map(|repo_id| CodeRepoSummary {
+                    repo_id: repo_id.clone(),
+                    display_root: repo_id.clone(),
+                    languages: Vec::new(),
+                    document_count: 0,
+                    symbol_count: 0,
+                    edge_count: 0,
+                    freshness: CodeGraphFreshness::Unknown,
+                    indexed: false,
+                    indexed_at: None,
+                    head_revision: None,
+                    worktree_dirty: false,
+                })
+                .collect(),
+        };
+    }
     CodeRepoList {
         schema_version: SchemaVersion::v1(),
         repos: vec![unindexed_code_repo_summary(config)],
@@ -3828,7 +3859,7 @@ struct CodeSnapshotState<'a> {
 pub fn code_index_target(
     config: &MemoryConfig,
 ) -> Result<Option<(String, String)>, CodeGraphProjectionError> {
-    let branch = code_index_branch(&config.repo_root)?;
+    let branch = code_index_branch_for_config(config)?;
     let Some(commit) = git_target_commit(&config.repo_root, &branch)? else {
         return Ok(None);
     };
@@ -3842,6 +3873,474 @@ pub fn code_index_repository_is_git(config: &MemoryConfig) -> bool {
         .args(["rev-parse", "--git-dir"])
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+pub fn code_repository_has_rows(
+    config: &MemoryConfig,
+    repository_id: &str,
+) -> Result<bool, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repo_id = ?"),
+                [repository_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        if count > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn code_repository_has_commit(
+    config: &MemoryConfig,
+    repository_id: &str,
+    commit_sha: &str,
+) -> Result<bool, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repo_id = ? AND commit_sha = ?"),
+                params![repository_id, commit_sha],
+                |row| row.get(0),
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        if count > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn migrate_code_repository_identity(
+    config: &MemoryConfig,
+    legacy_repo_id: &str,
+    canonical_repo_id: &str,
+) -> Result<(), MemoryError> {
+    if legacy_repo_id.is_empty() || legacy_repo_id == canonical_repo_id {
+        return Ok(());
+    }
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let migration_result: Result<(), duckdb::Error> = (|| {
+    // Preserve the indexed snapshot and its evidence in place. The old
+    // implementation deleted these rows and relied on a later manual
+    // reindex, which made a successful startup look like an empty catalog.
+    // Remove only rows that are already represented by the canonical owner;
+    // all remaining rows are rewritten below.
+    for (table, key_columns) in [
+        (
+            "code_documents",
+            "path, content_sha256, parser_version, query_pack_version",
+        ),
+        (
+            "code_documents_staging",
+            "commit_sha, path, parser_version, query_pack_version",
+        ),
+        (
+            "code_document_revisions",
+            "commit_sha, path, parser_version, query_pack_version",
+        ),
+        ("code_skipped_files", "commit_sha, path, content_sha256"),
+        ("code_skipped_files_staging", "commit_sha, path, content_sha256"),
+        ("code_index_snapshots", "commit_sha"),
+        ("code_snapshot_membership", "commit_sha, path"),
+        (
+            "code_snapshot_membership_staging",
+            "run_id, commit_sha, path",
+        ),
+    ] {
+        let predicates = key_columns
+            .split(", ")
+            .map(|column| format!("canonical.{column} = legacy.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        transaction
+            .execute(
+                &format!(
+                    "DELETE FROM {table} AS legacy WHERE legacy.repo_id = ? AND EXISTS (SELECT 1 FROM {table} AS canonical WHERE canonical.repo_id = ? AND {predicates})"
+                ),
+                params![legacy_repo_id, canonical_repo_id],
+            )?;
+    }
+
+    // Remove semantically duplicate rows already indexed under the canonical
+    // repository. A legacy basename-keyed snapshot may coexist with a
+    // canonical snapshot after a partial retry; re-keying both would leave
+    // duplicate symbols, edges, or diagnostics in the read model.
+    for (table, id_column, identity_columns) in [
+        (
+            "code_symbols",
+            "symbol_id",
+            "commit_sha, worktree_dirty, path, language, kind, name, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_edges",
+            "edge_id",
+            "commit_sha, worktree_dirty, path, language, edge_kind, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_edge_revisions",
+            "edge_id",
+            "commit_sha, worktree_dirty, path, language, edge_kind, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_diagnostics",
+            "diagnostic_id",
+            "commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+        (
+            "code_diagnostic_revisions",
+            "diagnostic_id",
+            "commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, freshness",
+        ),
+    ] {
+        let predicates = identity_columns
+            .split(", ")
+            .map(|column| format!("legacy.{column} IS NOT DISTINCT FROM canonical.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let canonical_key_column = if table == "code_symbols" {
+            "canonical.symbol_key"
+        } else {
+            "''"
+        };
+        let duplicate_ids = transaction
+            .prepare(&format!(
+                "SELECT DISTINCT legacy.{id_column}, canonical.{id_column}, {canonical_key_column}, legacy.commit_sha FROM {table} AS legacy JOIN {table} AS canonical ON canonical.repo_id = ? AND legacy.repo_id = ? AND legacy.{id_column} <> canonical.{id_column} AND {predicates}"
+            ))?
+            .query_map(params![canonical_repo_id, legacy_repo_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (duplicate_id, canonical_id, canonical_key, duplicate_commit_sha) in duplicate_ids {
+            if table == "code_symbols" {
+                let duplicate_key = transaction.query_row(
+                    "SELECT symbol_key FROM code_symbols WHERE repo_id = ? AND symbol_id = ?",
+                    params![legacy_repo_id, duplicate_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                transaction.execute(
+                    "UPDATE code_symbols SET container_symbol_id = ? WHERE repo_id = ? AND container_symbol_id = ?",
+                    params![canonical_id, legacy_repo_id, duplicate_id],
+                )?;
+                for (id_column, key_column) in [
+                    ("source_symbol_id", "source_symbol_key"),
+                    ("target_symbol_id", "target_symbol_key"),
+                ] {
+                    transaction.execute(
+                        &format!(
+                            "UPDATE code_edges SET {id_column} = ? WHERE repo_id = ? AND {id_column} = ?"
+                        ),
+                        params![canonical_id, legacy_repo_id, duplicate_id],
+                    )?;
+                    transaction.execute(
+                        &format!(
+                            "UPDATE code_edge_revisions SET {id_column} = ? WHERE repo_id = ? AND {id_column} = ?"
+                        ),
+                        params![canonical_id, legacy_repo_id, duplicate_id],
+                    )?;
+                    transaction.execute(
+                        &format!(
+                            "UPDATE code_edges SET {key_column} = ? WHERE repo_id = ? AND {key_column} = ?"
+                        ),
+                        params![canonical_key, legacy_repo_id, duplicate_key],
+                    )?;
+                    transaction.execute(
+                        &format!(
+                            "UPDATE code_edge_revisions SET {key_column} = ? WHERE repo_id = ? AND {key_column} = ?"
+                        ),
+                        params![canonical_key, legacy_repo_id, duplicate_key],
+                    )?;
+                }
+            }
+            transaction.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE repo_id = ? AND {id_column} = ? AND commit_sha IS NOT DISTINCT FROM ?"
+                ),
+                params![legacy_repo_id, duplicate_id, duplicate_commit_sha],
+            )?;
+        }
+    }
+
+    // Rewrite the primary identifiers and every persisted reference before
+    // changing repository ownership. The migration namespace is deterministic
+    // and avoids collisions with IDs generated by normal canonical indexing.
+    let symbol_ids = transaction
+        .prepare("SELECT symbol_id FROM code_symbols WHERE repo_id = ?")?
+        .query_map(params![legacy_repo_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for old_id in symbol_ids {
+        let temporary_id = format!("legacy-migration:symbol:{canonical_repo_id}:{old_id}");
+        let canonical_id = code_row_id(&["canonical-migration", "symbol", canonical_repo_id, &old_id]);
+        transaction.execute(
+            "UPDATE code_symbols SET symbol_id = ? WHERE symbol_id = ? AND repo_id = ?",
+            params![temporary_id, old_id, legacy_repo_id],
+        )?;
+        transaction.execute(
+            "UPDATE code_symbols SET container_symbol_id = ? WHERE container_symbol_id = ? AND repo_id = ?",
+            params![temporary_id, old_id, legacy_repo_id],
+        )?;
+        for table in ["code_edges", "code_edge_revisions"] {
+            for column in ["source_symbol_id", "target_symbol_id"] {
+                transaction.execute(
+                    &format!("UPDATE {table} SET {column} = ? WHERE {column} = ? AND repo_id = ?"),
+                    params![temporary_id, old_id, legacy_repo_id],
+                )?;
+            }
+        }
+        transaction.execute(
+            "UPDATE code_symbols SET symbol_id = ? WHERE symbol_id = ? AND repo_id = ?",
+            params![canonical_id, temporary_id, legacy_repo_id],
+        )?;
+        transaction.execute(
+            "UPDATE code_symbols SET container_symbol_id = ? WHERE container_symbol_id = ? AND repo_id = ?",
+            params![canonical_id, temporary_id, legacy_repo_id],
+        )?;
+        for table in ["code_edges", "code_edge_revisions"] {
+            for column in ["source_symbol_id", "target_symbol_id"] {
+                transaction.execute(
+                    &format!("UPDATE {table} SET {column} = ? WHERE {column} = ? AND repo_id = ?"),
+                    params![canonical_id, temporary_id, legacy_repo_id],
+                )?;
+            }
+        }
+    }
+
+    let symbol_rows = transaction
+        .prepare(
+            "SELECT symbol_id, symbol_key, commit_sha, path, language, kind, name, container_chain FROM code_symbols WHERE repo_id = ? ORDER BY path, commit_sha NULLS FIRST, start_line, start_col, end_line, end_col, symbol_id",
+        )?
+        .query_map(params![legacy_repo_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut symbol_key_counts = BTreeMap::<(String, String), usize>::new();
+    let symbol_key_migrations = symbol_rows
+        .into_iter()
+        .map(
+            |(symbol_id, old_key, commit_sha, path, language, kind, name, container_chain)| {
+            let base_key = code_row_id(&[
+                canonical_repo_id,
+                &path,
+                &language,
+                &kind,
+                &container_chain,
+                &name,
+            ]);
+            let ordinal = symbol_key_counts
+                .entry((commit_sha.clone().unwrap_or_default(), base_key.clone()))
+                .or_default();
+            *ordinal += 1;
+            let new_key = if *ordinal == 1 {
+                base_key
+            } else {
+                format!("{base_key}#{ordinal}")
+            };
+            (symbol_id, old_key, commit_sha, new_key)
+        },
+        )
+        .collect::<Vec<_>>();
+    for (symbol_id, old_key, commit_sha, new_key) in &symbol_key_migrations {
+        transaction.execute(
+            "UPDATE code_symbols SET symbol_key = ? WHERE repo_id = ? AND symbol_id = ?",
+            params![new_key, legacy_repo_id, symbol_id],
+        )?;
+        for table in ["code_edges", "code_edge_revisions"] {
+            for column in ["source_symbol_key", "target_symbol_key"] {
+                transaction.execute(
+                    &format!(
+                        "UPDATE {table} SET {column} = ? WHERE repo_id = ? AND {column} = ? AND commit_sha IS NOT DISTINCT FROM ?"
+                    ),
+                    params![new_key, legacy_repo_id, old_key, commit_sha],
+                )?;
+            }
+        }
+    }
+
+    let edge_ids = transaction
+        .prepare(
+            "SELECT edge_id FROM code_edges WHERE repo_id = ? UNION SELECT edge_id FROM code_edge_revisions WHERE repo_id = ?",
+        )?
+        .query_map(params![legacy_repo_id, legacy_repo_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for old_id in edge_ids {
+        let temporary_id = format!("legacy-migration:edge:{canonical_repo_id}:{old_id}");
+        let canonical_id = code_row_id(&["canonical-migration", "edge", canonical_repo_id, &old_id]);
+        for table in ["code_edges", "code_edge_revisions"] {
+            transaction.execute(
+                &format!("UPDATE {table} SET edge_id = ? WHERE edge_id = ? AND repo_id = ?"),
+                params![temporary_id, old_id, legacy_repo_id],
+            )?;
+            transaction.execute(
+                &format!("UPDATE {table} SET edge_id = ? WHERE edge_id = ? AND repo_id = ?"),
+                params![canonical_id, temporary_id, legacy_repo_id],
+            )?;
+        }
+    }
+
+    let diagnostic_ids = transaction
+        .prepare(
+            "SELECT diagnostic_id FROM code_diagnostics WHERE repo_id = ? UNION SELECT diagnostic_id FROM code_diagnostic_revisions WHERE repo_id = ?",
+        )?
+        .query_map(params![legacy_repo_id, legacy_repo_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for old_id in diagnostic_ids {
+        let temporary_id = format!("legacy-migration:diagnostic:{canonical_repo_id}:{old_id}");
+        let canonical_id = code_row_id(&[
+            "canonical-migration",
+            "diagnostic",
+            canonical_repo_id,
+            &old_id,
+        ]);
+        for table in ["code_diagnostics", "code_diagnostic_revisions"] {
+            transaction.execute(
+                &format!("UPDATE {table} SET diagnostic_id = ? WHERE diagnostic_id = ? AND repo_id = ?"),
+                params![temporary_id, old_id, legacy_repo_id],
+            )?;
+            transaction.execute(
+                &format!("UPDATE {table} SET diagnostic_id = ? WHERE diagnostic_id = ? AND repo_id = ?"),
+                params![canonical_id, temporary_id, legacy_repo_id],
+            )?;
+        }
+    }
+
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        transaction
+            .execute(
+                &format!("UPDATE {table} SET repo_id = ? WHERE repo_id = ?"),
+                params![canonical_repo_id, legacy_repo_id],
+            )?;
+    }
+    transaction.commit()?;
+    Ok(())
+    })();
+    migration_result.map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
+}
+
+pub fn withdraw_code_repository(
+    config: &MemoryConfig,
+    repository_id: &str,
+) -> Result<(), MemoryError> {
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        transaction
+            .execute(&format!("DELETE FROM {table} WHERE repo_id = ?"), [repository_id])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
 }
 
 pub fn index_code_repository(
@@ -4443,6 +4942,22 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
         .map(|value| value.trim_matches('`').trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_CODE_INDEX_BRANCH.to_string());
+    validate_code_index_branch(root, &branch)
+}
+
+pub(crate) fn code_index_branch_for_config(
+    config: &MemoryConfig,
+) -> Result<String, CodeGraphProjectionError> {
+    match config.code_index_target_branch.as_deref() {
+        Some(branch) => validate_code_index_branch(&config.repo_root, branch),
+        None => code_index_branch(&config.repo_root),
+    }
+}
+
+fn validate_code_index_branch(
+    root: &Path,
+    branch: &str,
+) -> Result<String, CodeGraphProjectionError> {
     if branch.starts_with('-')
         || branch.starts_with("origin/")
         || branch.starts_with("refs/")
@@ -4457,7 +4972,7 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
         ));
     }
     let branch_check = Command::new("git")
-        .args(["check-ref-format", "--branch", &branch])
+        .args(["check-ref-format", "--branch", branch])
         .output()
         .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
             path: root.to_path_buf(),
@@ -4468,7 +4983,7 @@ pub fn code_index_branch(root: &Path) -> Result<String, CodeGraphProjectionError
             "configured target branch is invalid".to_string(),
         ));
     }
-    Ok(branch)
+    Ok(branch.to_string())
 }
 
 fn git_target_commit(
@@ -5755,6 +6270,11 @@ fn ensure_code_repo(
     repo_id: &str,
     include_stale: bool,
 ) -> Result<(), CodeGraphProjectionError> {
+    if !config.repository_sources.is_empty()
+        && !config.repository_sources.contains_key(repo_id)
+    {
+        return Err(CodeGraphProjectionError::RepoNotFound(repo_id.to_string()));
+    }
     if code_graph_repos(config, include_stale)?
         .repos
         .iter()
@@ -7436,7 +7956,7 @@ mod code_graph_tests {
         CodeDiffConnectionScope, CodeDiffEdgeStatus, CodeDiffSymbol, CodeGraphConfidence,
         CodeGraphMode, CodeGraphSnapshotOptions, DtoDiffStatus,
         index_code_repository, index_code_repository_at, index_code_repository_at_current_target,
-        migrate_index, open_existing_index_read_only, open_index,
+        migrate_code_repository_identity, migrate_index, open_existing_index_read_only, open_index,
         query_code_edges_for_revision, query_revision_file_symbols, query_symbol_diagnostics,
         re_resolve_workspace_edges,
         CodeEdgeRecord, CodeSymbolRecord,
@@ -9496,5 +10016,322 @@ mod code_graph_tests {
         assert!(repository_scope_matches(&scopes, "team/repo"));
         assert!(!repository_scope_matches(&scopes, "missing-repo"));
         assert!(has_work_item_scope(&scopes));
+    }
+
+    #[test]
+    fn repository_identity_migration_preserves_snapshots_and_remaps_code_ids() {
+        let repository = TempDir::new().expect("repository");
+        let config = MemoryConfig::load(repository.path(), None).expect("config");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("schema");
+        for repo_id in ["legacy-repo", "canonical-repo"] {
+            connection
+                .execute(
+                    "INSERT INTO code_index_snapshots (repo_id, commit_sha, target_branch, status, total_files, parsed_files, skipped_files, deleted_files, config_fingerprint, indexed_at) VALUES (?, 'abc', 'develop', 'complete', 1, 1, 0, 0, '', 'now')",
+                    [repo_id],
+                )
+                .expect("snapshot");
+        }
+        connection
+            .execute(
+                "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-symbol",
+                    "legacy-key",
+                    "legacy-repo",
+                    "abc",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "function",
+                    "main",
+                    Option::<String>::None,
+                    "",
+                    Option::<String>::None,
+                    1_i64,
+                    0_i64,
+                    1_i64,
+                    10_i64,
+                    0_i64,
+                    10_i64,
+                    1_i64,
+                    1_i64,
+                    "content",
+                    "snippet",
+                    "parser",
+                    "query-pack",
+                    "now",
+                    "current",
+                ],
+            )
+            .expect("symbol");
+        connection
+            .execute(
+                "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-child",
+                    "legacy-child-key",
+                    "legacy-repo",
+                    "abc",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "function",
+                    "child",
+                    Some("legacy-symbol".to_string()),
+                    "legacy-symbol",
+                    Option::<String>::None,
+                    2_i64,
+                    0_i64,
+                    2_i64,
+                    10_i64,
+                    11_i64,
+                    21_i64,
+                    2_i64,
+                    2_i64,
+                    "content",
+                    "snippet",
+                    "parser",
+                    "query-pack",
+                    "now",
+                    "current",
+                ],
+            )
+            .expect("child symbol");
+        connection
+            .execute(
+                "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-main-def",
+                    "legacy-main-def-key",
+                    "legacy-repo",
+                    "def",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "function",
+                    "main",
+                    Option::<String>::None,
+                    "",
+                    Option::<String>::None,
+                    1_i64,
+                    0_i64,
+                    1_i64,
+                    10_i64,
+                    0_i64,
+                    10_i64,
+                    1_i64,
+                    1_i64,
+                    "content-def",
+                    "snippet-def",
+                    "parser",
+                    "query-pack",
+                    "later",
+                    "current",
+                ],
+            )
+            .expect("historical main symbol");
+        connection
+            .execute(
+                "INSERT INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-edge",
+                    "legacy-repo",
+                    "abc",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "call",
+                    "legacy-symbol",
+                    "legacy-key",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "exact",
+                    1_i64,
+                    0_i64,
+                    1_i64,
+                    4_i64,
+                    0_i64,
+                    4_i64,
+                    "content",
+                    "parser",
+                    "query-pack",
+                    "now",
+                    "current",
+                ],
+            )
+            .expect("edge");
+        connection
+            .execute(
+                "INSERT INTO code_edge_revisions (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "legacy-edge",
+                    "legacy-repo",
+                    "def",
+                    false,
+                    "src/lib.rs",
+                    "rust",
+                    "call",
+                    "legacy-main-def",
+                    "legacy-main-def-key",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "exact",
+                    2_i64,
+                    0_i64,
+                    2_i64,
+                    4_i64,
+                    5_i64,
+                    9_i64,
+                    "content-def",
+                    "parser",
+                    "query-pack",
+                    "later",
+                    "current",
+                ],
+            )
+            .expect("edge revision");
+        drop(connection);
+
+        migrate_code_repository_identity(&config, "legacy-repo", "canonical-repo")
+            .expect("identity migration");
+        let connection = open_index(&config).expect("index reopened");
+        let rows = connection
+            .prepare("SELECT repo_id FROM code_index_snapshots ORDER BY repo_id")
+            .expect("query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(rows, vec!["canonical-repo"]);
+        let symbol = connection
+            .query_row(
+                "SELECT repo_id, symbol_id, symbol_key FROM code_symbols WHERE commit_sha = 'abc' AND name = 'main'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("migrated symbol");
+        assert_eq!(symbol.0, "canonical-repo");
+        assert_ne!(symbol.1, "legacy-symbol");
+        let (container_symbol_id, child_symbol_key): (Option<String>, String) = connection
+            .query_row(
+                "SELECT container_symbol_id, symbol_key FROM code_symbols WHERE name = 'child'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("migrated child symbol");
+        assert_eq!(container_symbol_id.as_deref(), Some(symbol.1.as_str()));
+        assert_ne!(child_symbol_key, "legacy-child-key");
+        let edge = connection
+            .query_row(
+                "SELECT repo_id, edge_id, source_symbol_id, source_symbol_key FROM code_edges",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .expect("migrated edge");
+        assert_eq!(edge.0, "canonical-repo");
+        assert_ne!(edge.1, "legacy-edge");
+        assert_eq!(edge.2, symbol.1);
+        assert_eq!(edge.3.as_deref(), Some(symbol.2.as_str()));
+        let historical_symbol_key: String = connection
+            .query_row(
+                "SELECT symbol_key FROM code_symbols WHERE commit_sha = 'def' AND name = 'main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("historical main symbol");
+        assert_eq!(historical_symbol_key, symbol.2);
+        let revision = connection
+            .query_row(
+                "SELECT repo_id, commit_sha, source_symbol_key FROM code_edge_revisions",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .expect("historical edge revision");
+        assert_eq!(revision.0, "canonical-repo");
+        assert_eq!(revision.1, "def");
+        assert_eq!(revision.2.as_deref(), Some(historical_symbol_key.as_str()));
+    }
+
+    #[test]
+    fn repository_identity_migration_deduplicates_existing_canonical_symbols() {
+        let repository = TempDir::new().expect("repository");
+        let config = MemoryConfig::load(repository.path(), None).expect("config");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("schema");
+        for (symbol_id, repo_id) in [("legacy-symbol", "legacy-repo"), ("canonical-symbol", "canonical-repo")] {
+            let symbol_key = if repo_id == "legacy-repo" {
+                "legacy-key"
+            } else {
+                "canonical-key"
+            };
+            connection
+                .execute(
+                    "INSERT INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, NULL, false, 'src/lib.rs', 'rust', 'function', 'main', NULL, '', NULL, 1, 0, 1, 10, 0, 10, 1, 1, 'content', 'snippet', 'parser', 'query-pack', 'now', 'current')",
+                    [symbol_id, symbol_key, repo_id],
+                )
+                .expect("symbol");
+        }
+        connection
+            .execute(
+                "INSERT INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, 'abc', false, 'src/lib.rs', 'rust', 'call', ?, ?, NULL, NULL, NULL, 'exact', 1, 0, 1, 4, 0, 4, 'content', 'parser', 'query-pack', 'now', 'current')",
+                duckdb::params![
+                    "legacy-edge",
+                    "legacy-repo",
+                    "legacy-symbol",
+                    "legacy-key",
+                ],
+            )
+            .expect("edge");
+        drop(connection);
+
+        migrate_code_repository_identity(&config, "legacy-repo", "canonical-repo")
+            .expect("identity migration");
+        let connection = open_index(&config).expect("index reopened");
+        let rows = connection
+            .query_row(
+                "SELECT COUNT(*), MIN(repo_id) FROM code_symbols",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("deduplicated symbols");
+        assert_eq!(rows, (1, "canonical-repo".to_string()));
+        let edge = connection
+            .query_row(
+                "SELECT repo_id, source_symbol_id, source_symbol_key FROM code_edges",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .expect("deduplicated edge");
+        assert_eq!(edge.0, "canonical-repo");
+        assert_eq!(edge.1, "canonical-symbol");
+        assert_eq!(edge.2.as_deref(), Some("canonical-key"));
     }
 }

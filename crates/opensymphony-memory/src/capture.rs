@@ -97,6 +97,7 @@ pub fn write_capture_plan(
     plan: &CapturePlan,
     force: bool,
 ) -> Result<CaptureWriteReport, MemoryError> {
+    preflight_capture_plan(config, plan)?;
     let issue_dir = config.memory_root.join("issues");
     create_dir_all(&issue_dir)?;
     create_dir_all(config.index_path.parent().unwrap_or(&config.memory_root))?;

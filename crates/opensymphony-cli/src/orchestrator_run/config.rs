@@ -319,6 +319,7 @@ pub struct ResolvedCentralConfig {
     pub workspace_root: Option<PathBuf>,
     pub retain_failed: bool,
     pub memory_catalog_root: Option<PathBuf>,
+    pub project_set_id: Option<String>,
     pub mode: CentralRoutingMode,
     pub repository: Option<String>,
     pub integration_instructions: Option<ResolvedIntegrationInstructions>,
@@ -329,6 +330,7 @@ pub struct ResolvedCentralConfig {
     pub retry_max_attempts: Option<u32>,
     runtime: RunConfigFile,
     pub workflow_front_matter: WorkflowFrontMatter,
+    pub(crate) memory_sources: BTreeMap<String, ResolvedMemorySource>,
 }
 
 impl ResolvedCentralConfig {
@@ -359,6 +361,15 @@ impl ResolvedCentralConfig {
 pub struct ResolvedIntegrationInstructions {
     pub path: PathBuf,
     pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedMemorySource {
+    pub(crate) repository_id: String,
+    pub(crate) remote_locator: String,
+    pub(crate) checkout_path: PathBuf,
+    pub(crate) project_scope_ids: BTreeSet<String>,
+    pub(crate) target_branch: String,
 }
 
 #[derive(Debug, Error)]
@@ -413,6 +424,10 @@ pub enum CentralConfigError {
     UnsupportedRoutingMode { mode: &'static str },
     #[error("legacy_single repository `{repository}` must define checkout_path")]
     MissingLegacyCheckout { repository: String },
+    #[error(
+        "project_set repository `{repository}` must define checkout_path for memory source registration"
+    )]
+    MissingProjectSetCheckout { repository: String },
     #[error("central config path is outside the selected instance roots")]
     InvalidRoot,
 }
@@ -470,6 +485,8 @@ pub(super) struct RunRuntimeConfig {
     pub(super) repository_checkouts: Option<BTreeMap<String, CheckoutRepository>>,
     pub(super) state_root: Option<PathBuf>,
     pub(super) memory_catalog_root: Option<PathBuf>,
+    pub(super) memory_sources: BTreeMap<String, ResolvedMemorySource>,
+    pub(super) project_set_id: Option<String>,
     pub(super) retain_failed: bool,
     pub(super) preserve_terminal_workspaces: bool,
     pub(super) memory: RunMemoryConfig,
@@ -488,6 +505,8 @@ pub(super) async fn resolve_runtime_config(
         central_retain_failed,
         central_preserve_terminal_workspaces,
         central_memory_catalog_root,
+        central_memory_sources,
+        central_project_set_id,
         central_repository_instruction_path,
         central_workflow_front_matter,
         retry_max_attempts,
@@ -512,6 +531,8 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.retain_failed),
                     Some(true),
                     central.memory_catalog_root,
+                    central.memory_sources,
+                    central.project_set_id,
                     central.repository_instruction_path,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
@@ -526,6 +547,8 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    None,
+                    BTreeMap::new(),
                     None,
                     None,
                     None,
@@ -542,6 +565,8 @@ pub(super) async fn resolve_runtime_config(
             None,
             None,
             None,
+            None,
+            BTreeMap::new(),
             None,
             None,
             None,
@@ -686,6 +711,8 @@ pub(super) async fn resolve_runtime_config(
         repository_checkouts: central_repository_checkouts,
         state_root: central_state_root,
         memory_catalog_root: central_memory_catalog_root,
+        memory_sources: central_memory_sources,
+        project_set_id: central_project_set_id,
         retain_failed: central_retain_failed.unwrap_or(true),
         preserve_terminal_workspaces: central_preserve_terminal_workspaces.unwrap_or(true),
         memory,
@@ -1325,6 +1352,7 @@ fn resolve_central_config(
         generation.clone(),
     )?;
     let repository_checkouts = build_repository_checkouts(&config)?;
+    let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     let repository_instruction_path = legacy_repository_instruction_path.or_else(|| {
         integration_instructions
@@ -1337,6 +1365,7 @@ fn resolve_central_config(
         workspace_root: Some(workspace_root),
         retain_failed,
         memory_catalog_root,
+        project_set_id: config.routing.active_project_set.clone(),
         mode,
         repository: config.routing.repository,
         integration_instructions,
@@ -1347,6 +1376,7 @@ fn resolve_central_config(
         retry_max_attempts,
         runtime,
         workflow_front_matter,
+        memory_sources,
     })
 }
 
@@ -1552,6 +1582,110 @@ fn build_repository_checkouts(
         }
     }
     Ok(checkouts)
+}
+
+fn resolve_memory_sources(
+    config: &CentralConfigFile,
+    config_root: &Path,
+    repository_routing: &RepositoryRouting,
+) -> Result<BTreeMap<String, ResolvedMemorySource>, CentralConfigError> {
+    let active_repository_ids = match repository_routing.mode {
+        RepositoryRoutingMode::LegacySingle => repository_routing
+            .legacy_repository
+            .as_deref()
+            .and_then(|alias| repository_routing.inventory.get(alias))
+            .map(|entry| BTreeSet::from([entry.identity.id.clone()]))
+            .unwrap_or_default(),
+        RepositoryRoutingMode::ProjectSet => repository_routing
+            .project_repositories
+            .values()
+            .flat_map(|repositories| repositories.iter().cloned())
+            .collect::<BTreeSet<_>>(),
+    };
+    let mut sources = BTreeMap::new();
+    for (repository_key, repository) in &config.repositories {
+        let repository_id = CanonicalRepositoryId::from_remote(
+            &repository.remote.provider,
+            repository.remote.provider_id.as_deref(),
+            &repository.remote.locator,
+        )
+        .map_err(|_| CentralConfigError::InvalidReference {
+            field: "repositories.remote".to_owned(),
+        })?;
+        let repository_id = repository_id.to_string();
+        if !active_repository_ids
+            .iter()
+            .any(|active| active.to_string() == repository_id)
+        {
+            continue;
+        }
+        let Some(checkout_path) = repository.checkout_path.as_deref() else {
+            return Err(
+                if repository_routing.mode == RepositoryRoutingMode::ProjectSet {
+                    CentralConfigError::MissingProjectSetCheckout {
+                        repository: repository_key.clone(),
+                    }
+                } else {
+                    CentralConfigError::MissingLegacyCheckout {
+                        repository: repository_key.clone(),
+                    }
+                },
+            );
+        };
+        let resolved = ResolvedMemorySource {
+            repository_id: repository_id.clone(),
+            remote_locator: repository.remote.locator.clone(),
+            checkout_path: resolve_central_path(
+                config_root,
+                checkout_path,
+                "repositories.checkout_path",
+            )?,
+            project_scope_ids: config
+                .linear_projects
+                .iter()
+                .filter(|(_, project)| project.repositories.contains(repository_key))
+                .flat_map(|(project_id, project)| {
+                    let project_keys = [
+                        project_id.clone(),
+                        project.provider_project_id.clone(),
+                        project.provider_project_slug.clone().unwrap_or_default(),
+                    ];
+                    let source_project_keys = repository_routing
+                        .project_repositories
+                        .iter()
+                        .filter_map(|(scope_id, repositories)| {
+                            repositories
+                                .iter()
+                                .any(|candidate| candidate.to_string() == repository_id)
+                                .then_some(scope_id)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    if !repository_routing.project_repositories.is_empty()
+                        && !project_keys
+                            .iter()
+                            .any(|key| source_project_keys.contains(key))
+                    {
+                        return Vec::new();
+                    }
+                    [
+                        project_id.clone(),
+                        project.provider_project_id.clone(),
+                        project.provider_project_slug.clone().unwrap_or_default(),
+                    ]
+                    .into_iter()
+                    .filter(|scope_id| !scope_id.is_empty())
+                    .collect::<Vec<_>>()
+                })
+                .collect(),
+            target_branch: repository.target_branch.clone(),
+        };
+        if sources.insert(repository_id, resolved).is_some() {
+            return Err(CentralConfigError::InvalidReference {
+                field: "repositories.remote.canonical_id".to_owned(),
+            });
+        }
+    }
+    Ok(sources)
 }
 
 fn central_workflow_front_matter(
@@ -2754,7 +2888,30 @@ scheduler:
                 .as_ref()
                 .is_some_and(|path| path.ends_with("configs/checkout/AGENTS.md"))
         );
+        assert_eq!(resolved.memory_sources.len(), 1);
+        assert!(
+            resolved
+                .memory_sources
+                .contains_key("git:repository:example/repo")
+        );
         assert_eq!(resolved.runtime.memory.auto_capture, Some(true));
+    }
+
+    #[test]
+    fn project_set_memory_sources_require_checkout_paths() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions");
+        let source = central_fixture(root.path()).replace(
+            &format!("    checkout_path: {}/checkout\n", root.path().display()),
+            "",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("active project-set source without checkout must fail");
+        assert!(matches!(
+            error,
+            CentralConfigError::MissingProjectSetCheckout { repository } if repository == "core-repo"
+        ));
     }
 
     #[test]
@@ -2854,7 +3011,11 @@ scheduler:
             )
             .replace(
                 "repositories:\n  core-repo:",
-                "repositories:\n  other-repo:\n    aliases: [other]\n    remote:\n      provider: github\n      locator: example/other\n      clone: git@github.com:example/other.git\n    target_branch: develop\n    credential: github-ssh\n    review_profile: github-standard\n    instructions:\n      path: AGENTS.md\n  core-repo:",
+                "repositories:\n  other-repo:\n    aliases: [other]\n    remote:\n      provider: github\n      locator: example/other\n      clone: git@github.com:example/other.git\n    checkout_path: {root}/other-checkout\n    target_branch: develop\n    credential: github-ssh\n    review_profile: github-standard\n    instructions:\n      path: AGENTS.md\n  core-repo:",
+            )
+            .replace(
+                "{root}/other-checkout",
+                &format!("{}/other-checkout", root.path().display()),
             );
 
         let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)

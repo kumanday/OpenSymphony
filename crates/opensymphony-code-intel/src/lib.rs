@@ -555,9 +555,13 @@ pub struct AstCodeIntelProvider {
 
 impl AstCodeIntelProvider {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_max_file_bytes(root, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    pub fn with_max_file_bytes(root: impl Into<PathBuf>, max_file_bytes: u64) -> Self {
         Self {
             root: root.into(),
-            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_file_bytes,
         }
     }
 
@@ -846,10 +850,14 @@ pub struct CompositeCodeIntelProvider {
 
 impl CompositeCodeIntelProvider {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_max_file_bytes(root, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    pub fn with_max_file_bytes(root: impl Into<PathBuf>, max_file_bytes: u64) -> Self {
         let root = root.into();
         Self {
-            ast: AstCodeIntelProvider::new(&root),
-            fallback: CodebaseAnalyzer::new(root),
+            ast: AstCodeIntelProvider::with_max_file_bytes(&root, max_file_bytes),
+            fallback: CodebaseAnalyzer::with_max_file_bytes(root, max_file_bytes),
         }
     }
 
@@ -3136,6 +3144,27 @@ mod tests {
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace" && artifact.summary.contains("no requested paths")
         }));
+    }
+
+    #[test]
+    fn composite_fallback_respects_the_selected_file_size_limit() {
+        let repo = TempDir::new().expect("temp repo");
+        let package = repo.path().join("crates/oversized");
+        fs::create_dir_all(&package).expect("package dir");
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"oversized\"\nversion = \"0.1.0\"\n".repeat(4),
+        )
+        .expect("oversized manifest");
+
+        let artifacts = CompositeCodeIntelProvider::with_max_file_bytes(repo.path(), 16)
+            .code_context(&[], &[], 20)
+            .expect("code context");
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.title == "oversized")
+        );
     }
 
     #[test]
