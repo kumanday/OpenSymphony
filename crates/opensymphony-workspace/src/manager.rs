@@ -2364,6 +2364,27 @@ impl WorkspaceManager {
         self.write_bytes_artifact(workspace, &path, &payload).await
     }
 
+    pub async fn write_json_artifact_atomically<T>(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        artifact: &T,
+    ) -> Result<(), WorkspaceError>
+    where
+        T: Serialize,
+    {
+        self.validate_workspace_handle(workspace).await?;
+        let path = normalize_absolute_path(path)?;
+        let payload = serde_json::to_vec_pretty(artifact).map_err(|error| {
+            WorkspaceError::EncodeJsonArtifact {
+                path: path.clone(),
+                source: error,
+            }
+        })?;
+        self.write_bytes_artifact_atomically(workspace, &path, &payload)
+            .await
+    }
+
     pub async fn load_conversation_manifest(
         &self,
         workspace: &WorkspaceHandle,
@@ -2514,8 +2535,12 @@ impl WorkspaceManager {
     ) -> Result<(), WorkspaceError> {
         let mut receipt = AfterCreateBootstrapReceipt::new(workspace, issue);
         receipt.workspace_path = manifest_workspace_path.to_path_buf();
-        self.write_manifest(workspace, &workspace.after_create_receipt_path(), &receipt)
-            .await
+        self.write_json_artifact_atomically(
+            workspace,
+            &workspace.after_create_receipt_path(),
+            &receipt,
+        )
+        .await
     }
 
     async fn bootstrap_workspace_layout(
@@ -3228,6 +3253,35 @@ impl WorkspaceManager {
                 path,
                 source: error,
             })
+    }
+
+    async fn write_bytes_artifact_atomically(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        payload: &[u8],
+    ) -> Result<(), WorkspaceError> {
+        if let Some(parent) = path.parent() {
+            self.create_managed_directory(workspace, parent).await?;
+        }
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("artifact.json");
+        let temporary_path = path.with_file_name(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+        let temporary_path = self
+            .validate_workspace_owned_path(workspace, &temporary_path)
+            .await?;
+        if let Err(source) = fs::write(&temporary_path, payload).await {
+            let _ = fs::remove_file(&temporary_path).await;
+            return Err(WorkspaceError::WriteArtifact { path, source });
+        }
+        if let Err(source) = fs::rename(&temporary_path, &path).await {
+            let _ = fs::remove_file(&temporary_path).await;
+            return Err(WorkspaceError::WriteArtifact { path, source });
+        }
+        Ok(())
     }
 
     async fn validate_workspace_owned_path(

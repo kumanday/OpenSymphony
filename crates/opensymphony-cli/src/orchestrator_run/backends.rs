@@ -1967,8 +1967,17 @@ impl RuntimeWorkerBackend {
                 prior_run_manifest.as_mut(),
             )
             .await
-            .ok()
-            .flatten();
+            .map_err(|error| {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!("failed to recover conversation binding: {error}"),
+                );
+                error
+            });
+            let recovered_conversation = match recovered_conversation {
+                Ok(manifest) => manifest,
+                Err(_) => return,
+            };
             let target_is_codex = route.harness_kind == CODEX_APP_SERVER_KIND;
             let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
                 conversation_manifest_is_codex(manifest) != target_is_codex
@@ -2606,7 +2615,7 @@ fn worker_memory_project(issue: &NormalizedIssue, fallback: &str) -> String {
 
 fn memory_scope_prompt_values(project: &str, repo: &str) -> String {
     format!(
-        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope."
+        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related. For code.ast.* calls, pass repo={repo} and the current issue identifier as issue; do not use process-global scope."
     )
 }
 
@@ -3138,7 +3147,7 @@ async fn try_run_codex_stdio_issue(
                     })?;
             }
             workspace_manager
-                .write_json_artifact(
+                .write_json_artifact_atomically(
                     workspace,
                     &pending_conversation_manifest_path(workspace),
                     &Option::<IssueConversationManifest>::None,
@@ -4538,7 +4547,7 @@ async fn write_codex_conversation_manifest(
         envelope.conversation_binding = Some(manifest.conversation_id.to_string());
     }
     workspace_manager
-        .write_json_artifact(
+        .write_json_artifact_atomically(
             workspace,
             &pending_conversation_manifest_path(workspace),
             &Some(&manifest),

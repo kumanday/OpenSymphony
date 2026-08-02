@@ -2214,6 +2214,23 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
                 "access": match required_access_for_tool(name, auth) {
                     MemoryServerAccess::Read => "read",
                     MemoryServerAccess::Admin => "admin",
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "repo": { "type": "string", "description": "Canonical repository scope or explicit repository path" },
+                        "issue": { "type": "string", "description": "Issue identifier owning the verified checkout" },
+                        "paths": { "type": "array", "items": { "type": "string" } },
+                        "path": { "type": "string" },
+                        "symbol": { "type": "string" },
+                        "query": { "type": "string" },
+                        "kinds": { "type": "array", "items": { "type": "string" } },
+                        "symbols": { "type": "array", "items": { "type": "string" } },
+                        "language": { "type": "string" },
+                        "queryPack": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+                    }
                 }
             })
         }));
@@ -4426,20 +4443,31 @@ fn resolve_code_intel_config(
     workspace_root: Option<&Path>,
     issue: Option<&str>,
 ) -> Result<MemoryConfig, MemoryError> {
-    let Some(repo) = scope.repo.as_deref().and_then(non_empty) else {
-        return Ok(config.clone());
-    };
-    if resolve_code_intel_repo(config, Some(&repo)).is_ok() {
+    let repo = scope.repo.as_deref().and_then(non_empty);
+    if let Some(repo) = repo.as_deref()
+        && resolve_code_intel_repo(config, Some(repo)).is_ok()
+    {
         return Ok(config.clone());
     }
     let Some(workspace_root) = workspace_root else {
-        return resolve_code_intel_repo(config, Some(&repo)).map(|repo_root| {
-            let mut scoped = config.clone();
-            scoped.repo_root = repo_root;
-            scoped
-        });
+        return repo
+            .as_deref()
+            .map(|repo| resolve_code_intel_repo(config, Some(repo)))
+            .unwrap_or_else(|| Ok(config.repo_root.clone()))
+            .map(|repo_root| {
+                let mut scoped = config.clone();
+                scoped.repo_root = repo_root;
+                scoped
+            });
     };
-    let repo_root = find_verified_checkout_for_code_intel(workspace_root, &repo, issue)?;
+    let issue = issue.ok_or_else(|| {
+        MemoryError::InvalidInput(
+            "strict code-intelligence requests require `repo` and `issue` scope arguments"
+                .to_owned(),
+        )
+    })?;
+    let repo_root =
+        find_verified_checkout_for_code_intel(workspace_root, repo.as_deref(), Some(issue))?;
     let mut scoped = config.clone();
     scoped.repo_root = repo_root;
     Ok(scoped)
@@ -4447,7 +4475,7 @@ fn resolve_code_intel_config(
 
 fn find_verified_checkout_for_code_intel(
     workspace_root: &Path,
-    repository_id: &str,
+    repository_id: Option<&str>,
     issue: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let canonical_root =
@@ -4484,7 +4512,7 @@ fn find_verified_checkout_for_code_intel(
         else {
             continue;
         };
-        if found_repository_id != repository_id
+        if repository_id.is_some_and(|repository_id| found_repository_id != repository_id)
             || checkout
                 .get("quarantined")
                 .and_then(Value::as_bool)
@@ -4517,11 +4545,13 @@ fn find_verified_checkout_for_code_intel(
     match matches.as_slice() {
         [path] => Ok(path.clone()),
         [] => Err(MemoryError::InvalidInput(format!(
-            "no verified checkout for repository `{repository_id}` and issue `{}`",
+            "no verified checkout for repository `{}` and issue `{}`",
+            repository_id.unwrap_or("<unspecified>"),
             issue.unwrap_or("<unspecified>")
         ))),
         _ => Err(MemoryError::InvalidInput(format!(
-            "multiple verified checkouts for repository `{repository_id}` and issue `{}`",
+            "multiple verified checkouts for repository `{}` and issue `{}`",
+            repository_id.unwrap_or("<unspecified>"),
             issue.unwrap_or("<unspecified>")
         ))),
     }
@@ -9238,7 +9268,7 @@ Public memory concept.
 
         let resolved = find_verified_checkout_for_code_intel(
             workspace_root.path(),
-            "github:github.com:repository:123",
+            Some("github:github.com:repository:123"),
             Some("COE-123"),
         )
         .expect("canonical repository should resolve through the issue checkout");
