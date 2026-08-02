@@ -2463,13 +2463,19 @@ fn code_repo_id_for_workspace(
                 .ok()
                 .map(|remote| normalize_git_remote(&remote));
         for (repository_id, source) in &config.repository_sources {
-            let same_workspace = std::fs::canonicalize(&source.root).ok()
-                == std::fs::canonicalize(workspace_path).ok();
+            let source_root = std::fs::canonicalize(&source.root).ok();
+            let same_workspace = source_root == std::fs::canonicalize(workspace_path).ok();
+            let same_local_origin = workspace_remote
+                .as_deref()
+                .filter(|origin| StdPath::new(origin).is_absolute())
+                .and_then(|origin| std::fs::canonicalize(origin).ok())
+                .zip(source_root)
+                .is_some_and(|(origin, root)| origin == root);
             let same_remote = workspace_remote.as_deref().is_some_and(|remote| {
                 command_single_line(&source.root, "git", &["remote", "get-url", "origin"])
                     .is_ok_and(|source_remote| normalize_git_remote(&source_remote) == remote)
             });
-            if same_workspace || same_remote {
+            if same_workspace || same_local_origin || same_remote {
                 return Some(repository_id.clone());
             }
         }
@@ -5727,6 +5733,40 @@ mod tests {
         assert_eq!(
             code_repo_id_for_workspace(workspace.path(), Some(&config)),
             None
+        );
+    }
+
+    #[test]
+    fn local_clone_origin_matches_registered_repository_root() {
+        let catalog = tempfile::tempdir().expect("catalog temp dir");
+        let repository = tempfile::tempdir().expect("repository temp dir");
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        run_git(repository.path(), &["init"]);
+        run_git(workspace.path(), &["init"]);
+        run_git(
+            workspace.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                repository.path().to_str().expect("repository path"),
+            ],
+        );
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        assert_eq!(
+            code_repo_id_for_workspace(workspace.path(), Some(&config)),
+            Some("repo-a".to_string())
         );
     }
 

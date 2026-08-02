@@ -4194,6 +4194,67 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn scoped_shared_capsule_does_not_display_sibling_path_owner() {
+        let repo = TempDir::new().expect("catalog repo");
+        let source_a = TempDir::new().expect("source a");
+        let source_b = TempDir::new().expect("source b");
+        let mut config = config_for(repo.path());
+        for (repository_id, root) in [("repo-a", source_a.path()), ("repo-b", source_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let capsule_path = source_b.path().join("issues/COE-561.md");
+        fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+            .expect("capsule directory");
+        fs::write(&capsule_path, "source b capsule").expect("source capsule");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-561",
+                    "Shared capsule",
+                    "[]",
+                    "not_archived",
+                    capsule_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed shared body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-561",
+                    r#"[{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"repo-a"},{"kind":"legacy_store","id":"source-b","repo_id":"repo-b"}]"#,
+                    r#"["repo-a:source-a","repo-b:source-b"]"#,
+                ],
+            )
+            .expect("shared issue");
+        drop(connection);
+
+        let rendered = brief_with_scope(
+            &config,
+            "COE-561",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("scoped brief");
+        assert!(!rendered.contains("repo-b:"));
+        assert!(rendered.contains("- Capsule: COE-561.md"));
+    }
+
+    #[test]
     fn ownerless_capsule_reads_use_indexed_body_without_repository_probing() {
         let repo = TempDir::new().expect("catalog repo");
         let source_a = TempDir::new().expect("source a");

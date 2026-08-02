@@ -54,7 +54,7 @@ fn render_indexed_brief(
     output.push_str(&format!("# {}: {}\n\n", indexed.issue_key, indexed.title));
     output.push_str(&format!(
         "- Capsule: {}\n",
-        display_capsule_path(config, indexed)
+        display_capsule_path(config, indexed, scope)
     ));
     output.push_str(&format!("- Visibility: {}\n", indexed.visibility));
     let areas = indexed.areas_for_scope(config, scope);
@@ -66,7 +66,11 @@ fn render_indexed_brief(
     output
 }
 
-fn display_capsule_path(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
+fn display_capsule_path(
+    config: &MemoryConfig,
+    indexed: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> String {
     let source_ref_repositories = indexed
         .source_refs
         .iter()
@@ -86,7 +90,15 @@ fn display_capsule_path(config: &MemoryConfig, indexed: &IndexedIssue) -> String
         .filter(|(_, source)| indexed.capsule_path.strip_prefix(&source.root).is_ok())
         .map(|(repository_id, _)| repository_id.as_str())
         .collect::<BTreeSet<_>>();
-    let repository_id = if path_repositories.len() == 1 {
+    let requested_repository_id = requested_repository_id(config, scope);
+    let repository_id = if let Some(requested_repository_id) = requested_repository_id.as_deref()
+    {
+        let owns_requested_repository = indexed_issue_matches_repo(config, indexed, requested_repository_id);
+        (owns_requested_repository
+            && (path_repositories.is_empty()
+                || path_repositories.contains(requested_repository_id)))
+            .then_some(requested_repository_id)
+    } else if path_repositories.len() == 1 {
         path_repositories.iter().next().copied()
     } else if path_repositories.is_empty() {
         let mut candidates = source_ref_repositories;
@@ -120,6 +132,19 @@ fn display_capsule_path(config: &MemoryConfig, indexed: &IndexedIssue) -> String
     repository_id
         .map(|repository_id| format!("{repository_id}:{bundle_relative_path}"))
         .unwrap_or(bundle_relative_path)
+}
+
+fn requested_repository_id(config: &MemoryConfig, scope: &MemoryScopeFilter) -> Option<String> {
+    let requested = scope.repo.as_deref().and_then(normalize_optional)?;
+    if config.repository_sources.contains_key(&requested) {
+        return Some(requested);
+    }
+    let requested_root = Path::new(&requested).canonicalize().ok()?;
+    config
+        .repository_sources
+        .iter()
+        .find(|(_, source)| source.root.canonicalize().ok().as_ref() == Some(&requested_root))
+        .map(|(repository_id, _)| repository_id.clone())
 }
 
 fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<PathBuf> {
@@ -224,7 +249,7 @@ pub fn search_with_scope(
                 SearchResult {
                     issue_key: indexed.issue_key.clone(),
                     title: indexed.title.clone(),
-                    capsule_path: PathBuf::from(display_capsule_path(config, &indexed)),
+                    capsule_path: PathBuf::from(display_capsule_path(config, &indexed, scope)),
                     areas: indexed.areas_for_scope(config, scope),
                     snippet: snippet_for_terms(&indexed.body, &terms),
                 },
@@ -286,7 +311,7 @@ pub fn related_by_issue_with_scope(
                 SearchResult {
                     issue_key: candidate.issue_key.clone(),
                     title: candidate.title.clone(),
-                    capsule_path: PathBuf::from(display_capsule_path(config, &candidate)),
+                    capsule_path: PathBuf::from(display_capsule_path(config, &candidate, scope)),
                     areas: candidate_areas,
                     snippet: first_interesting_line(&candidate.body),
                 },
@@ -331,7 +356,7 @@ pub fn related_by_area_with_scope(
             results.push(SearchResult {
                 issue_key: candidate.issue_key.clone(),
                 title: candidate.title.clone(),
-                capsule_path: PathBuf::from(display_capsule_path(config, &candidate)),
+                capsule_path: PathBuf::from(display_capsule_path(config, &candidate, scope)),
                 areas,
                 snippet: first_interesting_line(&candidate.body),
             });
@@ -930,7 +955,7 @@ pub fn status_with_scope(
         .into_iter()
         .map(|issue| {
             let areas = issue.areas_for_scope(config, scope);
-            let capsule_path = PathBuf::from(display_capsule_path(config, &issue));
+            let capsule_path = PathBuf::from(display_capsule_path(config, &issue, scope));
             StatusIssue {
                 issue_key: issue.issue_key,
                 title: issue.title,

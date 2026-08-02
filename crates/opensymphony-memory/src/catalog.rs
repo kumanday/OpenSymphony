@@ -617,6 +617,11 @@ pub fn withdraw_memory_repository_records(
                 .collect::<BTreeMap<_, _>>(),
         )
     };
+    let withdrawn_source_ids = registered_source_repositories
+        .iter()
+        .filter(|(_, owner)| owner.as_str() == repository_id)
+        .map(|(source_id, _)| source_id.clone())
+        .collect::<Vec<_>>();
     transaction
         .execute(
             "DELETE FROM source_scope_refs WHERE source_id IN (SELECT source_id FROM registered_memory_sources WHERE repository_id = ?)",
@@ -651,12 +656,6 @@ pub fn withdraw_memory_repository_records(
             && (!scopes.iter().any(|scope| {
                 scope.kind == KnowledgeScopeKind::Repository && scope.id != repository_id
             }) || has_surviving_registered_owner);
-        let had_registered_source_owner = source_ids.iter().any(|candidate| {
-            !is_live_capture_owner(candidate)
-                && source_repository_id(config, &registered_source_repositories, candidate)
-                    .as_deref()
-                    == Some(repository_id)
-        });
         let had_legacy_live_owner = legacy_live_owner_attributable;
         source_ids.retain(|source_id| {
             !(live_capture_owner_matches_repository(source_id, repository_id)
@@ -693,6 +692,17 @@ pub fn withdraw_memory_repository_records(
             "checks",
             "reviews",
         ] {
+            for withdrawn_source_id in &withdrawn_source_ids {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
+                        duckdb::params![issue_key, withdrawn_source_id],
+                    )
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+            }
             transaction
                 .execute(
                     &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
@@ -793,35 +803,6 @@ pub fn withdraw_memory_repository_records(
             }
             continue;
         }
-        if had_registered_source_owner && source_ids.iter().any(|candidate| is_live_capture_owner(candidate)) {
-            transaction
-                .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
-                .map_err(|error| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source: error,
-                })?;
-            transaction
-                .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
-                .map_err(|error| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source: error,
-                })?;
-            for table in [
-                "issue_areas",
-                "pull_requests",
-                "changed_files",
-                "checks",
-                "reviews",
-            ] {
-                transaction
-                    .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?;
-            }
-            continue;
-        }
         let mut scope_statement = transaction
             .prepare(
                 "SELECT scope_id FROM source_scope_refs WHERE concept_id = ? AND scope_kind = 'project'",
@@ -864,7 +845,7 @@ pub fn withdraw_memory_repository_records(
                     .collect::<BTreeSet<_>>();
             }
         }
-        let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&scopes_json)
+        let mut scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&scopes_json)
             .unwrap_or_default()
             .into_iter()
             .filter(|scope| {
@@ -893,6 +874,42 @@ pub fn withdraw_memory_repository_records(
                 _ => true,
             })
             .collect::<Vec<_>>();
+        let mut provenance_scope_statement = transaction
+            .prepare(
+                "SELECT source_id, scope_kind, scope_id, label FROM source_scope_refs WHERE concept_id = ?",
+            )
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        let provenance_scopes = provenance_scope_statement
+            .query_map([&concept_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source: error,
+            })?;
+        for (source_id, kind, id, label) in provenance_scopes {
+            if source_ids.contains(&source_id)
+                && let Some(kind) = parse_scope_kind(&kind)
+            {
+                let scope = KnowledgeScope { kind, id, label };
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+        }
         let sources = serde_json::from_str::<Vec<MemorySourceRef>>(&sources_json)
             .unwrap_or_default()
             .into_iter()
@@ -1519,6 +1536,102 @@ mod catalog_tests {
             )
             .expect("repository a scopes");
         assert_eq!(remaining_a_scopes, 0);
+    }
+
+    #[test]
+    fn withdrawing_repository_preserves_surviving_live_capture_payload() {
+        let root = TempDir::new().expect("memory root");
+        let config = MemoryConfig::load(root.path(), None).expect("config");
+        let source_a = RegisteredMemorySource {
+            source_id: "github:repository:a:repository".to_string(),
+            repository_id: "github:repository:a".to_string(),
+            commit_sha: "abc123".to_string(),
+            kind: MemorySourceKind::Repository,
+            root: root.path().join("repo-a"),
+            status: MemorySourceRegistrationStatus::Registered,
+            generation: "sha256:repo-a".to_string(),
+        };
+        let source_b = RegisteredMemorySource {
+            source_id: "github:repository:b:repository".to_string(),
+            repository_id: "github:repository:b".to_string(),
+            root: root.path().join("repo-b"),
+            ..source_a.clone()
+        };
+        register_memory_source(&config, &source_a).expect("source a");
+        register_memory_source(&config, &source_b).expect("source b");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-562",
+                    "Live survivor",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-562.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Live capture body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-562",
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"repository","id":"github:repository:b"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"github:repository:a","registration_source_id":"github:repository:a:repository"},{"kind":"linear_issue","id":"COE-562","repo_id":"github:repository:b"}]"#,
+                    r#"["github:repository:a:repository","__live_capture__:github:repository:b"]"#,
+                ],
+            )
+            .expect("shared issue");
+        connection
+            .execute(
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-562', 'repository', 'github:repository:a', NULL), ('issues/COE-562', 'repository', 'github:repository:b', NULL)",
+                [],
+            )
+            .expect("normalized scopes");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-562', 'github:repository:a:repository', 'repository', 'github:repository:a', NULL), ('issues/COE-562', '__live_capture__:github:repository:b', 'repository', 'github:repository:b', NULL)",
+                [],
+            )
+            .expect("source scopes");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-562', 'area-a', 'github:repository:a:repository'), ('COE-562', 'area-b', '__live_capture__:github:repository:b')",
+                [],
+            )
+            .expect("source-owned areas");
+        drop(connection);
+
+        withdraw_memory_repository_records(&config, &source_a.repository_id)
+            .expect("repository withdrawal");
+
+        let issue = load_indexed_issues(&config)
+            .expect("issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-562")
+            .expect("live-owned issue survives");
+        let connection = open_existing_index_read_only(&config)
+            .expect("index should reopen")
+            .expect("index exists");
+        let source_ids: String = connection
+            .query_row(
+                "SELECT source_ids_json FROM issues WHERE issue_key = 'COE-562'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("surviving source ids");
+        assert_eq!(issue.title, "Live survivor");
+        assert_eq!(issue.body, "Live capture body");
+        assert_eq!(source_ids, r#"["__live_capture__:github:repository:b"]"#);
+        assert_eq!(
+            issue
+                .scope_refs
+                .iter()
+                .map(|scope| scope.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["github:repository:b"]
+        );
+        assert_eq!(issue.areas(), vec!["area-b"]);
     }
 
     #[test]
