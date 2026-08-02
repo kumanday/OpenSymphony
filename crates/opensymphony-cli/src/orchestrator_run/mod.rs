@@ -1083,6 +1083,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         memory_env.clone(),
         linear_worker_env,
     )
+    .with_openhands_conversation_store(runtime.openhands_conversation_store.clone())
     .with_checkout_credential_envs(
         runtime
             .repository_checkouts

@@ -154,6 +154,7 @@ pub(super) struct RuntimeWorkerBackend {
     client: OpenHandsClient,
     workflow: Arc<ResolvedWorkflow>,
     workspace_manager: Arc<WorkspaceManager>,
+    openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     runner_config: IssueSessionRunnerConfig,
     memory_env: Option<RuntimeMemoryEnv>,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
@@ -1826,6 +1827,7 @@ impl RuntimeWorkerBackend {
             client,
             workflow: workflow.clone(),
             workspace_manager,
+            openhands_conversation_store: None,
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             memory_env,
@@ -1844,6 +1846,14 @@ impl RuntimeWorkerBackend {
 
     pub(super) fn with_checkout_credential_envs(mut self, variables: BTreeSet<String>) -> Self {
         self.checkout_credential_envs = variables;
+        self
+    }
+
+    pub(super) fn with_openhands_conversation_store(
+        mut self,
+        store: Option<OpenHandsConversationStorePaths>,
+    ) -> Self {
+        self.openhands_conversation_store = store;
         self
     }
 
@@ -1875,6 +1885,7 @@ impl RuntimeWorkerBackend {
         let memory_env = self.memory_env.clone();
         let workpad_comment_source = self.workpad_comment_source.clone();
         let workspace_manager = self.workspace_manager.clone();
+        let openhands_conversation_store = self.openhands_conversation_store.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
         let worker_id = request.run.worker_id.clone();
@@ -1948,15 +1959,46 @@ impl RuntimeWorkerBackend {
             .await
             .ok()
             .flatten();
+            let target_is_codex = route.harness_kind == CODEX_APP_SERVER_KIND;
+            let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
+                conversation_manifest_is_codex(manifest) != target_is_codex
+            });
+            if switching_harness {
+                let previous = recovered_conversation
+                    .as_ref()
+                    .expect("switching harness requires a prior conversation manifest");
+                if let Err(error) = retire_superseded_harness_session(
+                    &workspace_manager,
+                    &ensured.handle,
+                    previous,
+                    target_is_codex,
+                    openhands_conversation_store.as_ref(),
+                    &codex_bin,
+                    &checkout_credential_envs,
+                )
+                .await
+                {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to retire previous harness session: {error}"),
+                    );
+                    return;
+                }
+            }
             let persisted_conversation_binding = recovered_conversation
                 .as_ref()
+                .filter(|_| !switching_harness)
                 .and_then(|manifest| manifest.runtime_envelope.as_ref())
                 .and_then(|envelope| envelope.conversation_binding.clone())
                 .or_else(|| {
-                    prior_run_manifest
-                        .as_ref()
-                        .and_then(|manifest| manifest.runtime_envelope.as_ref())
-                        .and_then(|envelope| envelope.conversation_binding.clone())
+                    if switching_harness {
+                        None
+                    } else {
+                        prior_run_manifest
+                            .as_ref()
+                            .and_then(|manifest| manifest.runtime_envelope.as_ref())
+                            .and_then(|envelope| envelope.conversation_binding.clone())
+                    }
                 });
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
@@ -4550,6 +4592,46 @@ async fn load_codex_conversation_manifest(
         ));
     }
     Ok(Some(manifest))
+}
+
+async fn retire_superseded_harness_session(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+    target_is_codex: bool,
+    openhands_conversation_store: Option<&OpenHandsConversationStorePaths>,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), String> {
+    if target_is_codex {
+        let store = openhands_conversation_store.ok_or_else(|| {
+            "OpenHands conversation store is unavailable while switching to Codex".to_owned()
+        })?;
+        match store
+            .move_conversation_to(
+                manifest.conversation_id.as_str(),
+                ConversationStoreKind::Archived,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            ConversationMoveOutcome::Moved { .. }
+            | ConversationMoveOutcome::AlreadyInTarget { .. } => Ok(()),
+            ConversationMoveOutcome::Missing => Err(format!(
+                "previous OpenHands conversation {} is not present in its active or archived store",
+                manifest.conversation_id
+            )),
+        }
+    } else {
+        let mut manifest = manifest.clone();
+        archive_terminal_codex_thread(
+            workspace_manager,
+            workspace,
+            &mut manifest,
+            codex_bin,
+            checkout_credential_envs,
+        )
+        .await
+    }
 }
 
 async fn update_codex_conversation_manifest(

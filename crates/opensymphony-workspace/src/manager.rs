@@ -1716,15 +1716,32 @@ impl WorkspaceManager {
         command.env_remove("GIT_OBJECT_DIRECTORY");
         command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
         command.env("GIT_NO_REPLACE_OBJECTS", "1");
-        let output = command
+        configure_process_group(&mut command);
+        command
             .kill_on_drop(true)
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
+            .spawn()
             .map_err(|source| WorkspaceError::CheckoutOperation {
                 operation: args.first().copied().unwrap_or("git").to_owned(),
                 path: checkout.to_path_buf(),
                 detail: source.to_string(),
             })?;
+        let process_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(process_id);
+        let output =
+            child
+                .wait_with_output()
+                .await
+                .map_err(|source| WorkspaceError::CheckoutOperation {
+                    operation: args.first().copied().unwrap_or("git").to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: source.to_string(),
+                })?;
+        #[cfg(unix)]
+        process_group_guard.disarm();
         if !output.status.success() {
             return Err(WorkspaceError::CheckoutOperation {
                 operation: args.first().copied().unwrap_or("git").to_owned(),

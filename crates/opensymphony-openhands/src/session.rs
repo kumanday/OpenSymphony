@@ -1459,7 +1459,7 @@ impl IssueSessionRunner {
         // keep a prior `finished` state in the baseline so the stale mirror
         // cannot complete the recovered turn before its post-trigger events
         // arrive.
-        let mut pre_trigger_baseline_event_ids =
+        let pre_trigger_baseline_event_ids =
             trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
             match recovery_client.run_conversation(conversation_id).await {
@@ -1482,8 +1482,6 @@ impl IssueSessionRunner {
                             "previous OpenHands turn did not finish before recovered run retry: {error}"
                         )));
                     }
-                    pre_trigger_baseline_event_ids =
-                        Some(all_event_ids(active_session.stream.event_cache().items()));
                     // The trigger was accepted before the crash, so a
                     // recovered 409 is evidence of the already-running turn.
                     // Do not issue /run again after it finishes.
