@@ -1052,6 +1052,23 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
         execution_repo: runtime.target_repo.display().to_string(),
+        authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
+        authorized_repositories_by_project: runtime
+            .repository_routing
+            .as_ref()
+            .map(|routing| {
+                routing
+                    .project_repositories
+                    .iter()
+                    .map(|(project, repositories)| {
+                        (
+                            project.clone(),
+                            repositories.iter().map(ToString::to_string).collect(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         scope_grants: Some(server.scope_grant_registry()),
     });
     if let Some(env) = &memory_env {
@@ -1468,6 +1485,8 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) token: Option<String>,
     pub(super) project: String,
     pub(super) execution_repo: String,
+    pub(super) authorized_repositories: BTreeSet<String>,
+    pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,
     pub(super) scope_grants: Option<super::memory::MemoryScopeGrantRegistry>,
 }
 

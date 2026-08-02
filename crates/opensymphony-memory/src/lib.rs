@@ -3302,7 +3302,7 @@ Reviews are triggered when you open a pull request for review.
                 ..MemoryScopeFilter::default()
             }
         ));
-        assert!(indexed_issue_matches_scope(
+        assert!(!indexed_issue_matches_scope(
             &config,
             &IndexedIssue {
                 scope_refs: Vec::new(),
@@ -3314,7 +3314,7 @@ Reviews are triggered when you open a pull request for review.
                 ..MemoryScopeFilter::default()
             }
         ));
-        assert!(indexed_issue_matches_scope(
+        assert!(!indexed_issue_matches_scope(
             &config,
             &IndexedIssue {
                 scope_refs: vec![KnowledgeScope {

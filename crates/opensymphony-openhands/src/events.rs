@@ -800,6 +800,7 @@ mod tests {
                 },
                 condenser: None,
                 tools: None,
+                mcp_config: None,
                 include_default_tools: None,
             },
             stats: None,
@@ -882,6 +883,7 @@ mod tests {
                 },
                 condenser: None,
                 tools: None,
+                mcp_config: None,
                 include_default_tools: None,
             },
             stats: Some(json!({

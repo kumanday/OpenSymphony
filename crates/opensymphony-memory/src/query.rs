@@ -1,7 +1,20 @@
 pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryError> {
+    brief_with_scope(config, issue_key, &MemoryScopeFilter::default())
+}
+
+pub fn brief_with_scope(
+    config: &MemoryConfig,
+    issue_key: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    if !indexed_issue_matches_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested memory scope"
+        )));
+    }
     Ok(render_indexed_brief(config, &indexed))
 }
 
@@ -797,8 +810,8 @@ fn indexed_issue_matches_project(issue: &IndexedIssue, project: &str) -> bool {
         .scope_refs
         .iter()
         .any(|scope| scope.kind == KnowledgeScopeKind::Project);
-    !has_explicit_project_scope
-        || indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Project, project)
+    has_explicit_project_scope
+        && indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Project, project)
 }
 
 fn indexed_issue_matches_scope_ref(
@@ -824,13 +837,16 @@ fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo:
     {
         return indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Repository, repo);
     }
+    if !Path::new(repo).is_absolute() && repo.contains(':') {
+        return false;
+    }
     if issue.changed_files.is_empty() {
         return true;
     }
     let Some(repo) = repo_scope_prefix(config, repo) else {
         // Canonical repository IDs are durable identities, not filesystem
-        // prefixes. Legacy capsules without explicit repository scope remain
-        // compatible with them instead of being filtered by an impossible path.
+        // prefixes. Legacy capsules without explicit repository scope were
+        // rejected above so they cannot bypass a worker's repository grant.
         return true;
     };
     if repo.is_empty() || repo == "." {

@@ -95,6 +95,24 @@ pub struct MemoryWorkerAccess {
     pub token: Option<String>,
     pub project: Option<String>,
     pub execution_repo: Option<String>,
+    pub authorized_repositories: Vec<String>,
+}
+
+impl MemoryWorkerAccess {
+    pub fn mcp_config(&self) -> Option<BTreeMap<String, Value>> {
+        let mut server = serde_json::Map::new();
+        server.insert("url".to_owned(), json!(self.endpoint));
+        if let Some(token) = &self.token {
+            server.insert(
+                "headers".to_owned(),
+                json!({ "Authorization": format!("Bearer {token}") }),
+            );
+        }
+        Some(BTreeMap::from([(
+            "mcpServers".to_owned(),
+            json!({ "opensymphony-memory": Value::Object(server) }),
+        )]))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -568,6 +586,7 @@ impl ConversationLaunchProfile {
                     )
                 }),
                 tools: self.agent_tools.clone(),
+                mcp_config: None,
                 include_default_tools: self.agent_include_default_tools.clone(),
             },
         })
@@ -2774,11 +2793,16 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        let mut request = request;
+        if let Some(memory) = self.config.memory.as_ref() {
+            request.agent.mcp_config = memory.mcp_config();
+        }
+        let persisted_request = request.without_mcp_credentials();
         workspace_manager
             .write_json_artifact(
                 workspace,
                 &create_conversation_request_path(workspace),
-                &request,
+                &persisted_request,
             )
             .await?;
 
@@ -4528,6 +4552,7 @@ mod tests {
             token: Some("read-token".to_string()),
             project: Some("project-alpha".to_string()),
             execution_repo: Some("/tmp/repo-alpha".to_string()),
+            authorized_repositories: vec!["repo-alpha".to_string()],
         };
 
         let issue = NormalizedIssue {
@@ -4604,12 +4629,34 @@ mod tests {
                 token: None,
                 project: Some("project-alpha".to_owned()),
                 execution_repo: Some("repo-alpha".to_owned()),
+                authorized_repositories: vec!["repo-alpha".to_owned()],
             }),
         );
 
         assert!(guidance.contains("project=project-alpha"));
         assert!(guidance.contains("repo=repo-alpha"));
         assert!(guidance.contains("memory.context"));
+    }
+
+    #[test]
+    fn memory_worker_access_builds_a_scoped_mcp_server_config() {
+        let access = MemoryWorkerAccess {
+            endpoint: "http://127.0.0.1:8765/mcp".to_owned(),
+            token: Some("worker-secret".to_owned()),
+            project: Some("project-alpha".to_owned()),
+            execution_repo: Some("repo-alpha".to_owned()),
+            authorized_repositories: vec!["repo-alpha".to_owned(), "repo-beta".to_owned()],
+        };
+
+        let config = access.mcp_config().expect("memory MCP config should exist");
+        assert_eq!(
+            config["mcpServers"]["opensymphony-memory"]["url"],
+            "http://127.0.0.1:8765/mcp"
+        );
+        assert_eq!(
+            config["mcpServers"]["opensymphony-memory"]["headers"]["Authorization"],
+            "Bearer worker-secret"
+        );
     }
 
     async fn memory_test_mcp(

@@ -387,6 +387,7 @@ fn long_history_request(workspace_root: &Path, model: &str) -> ConversationCreat
                 LONG_HISTORY_KEEP_FIRST,
             )),
             tools: None,
+            mcp_config: None,
             include_default_tools: None,
         },
     }

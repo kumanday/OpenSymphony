@@ -41,7 +41,7 @@ use crate::{
         CodeWorkspaceOverlay, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueLinkEvidence,
         IssueSelection, LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError,
         MemoryReindexReport, MemoryScopeFilter, MemoryVisibility, SourceFile,
-        archive_blocking_warning_count, brief, code_graph_context,
+        archive_blocking_warning_count, brief, brief_with_scope, code_graph_context,
         code_graph_workspace_context_overlay, code_index_branch, context_for_issue_with_options,
         context_for_issue_with_options_and_scope, docs_for_area_with_scope, expand_issue_range,
         export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
@@ -1663,11 +1663,17 @@ pub(crate) struct MemoryScopeGrantRegistry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MemoryScopeGrant {
     pub(crate) project: String,
-    pub(crate) repo: String,
+    pub(crate) execution_repo: String,
+    pub(crate) authorized_repositories: BTreeSet<String>,
 }
 
 impl MemoryScopeGrantRegistry {
-    pub(crate) fn issue(&self, project: &str, repo: &str) -> String {
+    pub(crate) fn issue(
+        &self,
+        project: &str,
+        execution_repo: &str,
+        authorized_repositories: BTreeSet<String>,
+    ) -> String {
         let token = format!("opensymphony-worker-{}", Uuid::new_v4());
         self.grants
             .write()
@@ -1676,7 +1682,8 @@ impl MemoryScopeGrantRegistry {
                 token.clone(),
                 MemoryScopeGrant {
                     project: project.to_owned(),
-                    repo: repo.to_owned(),
+                    execution_repo: execution_repo.to_owned(),
+                    authorized_repositories,
                 },
             );
         token
@@ -2585,7 +2592,11 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.brief" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            Ok(mcp_text(brief(config, &issue)?))
+            Ok(mcp_text(brief_with_scope(
+                config,
+                &issue,
+                &scope_filter_from_mcp(&arguments, true),
+            )?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
@@ -2707,7 +2718,12 @@ fn validate_worker_memory_scope(
         .or_else(|| optional_string_arg(arguments, "repository"));
     let project_required = matches!(
         tool_name,
-        "memory.context" | "memory.search" | "memory.related" | "memory.docs" | "memory.status"
+        "memory.brief"
+            | "memory.context"
+            | "memory.search"
+            | "memory.related"
+            | "memory.docs"
+            | "memory.status"
     );
     if project_required && requested_project.as_deref() != Some(grant.project.as_str()) {
         return Err(MemoryError::InvalidInput(format!(
@@ -2724,13 +2740,26 @@ fn validate_worker_memory_scope(
             grant.project
         )));
     }
-    if requested_repo.as_deref() != Some(grant.repo.as_str()) {
+    let Some(requested_repo) = requested_repo else {
+        return Err(MemoryError::InvalidInput(
+            "worker memory grant requires an explicit repository filter".to_owned(),
+        ));
+    };
+    if tool_name.starts_with("code.") && requested_repo != grant.execution_repo {
         return Err(MemoryError::InvalidInput(format!(
-            "worker memory grant permits repository `{}`; requested scope is not permitted",
-            grant.repo
+            "worker live code access is limited to execution repository `{}`",
+            grant.execution_repo
         )));
     }
-    if optional_string_arg(arguments, "projectSet").is_some() {
+    if !grant.authorized_repositories.contains(&requested_repo) {
+        return Err(MemoryError::InvalidInput(
+            "requested repository is outside the worker's project grant".to_owned(),
+        ));
+    }
+    if arguments
+        .get("projectSet")
+        .is_some_and(|value| !value.is_null())
+    {
         return Err(MemoryError::InvalidInput(format!(
             "worker memory grant does not permit project-set scope for `{tool_name}`"
         )));
@@ -6107,6 +6136,8 @@ fn print_search_results(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryScopeGrant,
         MemoryScopeGrantRegistry, MemoryServerAccess, MemoryServerAuth, MemoryServerState,
@@ -9446,7 +9477,8 @@ Public memory concept.
     fn worker_memory_grant_rejects_foreign_and_unscoped_requests() {
         let grant = MemoryScopeGrant {
             project: "project-alpha".to_owned(),
-            repo: "repo-alpha".to_owned(),
+            execution_repo: "repo-alpha".to_owned(),
+            authorized_repositories: BTreeSet::from(["repo-alpha".to_owned()]),
         };
         validate_worker_memory_scope(
             "memory.search",
@@ -9467,6 +9499,39 @@ Public memory concept.
                 "memory.related",
                 &json!({"project": "project-alpha", "repo": "repo-alpha", "allAccessible": true}),
                 &grant,
+            )
+            .is_err()
+        );
+        let project_grant = MemoryScopeGrant {
+            authorized_repositories: BTreeSet::from([
+                "repo-alpha".to_owned(),
+                "repo-beta".to_owned(),
+            ]),
+            ..grant.clone()
+        };
+        validate_worker_memory_scope(
+            "memory.search",
+            &json!({"project": "project-alpha", "repo": "repo-beta"}),
+            &project_grant,
+        )
+        .expect("project grant should permit its other authorized repositories");
+        assert!(
+            validate_worker_memory_scope(
+                "memory.search",
+                &json!({"project": "project-alpha", "repo": "repo-outsider"}),
+                &project_grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope("memory.brief", &json!({"repo": "repo-alpha"}), &grant,)
+                .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "code.ast.context",
+                &json!({"repo": "repo-beta"}),
+                &project_grant,
             )
             .is_err()
         );

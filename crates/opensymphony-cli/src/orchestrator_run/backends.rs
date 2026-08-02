@@ -579,6 +579,7 @@ async fn archive_superseded_openhands_conversations(
     let Some(raw) = manager.read_text_artifact(workspace, &path).await? else {
         return Ok(());
     };
+    let checkout = manager.verify_checkout(workspace).await?;
     let Some(manifests) = serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
         .ok()
         .flatten()
@@ -588,6 +589,24 @@ async fn archive_superseded_openhands_conversations(
         ));
     };
     for manifest in &manifests {
+        let Some(envelope) = manifest.runtime_envelope.as_ref() else {
+            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                "superseded OpenHands conversation evidence has no runtime envelope".to_owned(),
+            ));
+        };
+        if manifest.issue_id.as_str() != workspace.issue_id()
+            || manifest.identifier.as_str() != workspace.identifier()
+            || manifest.persistence_dir != workspace.metadata_dir()
+            || envelope.checkout_generation != checkout.generation
+            || envelope.checkout_path != workspace.workspace_path()
+            || envelope.repository_binding != checkout.repository_binding
+            || manifest.conversation_id.as_str().trim().is_empty()
+        {
+            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                "superseded OpenHands conversation evidence is not owned by this verified checkout"
+                    .to_owned(),
+            ));
+        }
         match store.move_conversation_to(
             manifest.conversation_id.as_str(),
             ConversationStoreKind::Archived,
@@ -2132,9 +2151,28 @@ impl RuntimeWorkerBackend {
                     .as_ref()
                     .map(|envelope| envelope.repository_binding.repository.id.to_string())
                     .unwrap_or_else(|| memory.execution_repo.clone());
+                let authorized_repositories = scoped
+                    .authorized_repositories_by_project
+                    .get(&scoped.project)
+                    .cloned()
+                    .or_else(|| {
+                        scoped
+                            .authorized_repositories_by_project
+                            .iter()
+                            .find(|(project, _)| project.eq_ignore_ascii_case(&scoped.project))
+                            .map(|(_, repositories)| repositories.clone())
+                    })
+                    .filter(|repositories| !repositories.is_empty())
+                    .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
+                scoped.authorized_repositories = authorized_repositories.clone();
                 if let Some(grants) = &scoped.scope_grants {
-                    scoped.token = Some(grants.issue(&scoped.project, &scoped.execution_repo));
+                    scoped.token = Some(grants.issue(
+                        &scoped.project,
+                        &scoped.execution_repo,
+                        authorized_repositories,
+                    ));
                 }
+                scoped.authorized_repositories_by_project.clear();
                 scoped
             });
             let mut worker_environment = worker_env.clone();
@@ -2704,6 +2742,7 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
         token: memory.token.clone(),
         project: Some(memory.project.clone()),
         execution_repo: Some(memory.execution_repo.clone()),
+        authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
     }
 }
 
@@ -7968,6 +8007,8 @@ mod tests {
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
             execution_repo: "/tmp/project-alpha/services/api".to_string(),
+            authorized_repositories: BTreeSet::from(["repo-alpha".to_string()]),
+            authorized_repositories_by_project: BTreeMap::new(),
             scope_grants: None,
         };
         let mut env = BTreeMap::new();
