@@ -96,6 +96,13 @@ truthful trusted-host process-`cwd` containment receipt. A compatible persisted
 conversation may be reused only when its envelope matches; a mismatch is
 rejected before attach.
 
+When the local memory server issues a process-scoped worker grant, the grant
+is also part of conversation compatibility. The agent-server create contract
+does not provide a conversation MCP-config update operation, so a persisted
+conversation with an old grant is superseded and recreated with the current
+grant before it can receive another turn. The old conversation evidence is
+retained until remote deletion succeeds.
+
 ## 6. Conversation model
 
 Each issue gets a stable conversation manifest under:

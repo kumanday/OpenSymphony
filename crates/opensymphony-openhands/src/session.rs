@@ -96,6 +96,11 @@ pub struct MemoryWorkerAccess {
     pub project: Option<String>,
     pub execution_repo: Option<String>,
     pub authorized_repositories: Vec<String>,
+    /// The token is issued by this process's memory server and cannot be
+    /// refreshed on an existing OpenHands conversation. Such conversations
+    /// must be superseded before the next turn so the new token is installed
+    /// in the create payload.
+    pub requires_fresh_conversation: bool,
 }
 
 impl MemoryWorkerAccess {
@@ -2564,6 +2569,18 @@ impl IssueSessionRunner {
             });
         }
 
+        if self
+            .config
+            .memory
+            .as_ref()
+            .is_some_and(|memory| memory.requires_fresh_conversation)
+        {
+            return Ok(ReuseSession::Reset {
+                reason: "existing conversation has a process-scoped memory grant that cannot be refreshed in place; creating a new conversation".to_string(),
+                manifest: Box::new(manifest),
+            });
+        }
+
         // Simplified conversation resumption: just try to attach directly.
         // The conversation's stored LLM config in meta.json is used as-is.
         // If the API key has changed, the attach will fail naturally and
@@ -2975,6 +2992,9 @@ impl IssueSessionRunner {
         };
 
         // Create a fresh session with the current configuration
+        self.preserve_superseded_conversation_manifest(workspace_manager, workspace, old_manifest)
+            .await?;
+
         let step = self
             .create_fresh_session(
                 workspace_manager,
@@ -3000,13 +3020,40 @@ impl IssueSessionRunner {
             }
         };
 
-        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str())
-            && let Err(error) = self.client.delete_conversation(conversation_id).await
+        let retired = if parse_uuid(old_conversation_id.as_str()).is_ok() {
+            match self
+                .retire_conversation(
+                    old_manifest,
+                    "superseded conversation after replacement became durable during rehydration",
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        conversation_id = %old_conversation_id,
+                        %error,
+                        "failed to delete old conversation after replacement became durable during rehydration; preserving superseded evidence"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if retired
+            && let Err(error) = self
+                .clear_superseded_conversation_manifest(
+                    workspace_manager,
+                    workspace,
+                    &old_manifest.conversation_id,
+                )
+                .await
         {
             tracing::warn!(
                 conversation_id = %old_conversation_id,
                 %error,
-                "failed to delete old conversation after replacement became durable during rehydration"
+                "failed to clear retired superseded conversation evidence after rehydration"
             );
         }
 
@@ -4553,6 +4600,7 @@ mod tests {
             project: Some("project-alpha".to_string()),
             execution_repo: Some("/tmp/repo-alpha".to_string()),
             authorized_repositories: vec!["repo-alpha".to_string()],
+            requires_fresh_conversation: false,
         };
 
         let issue = NormalizedIssue {
@@ -4630,6 +4678,7 @@ mod tests {
                 project: Some("project-alpha".to_owned()),
                 execution_repo: Some("repo-alpha".to_owned()),
                 authorized_repositories: vec!["repo-alpha".to_owned()],
+                requires_fresh_conversation: false,
             }),
         );
 
@@ -4646,6 +4695,7 @@ mod tests {
             project: Some("project-alpha".to_owned()),
             execution_repo: Some("repo-alpha".to_owned()),
             authorized_repositories: vec!["repo-alpha".to_owned(), "repo-beta".to_owned()],
+            requires_fresh_conversation: false,
         };
 
         let config = access.mcp_config().expect("memory MCP config should exist");

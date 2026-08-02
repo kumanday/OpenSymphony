@@ -7,6 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+
 use chrono::Utc;
 #[cfg(unix)]
 use rustix::{
@@ -1392,17 +1395,26 @@ impl WorkspaceManager {
     ) -> Result<(), WorkspaceError> {
         let environment_credential = repository.credential_kind == "environment";
         let ssh_agent_credential = repository.credential_kind == "ssh-agent";
-        if (!environment_credential && !ssh_agent_credential)
-            || (environment_credential
-                && repository
-                    .credential_env
-                    .as_deref()
-                    .is_none_or(|variable| std::env::var_os(variable).is_none()))
-        {
+        let credential_available = if environment_credential {
+            repository
+                .credential_env
+                .as_deref()
+                .is_some_and(|variable| std::env::var_os(variable).is_some())
+        } else if ssh_agent_credential {
+            ssh_agent_socket_is_usable()
+        } else {
+            false
+        };
+        if !credential_available {
             return Err(WorkspaceError::CheckoutOperation {
                 operation: "resolve repository credential provider".to_owned(),
                 path: destination.to_path_buf(),
-                detail: "repository credential provider is unavailable".to_owned(),
+                detail: if ssh_agent_credential {
+                    "SSH_AUTH_SOCK is unset or does not point to a usable SSH agent socket"
+                        .to_owned()
+                } else {
+                    "repository credential provider is unavailable".to_owned()
+                },
             });
         }
         let askpass_path = if environment_credential
@@ -1451,8 +1463,17 @@ impl WorkspaceManager {
             command.env_remove(variable);
         }
         command.env_remove("OPENSYMPHONY_CHECKOUT_CREDENTIAL");
-        if ssh_agent_credential && let Some(value) = std::env::var_os(SSH_AUTH_SOCK_ENV) {
-            command.env(SSH_AUTH_SOCK_ENV, value);
+        command.env_remove("GIT_SSH_COMMAND");
+        if ssh_agent_credential {
+            let value = std::env::var_os(SSH_AUTH_SOCK_ENV)
+                .expect("usable SSH agent socket was validated above");
+            command.env(SSH_AUTH_SOCK_ENV, &value).env(
+                "GIT_SSH_COMMAND",
+                format!(
+                    "ssh -o IdentityAgent={}",
+                    shell_single_quote(&value.to_string_lossy())
+                ),
+            );
         }
         if environment_credential
             && let Some(variable) = repository.credential_env.as_deref()
@@ -3566,6 +3587,31 @@ fn checkout_verification(path: &Path, reason: &str) -> WorkspaceError {
     }
 }
 
+fn ssh_agent_socket_is_usable() -> bool {
+    let Some(value) = std::env::var_os(SSH_AUTH_SOCK_ENV) else {
+        return false;
+    };
+    ssh_agent_socket_path_is_usable(Path::new(&value))
+}
+
+fn ssh_agent_socket_path_is_usable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        metadata.file_type().is_socket()
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn remote_contains_credentials(remote: &str) -> bool {
     if let Ok(url) = Url::parse(remote) {
         if url.password().is_some() {
@@ -4028,7 +4074,7 @@ mod tests {
 
     use super::{
         WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
-        remote_contains_credentials,
+        remote_contains_credentials, shell_single_quote, ssh_agent_socket_path_is_usable,
     };
 
     #[cfg(unix)]
@@ -4125,5 +4171,30 @@ mod tests {
         assert_eq!(git_askpass_username("GitLab"), "oauth2");
         assert_eq!(git_askpass_username("bitbucket"), "x-token-auth");
         assert_eq!(git_askpass_username("gitea"), "gitea");
+    }
+
+    #[test]
+    fn ssh_agent_socket_requires_a_socket_path() {
+        let root = tempfile::tempdir().expect("temporary directory should exist");
+        let regular_file = root.path().join("not-an-agent");
+        std::fs::write(&regular_file, b"not a socket").expect("regular file should exist");
+        assert!(!ssh_agent_socket_path_is_usable(&regular_file));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixListener;
+
+            let socket_path = root.path().join("agent.sock");
+            let _listener = UnixListener::bind(&socket_path).expect("Unix socket should bind");
+            assert!(ssh_agent_socket_path_is_usable(&socket_path));
+        }
+    }
+
+    #[test]
+    fn shell_single_quote_protects_agent_socket_paths() {
+        assert_eq!(
+            shell_single_quote("/tmp/agent's socket"),
+            "'/tmp/agent'\\''s socket'"
+        );
     }
 }

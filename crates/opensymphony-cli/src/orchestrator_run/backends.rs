@@ -2743,6 +2743,7 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
         project: Some(memory.project.clone()),
         execution_repo: Some(memory.execution_repo.clone()),
         authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
+        requires_fresh_conversation: memory.scope_grants.is_some(),
     }
 }
 
