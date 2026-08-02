@@ -5667,7 +5667,11 @@ fn resolve_code_intel_repo_for_scope(
     scope: &MemoryScopeFilter,
 ) -> Result<PathBuf, MemoryError> {
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
-    if scope.all_accessible {
+    if scope.all_accessible
+        && scope.repo.is_none()
+        && scope.project.is_none()
+        && scope.project_set.is_none()
+    {
         return Ok(repo_root);
     }
     let Some(repository_id) = scope.repo.as_deref() else {
@@ -5696,7 +5700,11 @@ fn repository_matches_memory_scope(
     repository_id: &str,
     scope: &MemoryScopeFilter,
 ) -> bool {
-    if scope.all_accessible {
+    if scope.all_accessible
+        && scope.repo.is_none()
+        && scope.project.is_none()
+        && scope.project_set.is_none()
+    {
         return true;
     }
     if scope
@@ -7732,6 +7740,47 @@ mod tests {
         assert_eq!(explicit_filter.project.as_deref(), Some("explicit-project"));
         assert!(explicit_filter.project_set.is_none());
         assert!(explicit_filter.repo.is_none());
+    }
+
+    #[test]
+    fn all_accessible_keeps_explicit_repository_and_project_constraints() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        for (repository_id, project_id) in [("repo-a", "project-a"), ("repo-b", "project-b")] {
+            let root = repo.path().join(repository_id);
+            std::fs::create_dir_all(&root).expect("repository source root");
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root,
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from([project_id.to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let project_scope = MemoryScopeFilter {
+            project: Some("project-a".to_string()),
+            all_accessible: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::unique_repository_for_memory_scope(&config, &project_scope)
+                .expect("project scope should select one source"),
+            "repo-a"
+        );
+        let mismatched_scope = MemoryScopeFilter {
+            repo: Some("repo-b".to_string()),
+            project: Some("project-a".to_string()),
+            all_accessible: true,
+            ..Default::default()
+        };
+        assert!(!super::repository_matches_memory_scope(
+            &config,
+            "repo-b",
+            &mismatched_scope
+        ));
     }
 
     #[test]

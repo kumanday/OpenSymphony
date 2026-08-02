@@ -12,6 +12,13 @@ fn is_live_capture_owner(owner: &str) -> bool {
     owner == LIVE_CAPTURE_OWNER || owner.starts_with(LIVE_CAPTURE_OWNER_PREFIX)
 }
 
+fn live_capture_payload_body(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with("captured_at:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn live_capture_owner_matches_repository(owner: &str, repository_id: &str) -> bool {
     owner == LIVE_CAPTURE_OWNER || owner == live_capture_owner(Some(repository_id))
 }
@@ -46,13 +53,16 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let live_owner = live_capture_owner(config.default_repository_id.as_deref());
         let existing = transaction
             .query_row(
-                "SELECT scope_refs_json, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
+                "SELECT title, visibility, body, scope_refs_json, source_refs_json, source_ids_json FROM issues WHERE issue_key = ?",
                 params![issue_key],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -62,16 +72,35 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 source,
             })?;
         let (mut scope_refs, mut source_refs, mut source_ids) = existing
-            .map(|(scope_refs_json, source_refs_json, source_ids_json)| {
+            .as_ref()
+            .map(|(_, _, _, scope_refs_json, source_refs_json, source_ids_json)| {
                 (
-                    serde_json::from_str::<Vec<KnowledgeScope>>(&scope_refs_json)
+                    serde_json::from_str::<Vec<KnowledgeScope>>(scope_refs_json)
                         .unwrap_or_default(),
-                    serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json)
+                    serde_json::from_str::<Vec<MemorySourceRef>>(source_refs_json)
                         .unwrap_or_default(),
-                    serde_json::from_str::<Vec<String>>(&source_ids_json).unwrap_or_default(),
+                    serde_json::from_str::<Vec<String>>(source_ids_json).unwrap_or_default(),
                 )
             })
             .unwrap_or_default();
+        if let Some((title, visibility, existing_body, _, existing_source_refs, _)) = existing {
+            let has_registered_owner = source_ids
+                .iter()
+                .any(|owner| !is_live_capture_owner(owner))
+                || serde_json::from_str::<Vec<MemorySourceRef>>(&existing_source_refs)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|source_ref| source_ref.registration_source_id.is_some());
+            let title_matches = title == issue_title(&issue_plan.issue);
+            let visibility_matches = visibility == config.visibility.as_str();
+            let body_matches = live_capture_payload_body(&existing_body)
+                == live_capture_payload_body(&body);
+            if has_registered_owner && (!title_matches || !visibility_matches || !body_matches) {
+                return Err(MemoryError::InvalidInput(format!(
+                    "conflicting live capture payload for registered memory source `{issue_key}` (title_match={title_matches}, visibility_match={visibility_matches}, body_match={body_matches})"
+                )));
+            }
+        }
         let concept_id = format!("issues/{issue_key}");
         let previous_source_scopes = {
             let mut statement = transaction

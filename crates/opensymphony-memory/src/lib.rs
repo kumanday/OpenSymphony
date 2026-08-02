@@ -3795,6 +3795,19 @@ Reviews are triggered when you open a pull request for review.
         source.issues[0].project_id = Some("project-live-new".to_string());
         let refreshed_plan = plan_capture(&config, &source, &selection, true, false)
             .expect("refreshed capture plan");
+        let refreshed_body = render_issue_capsule(
+            &config,
+            refreshed_plan.selected.first().expect("refreshed issue"),
+        )
+        .expect("refreshed capsule");
+        let connection = open_index(&config).expect("index for registered payload");
+        connection
+            .execute(
+                "UPDATE issues SET body = ? WHERE issue_key = 'COE-123'",
+                [refreshed_body.as_str()],
+            )
+            .expect("matching registered payload");
+        drop(connection);
         write_capture_plan(&config, &refreshed_plan, false).expect("refresh capture");
 
         let issue = load_indexed_issues(&config)
@@ -3863,6 +3876,45 @@ Reviews are triggered when you open a pull request for review.
             )
             .expect("registered relation");
         assert_eq!(registered_relation_count, 1);
+    }
+
+    #[test]
+    fn live_capture_rejects_divergent_registered_payloads() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = config_for(repo.path());
+        config.default_repository_id = Some("repo-a".to_string());
+        let source = sample_source();
+        let selection = IssueSelection {
+            identifiers: vec!["COE-123".to_string()],
+            ..IssueSelection::default()
+        };
+        let plan = plan_capture(&config, &source, &selection, true, false).expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("initial capture");
+
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET title = ?, source_refs_json = ?, source_ids_json = ? WHERE issue_key = 'COE-123'",
+                params![
+                    "Registered source title",
+                    r#"[{"kind":"legacy_store","id":"repo-b","repo_id":"repo-b","registration_source_id":"repo-b:legacy"}]"#,
+                    r#"["repo-b:legacy"]"#,
+                ],
+            )
+            .expect("registered payload");
+        drop(connection);
+
+        let error = write_capture_plan(&config, &plan, false)
+            .expect_err("live capture must not replace a divergent registered payload");
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("conflicting live capture payload"))
+        );
+        let issue = load_indexed_issues(&config)
+            .expect("indexed issues")
+            .into_iter()
+            .find(|issue| issue.issue_key == "COE-123")
+            .expect("registered issue");
+        assert_eq!(issue.title, "Registered source title");
     }
 
     #[test]
