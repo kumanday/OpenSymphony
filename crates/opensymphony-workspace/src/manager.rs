@@ -994,7 +994,10 @@ impl WorkspaceManager {
                             %source,
                             "skipping retained checkout with a malformed generation manifest"
                         );
-                        if is_checkout_generation_directory(&entry.path()) {
+                        if self
+                            .checkout_generation_ownership_is_proven(&entry.path())
+                            .await?
+                        {
                             self.quarantine_checkout_path(
                                 &entry.path(),
                                 "malformed retained checkout generation manifest",
@@ -1014,7 +1017,10 @@ impl WorkspaceManager {
             {
                 Ok(checkout) => checkout,
                 Err(WorkspaceError::DecodeManifest { .. }) => {
-                    if is_checkout_generation_directory(&entry.path()) {
+                    if self
+                        .checkout_generation_ownership_is_proven(&entry.path())
+                        .await?
+                    {
                         self.quarantine_checkout_path(
                             &entry.path(),
                             "malformed retained checkout generation manifest",
@@ -2394,7 +2400,10 @@ impl WorkspaceManager {
                 }
                 Ok(_) => {}
                 Err(WorkspaceError::DecodeManifest { .. }) => {
-                    if is_checkout_generation_directory(&candidate) {
+                    if self
+                        .checkout_generation_ownership_is_proven(&candidate)
+                        .await?
+                    {
                         self.quarantine_checkout_path(
                             &candidate,
                             "malformed retained checkout generation manifest",
@@ -2443,7 +2452,10 @@ impl WorkspaceManager {
                 }
                 Ok(_) => {}
                 Err(WorkspaceError::DecodeManifest { .. }) => {
-                    if is_checkout_generation_directory(&entry.path()) {
+                    if self
+                        .checkout_generation_ownership_is_proven(&entry.path())
+                        .await?
+                    {
                         self.quarantine_checkout_path(
                             &entry.path(),
                             "malformed retained checkout generation manifest",
@@ -2565,7 +2577,10 @@ impl WorkspaceManager {
                         %source,
                         "skipping workspace with malformed checkout manifest during recovery"
                     );
-                    if is_checkout_generation_directory(&entry.path()) {
+                    if self
+                        .checkout_generation_ownership_is_proven(&entry.path())
+                        .await?
+                    {
                         self.quarantine_checkout_path(
                             &entry.path(),
                             "malformed retained checkout generation manifest",
@@ -2573,47 +2588,56 @@ impl WorkspaceManager {
                         .await?;
                     }
                 }
-                Err(error @ WorkspaceError::CheckoutVerification { .. })
-                    if is_checkout_generation_directory(&entry.path()) =>
-                {
-                    tracing::warn!(
-                        path = %entry.path().display(),
-                        %error,
-                        "quarantining retained checkout generation that failed ownership validation"
-                    );
-                    self.quarantine_checkout_path(
-                        &entry.path(),
-                        "retained checkout generation failed ownership validation",
-                    )
-                    .await?;
+                Err(error @ WorkspaceError::CheckoutVerification { .. }) => {
+                    if self
+                        .checkout_generation_ownership_is_proven(&entry.path())
+                        .await?
+                    {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            %error,
+                            "quarantining retained checkout generation that failed ownership validation"
+                        );
+                        self.quarantine_checkout_path(
+                            &entry.path(),
+                            "retained checkout generation failed ownership validation",
+                        )
+                        .await?;
+                    }
                 }
-                Err(error @ WorkspaceError::ManagedPathSymlink { .. })
-                    if is_checkout_generation_directory(&entry.path()) =>
-                {
-                    tracing::warn!(
-                        path = %entry.path().display(),
-                        %error,
-                        "quarantining retained checkout generation with a symlinked managed manifest"
-                    );
-                    self.quarantine_checkout_path(
-                        &entry.path(),
-                        "retained checkout generation contains a symlinked managed manifest",
-                    )
-                    .await?;
+                Err(error @ WorkspaceError::ManagedPathSymlink { .. }) => {
+                    if self
+                        .checkout_generation_ownership_is_proven(&entry.path())
+                        .await?
+                    {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            %error,
+                            "quarantining retained checkout generation with a symlinked managed manifest"
+                        );
+                        self.quarantine_checkout_path(
+                            &entry.path(),
+                            "retained checkout generation contains a symlinked managed manifest",
+                        )
+                        .await?;
+                    }
                 }
-                Err(error @ WorkspaceError::WorkspacePathSymlink { .. })
-                    if is_checkout_generation_directory(&entry.path()) =>
-                {
-                    tracing::warn!(
-                        path = %entry.path().display(),
-                        %error,
-                        "quarantining retained checkout generation with a symlinked workspace path"
-                    );
-                    self.quarantine_checkout_path(
-                        &entry.path(),
-                        "retained checkout generation contains a symlinked workspace path",
-                    )
-                    .await?;
+                Err(error @ WorkspaceError::WorkspacePathSymlink { .. }) => {
+                    if self
+                        .checkout_generation_ownership_is_proven(&entry.path())
+                        .await?
+                    {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            %error,
+                            "quarantining retained checkout generation with a symlinked workspace path"
+                        );
+                        self.quarantine_checkout_path(
+                            &entry.path(),
+                            "retained checkout generation contains a symlinked workspace path",
+                        )
+                        .await?;
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -3212,10 +3236,32 @@ impl WorkspaceManager {
         let Ok(manifest) = serde_json::from_str::<CheckoutManifest>(&raw) else {
             return false;
         };
+        let path_matches = self.canonicalize_path(&manifest.workspace_path).await.ok()
+            == self.canonicalize_path(workspace_path).await.ok();
         manifest.schema_version == 1
             && !manifest.quarantined
             && manifest.generation == generation
-            && manifest.workspace_path == workspace_path
+            && path_matches
+    }
+
+    async fn checkout_generation_ownership_is_proven(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<bool, WorkspaceError> {
+        if self
+            .receipt_owned_issue_manifest(workspace_path)
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let Some(generation) = published_checkout_generation(workspace_path) else {
+            return Ok(false);
+        };
+        let proven = self
+            .published_checkout_ownership_marker(workspace_path, &generation)
+            .await;
+        Ok(proven)
     }
 
     async fn execute_hook(
@@ -4295,13 +4341,6 @@ fn staging_path_from_intent_marker(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?.strip_suffix(".intent.json")?;
     staging_generation_identity(Path::new(name))?;
     Some(path.parent()?.join(name))
-}
-
-fn is_checkout_generation_directory(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.rsplit_once("--"))
-        .is_some_and(|(_, generation)| !generation.is_empty())
 }
 
 fn missing_manifest_error(path: PathBuf) -> WorkspaceError {

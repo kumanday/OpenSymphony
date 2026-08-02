@@ -850,6 +850,82 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("malformed checkout manifest should be written");
 
+    let owned_malformed_path =
+        workspace_root.join("owned-malformed-generation--abcdef0123456789abcdef0123456789");
+    tokio::fs::create_dir_all(owned_malformed_path.join(".opensymphony"))
+        .await
+        .expect("owned malformed generation directory should exist");
+    tokio::fs::write(
+        owned_malformed_path.join(".opensymphony/issue.json"),
+        b"not-json",
+    )
+    .await
+    .expect("owned malformed issue manifest should be written");
+    let owned_checkout_manifest = json!({
+        "schema_version": 1,
+        "generation": "abcdef0123456789abcdef0123456789",
+        "issue_id": issue.issue_id.clone(),
+        "identifier": issue.identifier.clone(),
+        "run_id": "owned-malformed-run",
+        "sanitized_workspace_key": "owned-malformed-generation",
+        "workspace_path": std::fs::canonicalize(&owned_malformed_path)
+            .expect("owned malformed generation path should canonicalize"),
+        "repository_binding": {
+            "alias": "owned-malformed-repository",
+            "repository": {
+                "id": "git:repository:owned-malformed",
+                "safe_remote_fingerprint": "sha256:owned-malformed"
+            },
+            "config_generation": "config-1",
+            "inventory_generation": "inventory-1"
+        },
+        "remote_fingerprint": "sha256:owned-malformed",
+        "target_branch": "develop",
+        "target_commit": "commit-1",
+        "current_branch": "develop",
+        "head": "commit-1",
+        "shallow": false,
+        "clean": true,
+        "instruction": {
+            "path": "AGENTS.md",
+            "content_hash": "sha256:instructions",
+            "source_commit": "commit-1",
+            "source": "configured",
+            "native_discovery_paths": [],
+            "native_discovery_hashes": {}
+        },
+        "created_at": chrono::Utc::now(),
+        "verified_at": chrono::Utc::now(),
+        "quarantined": false,
+        "quarantine_reason": null
+    });
+    tokio::fs::write(
+        owned_malformed_path.join(".opensymphony/checkout.json"),
+        serde_json::to_vec_pretty(&owned_checkout_manifest)
+            .expect("owned checkout manifest should encode"),
+    )
+    .await
+    .expect("owned checkout manifest should be written");
+    let _: CheckoutManifest = serde_json::from_value(owned_checkout_manifest.clone())
+        .expect("owned checkout manifest should decode");
+
+    let foreign_malformed_path = workspace_root.join("notes--abc");
+    tokio::fs::create_dir_all(foreign_malformed_path.join(".opensymphony"))
+        .await
+        .expect("foreign malformed generation directory should exist");
+    tokio::fs::write(
+        foreign_malformed_path.join(".opensymphony/issue.json"),
+        b"not-json",
+    )
+    .await
+    .expect("foreign malformed issue manifest should be written");
+    tokio::fs::write(
+        foreign_malformed_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("foreign malformed checkout manifest should be written");
+
     let malformed_issue_path = workspace_root.join("malformed-issue-generation");
     tokio::fs::create_dir_all(malformed_issue_path.join(".opensymphony"))
         .await
@@ -919,8 +995,18 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     manager
         .list_all_workspaces()
         .await
-        .expect("workspace discovery should quarantine malformed generations");
-    assert!(!malformed_path.exists());
+        .expect("workspace discovery should inspect malformed generations");
+    assert!(malformed_path.exists());
+    assert!(
+        owned_malformed_path
+            .parent()
+            .expect("owned malformed generation should have a parent")
+            .join(".opensymphony-quarantine")
+            .exists()
+    );
+    assert!(!owned_malformed_path.exists());
+    assert!(foreign_malformed_path.exists());
+    assert!(missing_checkout_path.exists());
     assert!(receipt_owned_path.exists());
 
     let found = manager

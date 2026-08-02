@@ -571,10 +571,70 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
-async fn archive_superseded_openhands_conversations(
+async fn persist_superseded_harness_manifest(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
-    store: &OpenHandsConversationStorePaths,
+    manifest: &IssueConversationManifest,
+) -> Result<(), String> {
+    let path = superseded_conversation_manifests_path(workspace);
+    let raw = manager
+        .read_text_artifact(workspace, &path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut manifests = raw
+        .as_deref()
+        .map(|raw| {
+            serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(raw)
+                .map_err(|error| format!("superseded harness evidence is malformed: {error}"))
+        })
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
+    if manifests
+        .iter()
+        .all(|existing| existing.conversation_id != manifest.conversation_id)
+    {
+        manifests.push(manifest.clone());
+    }
+    manager
+        .write_json_artifact_atomically(workspace, &path, &Some(&manifests))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn clear_superseded_harness_manifest(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    conversation_id: &ConversationId,
+) -> Result<(), String> {
+    let path = superseded_conversation_manifests_path(workspace);
+    let Some(raw) = manager
+        .read_text_artifact(workspace, &path)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let Some(mut manifests) = serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
+        .ok()
+        .flatten()
+    else {
+        return Err("superseded harness evidence is malformed".to_owned());
+    };
+    manifests.retain(|manifest| &manifest.conversation_id != conversation_id);
+    let replacement = (!manifests.is_empty()).then_some(&manifests);
+    manager
+        .write_json_artifact_atomically(workspace, &path, &replacement)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn archive_superseded_harness_sessions(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    store: Option<&OpenHandsConversationStorePaths>,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), CliWorkspaceError> {
     let path = superseded_conversation_manifests_path(workspace);
     let Some(raw) = manager.read_text_artifact(workspace, &path).await? else {
@@ -608,24 +668,41 @@ async fn archive_superseded_openhands_conversations(
                     .to_owned(),
             ));
         }
-        match store.move_conversation_to(
-            manifest.conversation_id.as_str(),
-            ConversationStoreKind::Archived,
-        ) {
-            Ok(ConversationMoveOutcome::Moved { from, .. }) => tracing::info!(
-                issue = %workspace.identifier(),
-                conversation_id = %manifest.conversation_id,
-                from = %from,
-                "moved superseded OpenHands conversation into the archived store"
-            ),
-            Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {}
-            Ok(ConversationMoveOutcome::Missing) => tracing::warn!(
-                issue = %workspace.identifier(),
-                conversation_id = %manifest.conversation_id,
-                "superseded OpenHands conversation was already absent before terminal cleanup"
-            ),
-            Err(error) => {
-                return Err(CliWorkspaceError::OpenHandsLifecycle(error.to_string()));
+        if conversation_manifest_is_codex(manifest) {
+            archive_superseded_codex_thread(
+                workspace,
+                manifest,
+                codex_bin,
+                checkout_credential_envs,
+            )
+            .await
+            .map_err(CliWorkspaceError::CodexLifecycle)?;
+        } else {
+            let store = store.ok_or_else(|| {
+                CliWorkspaceError::OpenHandsLifecycle(
+                    "OpenHands conversation store is unavailable while archiving superseded evidence"
+                        .to_owned(),
+                )
+            })?;
+            match store.move_conversation_to(
+                manifest.conversation_id.as_str(),
+                ConversationStoreKind::Archived,
+            ) {
+                Ok(ConversationMoveOutcome::Moved { from, .. }) => tracing::info!(
+                    issue = %workspace.identifier(),
+                    conversation_id = %manifest.conversation_id,
+                    from = %from,
+                    "moved superseded OpenHands conversation into the archived store"
+                ),
+                Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {}
+                Ok(ConversationMoveOutcome::Missing) => tracing::warn!(
+                    issue = %workspace.identifier(),
+                    conversation_id = %manifest.conversation_id,
+                    "superseded OpenHands conversation was already absent before terminal cleanup"
+                ),
+                Err(error) => {
+                    return Err(CliWorkspaceError::OpenHandsLifecycle(error.to_string()));
+                }
             }
         }
     }
@@ -913,6 +990,14 @@ impl RuntimeWorkspaceBackend {
                             true
                         };
                         if envelope_compatible {
+                            archive_superseded_harness_sessions(
+                                &self.manager,
+                                &handle,
+                                self.openhands_conversation_store.as_ref(),
+                                &self.codex_bin,
+                                self.manager.checkout_credential_envs(),
+                            )
+                            .await?;
                             if let Err(error) = archive_terminal_codex_thread(
                                 &self.manager,
                                 &handle,
@@ -970,13 +1055,15 @@ impl RuntimeWorkspaceBackend {
                                     .to_owned(),
                             ));
                         }
+                        archive_superseded_harness_sessions(
+                            &self.manager,
+                            &handle,
+                            self.openhands_conversation_store.as_ref(),
+                            &self.codex_bin,
+                            self.manager.checkout_credential_envs(),
+                        )
+                        .await?;
                         if let Some(store) = self.openhands_conversation_store.as_ref() {
-                            archive_superseded_openhands_conversations(
-                                &self.manager,
-                                &handle,
-                                store,
-                            )
-                            .await?;
                             match store.move_conversation_to(
                                 manifest.conversation_id.as_str(),
                                 ConversationStoreKind::Archived,
@@ -2481,6 +2568,21 @@ impl RuntimeWorkerBackend {
                     worker_id: finished_worker_id.clone(),
                     outcome,
                 });
+                return;
+            }
+
+            if let Some(previous) = superseded_harness_manifest.as_ref()
+                && let Err(error) = persist_superseded_harness_manifest(
+                    &workspace_manager,
+                    &ensured.handle,
+                    previous,
+                )
+                .await
+            {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!("failed to persist superseded harness binding: {error}"),
+                );
                 return;
             }
 
@@ -4027,6 +4129,32 @@ async fn archive_terminal_codex_thread(
     }
 }
 
+async fn archive_superseded_codex_thread(
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), String> {
+    let thread_id = manifest.conversation_id.to_string();
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id, checkout_credential_envs)
+        .await?
+    {
+        CodexArchiveState::Archived => Ok(()),
+        CodexArchiveState::Active => send_codex_lifecycle_request(
+            codex_bin,
+            workspace.workspace_path(),
+            checkout_credential_envs,
+            "thread/archive",
+            |adapter, session| adapter.archive_issue_thread_request(session, thread_id.clone()),
+        )
+        .await
+        .map(|_| ()),
+        CodexArchiveState::Missing => Err(format!(
+            "canonical superseded Codex thread {thread_id} is missing; preserving workspace for repair"
+        )),
+    }
+}
+
 fn codex_schema_stderr_preview(stderr: &[u8]) -> Option<String> {
     if stderr.is_empty() {
         return None;
@@ -4831,7 +4959,6 @@ async fn load_codex_conversation_manifest(
 }
 
 async fn retire_superseded_harness_session(
-    workspace_manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     manifest: &IssueConversationManifest,
     target_is_codex: bool,
@@ -4858,15 +4985,8 @@ async fn retire_superseded_harness_session(
             )),
         }
     } else {
-        let mut manifest = manifest.clone();
-        archive_terminal_codex_thread(
-            workspace_manager,
-            workspace,
-            &mut manifest,
-            codex_bin,
-            checkout_credential_envs,
-        )
-        .await
+        archive_superseded_codex_thread(workspace, manifest, codex_bin, checkout_credential_envs)
+            .await
     }
 }
 
@@ -4905,7 +5025,6 @@ async fn retire_replaced_harness_session_if_durable(
         return Ok(());
     }
     retire_superseded_harness_session(
-        workspace_manager,
         workspace,
         previous,
         target_is_codex,
@@ -4913,7 +5032,8 @@ async fn retire_replaced_harness_session_if_durable(
         codex_bin,
         checkout_credential_envs,
     )
-    .await
+    .await?;
+    clear_superseded_harness_manifest(workspace_manager, workspace, &previous.conversation_id).await
 }
 
 fn runtime_envelopes_match_except_binding(

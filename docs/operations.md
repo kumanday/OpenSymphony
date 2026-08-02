@@ -713,7 +713,12 @@ worktree changes that a terminal worker legitimately left behind.
 When a route switches between OpenHands and Codex, the previous session remains
 active until the replacement manifest has been durably written with the expected
 runtime envelope and conversation binding; a failed replacement therefore does
-not destroy the session needed for recovery.
+not destroy the session needed for recovery. Before that replacement starts, its
+previous conversation manifest is also recorded in
+`.opensymphony/superseded-conversations.json`. Restart recovery and terminal
+cleanup use that durable evidence to archive the old OpenHands conversation or
+Codex thread, and successful retirement clears the evidence without overwriting
+the replacement manifest.
 
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after
