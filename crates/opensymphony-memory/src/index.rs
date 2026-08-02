@@ -3619,6 +3619,49 @@ pub fn backfill_legacy_memory_source_scopes(
         if has_registered_owner && !source_ids.iter().any(|value| value == source_id) {
             continue;
         }
+        if !has_registered_owner {
+            let scopes = serde_json::from_str::<Vec<KnowledgeScope>>(&encoded_scopes).unwrap_or_default();
+            let source_refs = serde_json::from_str::<Vec<MemorySourceRef>>(&encoded_sources).unwrap_or_default();
+            let repository_scopes = scopes
+                .iter()
+                .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+                .map(|scope| scope.id.as_str())
+                .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+                .collect::<BTreeSet<_>>();
+            let evidenced_repositories = if repository_scopes.is_empty() {
+                let mut repositories = source_refs
+                    .iter()
+                    .filter_map(|source| source.repo_id.as_deref())
+                    .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+                    .collect::<BTreeSet<_>>();
+                for source in config.repository_sources.values() {
+                    if scopes.iter().any(|scope| {
+                        scope.kind == KnowledgeScopeKind::Project
+                            && source.project_scope_ids.contains(&scope.id)
+                    }) {
+                        repositories.insert(source.repository_id.as_str());
+                    }
+                }
+                repositories
+            } else {
+                repository_scopes
+            };
+            if evidenced_repositories.len() > 1 {
+                return Err(MemoryError::InvalidInput(format!(
+                    "ambiguous ownerless legacy memory row `{issue_key}` cannot be assigned to `{repository_id}`"
+                )));
+            }
+            if let Some(evidenced_repository) = evidenced_repositories.first()
+                && *evidenced_repository != repository_id
+            {
+                continue;
+            }
+            if evidenced_repositories.is_empty() && config.repository_sources.len() > 1 {
+                return Err(MemoryError::InvalidInput(format!(
+                    "ambiguous ownerless legacy memory row `{issue_key}` cannot be assigned while multiple repositories share the catalog"
+                )));
+            }
+        }
         if !source_ids.iter().any(|value| value == source_id) {
             source_ids.push(source_id.to_string());
         }
@@ -5332,6 +5375,63 @@ mod index_tests {
             )
             .expect("source scope refs");
         assert_eq!(source_scope_count, 3);
+    }
+
+    #[test]
+    fn backfill_rejects_ambiguous_ownerless_rows_in_shared_catalog() {
+        let catalog = tempfile::TempDir::new().expect("catalog root");
+        let repo_a = tempfile::TempDir::new().expect("repo a");
+        let repo_b = tempfile::TempDir::new().expect("repo b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo_a.path().to_path_buf(),
+                commit_sha: Some("commit-a".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repo_b.path().to_path_buf(),
+                commit_sha: Some("commit-b".to_string()),
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+        let connection = open_index(&config).expect("index should open");
+        migrate_index(&connection).expect("index should migrate");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-559",
+                    "Ownerless legacy memory",
+                    "[]",
+                    "not_archived",
+                    "issues/COE-559.md",
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-559",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("legacy issue should insert");
+        drop(connection);
+
+        let error = backfill_legacy_memory_source_scopes(&config, "repo-a", "repo-a:legacy_store")
+            .expect_err("shared ownerless rows must be rejected");
+        assert!(error.to_string().contains("ambiguous ownerless legacy memory row"));
     }
 
     #[test]

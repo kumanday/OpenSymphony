@@ -5065,12 +5065,17 @@ fn legacy_code_repository_matches_source(
     if code_repository_has_commit(config, legacy_repository_id, commit_sha)? {
         return Ok(true);
     }
-    Ok(
-        git_remote_repository_slug(repository_root).is_some_and(|remote_repository_id| {
-            remote_repository_id == legacy_repository_id
-                || remote_repository_id == canonical_repository_id
-        }),
-    )
+    let Some(configured_locator) = config
+        .repository_remote_locators
+        .get(canonical_repository_id)
+    else {
+        return Ok(false);
+    };
+    Ok(git_remote_matches_repository_id(
+        repository_root,
+        canonical_repository_id,
+        Some(configured_locator),
+    ))
 }
 
 fn git_remote_repository_slug(repo_root: &Path) -> Option<String> {
@@ -11807,6 +11812,36 @@ Public memory concept.
             "github:repository:repo-a",
             Some("example/repo-a"),
         ));
+    }
+
+    #[test]
+    fn legacy_code_migration_rejects_basename_only_remote_evidence() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository = TempDir::new().expect("repository");
+        std::fs::write(repository.path().join("README.md"), "repo-a\n").expect("readme");
+        init_test_git_repo(repository.path(), "develop");
+        assert!(
+            std::process::Command::new("git")
+                .args(["remote", "add", "origin", "git@github.com:org-a/api.git"])
+                .current_dir(repository.path())
+                .status()
+                .expect("git remote add")
+                .success()
+        );
+        let config = MemoryConfig::load(catalog.path(), None)
+            .expect("memory config")
+            .with_repository_remote_locator("github:repository:org-b/api", "org-b/api");
+
+        assert!(
+            !super::legacy_code_repository_matches_source(
+                &config,
+                "api",
+                repository.path(),
+                "github:repository:org-b/api",
+                "missing-commit",
+            )
+            .expect("migration provenance check")
+        );
     }
 
     #[test]
