@@ -4008,6 +4008,60 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn absolute_capsule_paths_do_not_cross_repository_ownership() {
+        let repo = TempDir::new().expect("catalog repo");
+        let source_a = TempDir::new().expect("source a");
+        let source_b = TempDir::new().expect("source b");
+        let mut config = config_for(repo.path());
+        for (repository_id, root) in [("repo-a", source_a.path()), ("repo-b", source_b.path())] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::new(),
+                    target_branch: None,
+                },
+            );
+        }
+        let capsule_path = source_b.path().join("issues/COE-559.md");
+        fs::create_dir_all(capsule_path.parent().expect("capsule parent"))
+            .expect("capsule directory");
+        fs::write(&capsule_path, "unowned repository body").expect("capsule");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-559",
+                    "Cross repository path",
+                    "[]",
+                    "not_archived",
+                    capsule_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed owned body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-559",
+                    r#"[{"kind":"repository","id":"repo-a"}]"#,
+                    r#"[{"kind":"legacy_store","id":"source-a","repo_id":"repo-a"}]"#,
+                    r#"["repo-a:source-a"]"#,
+                ],
+            )
+            .expect("indexed issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-559").expect("indexed fallback body"),
+            "Indexed owned body"
+        );
+    }
+
+    #[test]
     fn docs_sync_omits_private_capsule_links_for_public_docs() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());

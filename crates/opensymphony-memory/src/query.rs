@@ -111,33 +111,37 @@ fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<P
             paths.push(path);
         }
     };
+    let mut owning_repositories = indexed
+        .source_refs
+        .iter()
+        .filter_map(|source| source.repo_id.as_deref())
+        .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .collect::<BTreeSet<_>>();
+    owning_repositories.extend(
+        indexed
+            .scope_refs
+            .iter()
+            .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+            .map(|scope| scope.id.as_str())
+            .filter(|repository_id| config.repository_sources.contains_key(*repository_id)),
+    );
+    let mut allowed_roots = vec![config.memory_root.clone()];
+    if owning_repositories.len() == 1
+        && let Some(repository_id) = owning_repositories.iter().next()
+        && let Some(source) = config.repository_sources.get(*repository_id)
+    {
+        allowed_roots.push(source.root.clone());
+    }
     if indexed.capsule_path.is_absolute() {
         if let Ok(resolved_path) = indexed.capsule_path.canonicalize()
-            && config
-                .repository_sources
-                .values()
-                .map(|source| &source.root)
-                .chain(std::iter::once(&config.memory_root))
+            && allowed_roots
+                .iter()
                 .filter_map(|root| root.canonicalize().ok())
                 .any(|root| resolved_path.starts_with(root))
         {
             add_path(&mut paths, resolved_path);
         }
     } else {
-        let mut owning_repositories = indexed
-            .source_refs
-            .iter()
-            .filter_map(|source| source.repo_id.as_deref())
-            .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
-            .collect::<BTreeSet<_>>();
-        owning_repositories.extend(
-            indexed
-                .scope_refs
-                .iter()
-                .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
-                .map(|scope| scope.id.as_str())
-                .filter(|repository_id| config.repository_sources.contains_key(*repository_id)),
-        );
         if owning_repositories.len() == 1 {
             let repository_id = owning_repositories
                 .into_iter()
