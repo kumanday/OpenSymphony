@@ -188,10 +188,15 @@ impl IndexedIssue {
         self.areas.clone()
     }
 
-    fn areas_for_scope(&self, _config: &MemoryConfig, scope: &MemoryScopeFilter) -> Vec<String> {
+    fn areas_for_scope(&self, config: &MemoryConfig, scope: &MemoryScopeFilter) -> Vec<String> {
         let Some(repository_id) = scope.repo.as_deref() else {
             return self.areas();
         };
+        if config.repository_sources.is_empty()
+            || !config.repository_sources.contains_key(repository_id)
+        {
+            return self.areas();
+        }
         let live_owner = format!("__live_capture__:{repository_id}");
         let repository_prefix = format!("{repository_id}:");
         let issue_has_repository_scope = self.scope_refs.iter().any(|scope| {
