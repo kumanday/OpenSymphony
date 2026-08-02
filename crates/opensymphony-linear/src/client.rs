@@ -21,13 +21,14 @@ use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
     ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
-    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_SUMMARIES_BY_STATE_QUERY,
-    ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
-    IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables,
-    IssueCreateData, IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
-    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData,
-    IssueRelationCreateInput, IssueRelationCreateVariables, IssueRelationMutationNode,
-    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueSummariesByStateData,
+    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_STATES_BY_IDS_UNSCOPED_QUERY,
+    ISSUE_SUMMARIES_BY_STATE_QUERY, ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData,
+    IssueArchiveVariables, IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData,
+    IssueCommentsVariables, IssueCreateData, IssueCreateInput, IssueCreateVariables,
+    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
+    IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
+    IssueRelationCreateVariables, IssueRelationMutationNode, IssueStatesByIdsData,
+    IssueStatesByIdsUnscopedVariables, IssueStatesByIdsVariables, IssueSummariesByStateData,
     IssueSummariesByStateVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
     IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
     LinearProjectNode, LinearRelationConnection, PROJECT_BY_ID_QUERY, PROJECT_BY_SLUG_QUERY,
@@ -734,86 +735,152 @@ impl LinearClient {
 
         let project_slugs = self.project_slugs_for_queries().await?;
         for project_slug in &project_slugs {
-            let mut after = None;
-            loop {
-                let variables = IssueStatesByIdsVariables {
-                    project_slug: project_slug.clone(),
-                    issue_ids: issue_ids.clone(),
-                    first: self.config.page_size,
-                    after: after.clone(),
-                    label_first: self.config.page_size,
-                    label_after: None,
-                };
-                let response: IssueStatesByIdsData = self
-                    .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(variables))
-                    .await?;
+            for snapshot in self
+                .query_issue_states_by_ids(
+                    ISSUE_STATES_BY_IDS_QUERY,
+                    &issue_ids,
+                    Some(project_slug),
+                )
+                .await?
+            {
+                if let Some(index) = snapshot_indices.get(&snapshot.id).copied() {
+                    // A bound issue can temporarily be returned by more
+                    // than one configured project. Project queries run
+                    // sequentially, so the later response is the newest
+                    // state we observed and must replace the stale one.
+                    snapshots[index] = snapshot;
+                } else {
+                    snapshot_indices.insert(snapshot.id.clone(), snapshots.len());
+                    snapshots.push(snapshot);
+                }
+            }
+        }
 
-                let page_info = response.issues.page_info;
-                for mut node in response.issues.nodes {
-                    let mut labels = std::mem::take(&mut node.labels.nodes);
-                    let label_page_info = std::mem::take(&mut node.labels.page_info);
-                    let mut label_after = next_page_cursor(
-                        label_page_info.has_next_page,
-                        label_page_info.end_cursor,
+        let missing_issue_ids = issue_ids
+            .iter()
+            .filter(|issue_id| !snapshot_indices.contains_key(*issue_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_issue_ids.is_empty() {
+            // Running issues can move out of the configured project set while
+            // they remain in the scheduler. Resolve only the bounded missing
+            // ID set without a project filter before reconciliation.
+            for snapshot in self
+                .query_issue_states_by_ids(
+                    ISSUE_STATES_BY_IDS_UNSCOPED_QUERY,
+                    &missing_issue_ids,
+                    None,
+                )
+                .await?
+            {
+                if let Some(index) = snapshot_indices.get(&snapshot.id).copied() {
+                    snapshots[index] = snapshot;
+                } else {
+                    snapshot_indices.insert(snapshot.id.clone(), snapshots.len());
+                    snapshots.push(snapshot);
+                }
+            }
+        }
+        Ok(snapshots)
+    }
+
+    async fn query_issue_states_by_ids(
+        &self,
+        query: &'static str,
+        issue_ids: &[String],
+        project_slug: Option<&str>,
+    ) -> Result<Vec<TrackerIssueStateSnapshot>, LinearError> {
+        let mut snapshots = Vec::new();
+        let mut after = None;
+        loop {
+            let variables = project_slug.map_or_else(
+                || {
+                    json!(IssueStatesByIdsUnscopedVariables {
+                        issue_ids: issue_ids.to_vec(),
+                        first: self.config.page_size,
+                        after: after.clone(),
+                        label_first: self.config.page_size,
+                        label_after: None,
+                    })
+                },
+                |project_slug| {
+                    json!(IssueStatesByIdsVariables {
+                        project_slug: project_slug.to_owned(),
+                        issue_ids: issue_ids.to_vec(),
+                        first: self.config.page_size,
+                        after: after.clone(),
+                        label_first: self.config.page_size,
+                        label_after: None,
+                    })
+                },
+            );
+            let response: IssueStatesByIdsData = self.execute_graphql(query, variables).await?;
+            let page_info = response.issues.page_info;
+            for mut node in response.issues.nodes {
+                let mut labels = std::mem::take(&mut node.labels.nodes);
+                let label_page_info = std::mem::take(&mut node.labels.page_info);
+                let mut label_after = next_page_cursor(
+                    label_page_info.has_next_page,
+                    label_page_info.end_cursor,
+                    "Linear issue-state label page",
+                )?;
+                while let Some(label_after_cursor) = label_after {
+                    let label_variables = project_slug.map_or_else(
+                        || {
+                            json!(IssueStatesByIdsUnscopedVariables {
+                                issue_ids: vec![node.id.clone()],
+                                first: 1,
+                                after: None,
+                                label_first: self.config.page_size,
+                                label_after: Some(label_after_cursor.clone()),
+                            })
+                        },
+                        |project_slug| {
+                            json!(IssueStatesByIdsVariables {
+                                project_slug: project_slug.to_owned(),
+                                issue_ids: vec![node.id.clone()],
+                                first: 1,
+                                after: None,
+                                label_first: self.config.page_size,
+                                label_after: Some(label_after_cursor.clone()),
+                            })
+                        },
+                    );
+                    let label_response: IssueStatesByIdsData =
+                        self.execute_graphql(query, label_variables).await?;
+                    let mut label_nodes = label_response.issues.nodes;
+                    let label_node = label_nodes.pop().ok_or_else(|| {
+                        LinearError::InvalidResponse(format!(
+                            "Linear issue-state label page returned no issue for {}",
+                            node.id
+                        ))
+                    })?;
+                    if !label_nodes.is_empty() || label_node.id != node.id {
+                        return Err(LinearError::InvalidResponse(format!(
+                            "Linear issue-state label page returned an unexpected issue for {}",
+                            node.id
+                        )));
+                    }
+                    labels.extend(label_node.labels.nodes);
+                    label_after = next_page_cursor(
+                        label_node.labels.page_info.has_next_page,
+                        label_node.labels.page_info.end_cursor,
                         "Linear issue-state label page",
                     )?;
-                    while let Some(label_after_cursor) = label_after {
-                        let label_variables = IssueStatesByIdsVariables {
-                            project_slug: project_slug.clone(),
-                            issue_ids: vec![node.id.clone()],
-                            first: 1,
-                            after: None,
-                            label_first: self.config.page_size,
-                            label_after: Some(label_after_cursor),
-                        };
-                        let label_response: IssueStatesByIdsData = self
-                            .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(label_variables))
-                            .await?;
-                        let mut label_nodes = label_response.issues.nodes;
-                        let label_node = label_nodes.pop().ok_or_else(|| {
-                            LinearError::InvalidResponse(format!(
-                                "Linear issue-state label page returned no issue for {}",
-                                node.id
-                            ))
-                        })?;
-                        if !label_nodes.is_empty() || label_node.id != node.id {
-                            return Err(LinearError::InvalidResponse(format!(
-                                "Linear issue-state label page returned an unexpected issue for {}",
-                                node.id
-                            )));
-                        }
-                        labels.extend(label_node.labels.nodes);
-                        label_after = next_page_cursor(
-                            label_node.labels.page_info.has_next_page,
-                            label_node.labels.page_info.end_cursor,
-                            "Linear issue-state label page",
-                        )?;
-                    }
-                    node.labels.nodes = labels;
-                    let snapshot = normalize_issue_state(node);
-                    if let Some(index) = snapshot_indices.get(&snapshot.id).copied() {
-                        // A bound issue can temporarily be returned by more
-                        // than one configured project. Project queries run
-                        // sequentially, so the later response is the newest
-                        // state we observed and must replace the stale one.
-                        snapshots[index] = snapshot;
-                    } else {
-                        snapshot_indices.insert(snapshot.id.clone(), snapshots.len());
-                        snapshots.push(snapshot);
-                    }
                 }
-
-                if !page_info.has_next_page {
-                    break;
-                }
-
-                after = Some(page_info.end_cursor.ok_or_else(|| {
-                    LinearError::InvalidResponse(
-                        "Linear issue-state page indicated a next page without an end cursor"
-                            .to_string(),
-                    )
-                })?);
+                node.labels.nodes = labels;
+                snapshots.push(normalize_issue_state(node));
             }
+
+            if !page_info.has_next_page {
+                break;
+            }
+            after = Some(page_info.end_cursor.ok_or_else(|| {
+                LinearError::InvalidResponse(
+                    "Linear issue-state page indicated a next page without an end cursor"
+                        .to_string(),
+                )
+            })?);
         }
         Ok(snapshots)
     }

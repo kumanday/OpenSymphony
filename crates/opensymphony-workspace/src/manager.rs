@@ -2013,7 +2013,8 @@ impl WorkspaceManager {
                 break;
             }
         }
-        let agents = discover_agents(checkout).await?;
+        let agents =
+            discover_agents_with_credentials(checkout, &self.checkout_credential_envs).await?;
         let native_discovery_hashes = self.hash_discovered_instructions(checkout, &agents).await?;
         let Some((relative, path, source)) = selected else {
             return Ok(InstructionProvenance {
@@ -3717,7 +3718,15 @@ fn workflow_body(bytes: &[u8]) -> Vec<u8> {
     body.trim_start_matches('\n').as_bytes().to_vec()
 }
 
+#[cfg(test)]
 async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
+    discover_agents_with_credentials(root, &BTreeSet::new()).await
+}
+
+async fn discover_agents_with_credentials(
+    root: &Path,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<Vec<PathBuf>, WorkspaceError> {
     const MAX_VISITED_DIRECTORIES: usize = 4_096;
     const MAX_VISITED_ENTRIES: usize = 100_000;
     let mut pending = vec![root.to_path_buf()];
@@ -3788,7 +3797,7 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                 );
                 if generated_tree
                     && let Ok(relative) = path.strip_prefix(root)
-                    && !tracked_instruction_tree(root, relative).await
+                    && !tracked_instruction_tree(root, relative, checkout_credential_envs).await
                 {
                     continue;
                 }
@@ -3812,14 +3821,24 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
     Ok(paths)
 }
 
-async fn tracked_instruction_tree(root: &Path, relative: &Path) -> bool {
-    let output = Command::new("git")
+async fn tracked_instruction_tree(
+    root: &Path,
+    relative: &Path,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> bool {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--cached", "--"])
-        .arg(relative)
-        .output()
-        .await;
+        .arg(relative);
+    for variable in checkout_credential_envs {
+        command.env_remove(variable);
+    }
+    command.env_remove("GIT_OBJECT_DIRECTORY");
+    command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
+    let output = command.output().await;
     output.is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 

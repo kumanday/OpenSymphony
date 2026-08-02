@@ -2426,7 +2426,22 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     };
     let rehydration_runtime_envelope = persisted_runtime_envelope
         .as_ref()
-        .map(|envelope| refresh_rehydration_runtime_envelope(envelope, &workflow));
+        .map(|envelope| {
+            refresh_rehydration_runtime_envelope(
+                envelope,
+                &workflow,
+                runtime.repository_routing.as_ref(),
+            )
+        })
+        .transpose()?;
+    if strict_recovery
+        && persisted_runtime_envelope.as_ref() != rehydration_runtime_envelope.as_ref()
+    {
+        return Err(format!(
+            "strict conversation {} runtime envelope does not match the current repository, harness, or model configuration; refusing to replace it",
+            old_manifest.conversation_id
+        ));
+    }
 
     println!(
         "Found existing conversation: {}",
@@ -2562,9 +2577,26 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 fn refresh_rehydration_runtime_envelope(
     persisted: &TerminalRuntimeEnvelope,
     workflow: &ResolvedWorkflow,
-) -> TerminalRuntimeEnvelope {
+    routing: Option<&RepositoryRouting>,
+) -> Result<TerminalRuntimeEnvelope, String> {
     let mut refreshed = persisted.clone();
-    refreshed.harness = "openhands_agent_server".to_string();
+    if let Some(routing) = routing {
+        let entry = routing
+            .inventory
+            .values()
+            .find(|entry| entry.identity.id == persisted.repository_binding.repository.id)
+            .ok_or_else(|| {
+                "persisted repository is absent from the current repository inventory".to_owned()
+            })?;
+        refreshed.repository_binding.alias = entry.alias.clone();
+        refreshed.repository_binding.repository = entry.identity.clone();
+        refreshed.repository_binding.config_generation = routing.config_generation.clone();
+        refreshed.repository_binding.inventory_generation = routing.inventory_generation.clone();
+        refreshed.config_generation = routing.config_generation.clone();
+        refreshed.inventory_generation = routing.inventory_generation.clone();
+        refreshed.policy_generation = routing.config_generation.clone();
+    }
+    refreshed.harness = workflow.config.routing.harness.clone();
     refreshed.model_profile = workflow
         .config
         .routing
@@ -2581,7 +2613,7 @@ fn refresh_rehydration_runtime_envelope(
             .as_ref()
             .and_then(|llm| llm.model.clone())
     });
-    refreshed
+    Ok(refreshed)
 }
 
 async fn resolve_rehydrate_runtime(
@@ -2865,7 +2897,7 @@ mod tests {
         RepositoryRouting, RepositoryRoutingMode,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
-    use crate::opensymphony_workspace::CheckoutRepository;
+    use crate::opensymphony_workspace::{CheckoutRepository, TerminalRuntimeEnvelope};
     use clap::{Parser, error::ErrorKind};
     use tempfile::TempDir;
 
@@ -2926,6 +2958,83 @@ mod tests {
             Some(&routing),
             Some(&checkouts)
         ));
+    }
+
+    #[test]
+    fn rehydrate_envelope_refresh_uses_current_repository_routing() {
+        let runtime = sample_doctor_runtime();
+        let persisted: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "repository_binding": {
+                "alias": "repo",
+                "repository": {
+                    "id": "git:repository:repo",
+                    "safe_remote_fingerprint": "sha256:old"
+                },
+                "config_generation": "old-config",
+                "inventory_generation": "old-inventory"
+            },
+            "config_generation": "old-config",
+            "inventory_generation": "old-inventory",
+            "policy_generation": "old-config",
+            "checkout_generation": "generation-1",
+            "checkout_path": "/workspace/COE-549--generation-1",
+            "target_branch": "develop",
+            "target_commit": "commit-1",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit-1",
+                "source": "configured",
+                "native_discovery_paths": [],
+                "native_discovery_hashes": {}
+            },
+            "harness": "openhands_agent_server",
+            "model_profile": "old-profile",
+            "model": "old-model",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "conversation_binding": "conversation-1",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("runtime envelope fixture should decode");
+        let routing: RepositoryRouting = serde_json::from_value(serde_json::json!({
+            "mode": "project_set",
+            "inventory": {
+                "repo": {
+                    "alias": "repo",
+                    "identity": {
+                        "id": "git:repository:repo",
+                        "safe_remote_fingerprint": "sha256:new"
+                    }
+                }
+            },
+            "project_repositories": {},
+            "active_projects": [],
+            "legacy_repository": null,
+            "config_generation": "new-config",
+            "inventory_generation": "new-inventory"
+        }))
+        .expect("routing fixture should decode");
+
+        let refreshed = super::refresh_rehydration_runtime_envelope(
+            &persisted,
+            &runtime.workflow,
+            Some(&routing),
+        )
+        .expect("current routing should refresh the desired envelope");
+
+        assert_eq!(
+            refreshed
+                .repository_binding
+                .repository
+                .safe_remote_fingerprint
+                .as_str(),
+            "sha256:new"
+        );
+        assert_eq!(refreshed.config_generation, "new-config");
+        assert_eq!(refreshed.inventory_generation, "new-inventory");
+        assert_eq!(refreshed.policy_generation, "new-config");
+        assert_ne!(refreshed, persisted);
     }
 
     #[test]

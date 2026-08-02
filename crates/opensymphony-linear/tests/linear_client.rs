@@ -927,10 +927,20 @@ async fn issue_states_by_ids_paginates_nested_labels() {
 }
 
 #[tokio::test]
-async fn issue_states_by_ids_omits_missing_ids_for_cross_project_recovery() {
-    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
-        "fixtures/issue_states_missing_id.json"
-    ))])
+async fn issue_states_by_ids_resolves_missing_ids_without_project_filter() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(include_str!("fixtures/issue_states_missing_id.json")),
+        QueuedResponse::json(
+            r#"{
+              "data": {"issues": {"nodes": [{
+                "id": "issue-264",
+                "identifier": "COE-264",
+                "updatedAt": "2026-03-21T18:00:00Z",
+                "state": {"id": "state-progress", "name": "In Progress", "type": "started"}
+              }], "pageInfo": {"hasNextPage": false, "endCursor": null}}
+            }}"#,
+        ),
+    ])
     .await;
     let client = LinearClient::new(test_config(server.base_url()))
         .expect("client configuration should be valid");
@@ -938,10 +948,20 @@ async fn issue_states_by_ids_omits_missing_ids_for_cross_project_recovery() {
     let snapshots = client
         .issue_states_by_ids(&["issue-260".to_string(), "issue-264".to_string()])
         .await
-        .expect("missing issue ids should be ignored during recovery reconciliation");
+        .expect("missing project-scoped issue ids should use the unscoped fallback");
 
-    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots.len(), 2);
     assert_eq!(snapshots[0].identifier, "COE-260");
+    assert_eq!(snapshots[1].identifier, "COE-264");
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["variables"]["projectSlug"], "e7b957855cb7");
+    assert!(
+        !requests[1].body["query"]
+            .as_str()
+            .expect("unscoped fallback query should be a string")
+            .contains("project: { slugId: { eq: $projectSlug } }")
+    );
 }
 
 #[tokio::test]

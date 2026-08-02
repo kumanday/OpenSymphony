@@ -355,6 +355,54 @@ query IssueStatesByIds(
 }
 "#;
 
+pub(super) const ISSUE_STATES_BY_IDS_UNSCOPED_QUERY: &str = r#"
+query IssueStatesByIdsUnscoped(
+  $issueIds: [ID!]
+  $first: Int!
+  $after: String
+  $labelFirst: Int!
+  $labelAfter: String
+) {
+  issues(
+    filter: {
+      id: { in: $issueIds }
+    }
+    includeArchived: true
+    first: $first
+    after: $after
+  ) {
+    nodes {
+      id
+      identifier
+      updatedAt
+      state {
+        id
+        name
+        type
+      }
+      labels(first: $labelFirst, after: $labelAfter) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+      children(includeArchived: true, first: 1) {
+        nodes {
+          id
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
+
 pub(super) const ISSUE_BY_IDENTIFIER_QUERY: &str = r#"
 query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst: Int!) {
   issue(id: $identifier) {
@@ -730,6 +778,16 @@ pub(super) struct IssueSummariesByStateVariables {
 #[serde(rename_all = "camelCase")]
 pub(super) struct IssueStatesByIdsVariables {
     pub project_slug: String,
+    pub issue_ids: Vec<String>,
+    pub first: usize,
+    pub after: Option<String>,
+    pub label_first: usize,
+    pub label_after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueStatesByIdsUnscopedVariables {
     pub issue_ids: Vec<String>,
     pub first: usize,
     pub after: Option<String>,

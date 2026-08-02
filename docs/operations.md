@@ -694,6 +694,12 @@ manually reset a quarantined checkout into service. The runtime envelope also
 records that current local containment is process `cwd` containment on a
 trusted host, not a sandbox boundary.
 
+Strict `opensymphony rehydrate` also derives the desired repository, harness,
+model, and generation envelope from the current central routing inventory before
+creating a replacement conversation. If that envelope differs from the
+persisted run, rehydration stops and leaves the existing conversation intact
+until the checkout is rematerialized or the configuration is reconciled.
+
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after
 migration visible instead of restoring a legacy config that would hide them;

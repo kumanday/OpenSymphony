@@ -318,6 +318,9 @@ Current repository note:
   The frequent state read also refreshes child presence, so a running issue that
   becomes a parent is made repository-neutral and its old generation is stopped
   before dispatch can continue it.
+- strict tracked-instruction discovery scrubs repository credential variables
+  from its Git path checks, including checks used while deciding whether a
+  generated-named tree contains tracked instructions.
 
 ## 8. Conversation metadata manifest
 

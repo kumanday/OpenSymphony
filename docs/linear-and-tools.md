@@ -74,6 +74,9 @@ parallel vectors rather than collapsing them into one scalar selector:
   running-issue state refreshes, and project issue scans iterate every
   configured project and combine their paginated results before the scheduler
   or gateway consumes them
+- running-issue state refreshes perform a bounded unscoped ID lookup for any
+  tracked issue omitted by those project filters, so moving an issue out of
+  the configured project set cannot leave stale execution state behind
 - the scalar `tracker.project_id`/`tracker.project_slug` fields remain the
   compatibility view for the first configured project; they do not limit a
   central multi-project poll to that one project
