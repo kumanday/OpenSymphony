@@ -2740,7 +2740,7 @@ impl IssueSessionRunner {
         run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
         let pending_manifest_path = pending_conversation_manifest_path(workspace);
         workspace_manager
-            .write_json_artifact(workspace, &pending_manifest_path, &Some(&manifest))
+            .write_json_artifact_atomically(workspace, &pending_manifest_path, &Some(&manifest))
             .await?;
         workspace_manager
             .write_run_manifest(workspace, run_manifest)
