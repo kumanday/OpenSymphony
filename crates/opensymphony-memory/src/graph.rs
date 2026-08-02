@@ -1490,6 +1490,7 @@ mod community_tests {
             captured_at: "2026-07-06T00:00:00Z".to_string(),
             changed_files: Vec::new(),
             scope_refs: Vec::new(),
+            source_scope_refs: BTreeMap::new(),
             source_refs: Vec::new(),
             links: Vec::new(),
             citations: Vec::new(),

@@ -42,10 +42,14 @@ pub fn brief_with_scope(
             "no capsule found for {issue_key} in the requested scope"
         )));
     }
-    Ok(render_indexed_brief(config, &indexed))
+    Ok(render_indexed_brief(config, &indexed, scope))
 }
 
-fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
+fn render_indexed_brief(
+    config: &MemoryConfig,
+    indexed: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> String {
     let mut output = String::new();
     output.push_str(&format!("# {}: {}\n\n", indexed.issue_key, indexed.title));
     output.push_str(&format!(
@@ -53,8 +57,9 @@ fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String
         display_capsule_path(config, indexed)
     ));
     output.push_str(&format!("- Visibility: {}\n", indexed.visibility));
-    if !indexed.areas().is_empty() {
-        output.push_str(&format!("- Areas: {}\n", indexed.areas().join(", ")));
+    let areas = indexed.areas_for_scope(config, scope);
+    if !areas.is_empty() {
+        output.push_str(&format!("- Areas: {}\n", areas.join(", ")));
     }
     output.push('\n');
     output.push_str(&compact_capsule_body(&indexed.body));
@@ -643,7 +648,7 @@ pub fn context_for_issue_with_options(
                 continue;
             }
             if indexed
-                .areas()
+                .areas_for_scope(config, &options.scope)
                 .iter()
                 .any(|area| current_areas.contains(area))
             {
@@ -696,7 +701,11 @@ pub fn context_for_issue_with_options(
             if !indexed_issue_matches_scope(config, indexed, &options.scope) {
                 continue;
             }
-            let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(config, indexed));
+            let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(
+                config,
+                indexed,
+                &options.scope,
+            ));
             documentation_paths.extend(docs);
             selected.push(SelectedContextBrief {
                 bucket,
@@ -954,15 +963,16 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
+    let requested_repo = scope
+        .repo
+        .as_ref()
+        .and_then(|value| normalize_optional(value));
     for (kind, requested) in [
         (KnowledgeScopeKind::ProjectSet, scope.project_set.as_ref()),
         (KnowledgeScopeKind::Project, scope.project.as_ref()),
     ] {
         if let Some(requested) = requested.and_then(|value| normalize_optional(value))
-            && !issue
-                .scope_refs
-                .iter()
-                .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(&requested))
+            && !issue_scope_matches_request(config, issue, requested_repo.as_deref(), kind, &requested)
         {
             return false;
         }
@@ -973,7 +983,7 @@ fn indexed_issue_matches_scope(
         return false;
     }
     if let Some(area) = scope.area.as_ref().map(|area| slugify(area))
-        && !issue.areas().contains(&area)
+        && !issue.areas_for_scope(config, scope).contains(&area)
     {
         return false;
     }
@@ -982,19 +992,59 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
-    if let (Some(repo), Some(project)) = (
-        scope.repo.as_ref().and_then(|value| normalize_optional(value)),
-        scope.project.as_ref().and_then(|value| normalize_optional(value)),
-    ) && let Some(source) = config.repository_sources.get(&repo)
-        && !source.project_scope_ids.is_empty()
-        && !source
-            .project_scope_ids
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case(&project))
-    {
-        return false;
-    }
     true
+}
+
+fn issue_scope_matches_request(
+    config: &MemoryConfig,
+    issue: &IndexedIssue,
+    repository_id: Option<&str>,
+    kind: KnowledgeScopeKind,
+    requested: &str,
+) -> bool {
+    if let Some(repository_id) = repository_id {
+        let owned_scopes = issue
+            .source_scope_refs
+            .iter()
+            .filter(|(source_id, _)| issue_source_belongs_to_repository(issue, source_id, repository_id))
+            .flat_map(|(_, scopes)| scopes.iter())
+            .collect::<Vec<_>>();
+        if !owned_scopes.is_empty() {
+            return owned_scopes
+                .iter()
+                .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(requested));
+        }
+        if let Some(source) = config.repository_sources.get(repository_id)
+            && kind == KnowledgeScopeKind::Project
+            && !source.project_scope_ids.is_empty()
+        {
+            return source
+                .project_scope_ids
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(requested))
+                && issue.scope_refs.iter().any(|scope| {
+                    scope.kind == kind && scope.id.eq_ignore_ascii_case(requested)
+                });
+        }
+    }
+    issue
+        .scope_refs
+        .iter()
+        .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(requested))
+}
+
+fn issue_source_belongs_to_repository(
+    issue: &IndexedIssue,
+    source_id: &str,
+    repository_id: &str,
+) -> bool {
+    source_id == format!("__live_capture__:{repository_id}")
+        || source_id.starts_with(&format!("{repository_id}:"))
+        || issue.source_refs.iter().any(|source| {
+            source.repo_id.as_deref() == Some(repository_id)
+                && (source.registration_source_id.as_deref() == Some(source_id)
+                    || source.id == source_id)
+        })
 }
 
 fn indexed_issue_visible_in_scope(

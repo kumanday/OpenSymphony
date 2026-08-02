@@ -825,6 +825,12 @@ CREATE TABLE IF NOT EXISTS registered_memory_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_registered_memory_sources_repository
   ON registered_memory_sources(repository_id, commit_sha);
+CREATE TABLE IF NOT EXISTS legacy_code_imports (
+  source_index_path TEXT NOT NULL,
+  canonical_repo_id TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  PRIMARY KEY (source_index_path, canonical_repo_id)
+);
 CREATE TABLE IF NOT EXISTS doc_sync_runs (
   run_id TEXT PRIMARY KEY,
   selected_issues_json TEXT NOT NULL,
@@ -1113,11 +1119,21 @@ CREATE INDEX IF NOT EXISTS idx_code_skipped_files_staging_repo ON code_skipped_f
     ))?;
     for table in [
         "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
         "code_symbols",
         "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
         "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
     ] {
         ensure_worktree_dirty_column(connection, table)?;
+        ensure_legacy_source_column(connection, table)?;
     }
     Ok(())
 }
@@ -1136,6 +1152,14 @@ fn ensure_worktree_dirty_column(connection: &Connection, table: &str) -> Result<
     }
     connection.execute(
         &format!("UPDATE {table} SET worktree_dirty = false WHERE worktree_dirty IS NULL"),
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_legacy_source_column(connection: &Connection, table: &str) -> Result<(), duckdb::Error> {
+    connection.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS legacy_source_path TEXT"),
         [],
     )?;
     Ok(())
@@ -2662,6 +2686,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 changed_files: Vec::new(),
                 scope_refs: serde_json::from_str::<Vec<KnowledgeScope>>(&scope_refs_json)
                     .unwrap_or_default(),
+                source_scope_refs: BTreeMap::new(),
                 source_refs: serde_json::from_str::<Vec<MemorySourceRef>>(&source_refs_json)
                     .unwrap_or_default(),
                 links: serde_json::from_str::<Vec<OkfLink>>(&links_json).unwrap_or_default(),
@@ -2700,6 +2725,12 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
         })?;
         issue.areas = areas;
         issue.area_source_ids = area_source_ids;
+        issue.source_scope_refs = load_issue_source_scopes(&connection, &issue.concept_id).map_err(|source| {
+            MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            }
+        })?;
         issue.changed_files =
             load_issue_changed_files(&connection, &issue.issue_key).map_err(|source| {
                 MemoryError::DuckDb {
@@ -2789,6 +2820,50 @@ fn load_issue_areas(
             .insert(source_id.unwrap_or_default());
     }
     Ok((area_source_ids.keys().cloned().collect(), area_source_ids))
+}
+
+fn load_issue_source_scopes(
+    connection: &Connection,
+    concept_id: &str,
+) -> Result<BTreeMap<String, Vec<KnowledgeScope>>, duckdb::Error> {
+    let mut statement = connection.prepare(
+        "SELECT source_id, scope_kind, scope_id, label FROM source_scope_refs WHERE concept_id = ? ORDER BY source_id, scope_kind, scope_id",
+    )?;
+    let rows = statement.query_map(params![concept_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut source_scopes = BTreeMap::new();
+    for row in rows {
+        let (source_id, kind, id, label) = row?;
+        let Some(kind) = parse_scope_kind(&kind) else {
+            continue;
+        };
+        source_scopes
+            .entry(source_id)
+            .or_insert_with(Vec::new)
+            .push(KnowledgeScope { kind, id, label });
+    }
+    Ok(source_scopes)
+}
+
+fn parse_scope_kind(value: &str) -> Option<KnowledgeScopeKind> {
+    Some(match value {
+        "local_instance" => KnowledgeScopeKind::LocalInstance,
+        "organization" => KnowledgeScopeKind::Organization,
+        "project_set" => KnowledgeScopeKind::ProjectSet,
+        "project" => KnowledgeScopeKind::Project,
+        "milestone" => KnowledgeScopeKind::Milestone,
+        "work_item" => KnowledgeScopeKind::WorkItem,
+        "repository" => KnowledgeScopeKind::Repository,
+        "code_path" => KnowledgeScopeKind::CodePath,
+        "area" => KnowledgeScopeKind::Area,
+        _ => return None,
+    })
 }
 
 fn load_issue_changed_files(
@@ -2931,7 +3006,7 @@ pub fn merge_legacy_code_index(
         return Ok(());
     }
     let Some(source_connection) = open_existing_index_read_only(source_config)? else {
-        return withdraw_code_repository(config, canonical_repo_id);
+        return withdraw_imported_legacy_code(config, source_config, canonical_repo_id);
     };
     let tables: &[(&str, &[&str])] = &[
         (
@@ -3221,8 +3296,10 @@ pub fn merge_legacy_code_index(
     }
     if tables_to_copy.is_empty() {
         drop(source_connection);
-        return withdraw_code_repository(config, canonical_repo_id);
+        return withdraw_imported_legacy_code(config, source_config, canonical_repo_id);
     }
+
+    withdraw_imported_legacy_code(config, source_config, canonical_repo_id)?;
 
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
@@ -3250,10 +3327,8 @@ pub fn merge_legacy_code_index(
         for (table, _) in tables {
             transaction
                 .execute(
-                    &format!(
-                        "DELETE FROM {table} WHERE repo_id = ? OR repo_id = ?"
-                    ),
-                    params![canonical_repo_id, legacy_repo_id],
+                    &format!("DELETE FROM {table} WHERE repo_id = ?"),
+                    [legacy_repo_id],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -3272,7 +3347,25 @@ pub fn merge_legacy_code_index(
                     path: config.index_path.clone(),
                     source,
                 })?;
+            transaction
+                .execute(
+                    &format!("UPDATE {table} SET legacy_source_path = ? WHERE repo_id = ?"),
+                    params![source_config.index_path.to_string_lossy().to_string(), legacy_repo_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
         }
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO legacy_code_imports (source_index_path, canonical_repo_id, imported_at) VALUES (?, ?, CAST(current_timestamp AS TEXT))",
+                params![source_config.index_path.to_string_lossy().to_string(), canonical_repo_id],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
         transaction.commit().map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
@@ -3289,6 +3382,74 @@ pub fn merge_legacy_code_index(
     drop(source_connection);
     drop(connection);
     migrate_code_repository_identity(config, legacy_repo_id, canonical_repo_id)
+}
+
+fn withdraw_imported_legacy_code(
+    config: &MemoryConfig,
+    source_config: &MemoryConfig,
+    canonical_repo_id: &str,
+) -> Result<(), MemoryError> {
+    let source_index_path = source_config.index_path.to_string_lossy().to_string();
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let imported = connection
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_code_imports WHERE source_index_path = ? AND canonical_repo_id = ?",
+            params![source_index_path, canonical_repo_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    if imported == 0 {
+        return Ok(());
+    }
+    let transaction = connection.transaction().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    for table in [
+        "code_documents",
+        "code_documents_staging",
+        "code_document_revisions",
+        "code_symbols",
+        "code_edges",
+        "code_edge_revisions",
+        "code_skipped_files",
+        "code_skipped_files_staging",
+        "code_diagnostics",
+        "code_diagnostic_revisions",
+        "code_index_snapshots",
+        "code_snapshot_membership",
+        "code_snapshot_membership_staging",
+    ] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE repo_id = ? AND legacy_source_path = ?"),
+                params![canonical_repo_id, source_config.index_path.to_string_lossy().to_string()],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM legacy_code_imports WHERE source_index_path = ? AND canonical_repo_id = ?",
+            params![source_config.index_path.to_string_lossy().to_string(), canonical_repo_id],
+        )
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    transaction.commit().map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })
 }
 
 pub fn merge_legacy_memory_index(
@@ -5364,6 +5525,7 @@ mod index_tests {
             captured_at: "also-not-a-date".to_string(),
             changed_files: Vec::new(),
             scope_refs: Vec::new(),
+            source_scope_refs: BTreeMap::new(),
             source_refs: Vec::new(),
             links: Vec::new(),
             citations: Vec::new(),
@@ -5669,6 +5831,17 @@ mod index_tests {
         assert!(symbol_count > 0);
         drop(connection);
 
+        persist_code_intel_documents(
+            &config,
+            CodeIntelPersistBatch {
+                repo_id: "github.com/team/repo".to_string(),
+                commit_sha: Some("central-commit".to_string()),
+                worktree_dirty: false,
+                documents: vec![test_code_document("src/central.rs", "central-content")],
+            },
+        )
+        .expect("central code index");
+
         let source_connection = open_index(&source_config).expect("source index");
         migrate_index(&source_connection).expect("source index schema");
         for table in [
@@ -5702,20 +5875,28 @@ mod index_tests {
             .expect("catalog index exists after withdrawal");
         let remaining_documents: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM code_documents WHERE repo_id = 'github.com/team/repo'",
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = 'github.com/team/repo' AND commit_sha = 'legacy-commit'",
                 [],
                 |row| row.get(0),
             )
             .expect("remaining imported documents");
         let remaining_symbols: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = 'github.com/team/repo'",
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = 'github.com/team/repo' AND commit_sha = 'legacy-commit'",
                 [],
                 |row| row.get(0),
             )
             .expect("remaining imported symbols");
         assert_eq!(remaining_documents, 0);
         assert_eq!(remaining_symbols, 0);
+        let central_documents: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = 'github.com/team/repo' AND commit_sha = 'central-commit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("central documents survive legacy withdrawal");
+        assert_eq!(central_documents, 1);
     }
 
     #[test]

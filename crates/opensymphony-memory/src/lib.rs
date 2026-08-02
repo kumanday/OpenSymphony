@@ -1154,6 +1154,7 @@ struct IndexedIssue {
     captured_at: String,
     changed_files: Vec<PathBuf>,
     scope_refs: Vec<KnowledgeScope>,
+    source_scope_refs: BTreeMap<String, Vec<KnowledgeScope>>,
     source_refs: Vec<MemorySourceRef>,
     links: Vec<OkfLink>,
     citations: Vec<OkfCitation>,
@@ -3960,6 +3961,98 @@ Reviews are triggered when you open a pull request for review.
             )
             .expect("registered relation");
         assert_eq!(registered_relation_count, 1);
+    }
+
+    #[test]
+    fn scoped_reads_correlate_repository_project_and_area_provenance() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = config_for(repo.path());
+        config.repository_sources.insert(
+            "repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-a".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from([
+                    "project-a".to_string(),
+                    "project-shared".to_string(),
+                ]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-b".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-b".to_string(),
+                root: repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from([
+                    "project-b".to_string(),
+                    "project-shared".to_string(),
+                ]),
+                target_branch: None,
+            },
+        );
+        let plan = plan_capture(
+            &config,
+            &sample_source(),
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &plan, false).expect("capture");
+        let connection = open_index(&config).expect("index");
+        connection
+            .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = 'COE-123'",
+                [r#"[{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-b"},{"kind":"project","id":"project-shared"}]"#],
+            )
+            .expect("aggregate scopes");
+        connection
+            .execute("DELETE FROM issue_areas WHERE issue_key = 'COE-123'", [])
+            .expect("clear areas");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-123', 'area-a', 'repo-a:live'), ('COE-123', 'area-b', 'repo-b:live')",
+                [],
+            )
+            .expect("source areas");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id) VALUES ('issues/COE-123', 'repo-a:live', 'repository', 'repo-a'), ('issues/COE-123', 'repo-a:live', 'project', 'project-a'), ('issues/COE-123', 'repo-a:live', 'project', 'project-shared'), ('issues/COE-123', 'repo-b:live', 'repository', 'repo-b'), ('issues/COE-123', 'repo-b:live', 'project', 'project-b'), ('issues/COE-123', 'repo-b:live', 'project', 'project-shared')",
+                [],
+            )
+            .expect("source scopes");
+        drop(connection);
+
+        let area_results = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                area: Some("area-b".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("scoped search");
+        assert!(area_results.is_empty());
+        let project_results = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                project: Some("project-b".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("combined scoped search");
+        assert!(project_results.is_empty());
     }
 
     #[test]
