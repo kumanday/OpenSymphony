@@ -319,9 +319,9 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         remote_locator: origin.to_str().expect("origin path").to_owned(),
         remote: origin.to_str().expect("origin path").to_owned(),
         target_branch: "main".to_owned(),
-        credential_kind: "ssh-agent".to_owned(),
+        credential_kind: "environment".to_owned(),
         credential_reference: None,
-        credential_env: Some("CHECKOUT_SECRET_CANARY".to_owned()),
+        credential_env: Some("HOME".to_owned()),
         instructions_path: "AGENTS.md".into(),
         review_profile: "local".to_owned(),
     };
@@ -408,7 +408,7 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         manifest_record.workspace_path,
         first.handle.workspace_path()
     );
-    assert!(!manifest.contains("CHECKOUT_SECRET_CANARY"));
+    assert!(!manifest.contains("HOME"));
     assert!(!manifest.contains(origin.to_str().expect("origin path")));
 
     let reused = manager.ensure(&issue).await.expect("checkout should reuse");
