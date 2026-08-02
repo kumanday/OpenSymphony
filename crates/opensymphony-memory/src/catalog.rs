@@ -437,7 +437,46 @@ pub fn withdraw_memory_source_records(
                         .filter_map(|repository_id| config.repository_sources.get(&repository_id))
                         .flat_map(|source| source.project_scope_ids.iter())
                         .cloned()
-                        .collect::<BTreeSet<_>>();
+                    .collect::<BTreeSet<_>>();
+                }
+            }
+            drop(scope_statement);
+            let surviving_source_scopes = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT source_id, scope_kind, scope_id, label FROM source_scope_refs WHERE concept_id = ?",
+                    )
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?;
+                statement
+                    .query_map([&concept_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    })
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source: error,
+                    })?
+            };
+            for (surviving_source_id, kind, id, label) in surviving_source_scopes {
+                if source_ids.contains(&surviving_source_id)
+                    && let Some(kind) = parse_scope_kind(&kind)
+                {
+                    let scope = KnowledgeScope { kind, id, label };
+                    if !scopes.contains(&scope) {
+                        scopes.push(scope);
+                    }
                 }
             }
             scopes.retain(|scope| match &scope.kind {
@@ -470,33 +509,7 @@ pub fn withdraw_memory_source_records(
                 .collect::<Vec<_>>();
             let surviving_live_owner = source_ids.iter().any(|candidate| is_live_capture_owner(candidate));
             if surviving_live_owner {
-                transaction
-                    .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?;
-                transaction
-                    .execute("DELETE FROM issues WHERE issue_key = ?", [&issue_key])
-                    .map_err(|error| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source: error,
-                    })?;
-                for table in [
-                    "issue_areas",
-                    "pull_requests",
-                    "changed_files",
-                    "checks",
-                    "reviews",
-                ] {
-                    transaction
-                        .execute(&format!("DELETE FROM {table} WHERE issue_key = ?"), [&issue_key])
-                        .map_err(|error| MemoryError::DuckDb {
-                            path: config.index_path.clone(),
-                            source: error,
-                        })?;
-                }
-                for surviving_source_id in surviving_reimport_sources {
+                for surviving_source_id in &surviving_reimport_sources {
                     transaction
                         .execute(
                             "UPDATE registered_memory_sources SET status = 'pending' WHERE source_id = ?",
@@ -507,7 +520,6 @@ pub fn withdraw_memory_source_records(
                             source: error,
                         })?;
                 }
-                continue;
             }
             transaction
                 .execute("DELETE FROM scope_refs WHERE concept_id = ?", [&concept_id])
@@ -1406,7 +1418,7 @@ mod catalog_tests {
     }
 
     #[test]
-    fn withdrawing_registered_source_removes_stale_live_capture_payload() {
+    fn withdrawing_registered_source_preserves_surviving_live_capture_payload() {
         let root = TempDir::new().expect("memory root");
         let config = MemoryConfig::load(root.path(), None).expect("config");
         let source = RegisteredMemorySource {
@@ -1436,18 +1448,30 @@ mod catalog_tests {
                     "body",
                     "2026-07-31T00:00:00Z",
                     "issues/COE-555",
-                    r#"[{"kind":"repository","id":"github:repository:a"}]"#,
-                    r#"[{"kind":"github_pr","id":"42","repo_id":"github:repository:a"},{"kind":"legacy_store","id":"source","repo_id":"github:repository:a","registration_source_id":"github:repository:a:repository"}]"#,
-                    r#"["__live_capture__","github:repository:a:repository"]"#,
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"repository","id":"github:repository:b"}]"#,
+                    r#"[{"kind":"github_pr","id":"42","repo_id":"github:repository:b"},{"kind":"legacy_store","id":"source","repo_id":"github:repository:a","registration_source_id":"github:repository:a:repository"}]"#,
+                    r#"["__live_capture__:github:repository:b","github:repository:a:repository"]"#,
                 ],
             )
             .expect("live capture");
         connection
             .execute(
-                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL)",
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL), ('issues/COE-555', 'repository', 'github:repository:b', NULL)",
                 [],
             )
             .expect("normalized scope");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', '__live_capture__:github:repository:b', 'repository', 'github:repository:b', NULL)",
+                [],
+            )
+            .expect("surviving live scope");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-555', 'area-a', 'github:repository:a:repository'), ('COE-555', 'area-b', '__live_capture__:github:repository:b')",
+                [],
+            )
+            .expect("source-owned areas");
 
         withdraw_memory_source_records(
             &config,
@@ -1456,10 +1480,22 @@ mod catalog_tests {
         )
         .expect("source withdrawal");
 
-        assert!(load_indexed_issues(&config)
+        let issue = load_indexed_issues(&config)
             .expect("issues")
             .into_iter()
-            .all(|issue| issue.issue_key != "COE-555"));
+            .find(|issue| issue.issue_key == "COE-555")
+            .expect("surviving live issue");
+        assert_eq!(issue.title, "Live capture refreshed from source");
+        assert_eq!(issue.body, "body");
+        assert_eq!(issue.areas(), vec!["area-b"]);
+        assert_eq!(
+            issue
+                .scope_refs
+                .iter()
+                .map(|scope| scope.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["github:repository:b"]
+        );
     }
 
     #[test]
@@ -1850,7 +1886,7 @@ mod catalog_tests {
     }
 
     #[test]
-    fn withdraws_source_removes_stale_payload_for_cross_repository_owner() {
+    fn withdraws_source_preserves_live_payload_for_cross_repository_owner() {
         let root = TempDir::new().expect("memory root");
         let mut config = MemoryConfig::load(root.path(), None).expect("config");
         config.default_project_set_id = Some("set-a".to_string());
@@ -1901,7 +1937,7 @@ mod catalog_tests {
                     "body",
                     "2026-07-31T00:00:00Z",
                     "issues/COE-555",
-                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"project","id":"project-b"},{"kind":"project_set","id":"set-a"}]"#,
+                    r#"[{"kind":"repository","id":"github:repository:a"},{"kind":"repository","id":"github:repository:b"},{"kind":"project","id":"project-b"},{"kind":"project_set","id":"set-a"}]"#,
                     "[]",
                     r#"["github:repository:a:public","__live_capture__:github:repository:b"]"#,
                 ],
@@ -1909,13 +1945,13 @@ mod catalog_tests {
             .expect("shared issue");
         connection
             .execute(
-                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL), ('issues/COE-555', 'project', 'project-b', NULL), ('issues/COE-555', 'project_set', 'set-a', NULL)",
+                "INSERT INTO scope_refs (concept_id, scope_kind, scope_id, label) VALUES ('issues/COE-555', 'repository', 'github:repository:a', NULL), ('issues/COE-555', 'repository', 'github:repository:b', NULL), ('issues/COE-555', 'project', 'project-b', NULL), ('issues/COE-555', 'project_set', 'set-a', NULL)",
                 [],
             )
             .expect("normalized scopes");
         connection
             .execute(
-                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/unrelated', 'github:repository:b:public', 'project', 'project-b', NULL)",
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/unrelated', 'github:repository:b:public', 'project', 'project-b', NULL), ('issues/COE-555', '__live_capture__:github:repository:b', 'repository', 'github:repository:b', NULL), ('issues/COE-555', '__live_capture__:github:repository:b', 'project', 'project-b', NULL)",
                 [],
             )
             .expect("unrelated source scope");
@@ -1928,10 +1964,20 @@ mod catalog_tests {
         )
         .expect("source withdrawal");
 
-        assert!(load_indexed_issues(&config)
+        let issue = load_indexed_issues(&config)
             .expect("issues")
             .into_iter()
-            .all(|issue| issue.issue_key != "COE-555"));
+            .find(|issue| issue.issue_key == "COE-555")
+            .expect("surviving live issue");
+        assert_eq!(issue.body, "body");
+        assert_eq!(
+            issue
+                .scope_refs
+                .iter()
+                .map(|scope| scope.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["github:repository:b", "project-b", "set-a"]
+        );
     }
 
     #[test]

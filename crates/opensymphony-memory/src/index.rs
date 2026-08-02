@@ -171,6 +171,11 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 source_refs.push(source_ref);
             }
         }
+        let previous_live_owners = source_ids
+            .iter()
+            .filter(|owner| is_live_capture_owner(owner))
+            .cloned()
+            .collect::<Vec<_>>();
         source_ids.retain(|owner| !is_live_capture_owner(owner));
         source_ids.push(live_owner.clone());
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
@@ -287,15 +292,17 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             "checks",
             "reviews",
         ] {
-            transaction
-                .execute(
-                    &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
-                    params![issue_key, live_owner.clone()],
-                )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
+            for previous_live_owner in &previous_live_owners {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE issue_key = ? AND source_id = ?"),
+                        params![issue_key, previous_live_owner],
+                    )
+                    .map_err(|source| MemoryError::DuckDb {
+                        path: config.index_path.clone(),
+                        source,
+                    })?;
+            }
             if had_legacy_live_owner {
                 transaction
                     .execute(

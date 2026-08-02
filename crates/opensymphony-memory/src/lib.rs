@@ -3875,6 +3875,36 @@ Reviews are triggered when you open a pull request for review.
                 [],
             )
             .expect("previous live scope provenance");
+        connection
+            .execute(
+                "INSERT INTO issue_areas (issue_key, area, source_id) VALUES ('COE-123', 'area:old-live', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live area");
+        connection
+            .execute(
+                "INSERT INTO pull_requests (issue_key, number, title, source_id) VALUES ('COE-123', 99, 'old live PR', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live pull request");
+        connection
+            .execute(
+                "INSERT INTO changed_files (issue_key, pr_number, file_path, source_id) VALUES ('COE-123', 99, 'old-live.rs', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live changed file");
+        connection
+            .execute(
+                "INSERT INTO checks (issue_key, pr_number, name, source_id) VALUES ('COE-123', 99, 'old-live-check', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live check");
+        connection
+            .execute(
+                "INSERT INTO reviews (issue_key, pr_number, reviewer, source_id) VALUES ('COE-123', 99, 'old-live-reviewer', '__live_capture__:repo-b')",
+                [],
+            )
+            .expect("previous live review");
         drop(connection);
 
         source.issues[0].project_id = Some("project-live-new".to_string());
@@ -3961,6 +3991,24 @@ Reviews are triggered when you open a pull request for review.
             )
             .expect("registered relation");
         assert_eq!(registered_relation_count, 1);
+        for table in [
+            "issue_areas",
+            "pull_requests",
+            "changed_files",
+            "checks",
+            "reviews",
+        ] {
+            let stale_relation_count: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE issue_key = 'COE-123' AND source_id = '__live_capture__:repo-b'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("stale live relation count");
+            assert_eq!(stale_relation_count, 0, "stale relation table: {table}");
+        }
     }
 
     #[test]
