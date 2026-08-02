@@ -446,6 +446,12 @@ ordinary MCP reads only inspect the existing schema. Code-intelligence lookups
 use the registered canonical repository ID rather than a caller-supplied local
 path.
 
+Managed local OpenHands workers receive the memory endpoint and their
+per-conversation scoped read grant through the worker environment. The
+process-wide server read token is never placed in the shared managed-server
+environment, so one worker cannot bypass its grant by reading that token from a
+shared agent-server process.
+
 `memory serve` exposes the memory command set through a local MCP-style
 Streamable HTTP JSON-RPC endpoint at `/mcp`. CLI commands call that endpoint
 when `OPENSYMPHONY_MEMORY_ENDPOINT` is set; otherwise they use offline direct

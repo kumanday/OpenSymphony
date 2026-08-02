@@ -1085,7 +1085,6 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         build_runtime_transport(
             &runtime,
             managed_local_preparation.tooling,
-            memory_env.as_ref(),
             &linear_worker_env,
         )
         .await?

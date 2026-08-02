@@ -2589,14 +2589,12 @@ fn refresh_rehydration_runtime_envelope(
                     persisted.repository_binding.alias
                 ));
             }
-            None => routing
-                .inventory
-                .values()
-                .find(|entry| entry.identity.id == persisted.repository_binding.repository.id)
-                .ok_or_else(|| {
-                    "persisted repository is absent from the current repository inventory"
-                        .to_owned()
-                })?,
+            None => {
+                return Err(format!(
+                    "persisted repository alias {} is absent from the current repository inventory",
+                    persisted.repository_binding.alias
+                ));
+            }
         };
         refreshed.repository_binding.alias = entry.alias.clone();
         refreshed.repository_binding.repository = entry.identity.clone();
@@ -3007,7 +3005,7 @@ mod tests {
             "cleanup_intent": "workspace_manager_owned"
         }))
         .expect("runtime envelope fixture should decode");
-        let routing: RepositoryRouting = serde_json::from_value(serde_json::json!({
+        let mut routing: RepositoryRouting = serde_json::from_value(serde_json::json!({
             "mode": "project_set",
             "inventory": {
                 "repo-a": {
@@ -3053,6 +3051,15 @@ mod tests {
         assert_eq!(refreshed.inventory_generation, "new-inventory");
         assert_eq!(refreshed.policy_generation, "new-config");
         assert_ne!(refreshed, persisted);
+
+        routing.inventory.remove("repo-z");
+        let error = super::refresh_rehydration_runtime_envelope(
+            &persisted,
+            &runtime.workflow,
+            Some(&routing),
+        )
+        .expect_err("rehydration must not silently replace a missing persisted alias");
+        assert!(error.contains("persisted repository alias repo-z is absent"));
     }
 
     #[test]

@@ -675,7 +675,6 @@ pub(super) fn build_workspace_manager_config_with_retention(
 pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
     prepared_tooling: Option<LocalServerTooling>,
-    memory_env: Option<&RuntimeMemoryEnv>,
     worker_env: &BTreeMap<String, String>,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport_environment = BlockedEnvironment::new(
@@ -728,9 +727,6 @@ pub(super) async fn build_runtime_transport(
             OPENHANDS_CONVERSATIONS_PATH_ENV.to_string(),
             conversation_store.active.display().to_string(),
         );
-    }
-    if let Some(memory_env) = memory_env {
-        inject_memory_env(&mut config.extra_env, memory_env);
     }
     config.startup_timeout = Duration::from_millis(local_server.startup_timeout_ms);
     config.probe.path = local_server.readiness_probe_path.clone();
@@ -4902,7 +4898,7 @@ async fn retire_replaced_harness_session_if_durable(
         return Ok(());
     };
     if conversation_manifest_is_codex(&replacement) != target_is_codex
-        || replacement_envelope != expected_envelope
+        || !runtime_envelopes_match_except_binding(expected_envelope, replacement_envelope)
         || replacement_envelope.conversation_binding.as_deref()
             != Some(replacement.conversation_id.as_str())
     {
@@ -4918,6 +4914,17 @@ async fn retire_replaced_harness_session_if_durable(
         checkout_credential_envs,
     )
     .await
+}
+
+fn runtime_envelopes_match_except_binding(
+    expected: &TerminalRuntimeEnvelope,
+    actual: &TerminalRuntimeEnvelope,
+) -> bool {
+    let mut expected = expected.clone();
+    expected.conversation_binding = None;
+    let mut actual = actual.clone();
+    actual.conversation_binding = None;
+    expected == actual
 }
 
 async fn update_codex_conversation_manifest(
@@ -5950,6 +5957,14 @@ mod tests {
         let mut pending_manifest = sample_conversation_manifest("conv-pending");
         pending_manifest.runtime_envelope = Some(pending_envelope);
 
+        assert!(runtime_envelopes_match_except_binding(
+            &envelope,
+            pending_manifest
+                .runtime_envelope
+                .as_ref()
+                .expect("pending envelope should be present")
+        ));
+
         assert!(runtime_envelope_matches_pending_binding(
             Some(&envelope),
             &pending_manifest,
@@ -5960,6 +5975,13 @@ mod tests {
             .as_mut()
             .expect("pending envelope")
             .target_commit = "different-commit".to_owned();
+        assert!(!runtime_envelopes_match_except_binding(
+            &envelope,
+            pending_manifest
+                .runtime_envelope
+                .as_ref()
+                .expect("pending envelope should be present")
+        ));
         assert!(!runtime_envelope_matches_pending_binding(
             Some(&envelope),
             &pending_manifest,
@@ -8913,7 +8935,7 @@ Run the scheduler.
             },
         };
 
-        let error = match build_runtime_transport(&runtime, None, None, &BTreeMap::new()).await {
+        let error = match build_runtime_transport(&runtime, None, &BTreeMap::new()).await {
             Ok(_) => panic!("external targets should reject launcher overrides"),
             Err(error) => error,
         };
