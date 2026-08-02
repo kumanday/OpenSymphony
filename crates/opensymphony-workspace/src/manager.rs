@@ -31,7 +31,10 @@ use super::{
     PromptCaptureDescriptor, PromptCaptureManifest, RunDescriptor, RunManifest, RunStatus,
     SessionContextArtifact, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
     WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
-    models::{AfterCreateBootstrapReceipt, InstructionProvenance, redact_runtime_diagnostic},
+    models::{
+        AfterCreateBootstrapReceipt, InstructionProvenance, SSH_AUTH_SOCK_ENV,
+        redact_runtime_diagnostic,
+    },
     paths::{
         checkout_workspace_key, normalize_absolute_path, resolve_path_within_root,
         sanitize_workspace_key,
@@ -523,6 +526,12 @@ impl WorkspaceManager {
             let _ = fs::remove_dir_all(workspace.workspace_path()).await;
             return Err(error);
         }
+        if after_create.is_some() {
+            // The receipt is the durable ownership handoff for a completed
+            // hook. Preserve its generation if the outer launch future is
+            // cancelled before the remaining verification finishes.
+            staging_cleanup.disarm();
+        }
         if let Err(error) = checkout_operation_with_timeout(
             checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
@@ -750,11 +759,11 @@ impl WorkspaceManager {
             });
         }
         if allow_worker_changes {
-            let ancestry = checkout_operation_with_timeout(
+            let is_ancestor = checkout_operation_with_timeout(
                 checkout_time_remaining(checkout_deadline),
                 workspace.workspace_path(),
                 "verify retained checkout ancestry",
-                self.git(
+                self.git_is_ancestor(
                     workspace.workspace_path(),
                     &[
                         "merge-base",
@@ -764,8 +773,8 @@ impl WorkspaceManager {
                     ],
                 ),
             )
-            .await;
-            if ancestry.is_err() {
+            .await?;
+            if !is_ancestor {
                 return Err(WorkspaceError::CheckoutVerification {
                     path: workspace.workspace_path().to_path_buf(),
                     generation: manifest.generation,
@@ -1321,7 +1330,8 @@ impl WorkspaceManager {
                 detail: "repository credential provider is unavailable".to_owned(),
             });
         }
-        let askpass_path = if let Some(variable) = repository.credential_env.as_deref()
+        let askpass_path = if environment_credential
+            && let Some(variable) = repository.credential_env.as_deref()
             && std::env::var_os(variable).is_some()
         {
             let path = destination
@@ -1362,7 +1372,15 @@ impl WorkspaceManager {
             .arg(&repository.target_branch)
             .arg(&repository.remote)
             .arg(destination);
-        if let Some(variable) = repository.credential_env.as_deref()
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
+        command.env_remove("OPENSYMPHONY_CHECKOUT_CREDENTIAL");
+        if ssh_agent_credential && let Some(value) = std::env::var_os(SSH_AUTH_SOCK_ENV) {
+            command.env(SSH_AUTH_SOCK_ENV, value);
+        }
+        if environment_credential
+            && let Some(variable) = repository.credential_env.as_deref()
             && let Ok(value) = std::env::var(variable)
         {
             command.env("OPENSYMPHONY_CHECKOUT_CREDENTIAL", value);
@@ -1754,6 +1772,58 @@ impl WorkspaceManager {
             });
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    async fn git_is_ancestor(
+        &self,
+        checkout: &Path,
+        args: &[&str],
+    ) -> Result<bool, WorkspaceError> {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(checkout).args(args);
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
+        command.env_remove("GIT_OBJECT_DIRECTORY");
+        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command.env("GIT_NO_REPLACE_OBJECTS", "1");
+        configure_process_group(&mut command);
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
+            .spawn()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: args.first().copied().unwrap_or("git").to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let process_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(process_id);
+        let output =
+            child
+                .wait_with_output()
+                .await
+                .map_err(|source| WorkspaceError::CheckoutOperation {
+                    operation: args.first().copied().unwrap_or("git").to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: source.to_string(),
+                })?;
+        #[cfg(unix)]
+        process_group_guard.disarm();
+        if output.status.success() {
+            return Ok(true);
+        }
+        if output.status.code() == Some(1) {
+            return Ok(false);
+        }
+        Err(WorkspaceError::CheckoutOperation {
+            operation: args.first().copied().unwrap_or("git").to_owned(),
+            path: checkout.to_path_buf(),
+            detail: redact_runtime_diagnostic(&String::from_utf8_lossy(&output.stderr)),
+        })
     }
 
     async fn load_instruction_provenance(
@@ -3456,10 +3526,21 @@ fn workflow_body(bytes: &[u8]) -> Vec<u8> {
 }
 
 async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
+    const MAX_VISITED_DIRECTORIES: usize = 4_096;
+    const MAX_VISITED_ENTRIES: usize = 100_000;
     let mut pending = vec![root.to_path_buf()];
     let mut paths = Vec::new();
     let mut instruction_candidates = 0;
+    let mut visited_directories = 0;
+    let mut visited_entries = 0;
     while let Some(directory) = pending.pop() {
+        visited_directories += 1;
+        if visited_directories > MAX_VISITED_DIRECTORIES {
+            return Err(checkout_verification(
+                root,
+                "instruction discovery exceeded the directory limit",
+            ));
+        }
         let mut entries =
             fs::read_dir(&directory)
                 .await
@@ -3476,6 +3557,13 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                     source,
                 })?
         {
+            visited_entries += 1;
+            if visited_entries > MAX_VISITED_ENTRIES {
+                return Err(checkout_verification(
+                    root,
+                    "instruction discovery exceeded the entry limit",
+                ));
+            }
             let path = entry.path();
             let file_type =
                 entry
@@ -3492,7 +3580,20 @@ async fn discover_agents(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
                 continue;
             }
             if file_type.is_dir() {
-                if !matches!(entry.file_name().to_str(), Some(".git" | ".opensymphony")) {
+                if !matches!(
+                    entry.file_name().to_str(),
+                    Some(
+                        ".git"
+                            | ".opensymphony"
+                            | "node_modules"
+                            | "target"
+                            | "vendor"
+                            | ".venv"
+                            | "__pycache__"
+                            | "build"
+                            | "dist"
+                    )
+                ) {
                     pending.push(path);
                 }
             } else if file_type.is_file()
@@ -3820,6 +3921,7 @@ fn build_shell_command(command: &str) -> Command {
 mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     use super::{
         WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
@@ -3849,6 +3951,32 @@ mod tests {
             error,
             WorkspaceError::InstructionPathEscape { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn discover_agents_prunes_generated_trees() {
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let source = root.path().join("src");
+        tokio::fs::create_dir(&source)
+            .await
+            .expect("source directory should exist");
+        tokio::fs::write(source.join("AGENTS.md"), "source instructions")
+            .await
+            .expect("source instructions should exist");
+        for directory in ["node_modules", "target", "vendor", "dist"] {
+            let nested = root.path().join(directory).join("nested");
+            tokio::fs::create_dir_all(&nested)
+                .await
+                .expect("generated directory should exist");
+            tokio::fs::write(nested.join("AGENTS.md"), "generated instructions")
+                .await
+                .expect("generated instructions should exist");
+        }
+
+        let paths = discover_agents(root.path())
+            .await
+            .expect("instruction discovery should succeed");
+        assert_eq!(paths, vec![PathBuf::from("src/AGENTS.md")]);
     }
 
     #[cfg(unix)]

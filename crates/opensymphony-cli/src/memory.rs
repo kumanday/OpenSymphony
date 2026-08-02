@@ -2384,6 +2384,19 @@ async fn call_memory_tool_with_workspace(
     if is_memory_writer_tool(name) {
         reject_project_set_memory_write(central_config_path, name)?;
     }
+    if name == "memory.context" {
+        let scope = scope_filter_from_mcp(&arguments, false);
+        if workspace_root.is_some()
+            && !scope.all_accessible
+            && scope.project.is_none()
+            && scope.repo.is_none()
+        {
+            return Err(MemoryError::InvalidInput(
+                "strict memory.context requires the worker's project or repository grant"
+                    .to_owned(),
+            ));
+        }
+    }
     if AST_MCP_TOOL_NAMES.contains(&name) && !ast_tools_enabled(config) {
         return Err(MemoryError::InvalidInput(
             "AST code-intelligence tools are disabled".to_string(),
@@ -4444,30 +4457,19 @@ fn resolve_code_intel_config(
     issue: Option<&str>,
 ) -> Result<MemoryConfig, MemoryError> {
     let repo = scope.repo.as_deref().and_then(non_empty);
-    if let Some(repo) = repo.as_deref()
-        && resolve_code_intel_repo(config, Some(repo)).is_ok()
-    {
-        return Ok(config.clone());
-    }
-    let Some(workspace_root) = workspace_root else {
-        return repo
-            .as_deref()
+    let repo_root = if let Some(workspace_root) = workspace_root {
+        let issue = issue.ok_or_else(|| {
+            MemoryError::InvalidInput(
+                "strict code-intelligence requests require `repo` and `issue` scope arguments"
+                    .to_owned(),
+            )
+        })?;
+        find_verified_checkout_for_code_intel(workspace_root, repo.as_deref(), Some(issue))?
+    } else {
+        repo.as_deref()
             .map(|repo| resolve_code_intel_repo(config, Some(repo)))
-            .unwrap_or_else(|| Ok(config.repo_root.clone()))
-            .map(|repo_root| {
-                let mut scoped = config.clone();
-                scoped.repo_root = repo_root;
-                scoped
-            });
+            .unwrap_or_else(|| Ok(config.repo_root.clone()))?
     };
-    let issue = issue.ok_or_else(|| {
-        MemoryError::InvalidInput(
-            "strict code-intelligence requests require `repo` and `issue` scope arguments"
-                .to_owned(),
-        )
-    })?;
-    let repo_root =
-        find_verified_checkout_for_code_intel(workspace_root, repo.as_deref(), Some(issue))?;
     let mut scoped = config.clone();
     scoped.repo_root = repo_root;
     Ok(scoped)
@@ -4647,17 +4649,24 @@ fn env_scope_value(name: &str) -> Option<String> {
 }
 
 fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeFilter {
+    let all_accessible =
+        bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible");
     MemoryScopeFilter {
-        project_set: optional_string_arg(arguments, "projectSet"),
-        project: optional_string_arg(arguments, "project"),
+        project_set: optional_string_arg(arguments, "projectSet").or_else(|| {
+            (!all_accessible)
+                .then(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
+                .flatten()
+        }),
+        project: optional_string_arg(arguments, "project")
+            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT")),
         milestone: optional_string_arg(arguments, "milestone"),
         issue: include_issue
             .then(|| optional_string_arg(arguments, "issue"))
             .flatten(),
-        repo: optional_string_arg(arguments, "repo"),
+        repo: optional_string_arg(arguments, "repo")
+            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO")),
         area: optional_string_arg(arguments, "area"),
-        all_accessible: bool_arg(arguments, "allAccessible")
-            || bool_arg(arguments, "all_accessible"),
+        all_accessible,
     }
 }
 
@@ -5961,11 +5970,12 @@ mod tests {
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
         authorize_memory_request, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
-        call_memory_tool, context_source_from_mcp, find_verified_checkout_for_code_intel,
-        load_memory_config, memory_server_health, memory_server_health_payload,
-        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
+        call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
+        find_verified_checkout_for_code_intel, load_memory_config, memory_server_health,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_config,
+        resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -9243,6 +9253,48 @@ Public memory concept.
         )
         .expect_err("outside repo must be rejected");
         assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn code_intel_config_uses_an_explicit_repository_path_as_its_root() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+        let service = repo.path().join("service");
+        std::fs::create_dir(&service).expect("service directory");
+        let scope = super::MemoryScopeFilter {
+            repo: Some("service".to_owned()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_code_intel_config(&config, &scope, None, None)
+            .expect("explicit repository path should resolve");
+        assert_eq!(
+            resolved.repo_root,
+            service.canonicalize().expect("service should canonicalize")
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_memory_context_requires_a_worker_scope_grant() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+        let error = call_memory_tool_with_workspace(
+            &config,
+            json!({
+                "name": "memory.context",
+                "arguments": { "issue": "COE-549" }
+            }),
+            Some(repo.path()),
+            None,
+            None,
+        )
+        .await
+        .expect_err("strict context must reject an unscoped worker request");
+        assert!(
+            error
+                .to_string()
+                .contains("worker's project or repository grant")
+        );
     }
 
     #[test]
