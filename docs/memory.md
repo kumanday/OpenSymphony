@@ -473,6 +473,12 @@ The rendered artifact/provider contract is owned by `opensymphony_code_intel`;
 memory keeps the legacy `CodeIntelIndex` and `CodeIntelArtifact` surface as an
 adapter around that provider contract instead of requiring code-intelligence
 providers to import memory internals.
+
+Worker-scoped memory access uses a per-run bearer grant bound to the worker's
+project, execution repository, authorized repository set, issue, and checkout
+generation. The grant is held by the worker task and revoked automatically when
+that task finishes, is superseded, or is cancelled; it is not a process-lifetime
+authorization and must not accumulate across retries.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.

@@ -699,6 +699,15 @@ model, and generation envelope from the current central routing inventory before
 creating a replacement conversation. If that envelope differs from the
 persisted run, rehydration stops and leaves the existing conversation intact
 until the checkout is rematerialized or the configuration is reconciled.
+When several configured aliases identify the same repository, recovery first
+preserves and validates the alias recorded in the persisted binding; an alias
+that now resolves to a different repository is rejected rather than silently
+rewritten.
+
+Terminal OpenHands archival uses the retry verification mode for the checkout.
+That mode still requires the recorded generation, repository binding, ancestry,
+and instruction provenance, while permitting ordinary worker commits or dirty
+worktree changes that a terminal worker legitimately left behind.
 
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after

@@ -75,8 +75,12 @@ instruction path/hash/source commit, and verification timestamps. Runtime
 manifests copy this provenance into a terminal envelope. Harness adapters must
 launch with the verified checkout as `cwd`; the current trusted-host
 containment receipt describes process working-directory containment and does
-not claim sandbox isolation. Checkout retention and deletion remain
-`WorkspaceManager` decisions.
+not claim sandbox isolation. During discovery, a directory whose name merely
+resembles a published generation is not enough to authorize deletion: an
+incomplete published generation is swept only when its durable checkout
+manifest (or completed `after_create` receipt) claims the exact path and
+generation. Foreign or malformed generation-shaped directories are preserved.
+Checkout retention and deletion remain `WorkspaceManager` decisions.
 
 ## 4. Workspace directory layout
 

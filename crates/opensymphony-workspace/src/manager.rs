@@ -2938,12 +2938,27 @@ impl WorkspaceManager {
                 );
                 return Ok(Some((handle, manifest)));
             }
-            tracing::warn!(
-                path = %canonical_workspace.display(),
-                "sweeping incomplete published checkout generation without issue ownership"
-            );
-            self.remove_incomplete_published_checkout(&canonical_workspace)
-                .await?;
+            let generation = published_checkout_generation(&canonical_workspace);
+            let has_ownership_marker = match generation.as_deref() {
+                Some(generation) => {
+                    self.published_checkout_ownership_marker(&canonical_workspace, generation)
+                        .await
+                }
+                None => false,
+            };
+            if has_ownership_marker {
+                tracing::warn!(
+                    path = %canonical_workspace.display(),
+                    "sweeping incomplete published checkout generation with an ownership marker"
+                );
+                self.remove_incomplete_published_checkout(&canonical_workspace)
+                    .await?;
+            } else {
+                tracing::warn!(
+                    path = %canonical_workspace.display(),
+                    "preserving generation-shaped directory without an ownership marker"
+                );
+            }
             return Ok(None);
         }
         let raw = match fs::read_to_string(&issue_manifest_path).await {
@@ -3072,6 +3087,24 @@ impl WorkspaceManager {
                 .repository_binding
                 .map(crate::opensymphony_domain::RepositoryBindingOutcome::Resolved),
         }))
+    }
+
+    async fn published_checkout_ownership_marker(
+        &self,
+        workspace_path: &Path,
+        generation: &str,
+    ) -> bool {
+        let path = workspace_path.join(".opensymphony").join("checkout.json");
+        let Ok(raw) = fs::read_to_string(path).await else {
+            return false;
+        };
+        let Ok(manifest) = serde_json::from_str::<CheckoutManifest>(&raw) else {
+            return false;
+        };
+        manifest.schema_version == 1
+            && !manifest.quarantined
+            && manifest.generation == generation
+            && manifest.workspace_path == workspace_path
     }
 
     async fn execute_hook(

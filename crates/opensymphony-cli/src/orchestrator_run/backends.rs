@@ -8,6 +8,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+use super::super::memory::MemoryScopeGrantLease;
 use crate::opensymphony_cli::BlockedEnvironment;
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
@@ -579,7 +580,7 @@ async fn archive_superseded_openhands_conversations(
     let Some(raw) = manager.read_text_artifact(workspace, &path).await? else {
         return Ok(());
     };
-    let checkout = manager.verify_checkout(workspace).await?;
+    let checkout = manager.verify_checkout_for_retry(workspace).await?;
     let Some(manifests) = serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
         .ok()
         .flatten()
@@ -2168,6 +2169,7 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
+            let mut _worker_grant_lease: Option<MemoryScopeGrantLease> = None;
             let worker_memory_env = memory_env.as_ref().map(|memory| {
                 let mut scoped = memory.clone();
                 scoped.project = worker_memory_project(&issue, &memory.project);
@@ -2190,17 +2192,17 @@ impl RuntimeWorkerBackend {
                     .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
                 scoped.authorized_repositories = authorized_repositories.clone();
                 if let Some(grants) = &scoped.scope_grants {
-                    scoped.token = Some(
-                        grants.issue(
-                            &scoped.project,
-                            &scoped.execution_repo,
-                            authorized_repositories,
-                            issue.identifier.as_str(),
-                            runtime_envelope
-                                .as_ref()
-                                .map(|envelope| envelope.checkout_generation.clone()),
-                        ),
+                    let token = grants.issue(
+                        &scoped.project,
+                        &scoped.execution_repo,
+                        authorized_repositories,
+                        issue.identifier.as_str(),
+                        runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.checkout_generation.clone()),
                     );
+                    scoped.token = Some(token.clone());
+                    _worker_grant_lease = Some(MemoryScopeGrantLease::new(grants.clone(), token));
                 }
                 scoped.authorized_repositories_by_project.clear();
                 scoped

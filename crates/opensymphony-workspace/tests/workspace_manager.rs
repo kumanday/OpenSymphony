@@ -911,17 +911,66 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
             .is_some()
     );
     let sweep_root = temp_dir.path().join("sweep-workspaces");
-    let orphan_published_path =
-        sweep_root.join("orphan-generation--0123456789abcdef0123456789abcdef");
-    tokio::fs::create_dir_all(orphan_published_path.join(".opensymphony"))
+    let foreign_published_path =
+        sweep_root.join("foreign-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(&foreign_published_path)
         .await
-        .expect("orphan published generation directory should exist");
+        .expect("foreign published generation directory should exist");
     tokio::fs::write(
-        orphan_published_path.join(".opensymphony/checkout.json"),
-        b"{}",
+        foreign_published_path.join("foreign-data.txt"),
+        b"must survive discovery",
     )
     .await
-    .expect("orphan published checkout marker should be written");
+    .expect("foreign published data should be written");
+    let owned_published_path =
+        sweep_root.join("owned-generation--fedcba9876543210fedcba9876543210");
+    tokio::fs::create_dir_all(owned_published_path.join(".opensymphony"))
+        .await
+        .expect("owned published generation directory should exist");
+    let owned_manifest = json!({
+        "schema_version": 1,
+        "generation": "fedcba9876543210fedcba9876543210",
+        "issue_id": "owned-issue",
+        "identifier": "COE-549-owned",
+        "run_id": "owned-run",
+        "sanitized_workspace_key": "owned-generation",
+        "workspace_path": std::fs::canonicalize(&owned_published_path)
+            .expect("owned published path should canonicalize"),
+        "repository_binding": {
+            "alias": "owned-repository",
+            "repository": {
+                "id": "git:repository:owned",
+                "safe_remote_fingerprint": "sha256:owned"
+            },
+            "config_generation": "config-1",
+            "inventory_generation": "inventory-1"
+        },
+        "remote_fingerprint": "sha256:owned",
+        "target_branch": "develop",
+        "target_commit": "commit-1",
+        "current_branch": "develop",
+        "head": "commit-1",
+        "shallow": false,
+        "clean": true,
+        "instruction": {
+            "path": "AGENTS.md",
+            "content_hash": "sha256:instructions",
+            "source_commit": "commit-1",
+            "source": "configured",
+            "native_discovery_paths": [],
+            "native_discovery_hashes": {}
+        },
+        "created_at": chrono::Utc::now(),
+        "verified_at": chrono::Utc::now(),
+        "quarantined": false,
+        "quarantine_reason": null
+    });
+    tokio::fs::write(
+        owned_published_path.join(".opensymphony/checkout.json"),
+        serde_json::to_vec_pretty(&owned_manifest).expect("owned checkout marker should encode"),
+    )
+    .await
+    .expect("owned published checkout marker should be written");
     let sweep_manager = WorkspaceManager::new(manager_config(
         &sweep_root,
         HookConfig::default(),
@@ -931,10 +980,14 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     sweep_manager
         .list_all_workspaces()
         .await
-        .expect("workspace discovery should sweep orphan generations");
+        .expect("workspace discovery should inspect generation-shaped directories");
     assert!(
-        !orphan_published_path.exists(),
-        "orphan published generations should be swept during discovery"
+        foreign_published_path.exists(),
+        "foreign generation-shaped directories should survive discovery"
+    );
+    assert!(
+        !owned_published_path.exists(),
+        "owned incomplete published generations should be swept during discovery"
     );
 }
 

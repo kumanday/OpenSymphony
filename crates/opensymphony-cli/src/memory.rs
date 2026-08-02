@@ -1986,6 +1986,13 @@ impl MemoryScopeGrantRegistry {
         token
     }
 
+    fn revoke(&self, token: &str) {
+        self.grants
+            .write()
+            .expect("memory grant registry poisoned")
+            .remove(token);
+    }
+
     fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
         token.and_then(|token| {
             self.grants
@@ -1994,6 +2001,23 @@ impl MemoryScopeGrantRegistry {
                 .get(token)
                 .cloned()
         })
+    }
+}
+
+pub(crate) struct MemoryScopeGrantLease {
+    registry: MemoryScopeGrantRegistry,
+    token: String,
+}
+
+impl MemoryScopeGrantLease {
+    pub(crate) fn new(registry: MemoryScopeGrantRegistry, token: String) -> Self {
+        Self { registry, token }
+    }
+}
+
+impl Drop for MemoryScopeGrantLease {
+    fn drop(&mut self) {
+        self.registry.revoke(&self.token);
     }
 }
 
@@ -12664,6 +12688,25 @@ Public memory concept.
             &grant,
         )
         .expect("code scope should remain bound to the worker issue");
+    }
+
+    #[test]
+    fn worker_memory_grant_lease_revokes_bearer_on_drop() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let token = registry.issue(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+        assert!(registry.get(Some(&token)).is_some());
+
+        let lease = super::MemoryScopeGrantLease::new(registry.clone(), token.clone());
+        assert!(registry.get(Some(&token)).is_some());
+        drop(lease);
+
+        assert!(registry.get(Some(&token)).is_none());
     }
 
     #[test]

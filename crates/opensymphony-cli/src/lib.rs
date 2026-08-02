@@ -2581,13 +2581,23 @@ fn refresh_rehydration_runtime_envelope(
 ) -> Result<TerminalRuntimeEnvelope, String> {
     let mut refreshed = persisted.clone();
     if let Some(routing) = routing {
-        let entry = routing
-            .inventory
-            .values()
-            .find(|entry| entry.identity.id == persisted.repository_binding.repository.id)
-            .ok_or_else(|| {
-                "persisted repository is absent from the current repository inventory".to_owned()
-            })?;
+        let entry = match routing.inventory.get(&persisted.repository_binding.alias) {
+            Some(entry) if entry.identity.id == persisted.repository_binding.repository.id => entry,
+            Some(_) => {
+                return Err(format!(
+                    "persisted repository alias {} resolves to a different current repository",
+                    persisted.repository_binding.alias
+                ));
+            }
+            None => routing
+                .inventory
+                .values()
+                .find(|entry| entry.identity.id == persisted.repository_binding.repository.id)
+                .ok_or_else(|| {
+                    "persisted repository is absent from the current repository inventory"
+                        .to_owned()
+                })?,
+        };
         refreshed.repository_binding.alias = entry.alias.clone();
         refreshed.repository_binding.repository = entry.identity.clone();
         refreshed.repository_binding.config_generation = routing.config_generation.clone();
@@ -2965,7 +2975,7 @@ mod tests {
         let runtime = sample_doctor_runtime();
         let persisted: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
             "repository_binding": {
-                "alias": "repo",
+                "alias": "repo-z",
                 "repository": {
                     "id": "git:repository:repo",
                     "safe_remote_fingerprint": "sha256:old"
@@ -3000,8 +3010,15 @@ mod tests {
         let routing: RepositoryRouting = serde_json::from_value(serde_json::json!({
             "mode": "project_set",
             "inventory": {
-                "repo": {
-                    "alias": "repo",
+                "repo-a": {
+                    "alias": "repo-a",
+                    "identity": {
+                        "id": "git:repository:repo",
+                        "safe_remote_fingerprint": "sha256:new"
+                    }
+                },
+                "repo-z": {
+                    "alias": "repo-z",
                     "identity": {
                         "id": "git:repository:repo",
                         "safe_remote_fingerprint": "sha256:new"
@@ -3031,6 +3048,7 @@ mod tests {
                 .as_str(),
             "sha256:new"
         );
+        assert_eq!(refreshed.repository_binding.alias, "repo-z");
         assert_eq!(refreshed.config_generation, "new-config");
         assert_eq!(refreshed.inventory_generation, "new-inventory");
         assert_eq!(refreshed.policy_generation, "new-config");
