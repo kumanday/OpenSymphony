@@ -1039,6 +1039,8 @@ pub struct MemoryScopeFilter {
     pub area: Option<String>,
     #[serde(default)]
     pub all_accessible: bool,
+    #[serde(skip)]
+    pub project_id_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3368,6 +3370,24 @@ Reviews are triggered when you open a pull request for review.
         };
 
         assert!(indexed_issue_matches_scope(&config, &issue, &scope));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                project: Some("project one".to_string()),
+                project_id_only: true,
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                project: Some("project-1".to_string()),
+                project_id_only: true,
+                ..MemoryScopeFilter::default()
+            }
+        ));
         assert!(indexed_issue_matches_scope(
             &config,
             &IndexedIssue {

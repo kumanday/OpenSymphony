@@ -85,7 +85,9 @@ generation. Foreign or malformed generation-shaped directories are preserved.
 Checkout retention and deletion remain `WorkspaceManager` decisions. Generated
 tree instruction pruning asks Git only for tracked `AGENTS.md` paths, so a
 large vendored tree with unrelated tracked files does not become an unbounded
-instruction-discovery traversal.
+instruction-discovery traversal. If that tracked-instruction probe cannot run or
+exits unsuccessfully, discovery fails closed instead of treating the failure as
+an empty instruction result.
 
 ## 4. Workspace directory layout
 

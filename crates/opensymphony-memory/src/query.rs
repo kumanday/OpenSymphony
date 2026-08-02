@@ -1014,7 +1014,14 @@ fn indexed_issue_matches_scope(
         (KnowledgeScopeKind::Project, scope.project.as_ref()),
     ] {
         if let Some(requested) = requested.and_then(|value| normalize_optional(value))
-            && !issue_scope_matches_request(config, issue, requested_repo.as_deref(), kind, &requested)
+            && !issue_scope_matches_request(
+                config,
+                issue,
+                requested_repo.as_deref(),
+                kind,
+                &requested,
+                scope.project_id_only,
+            )
         {
             return false;
         }
@@ -1033,7 +1040,7 @@ fn indexed_issue_matches_scope(
         return false;
     }
     if let Some(project) = scope.project.as_ref().and_then(|value| normalize_optional(value))
-        && !indexed_issue_matches_project(issue, &project)
+        && !indexed_issue_matches_project(issue, &project, scope.project_id_only)
     {
         return false;
     }
@@ -1050,13 +1057,20 @@ fn indexed_issue_matches_scope(
     true
 }
 
-fn indexed_issue_matches_project(issue: &IndexedIssue, project: &str) -> bool {
+fn indexed_issue_matches_project(
+    issue: &IndexedIssue,
+    project: &str,
+    project_id_only: bool,
+) -> bool {
     let has_explicit_project_scope = issue
         .scope_refs
         .iter()
         .any(|scope| scope.kind == KnowledgeScopeKind::Project);
     has_explicit_project_scope
-        && indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Project, project)
+        && issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project
+                && scope_ref_matches(scope, project, project_id_only)
+        })
 }
 
 fn indexed_issue_matches_scope_ref(
@@ -1080,6 +1094,7 @@ fn issue_scope_matches_request(
     repository_id: Option<&str>,
     kind: KnowledgeScopeKind,
     requested: &str,
+    project_id_only: bool,
 ) -> bool {
     if let Some(repository_id) = repository_id {
         let owned_scopes = issue
@@ -1091,11 +1106,11 @@ fn issue_scope_matches_request(
         if !owned_scopes.is_empty() {
             return owned_scopes.iter().any(|scope| {
                 scope.kind == kind
-                    && (scope.id.eq_ignore_ascii_case(requested)
-                        || scope
-                            .label
-                            .as_deref()
-                            .is_some_and(|label| label.eq_ignore_ascii_case(requested)))
+                    && scope_ref_matches(
+                        scope,
+                        requested,
+                        kind == KnowledgeScopeKind::Project && project_id_only,
+                    )
             });
         }
         if let Some(source) = config.repository_sources.get(repository_id)
@@ -1108,11 +1123,11 @@ fn issue_scope_matches_request(
                 .any(|id| id.eq_ignore_ascii_case(requested))
                 && issue.scope_refs.iter().any(|scope| {
                     scope.kind == kind
-                        && (scope.id.eq_ignore_ascii_case(requested)
-                            || scope
-                                .label
-                                .as_deref()
-                                .is_some_and(|label| label.eq_ignore_ascii_case(requested)))
+                        && scope_ref_matches(
+                            scope,
+                            requested,
+                            kind == KnowledgeScopeKind::Project && project_id_only,
+                        )
                 });
         }
     }
@@ -1121,12 +1136,21 @@ fn issue_scope_matches_request(
         .iter()
         .any(|scope| {
             scope.kind == kind
-                && (scope.id.eq_ignore_ascii_case(requested)
-                    || scope
-                        .label
-                        .as_deref()
-                        .is_some_and(|label| label.eq_ignore_ascii_case(requested)))
+                && scope_ref_matches(
+                    scope,
+                    requested,
+                    kind == KnowledgeScopeKind::Project && project_id_only,
+                )
         })
+}
+
+fn scope_ref_matches(scope: &KnowledgeScope, requested: &str, id_only: bool) -> bool {
+    scope.id.eq_ignore_ascii_case(requested)
+        || (!id_only
+            && scope
+                .label
+                .as_deref()
+                .is_some_and(|label| label.eq_ignore_ascii_case(requested)))
 }
 
 fn issue_source_belongs_to_repository(

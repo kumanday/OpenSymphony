@@ -561,9 +561,17 @@ async fn strict_conversation_manifest_is_bound(
     let Some(conversation_envelope) = manifest.runtime_envelope.as_ref() else {
         return Ok(false);
     };
-    Ok(conversation_envelope == run_envelope
-        && conversation_envelope.conversation_binding.as_deref()
-            == Some(manifest.conversation_id.as_str()))
+    if conversation_envelope != run_envelope
+        || conversation_envelope.conversation_binding.as_deref()
+            != Some(manifest.conversation_id.as_str())
+    {
+        return Ok(false);
+    }
+    workspace_manager
+        .verify_runtime_envelope_for_retry(workspace, conversation_envelope)
+        .await
+        .map(|_| true)
+        .map_err(RunCommandError::from)
 }
 
 fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool {

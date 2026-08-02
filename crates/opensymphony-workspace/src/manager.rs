@@ -4052,7 +4052,7 @@ async fn discover_agents_with_credentials(
                 );
                 if generated_tree
                     && let Ok(relative) = path.strip_prefix(root)
-                    && !tracked_instruction_tree(root, relative, checkout_credential_envs).await
+                    && !tracked_instruction_tree(root, relative, checkout_credential_envs).await?
                 {
                     continue;
                 }
@@ -4080,7 +4080,7 @@ async fn tracked_instruction_tree(
     root: &Path,
     relative: &Path,
     checkout_credential_envs: &BTreeSet<String>,
-) -> bool {
+) -> Result<bool, WorkspaceError> {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -4093,8 +4093,17 @@ async fn tracked_instruction_tree(
     command.env_remove("GIT_OBJECT_DIRECTORY");
     command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
     command.env("GIT_NO_REPLACE_OBJECTS", "1");
-    let output = command.output().await;
-    output.is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+    let output = command
+        .output()
+        .await
+        .map_err(|_| checkout_verification(root, "tracked instruction probe failed"))?;
+    if !output.status.success() {
+        return Err(checkout_verification(
+            root,
+            "tracked instruction probe exited unsuccessfully",
+        ));
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 async fn read_child_pipe<R>(pipe: Option<R>) -> io::Result<Vec<u8>>
@@ -4470,6 +4479,13 @@ mod tests {
     #[tokio::test]
     async fn discover_agents_prunes_generated_trees() {
         let root = tempfile::tempdir().expect("checkout root should exist");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init should launch");
+        assert!(status.success(), "git init should succeed");
         let source = root.path().join("src");
         tokio::fs::create_dir(&source)
             .await
@@ -4556,7 +4572,25 @@ mod tests {
                 &std::collections::BTreeSet::new(),
             )
             .await
+            .expect("tracked instruction probe should succeed")
         );
+    }
+
+    #[tokio::test]
+    async fn discover_agents_surfaces_tracked_instruction_probe_failures() {
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let tracked = root.path().join("vendor").join("AGENTS.md");
+        tokio::fs::create_dir_all(tracked.parent().expect("tracked parent should exist"))
+            .await
+            .expect("tracked parent should exist");
+        tokio::fs::write(&tracked, "tracked vendor instructions")
+            .await
+            .expect("tracked instructions should exist");
+
+        let error = discover_agents(root.path())
+            .await
+            .expect_err("a failed tracked-instruction probe must be surfaced");
+        assert!(error.to_string().contains("tracked instruction probe"));
     }
 
     #[cfg(unix)]

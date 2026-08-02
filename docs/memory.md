@@ -480,13 +480,15 @@ memory keeps the legacy `CodeIntelIndex` and `CodeIntelArtifact` surface as an
 adapter around that provider contract instead of requiring code-intelligence
 providers to import memory internals.
 
-Worker-scoped memory access uses a per-run bearer grant bound to the worker's
-project, execution repository, authorized repository set, issue, and checkout
-generation. The grant is held by the worker task and revoked automatically when
-that task finishes, is superseded, or is cancelled; it is not a process-lifetime
-authorization and must not accumulate across retries. This project scope applies
-to direct `memory.show` capsule reads as well as search, context, brief, related,
-docs, and status tools.
+Worker-scoped memory access uses a stable per-issue bearer grant bound to the
+worker's project, execution repository, authorized repository set, issue, and
+checkout generation. Retry and recovery refresh that registry entry in place so
+the default reusable OpenHands conversation retains its MCP bearer while its
+verified checkout scope changes. The grant is server-local, non-persisted, and
+replaced with the latest verified scope; it must not become a process-wide
+authorization. This project scope applies to direct `memory.show` capsule reads
+as well as search, context, brief, related, docs, and status tools, and worker
+project matching uses canonical project IDs rather than display labels.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.

@@ -3602,7 +3602,7 @@ async fn call_memory_tool_with_workspace(
         reject_project_set_memory_write(central_config_path, name)?;
     }
     if name == "memory.context" {
-        let scope = scope_filter_from_mcp(config, &arguments, false)?;
+        let scope = worker_scope_filter_from_mcp(config, &arguments, false, worker_grant)?;
         if workspace_root.is_some()
             && !scope.all_accessible
             && scope.project.is_none()
@@ -3627,7 +3627,7 @@ async fn call_memory_tool_with_workspace(
             && (bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")))
     {
-        let mut scope = scope_filter_from_mcp(config, &arguments, true)?;
+        let mut scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
         if workspace_root.is_none()
             && scope.repo.is_none()
             && (scope.project.is_some() || scope.project_set.is_some())
@@ -3657,7 +3657,8 @@ async fn call_memory_tool_with_workspace(
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            let mut context_scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let mut context_scope =
+                worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             context_scope.issue = None;
             if context_scope.repo.is_none()
                 && (context_scope.project.is_some() || context_scope.project_set.is_some())
@@ -3678,7 +3679,7 @@ async fn call_memory_tool_with_workspace(
             let source = context_source_from_mcp(&arguments);
             let context_config =
                 memory_config_for_repository(config, options.scope.repo.as_deref())?;
-            let scope = scope_filter_from_mcp(config, &arguments, false)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, false, worker_grant)?;
             let mut text = context_for_issue_with_options_and_scope(
                 &context_config,
                 &source,
@@ -3692,7 +3693,8 @@ async fn call_memory_tool_with_workspace(
                     Some(code_config) => code_config,
                     None => memory_config_for_code_intel_scope(config, &arguments)?,
                 };
-                let mut code_scope = scope_filter_from_mcp(config, &arguments, true)?;
+                let mut code_scope =
+                    worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
                 if code_scope.repo.is_none()
                     && (code_scope.project.is_some() || code_scope.project_set.is_some())
                 {
@@ -3712,14 +3714,14 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.search" => {
             let query = required_string_arg(&arguments, "query")?;
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             let results =
                 search_with_scope(config, &query, usize_arg(&arguments, "limit", 10), &scope)?;
             Ok(json!({ "results": search_results_json(config, &results) }))
         }
         "memory.related" => {
             let limit = usize_arg(&arguments, "limit", 10);
-            let scope = scope_filter_from_mcp(config, &arguments, false)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, false, worker_grant)?;
             let results = if let Some(issue) = optional_string_arg(&arguments, "issue") {
                 related_by_issue_with_scope(config, &issue, limit, &scope)?
             } else if let Some(area) = optional_string_arg(&arguments, "area") {
@@ -3740,19 +3742,19 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.brief" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            let scope = brief_scope_filter(config, &arguments)?;
+            let scope = brief_scope_filter_for_worker(config, &arguments, worker_grant)?;
             Ok(mcp_text(brief_with_scope(config, &issue, &scope)?))
         }
         "memory.show" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             Ok(mcp_text(load_issue_capsule_with_scope(
                 config, &issue, &scope,
             )?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             let docs_config = memory_config_for_docs_scope(config, &scope, &area)?;
             Ok(mcp_text(docs_for_area_with_scope(
                 &docs_config,
@@ -3761,7 +3763,7 @@ async fn call_memory_tool_with_workspace(
             )?))
         }
         "memory.status" => {
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             let effective_scope = if scope.all_accessible
                 && (scope.project_set.is_some() || scope.project.is_some() || scope.repo.is_some())
             {
@@ -3976,7 +3978,7 @@ async fn call_code_graph_context_tool(
 ) -> Result<Value, MemoryError> {
     let strict_checkout = worker_grant.is_some();
     let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
-    let mut scope = scope_filter_from_mcp(&config, &arguments, true)?;
+    let mut scope = worker_scope_filter_from_mcp(&config, &arguments, true, worker_grant)?;
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = optional_string_arg(&arguments, "repository")
             .or_else(|| optional_string_arg(&arguments, "repo"))
@@ -6532,6 +6534,7 @@ where
         ),
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
+        project_id_only: false,
     }
 }
 
@@ -6620,6 +6623,17 @@ fn scope_filter_from_mcp(
     scope_filter_from_mcp_with_env(config, arguments, include_issue, env_scope_value)
 }
 
+fn worker_scope_filter_from_mcp(
+    config: &MemoryConfig,
+    arguments: &Value,
+    include_issue: bool,
+    worker_grant: Option<&MemoryScopeGrant>,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let mut scope = scope_filter_from_mcp(config, arguments, include_issue)?;
+    scope.project_id_only = worker_grant.is_some();
+    Ok(scope)
+}
+
 fn scope_filter_from_mcp_with_env<F>(
     config: &MemoryConfig,
     arguments: &Value,
@@ -6653,6 +6667,7 @@ where
         }),
         area: optional_string_arg(arguments, "area"),
         all_accessible,
+        project_id_only: false,
     };
     if !scope.all_accessible
         && scope.project_set.is_none()
@@ -6676,11 +6691,20 @@ where
     Ok(scope)
 }
 
+#[cfg(test)]
 fn brief_scope_filter(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<MemoryScopeFilter, MemoryError> {
-    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    brief_scope_filter_for_worker(config, arguments, None)
+}
+
+fn brief_scope_filter_for_worker(
+    config: &MemoryConfig,
+    arguments: &Value,
+    worker_grant: Option<&MemoryScopeGrant>,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let scope = worker_scope_filter_from_mcp(config, arguments, false, worker_grant)?;
     if scope.all_accessible
         || scope.project_set.is_some()
         || scope.project.is_some()
