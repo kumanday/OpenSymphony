@@ -112,7 +112,17 @@ fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<P
         }
     };
     if indexed.capsule_path.is_absolute() {
-        add_path(&mut paths, indexed.capsule_path.clone());
+        if let Ok(resolved_path) = indexed.capsule_path.canonicalize()
+            && config
+                .repository_sources
+                .values()
+                .map(|source| &source.root)
+                .chain(std::iter::once(&config.memory_root))
+                .filter_map(|root| root.canonicalize().ok())
+                .any(|root| resolved_path.starts_with(root))
+        {
+            add_path(&mut paths, resolved_path);
+        }
     } else {
         let mut owning_repositories = indexed
             .source_refs

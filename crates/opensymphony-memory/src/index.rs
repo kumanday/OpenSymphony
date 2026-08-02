@@ -2845,7 +2845,7 @@ pub fn merge_legacy_code_index(
         return Ok(());
     }
     let Some(source_connection) = open_existing_index_read_only(source_config)? else {
-        return Ok(());
+        return withdraw_code_repository(config, canonical_repo_id);
     };
     let tables: &[(&str, &[&str])] = &[
         (
@@ -3135,7 +3135,8 @@ pub fn merge_legacy_code_index(
         tables_to_copy.push((*table, columns.join(", ")));
     }
     if tables_to_copy.is_empty() {
-        return Ok(());
+        drop(source_connection);
+        return withdraw_code_repository(config, canonical_repo_id);
     }
 
     let mut connection = open_index(config)?;
@@ -3161,6 +3162,19 @@ pub fn merge_legacy_code_index(
             path: config.index_path.clone(),
             source,
         })?;
+        for (table, _) in tables {
+            transaction
+                .execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE repo_id = ? OR repo_id = ?"
+                    ),
+                    params![canonical_repo_id, legacy_repo_id],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
         for (table, columns) in &tables_to_copy {
             transaction
                 .execute(
@@ -5453,6 +5467,55 @@ mod index_tests {
             )
             .expect("imported code symbols");
         assert!(symbol_count > 0);
+        drop(connection);
+
+        let source_connection = open_index(&source_config).expect("source index");
+        migrate_index(&source_connection).expect("source index schema");
+        for table in [
+            "code_documents",
+            "code_document_revisions",
+            "code_symbols",
+            "code_edges",
+            "code_edge_revisions",
+            "code_diagnostics",
+            "code_diagnostic_revisions",
+        ] {
+            source_connection
+                .execute(
+                    &format!("DELETE FROM {table} WHERE repo_id = ?"),
+                    [legacy_repo_id.as_str()],
+                )
+                .expect("remove legacy code rows");
+        }
+        drop(source_connection);
+
+        merge_legacy_code_index(
+            &config,
+            &source_config,
+            &legacy_repo_id,
+            "github.com/team/repo",
+        )
+        .expect("empty legacy refresh withdraws code rows");
+
+        let connection = open_existing_index_read_only(&config)
+            .expect("catalog index should reopen after withdrawal")
+            .expect("catalog index exists after withdrawal");
+        let remaining_documents: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_documents WHERE repo_id = 'github.com/team/repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("remaining imported documents");
+        let remaining_symbols: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM code_symbols WHERE repo_id = 'github.com/team/repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("remaining imported symbols");
+        assert_eq!(remaining_documents, 0);
+        assert_eq!(remaining_symbols, 0);
     }
 
     #[test]

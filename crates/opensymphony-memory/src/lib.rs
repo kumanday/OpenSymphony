@@ -3969,6 +3969,45 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn absolute_capsule_paths_outside_allowed_roots_fall_back_to_indexed_body() {
+        let repo = TempDir::new().expect("catalog repo");
+        let outside = TempDir::new().expect("outside root");
+        let config = config_for(repo.path());
+        let outside_path = outside.path().join("secret.md");
+        fs::write(&outside_path, "untrusted file").expect("outside file");
+        let connection = open_index(&config).expect("index");
+        migrate_index(&connection).expect("index schema");
+        connection
+            .execute(
+                "INSERT INTO issues (issue_key, title, labels_json, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, scope_refs_json, source_refs_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    "COE-558",
+                    "Absolute path",
+                    "[]",
+                    "not_archived",
+                    outside_path.to_string_lossy().to_string(),
+                    "private",
+                    "hash",
+                    0_i64,
+                    "pending",
+                    "Indexed safe body",
+                    "2026-08-01T00:00:00Z",
+                    "issues/COE-558",
+                    "[]",
+                    "[]",
+                    "[]",
+                ],
+            )
+            .expect("indexed issue");
+        drop(connection);
+
+        assert_eq!(
+            load_issue_capsule(&config, "COE-558").expect("indexed fallback body"),
+            "Indexed safe body"
+        );
+    }
+
+    #[test]
     fn docs_sync_omits_private_capsule_links_for_public_docs() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
