@@ -1028,6 +1028,14 @@ impl RuntimeWorkspaceBackend {
                         }
                     }
                     Ok(manifest) => {
+                        archive_superseded_harness_sessions(
+                            &self.manager,
+                            &handle,
+                            self.openhands_conversation_store.as_ref(),
+                            &self.codex_bin,
+                            self.manager.checkout_credential_envs(),
+                        )
+                        .await?;
                         if !removes_workspace {
                             self.manager
                                 .cleanup(&handle, IssueLifecycleState::Terminal)
@@ -1055,14 +1063,6 @@ impl RuntimeWorkspaceBackend {
                                     .to_owned(),
                             ));
                         }
-                        archive_superseded_harness_sessions(
-                            &self.manager,
-                            &handle,
-                            self.openhands_conversation_store.as_ref(),
-                            &self.codex_bin,
-                            self.manager.checkout_credential_envs(),
-                        )
-                        .await?;
                         if let Some(store) = self.openhands_conversation_store.as_ref() {
                             match store.move_conversation_to(
                                 manifest.conversation_id.as_str(),
@@ -2240,6 +2240,11 @@ impl RuntimeWorkerBackend {
             let worker_memory_env = memory_env.as_ref().map(|memory| {
                 let mut scoped = memory.clone();
                 scoped.project = worker_memory_project(&issue, &memory.project);
+                // Worker requests carry an issue-specific project and repository grant.
+                // Do not inherit the central project-set scope alongside that grant: the
+                // memory server treats project-set plus a different explicit project as a
+                // conflicting scope and rejects otherwise authorized reads.
+                scoped.project_set = None;
                 scoped.execution_repo = runtime_envelope
                     .as_ref()
                     .map(|envelope| envelope.repository_binding.repository.id.to_string())

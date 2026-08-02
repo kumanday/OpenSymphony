@@ -116,6 +116,17 @@ fn resolve_tracker<E: Environment>(
             .map(|id| vec![id.trim().to_owned()])
             .unwrap_or_default(),
     };
+    if let (Some(project_id), Some(first_project_id)) =
+        (tracker.project_id.as_deref(), project_ids.first())
+    {
+        let project_id = require_literal(Some(project_id), "tracker.project_id")?;
+        if project_id != *first_project_id {
+            return Err(WorkflowConfigError::InvalidField {
+                field: "tracker.project_id",
+                message: "must match the first entry in tracker.project_ids".to_owned(),
+            });
+        }
+    }
     let project_slugs = match tracker.project_slugs.as_deref() {
         Some([]) => {
             return Err(WorkflowConfigError::MissingRequiredField {

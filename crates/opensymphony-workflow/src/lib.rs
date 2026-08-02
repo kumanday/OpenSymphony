@@ -173,6 +173,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_conflicting_legacy_and_vector_tracker_project_ids() {
+        let source = "---\ntracker:\n  kind: linear\n  project_id: project-a\n  project_slug: sample-project\n  project_ids: [project-b]\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nPrompt\n";
+        let workflow =
+            WorkflowDefinition::parse(source).expect("conflicting project workflow parses");
+        let error = workflow
+            .resolve(
+                Path::new("/repo"),
+                &env([("LINEAR_API_KEY", "linear-token")]),
+            )
+            .expect_err("conflicting singular and vector project IDs must be rejected");
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField { field, .. } if field == "tracker.project_id"
+        ));
+    }
+
+    #[test]
     fn parses_workflow_without_front_matter() {
         let workflow = WorkflowDefinition::parse("\n\nPrompt only\n")
             .expect("prompt-only workflow should parse");
