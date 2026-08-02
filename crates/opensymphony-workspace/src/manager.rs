@@ -120,6 +120,55 @@ struct StagingCleanupGuard {
     paths: Vec<PathBuf>,
 }
 
+async fn replace_staged_path(temporary: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, destination).await
+    }
+
+    #[cfg(windows)]
+    {
+        let temporary = temporary.to_path_buf();
+        let destination = destination.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use std::os::windows::ffi::OsStrExt;
+
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn MoveFileExW(existing_name: *const u16, new_name: *const u16, flags: u32) -> i32;
+            }
+
+            const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+            const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+            let existing = temporary
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let replacement = destination
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            // SAFETY: both paths are NUL-terminated UTF-16 buffers owned for the call.
+            let replaced = unsafe {
+                MoveFileExW(
+                    existing.as_ptr(),
+                    replacement.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if replaced == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("manifest replacement task failed: {error}")))?
+    }
+}
+
 impl StagingCleanupGuard {
     fn new(path: PathBuf) -> Self {
         Self { paths: vec![path] }
@@ -540,11 +589,13 @@ impl WorkspaceManager {
         )
         .await
         {
-            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
+            self.handle_receipt_owned_checkout_failure(&workspace, &error)
+                .await;
             return Err(error);
         }
         if let Err(error) = self.bootstrap_workspace_layout(&workspace).await {
-            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
+            self.handle_receipt_owned_checkout_failure(&workspace, &error)
+                .await;
             return Err(error);
         }
 
@@ -583,13 +634,15 @@ impl WorkspaceManager {
             )
             .await
         {
-            let _ = fs::remove_dir_all(workspace.workspace_path()).await;
+            self.handle_receipt_owned_checkout_failure(&workspace, &error)
+                .await;
             return Err(error);
         }
         let issue_manifest = match self.upsert_issue_manifest(issue, &workspace).await {
             Ok(manifest) => manifest,
             Err(error) => {
-                let _ = fs::remove_dir_all(workspace.workspace_path()).await;
+                self.handle_receipt_owned_checkout_failure(&workspace, &error)
+                    .await;
                 return Err(error);
             }
         };
@@ -601,7 +654,8 @@ impl WorkspaceManager {
         )
         .await
         {
-            self.remove_published_checkout(&workspace).await;
+            self.handle_receipt_owned_checkout_failure(&workspace, &error)
+                .await;
             return Err(error);
         }
         staging_cleanup.disarm();
@@ -1290,8 +1344,29 @@ impl WorkspaceManager {
             })
     }
 
-    async fn remove_published_checkout(&self, workspace: &WorkspaceHandle) {
-        let _ = fs::remove_dir_all(workspace.workspace_path()).await;
+    async fn handle_receipt_owned_checkout_failure(
+        &self,
+        workspace: &WorkspaceHandle,
+        error: &WorkspaceError,
+    ) {
+        if matches!(
+            &error,
+            WorkspaceError::CheckoutVerification { .. }
+                | WorkspaceError::InstructionPathEscape { .. }
+                | WorkspaceError::MissingInstruction { .. }
+                | WorkspaceError::ManagedPathSymlink { .. }
+                | WorkspaceError::WorkspacePathSymlink { .. }
+                | WorkspaceError::WorkspaceOwnershipConflict { .. }
+        ) && let Err(quarantine_error) = self
+            .quarantine_checkout_path(workspace.workspace_path(), &error.to_string())
+            .await
+        {
+            tracing::warn!(
+                path = %workspace.workspace_path().display(),
+                %quarantine_error,
+                "failed to quarantine invalid receipt-owned checkout; preserving it for recovery"
+            );
+        }
     }
 
     async fn remove_incomplete_published_checkout(
@@ -3299,7 +3374,7 @@ impl WorkspaceManager {
             let _ = fs::remove_file(&temporary_path).await;
             return Err(WorkspaceError::WriteManifest { path, source });
         }
-        if let Err(source) = fs::rename(&temporary_path, &path).await {
+        if let Err(source) = replace_staged_path(&temporary_path, &path).await {
             let _ = fs::remove_file(&temporary_path).await;
             return Err(WorkspaceError::WriteManifest { path, source });
         }
@@ -3347,7 +3422,7 @@ impl WorkspaceManager {
             let _ = fs::remove_file(&temporary_path).await;
             return Err(WorkspaceError::WriteArtifact { path, source });
         }
-        if let Err(source) = fs::rename(&temporary_path, &path).await {
+        if let Err(source) = replace_staged_path(&temporary_path, &path).await {
             let _ = fs::remove_file(&temporary_path).await;
             return Err(WorkspaceError::WriteArtifact { path, source });
         }

@@ -246,13 +246,19 @@ struct DoctorWorkflowEnvironment {
 
 impl Environment for DoctorWorkflowEnvironment {
     fn get(&self, name: &str) -> Option<String> {
-        if self.blocked.contains(name) {
+        if self
+            .blocked
+            .iter()
+            .any(|blocked| environment_variable_names_equal(blocked, name))
+        {
             return None;
         }
         env::var_os(name)
             .map(|value| value.to_string_lossy().into_owned())
             .or_else(|| {
-                if self.fallback_linear_api_key && name == "LINEAR_API_KEY" {
+                if self.fallback_linear_api_key
+                    && environment_variable_names_equal(name, "LINEAR_API_KEY")
+                {
                     Some("doctor-linear-disabled-placeholder".to_string())
                 } else {
                     None
@@ -2705,7 +2711,11 @@ pub(crate) struct BlockedEnvironment<E> {
 
 impl<E: Environment> Environment for BlockedEnvironment<E> {
     fn get(&self, name: &str) -> Option<String> {
-        if self.blocked.contains(name) {
+        if self
+            .blocked
+            .iter()
+            .any(|blocked| environment_variable_names_equal(blocked, name))
+        {
             None
         } else {
             self.base.get(name)

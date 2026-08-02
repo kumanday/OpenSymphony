@@ -217,7 +217,11 @@ struct OverlayEnvironment {
 
 impl Environment for OverlayEnvironment {
     fn get(&self, name: &str) -> Option<String> {
-        if self.blocked.contains(name) {
+        if self
+            .blocked
+            .iter()
+            .any(|blocked| environment_variable_names_equal(blocked, name))
+        {
             return None;
         }
         self.overrides
@@ -2868,6 +2872,7 @@ async fn try_run_codex_stdio_issue(
         load_codex_conversation_manifest(workspace_manager, workspace, issue)
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let mut superseded_manifest = None;
     let conversation_envelope_untrusted =
         run_manifest
             .runtime_envelope
@@ -2884,8 +2889,9 @@ async fn try_run_codex_stdio_issue(
     if conversation_envelope_untrusted && let Some(incompatible) = existing_manifest.take() {
         tracing::warn!(
             conversation_id = %incompatible.conversation_id,
-            "skipping retirement of Codex thread with an untrusted runtime envelope"
+            "deferring retirement of Codex thread with an untrusted runtime envelope until replacement is durable"
         );
+        superseded_manifest = Some(incompatible);
     }
     if let Some(manifest) = existing_manifest.as_mut() {
         ensure_codex_thread_active(
@@ -3168,6 +3174,60 @@ async fn try_run_codex_stdio_issue(
                         error,
                     )
                 })?;
+            if let Some(superseded) = superseded_manifest.take() {
+                let archive = adapter
+                    .archive_issue_thread_request(
+                        &mut session,
+                        superseded.conversation_id.to_string(),
+                    )
+                    .map_err(|source| {
+                        codex_lifecycle_error(
+                            issue,
+                            Some(&conversation_id),
+                            "superseded thread/archive request",
+                            source.to_string(),
+                        )
+                    })?;
+                write_codex_request(
+                    &mut stdin,
+                    &schema_validator,
+                    &archive.request,
+                    "superseded thread/archive",
+                    &stderr_tail,
+                )
+                .await
+                .map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "superseded thread/archive request",
+                        error,
+                    )
+                })?;
+                read_response_line(
+                    &mut reader,
+                    archive.request.id,
+                    updates_tx,
+                    &run.worker_id.to_string(),
+                    issue,
+                    run,
+                    &mut read_state,
+                )
+                .await
+                .map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "superseded thread/archive response",
+                        with_codex_stderr(error, &stderr_tail),
+                    )
+                })?;
+                tracing::info!(
+                    previous_conversation_id = %superseded.conversation_id,
+                    replacement_conversation_id = %conversation_id,
+                    "archived superseded Codex conversation after replacement binding became durable"
+                );
+            }
             (
                 conversation_id,
                 manifest,
@@ -7814,6 +7874,17 @@ mod tests {
         let env = OverlayEnvironment {
             overrides: BTreeMap::from([("CHECKOUT_TOKEN".to_string(), "secret".to_string())]),
             blocked: BTreeSet::from(["CHECKOUT_TOKEN".to_string()]),
+        };
+
+        assert_eq!(env.get("CHECKOUT_TOKEN"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_environment_blocks_checkout_credentials_case_insensitively_on_windows() {
+        let env = OverlayEnvironment {
+            overrides: BTreeMap::from([("CHECKOUT_TOKEN".to_string(), "secret".to_string())]),
+            blocked: BTreeSet::from(["checkout_token".to_string()]),
         };
 
         assert_eq!(env.get("CHECKOUT_TOKEN"), None);
