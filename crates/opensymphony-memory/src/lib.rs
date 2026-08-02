@@ -4053,6 +4053,31 @@ Reviews are triggered when you open a pull request for review.
         )
         .expect("combined scoped search");
         assert!(project_results.is_empty());
+
+        let project_area_results = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                project: Some("project-b".to_string()),
+                area: Some("area-b".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("project-only area search");
+        assert_eq!(project_area_results.len(), 1);
+        let project_area_mismatch = search_with_scope(
+            &config,
+            "COE-123",
+            10,
+            &MemoryScopeFilter {
+                project: Some("project-b".to_string()),
+                area: Some("area-a".to_string()),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect("project-only mismatched area search");
+        assert!(project_area_mismatch.is_empty());
     }
 
     #[test]

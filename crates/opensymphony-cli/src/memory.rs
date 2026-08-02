@@ -2575,6 +2575,91 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             }
         }
     }
+    reimport_pending_memory_sources(config)?;
+    Ok(())
+}
+
+fn reimport_pending_memory_sources(config: &MemoryConfig) -> Result<(), MemoryError> {
+    let pending = registered_memory_sources(config)?
+        .into_iter()
+        .filter(|source| {
+            matches!(
+                source.kind,
+                MemorySourceKind::LegacyStore | MemorySourceKind::OkfBundle
+            ) && source.status != MemorySourceRegistrationStatus::Registered
+        })
+        .collect::<Vec<_>>();
+    for registration in pending {
+        let Some(source) = config.repository_sources.get(&registration.repository_id) else {
+            continue;
+        };
+        if !registration.root.exists() {
+            continue;
+        }
+        let local_config = MemoryConfig::load(&source.root, None)?;
+        let same_catalog = registration.kind == MemorySourceKind::LegacyStore
+            && match (
+                fs::canonicalize(&registration.root),
+                fs::canonicalize(&config.memory_root),
+            ) {
+                (Ok(root), Ok(catalog)) => root == catalog,
+                _ => registration.root == config.memory_root,
+            };
+        let _source_memory_lock =
+            if registration.kind == MemorySourceKind::LegacyStore && !same_catalog {
+                Some(acquire_source_memory_writer_lock(&local_config)?)
+            } else {
+                None
+            };
+        let import_result = if same_catalog {
+            backfill_legacy_memory_source_scopes(
+                config,
+                &source.repository_id,
+                &registration.source_id,
+            )
+        } else {
+            let mut import_config = config.clone();
+            import_config.repo_root = source.root.clone();
+            import_config.visibility = local_config.visibility;
+            import_config.docs.default_visibility = local_config.docs.default_visibility;
+            import_config.areas = local_config.areas.clone();
+            merge_memory_index_from_okf(
+                &import_config,
+                &registration.root,
+                &source.repository_id,
+                &registration.source_id,
+            )
+            .and_then(|_| {
+                if registration.kind == MemorySourceKind::LegacyStore {
+                    merge_legacy_memory_index(config, &local_config, &registration.source_id)
+                        .and_then(|_| {
+                            source
+                                .root
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .map_or(Ok(()), |legacy_repo_id| {
+                                    merge_legacy_code_index(
+                                        config,
+                                        &local_config,
+                                        legacy_repo_id,
+                                        &source.repository_id,
+                                    )
+                                })
+                        })
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        import_result?;
+        register_memory_source(
+            config,
+            &RegisteredMemorySource {
+                status: MemorySourceRegistrationStatus::Registered,
+                ..registration
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -2979,49 +3064,79 @@ async fn memory_server_mcp(
             .get("name")
             .and_then(Value::as_str)
             .is_some_and(is_memory_writer_tool);
-    let _writer_guard = if writer_request {
+    let writer_guard = if writer_request {
         Some(state.writer_gate.clone().lock_owned().await)
     } else {
         None
     };
-    let result = match request.method.as_str() {
-        "initialize" => Ok(json!({
-            "protocolVersion": "2025-06-18",
-            "serverInfo": { "name": "opensymphony-memory", "version": env!("CARGO_PKG_VERSION") },
-            "capabilities": { "tools": {} }
-        })),
-        "tools/list" => {
-            let config = state.config.clone();
-            let auth = state.auth.clone();
-            match tokio::task::spawn_blocking(move || memory_tool_descriptors(&config, &auth)).await
-            {
-                Ok(tools) => Ok(json!({ "tools": tools })),
-                Err(error) => Err(MemoryError::InvalidInput(format!(
-                    "memory tool discovery task failed: {error}"
-                ))),
-            }
-        }
-        "tools/call" => match tokio::time::timeout(
-            MEMORY_MCP_TOOL_TIMEOUT,
+    let result = if let Some(writer_guard) = writer_guard {
+        let config = state.config.clone();
+        let params = request.params;
+        let workspace_root = state.workspace_root.clone();
+        let central_config_path = state.central_config_path.clone();
+        let resolved_workflow = state.resolved_workflow.clone();
+        let task = tokio::spawn(async move {
+            let _writer_guard = writer_guard;
             call_memory_tool_with_workspace(
-                &state.config,
-                request.params,
-                state.workspace_root.as_deref(),
-                state.central_config_path.as_deref(),
-                state.resolved_workflow.as_ref(),
-            ),
-        )
-        .await
-        {
-            Ok(result) => result,
+                &config,
+                params,
+                workspace_root.as_deref(),
+                central_config_path.as_deref(),
+                resolved_workflow.as_ref(),
+            )
+            .await
+        });
+        match tokio::time::timeout(MEMORY_MCP_TOOL_TIMEOUT, task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(MemoryError::InvalidInput(format!(
+                "memory writer task failed: {error}"
+            ))),
             Err(_) => Err(MemoryError::InvalidInput(format!(
                 "memory tool call exceeded {} second timeout",
                 MEMORY_MCP_TOOL_TIMEOUT.as_secs()
             ))),
-        },
-        other => Err(MemoryError::InvalidInput(format!(
-            "unsupported MCP method `{other}`"
-        ))),
+        }
+    } else {
+        match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2025-06-18",
+                "serverInfo": { "name": "opensymphony-memory", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "tools": {} }
+            })),
+            "tools/list" => {
+                let config = state.config.clone();
+                let auth = state.auth.clone();
+                match tokio::task::spawn_blocking(move || memory_tool_descriptors(&config, &auth))
+                    .await
+                {
+                    Ok(tools) => Ok(json!({ "tools": tools })),
+                    Err(error) => Err(MemoryError::InvalidInput(format!(
+                        "memory tool discovery task failed: {error}"
+                    ))),
+                }
+            }
+            "tools/call" => match tokio::time::timeout(
+                MEMORY_MCP_TOOL_TIMEOUT,
+                call_memory_tool_with_workspace(
+                    &state.config,
+                    request.params,
+                    state.workspace_root.as_deref(),
+                    state.central_config_path.as_deref(),
+                    state.resolved_workflow.as_ref(),
+                ),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(MemoryError::InvalidInput(format!(
+                    "memory tool call exceeded {} second timeout",
+                    MEMORY_MCP_TOOL_TIMEOUT.as_secs()
+                ))),
+            },
+            other => Err(MemoryError::InvalidInput(format!(
+                "unsupported MCP method `{other}`"
+            ))),
+        }
     };
 
     match result {

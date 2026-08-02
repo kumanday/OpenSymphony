@@ -189,31 +189,74 @@ impl IndexedIssue {
     }
 
     fn areas_for_scope(&self, config: &MemoryConfig, scope: &MemoryScopeFilter) -> Vec<String> {
-        let Some(repository_id) = scope.repo.as_deref() else {
+        let repository_id = scope.repo.as_deref();
+        let has_project_scope = scope.project.is_some() || scope.project_set.is_some();
+        if repository_id.is_none() && !has_project_scope {
             return self.areas();
-        };
+        }
         if config.repository_sources.is_empty()
-            || !config.repository_sources.contains_key(repository_id)
+            || repository_id.is_some_and(|id| !config.repository_sources.contains_key(id))
+            || self.source_scope_refs.is_empty()
         {
             return self.areas();
         }
-        let live_owner = format!("__live_capture__:{repository_id}");
-        let repository_prefix = format!("{repository_id}:");
-        let issue_has_repository_scope = self.scope_refs.iter().any(|scope| {
-            scope.kind == KnowledgeScopeKind::Repository && scope.id == repository_id
-        });
         self.area_source_ids
             .iter()
             .filter(|(_, source_ids)| {
                 let has_qualified_source = source_ids
                     .iter()
                     .any(|source_id| !source_id.is_empty() && source_id != LIVE_CAPTURE_OWNER);
+                let issue_has_repository_scope = repository_id.is_some_and(|repository_id| {
+                    self.scope_refs.iter().any(|source_scope| {
+                        source_scope.kind == KnowledgeScopeKind::Repository
+                            && source_scope.id.eq_ignore_ascii_case(repository_id)
+                    })
+                });
                 source_ids.iter().any(|source_id| {
-                    source_id == &live_owner
-                        || source_id.starts_with(&repository_prefix)
-                        || ((source_id.is_empty() || source_id == LIVE_CAPTURE_OWNER)
+                    let repository_matches = repository_id.is_none_or(|repository_id| {
+                        source_id == &format!("__live_capture__:{repository_id}")
+                            || source_id.starts_with(&format!("{repository_id}:"))
+                            || ((source_id.is_empty() || source_id == LIVE_CAPTURE_OWNER)
+                                && !has_qualified_source
+                                && issue_has_repository_scope)
+                            || self.source_refs.iter().any(|source| {
+                                source.repo_id.as_deref() == Some(repository_id)
+                                    && (source.registration_source_id.as_deref()
+                                        == Some(source_id)
+                                        || source.id == *source_id)
+                            })
+                    });
+                    let project_matches = scope.project.as_deref().is_none_or(|project| {
+                        let source_scopes = self.source_scope_refs.get(source_id);
+                        let has_source_project_scope = source_scopes.is_some_and(|scopes| {
+                            scopes
+                                .iter()
+                                .any(|source_scope| source_scope.kind == KnowledgeScopeKind::Project)
+                        });
+                        source_scopes.is_some_and(|scopes| {
+                            scopes.iter().any(|source_scope| {
+                                source_scope.kind == KnowledgeScopeKind::Project
+                                    && source_scope.id.eq_ignore_ascii_case(project)
+                            })
+                        }) || (!has_source_project_scope
+                            && (source_id.is_empty() || source_id == LIVE_CAPTURE_OWNER)
                             && !has_qualified_source
-                            && issue_has_repository_scope)
+                            && issue_has_repository_scope
+                            && self.scope_refs.iter().any(|source_scope| {
+                                source_scope.kind == KnowledgeScopeKind::Project
+                                    && source_scope.id.eq_ignore_ascii_case(project)
+                            }))
+                    });
+                    let project_set_matches =
+                        scope.project_set.as_deref().is_none_or(|project_set| {
+                            self.source_scope_refs.get(source_id).is_some_and(|scopes| {
+                                scopes.iter().any(|source_scope| {
+                                    source_scope.kind == KnowledgeScopeKind::ProjectSet
+                                        && source_scope.id.eq_ignore_ascii_case(project_set)
+                                })
+                            })
+                        });
+                    repository_matches && project_matches && project_set_matches
                 })
             })
             .map(|(area, _)| area.clone())
