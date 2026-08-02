@@ -3573,6 +3573,46 @@ async fn gateway_serves_run_code_outline_without_workspace_root_leakage() {
 }
 
 #[tokio::test]
+async fn gateway_enforces_code_outline_limit_without_memory_repository_resolution() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("COE-553");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace dirs");
+    std::fs::write(workspace.join("src/large.rs"), vec![b'x'; 2_097_153])
+        .expect("large workspace file");
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.daemon.workspace_root = root.path().to_string_lossy().to_string();
+    snapshot.issues[0].identifier = "COE-553".to_string();
+    snapshot.issues[0].workspace_path_suffix = "COE-553".to_string();
+    let server = GatewayServer::new(SnapshotStore::new(snapshot));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-553/code/outline?file_path=src/large.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch large run outline");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode large outline error");
+    assert_eq!(body["error"]["code"], "code_file_too_large");
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn gateway_serves_run_code_diff_overlay_with_resolved_revisions() {
     let memory_repo = tempfile::tempdir().expect("memory repo");
     let root = tempfile::tempdir().expect("workspace root");

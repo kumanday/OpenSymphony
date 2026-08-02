@@ -1420,27 +1420,13 @@ fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryErr
 }
 
 fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
-    let mut scope = direct_scope_filter(
+    let scope = direct_scope_filter(
         config,
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         Some(args.area.as_str()),
     )?;
-    if let Some(requested_repo) = scope.repo.clone()
-        && !config.repository_sources.contains_key(&requested_repo)
-        && !config.repository_sources.is_empty()
-    {
-        let requested_root = repo_existing_path(config, &requested_repo)?;
-        if let Some((repository_id, _)) = config.repository_sources.iter().find(|(_, source)| {
-            source
-                .root
-                .canonicalize()
-                .is_ok_and(|root| root == requested_root)
-        }) {
-            scope.repo = Some(repository_id.clone());
-        }
-    }
     let docs_config = memory_config_for_docs_scope(config, &scope, &args.area)?;
     println!(
         "{}",
@@ -2269,10 +2255,6 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             }
         }
         for (kind, root) in roots {
-            if !root.exists() {
-                continue;
-            }
-            source_ids.insert(source_id_for(&source.repository_id, kind, &root));
             let same_catalog = if kind == MemorySourceKind::LegacyStore {
                 match (
                     fs::canonicalize(&root),
@@ -2284,6 +2266,22 @@ fn register_configured_memory_sources(config: &MemoryConfig) -> Result<(), Memor
             } else {
                 false
             };
+            if !root.exists() {
+                if kind == MemorySourceKind::LegacyStore
+                    && !same_catalog
+                    && let Some(legacy_repo_id) =
+                        source.root.file_name().and_then(|name| name.to_str())
+                {
+                    merge_legacy_code_index(
+                        config,
+                        &local_config,
+                        legacy_repo_id,
+                        &source.repository_id,
+                    )?;
+                }
+                continue;
+            }
+            source_ids.insert(source_id_for(&source.repository_id, kind, &root));
             if kind == MemorySourceKind::LegacyStore && !same_catalog {
                 let lock_key = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
                 if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -3391,7 +3389,7 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
-            let scope = scope_filter_from_mcp(config, &arguments, false)?;
+            let scope = scope_filter_from_mcp(config, &arguments, true)?;
             let docs_config = memory_config_for_docs_scope(config, &scope, &area)?;
             Ok(mcp_text(docs_for_area_with_scope(
                 &docs_config,
@@ -5854,6 +5852,7 @@ fn direct_scope_filter(
     area: Option<&str>,
 ) -> Result<MemoryScopeFilter, MemoryError> {
     let mut scope = scope_filter(scope, issue, milestone, area);
+    normalize_memory_scope_repository(config, &mut scope);
     if scope.all_accessible
         || scope.project_set.is_some()
         || scope.project.is_some()
@@ -5896,6 +5895,32 @@ where
     }
 }
 
+fn normalize_memory_scope_repository(config: &MemoryConfig, scope: &mut MemoryScopeFilter) {
+    let Some(requested) = scope.repo.clone() else {
+        return;
+    };
+    if config.repository_sources.is_empty() || config.repository_sources.contains_key(&requested) {
+        return;
+    }
+    let requested_path = Path::new(&requested);
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        config.repo_root.join(requested_path)
+    };
+    let Ok(requested_root) = candidate.canonicalize() else {
+        return;
+    };
+    if let Some((repository_id, _)) = config.repository_sources.iter().find(|(_, source)| {
+        source
+            .root
+            .canonicalize()
+            .is_ok_and(|root| root == requested_root)
+    }) {
+        scope.repo = Some(repository_id.clone());
+    }
+}
+
 fn scope_filter_from_mcp(
     config: &MemoryConfig,
     arguments: &Value,
@@ -5913,25 +5938,25 @@ fn scope_filter_from_mcp(
         all_accessible: bool_arg(arguments, "allAccessible")
             || bool_arg(arguments, "all_accessible"),
     };
-    if scope.all_accessible
-        || scope.project_set.is_some()
-        || scope.project.is_some()
-        || scope.repo.is_some()
+    if !scope.all_accessible
+        && scope.project_set.is_none()
+        && scope.project.is_none()
+        && scope.repo.is_none()
     {
-        return Ok(scope);
+        if let Some(project_set_id) = &config.default_project_set_id {
+            scope.project_set = Some(project_set_id.clone());
+        } else if let Some(repository_id) = &config.default_repository_id {
+            scope.repo = Some(repository_id.clone());
+        } else if config.repository_sources.len() == 1 {
+            scope.repo = config.repository_sources.keys().next().cloned();
+        } else if config.repository_sources.len() > 1 {
+            return Err(MemoryError::InvalidInput(
+                "a projectSet, project, or repo scope is required when multiple repository sources are registered"
+                    .to_string(),
+            ));
+        }
     }
-    if let Some(project_set_id) = &config.default_project_set_id {
-        scope.project_set = Some(project_set_id.clone());
-    } else if let Some(repository_id) = &config.default_repository_id {
-        scope.repo = Some(repository_id.clone());
-    } else if config.repository_sources.len() == 1 {
-        scope.repo = config.repository_sources.keys().next().cloned();
-    } else if config.repository_sources.len() > 1 {
-        return Err(MemoryError::InvalidInput(
-            "a projectSet, project, or repo scope is required when multiple repository sources are registered"
-                .to_string(),
-        ));
-    }
+    normalize_memory_scope_repository(config, &mut scope);
     Ok(scope)
 }
 
@@ -7627,6 +7652,50 @@ mod tests {
         assert_eq!(tool, "memory.brief");
         assert_eq!(arguments["repo"], "repo-b");
         assert_eq!(arguments["issue"], "COE-550");
+    }
+
+    #[test]
+    fn direct_scope_resolves_repository_paths_to_canonical_ids() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_a = repo.path().join("repo-a");
+        std::fs::create_dir_all(&repo_a).expect("repository source root");
+        let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "canonical/repo-a".to_string(),
+            MemoryRepositorySource {
+                repository_id: "canonical/repo-a".to_string(),
+                root: repo_a.clone(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let scope = super::direct_scope_filter(
+            &config,
+            &super::ScopeArgs {
+                repo: Some(repo_a.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("repository path scope");
+        assert_eq!(scope.repo.as_deref(), Some("canonical/repo-a"));
+    }
+
+    #[test]
+    fn remote_docs_preserves_issue_scope() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let scope = super::scope_filter_from_mcp(
+            &config,
+            &json!({"area": "memory", "issue": "COE-550", "allAccessible": true}),
+            true,
+        )
+        .expect("docs scope");
+        assert_eq!(scope.issue.as_deref(), Some("COE-550"));
     }
 
     #[test]

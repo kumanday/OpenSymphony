@@ -80,7 +80,9 @@ impl MemoryConfig {
                 enabled: code_intel.enabled.unwrap_or(true),
                 ast: AstCodeIntelConfig {
                     enabled: ast.enabled.unwrap_or(true),
-                    max_file_bytes: ast.max_file_bytes.unwrap_or(2_097_152),
+                    max_file_bytes: ast
+                        .max_file_bytes
+                        .unwrap_or(DEFAULT_AST_MAX_FILE_BYTES),
                     max_files_per_request: ast.max_files_per_request.unwrap_or(200),
                     max_matches_per_request: ast
                         .max_matches_per_request

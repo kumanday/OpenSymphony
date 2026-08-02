@@ -18,6 +18,7 @@ pub const FALLBACK_PRIVATE_MEMORY_CONFIG_FILE: &str = ".opensymphony/memory/conf
 pub const DEFAULT_MEMORY_ROOT: &str = ".opensymphony/memory";
 pub const DEFAULT_INDEX_FILE_NAME: &str = "memory.duckdb";
 pub const DEFAULT_PUBLIC_DOCS_ROOT: &str = "docs";
+pub const DEFAULT_AST_MAX_FILE_BYTES: u64 = 2_097_152;
 pub const ISSUE_CAPSULE_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const ISSUE_CAPSULE_END: &str = "<!-- END OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const TOPIC_DOC_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->";
@@ -3759,9 +3760,9 @@ Reviews are triggered when you open a pull request for review.
             .execute(
                 "UPDATE issues SET source_ids_json = ?, scope_refs_json = ?, source_refs_json = ? WHERE issue_key = 'COE-123'",
                 params![
-                    r#"["__live_capture__:repo-a","github:repository:b:okf"]"#,
+                    r#"["__live_capture__:repo-a","__live_capture__:repo-b","github:repository:b:okf"]"#,
                     r#"[{"kind":"work_item","id":"COE-123"},{"kind":"repository","id":"repo-a"},{"kind":"repository","id":"repo-b"},{"kind":"project","id":"project-a"},{"kind":"project","id":"project-registered"}]"#,
-                    r#"[{"kind":"github_pr","id":"legacy"},{"kind":"legacy_store","id":"b","repo_id":"repo-b","registration_source_id":"github:repository:b:okf"}]"#,
+                    r#"[{"kind":"github_pr","id":"legacy","repo_id":"repo-b"},{"kind":"legacy_store","id":"b","repo_id":"repo-b","registration_source_id":"github:repository:b:okf"}]"#,
                 ],
             )
             .expect("registered ownership");
@@ -3783,6 +3784,12 @@ Reviews are triggered when you open a pull request for review.
                 [],
             )
             .expect("other concept live scope provenance");
+        connection
+            .execute(
+                "INSERT INTO source_scope_refs (concept_id, source_id, scope_kind, scope_id, label) VALUES ('issues/COE-123', '__live_capture__:repo-b', 'project', 'project-old-live', NULL)",
+                [],
+            )
+            .expect("previous live scope provenance");
         drop(connection);
 
         source.issues[0].project_id = Some("project-live-new".to_string());
@@ -3816,6 +3823,9 @@ Reviews are triggered when you open a pull request for review.
                 .iter()
                 .any(|scope| scope.id == "project-registered")
         );
+        assert!(!issue.source_refs.iter().any(|source| {
+            source.repo_id.as_deref() == Some("repo-b") && source.registration_source_id.is_none()
+        }));
         let connection = open_existing_index_read_only(&config)
             .expect("index should reopen")
             .expect("index exists");
@@ -3827,7 +3837,16 @@ Reviews are triggered when you open a pull request for review.
             )
             .expect("source ownership");
         assert!(source_ids.contains("__live_capture__:repo-a"));
+        assert!(!source_ids.contains("__live_capture__:repo-b"));
         assert!(source_ids.contains("github:repository:b:okf"));
+        let old_live_scope_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-123' AND source_id = '__live_capture__:repo-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("old live scope provenance count");
+        assert_eq!(old_live_scope_count, 0);
         let other_concept_scope_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM source_scope_refs WHERE concept_id = 'issues/COE-999' AND source_id = '__live_capture__:repo-a' AND scope_id = 'project-other-issue'",

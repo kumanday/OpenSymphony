@@ -103,16 +103,12 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let live_scope_refs = capture_scope_refs(config, issue_plan);
         let other_source_scopes = previous_source_scopes
             .iter()
-            .filter(|(source_id, _, _)| {
-                source_id != &live_owner && source_id != LIVE_CAPTURE_OWNER
-            })
+            .filter(|(source_id, _, _)| !is_live_capture_owner(source_id))
             .map(|(_, scope_kind, scope_id)| (scope_kind.as_str(), scope_id.as_str()))
             .collect::<Vec<_>>();
         let current_live_scopes = previous_source_scopes
             .iter()
-            .filter(|(source_id, _, _)| {
-                source_id == &live_owner || source_id == LIVE_CAPTURE_OWNER
-            })
+            .filter(|(source_id, _, _)| is_live_capture_owner(source_id))
             .map(|(_, scope_kind, scope_id)| (scope_kind.as_str(), scope_id.as_str()))
             .collect::<Vec<_>>();
         scope_refs.retain(|scope| {
@@ -127,10 +123,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         let had_legacy_live_owner = source_ids.iter().any(|owner| is_live_capture_owner(owner));
         source_refs.retain(|source_ref| {
             source_ref.registration_source_id.is_some()
-                || (source_ref.repo_id.as_deref() != config.default_repository_id.as_deref()
-                    && !(had_legacy_live_owner
-                        && source_ref.repo_id.is_none()
-                        && source_ref.registration_source_id.is_none()))
+                || (source_ref.repo_id.is_none() && !had_legacy_live_owner)
         });
         let live_source_refs = issue_plan
             .prs
@@ -149,7 +142,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 source_refs.push(source_ref);
             }
         }
-        source_ids.retain(|owner| owner != &live_owner && owner != LIVE_CAPTURE_OWNER);
+        source_ids.retain(|owner| !is_live_capture_owner(owner));
         source_ids.push(live_owner.clone());
         let scope_refs_json = serde_json::to_string(&scope_refs)?;
         let source_refs_json = serde_json::to_string(&source_refs)?;
@@ -226,20 +219,15 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     source,
                 })?;
         }
-        transaction
-            .execute(
-                "DELETE FROM source_scope_refs WHERE concept_id = ? AND source_id = ?",
-                params![&concept_id, live_owner.clone()],
-            )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
-        if had_legacy_live_owner {
+        for source_id in previous_source_scopes
+            .iter()
+            .filter(|(source_id, _, _)| is_live_capture_owner(source_id))
+            .map(|(source_id, _, _)| source_id)
+        {
             transaction
                 .execute(
                     "DELETE FROM source_scope_refs WHERE concept_id = ? AND source_id = ?",
-                    params![&concept_id, LIVE_CAPTURE_OWNER],
+                    params![&concept_id, source_id],
                 )
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
@@ -3010,7 +2998,6 @@ pub fn merge_legacy_code_index(
                 "reason",
                 "content_sha256",
                 "indexed_at",
-                "freshness",
             ],
         ),
         (
@@ -5439,6 +5426,20 @@ mod index_tests {
             },
         )
         .expect("legacy code index");
+        persist_code_intel_skipped_files_with_freshness(
+            &source_config,
+            &legacy_repo_id,
+            Some("legacy-commit"),
+            false,
+            &[CodeIntelSkippedFileInput {
+                path: PathBuf::from("src/skipped.rs"),
+                reason: "unsupported".to_string(),
+                content_sha256: "legacy-skipped".to_string(),
+            }],
+            "staged",
+            false,
+        )
+        .expect("legacy staged skipped file");
 
         merge_legacy_code_index(
             &config,

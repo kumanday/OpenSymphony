@@ -46,16 +46,16 @@ use crate::opensymphony_gateway_schema::{
     },
 };
 use crate::opensymphony_memory::{
-    CodeGraphProjectionError, CodeGraphSnapshotOptions, DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
-    MemoryConfig, MemoryError, MemoryGraphAccess, MemoryGraphCommunityOptions,
-    MemoryGraphProjectionError, code_file_outline_from_source, code_file_outline_from_workspace,
-    code_graph_diff_overlay, code_graph_index_report, code_graph_repos, code_graph_snapshot,
-    code_graph_symbol_detail, code_graph_updated_event, code_graph_workspace_diff_overlay,
-    code_graph_workspace_snapshot, code_index_branch, code_index_repository_is_git,
-    code_index_target, index_code_repository_at, index_code_repository_at_current_target,
-    memory_completed_task_rows, memory_concept_detail, memory_graph_bundles,
-    memory_graph_communities_with_options, memory_graph_search as search_memory_graph,
-    memory_graph_snapshot_with_options,
+    CodeGraphProjectionError, CodeGraphSnapshotOptions, DEFAULT_AST_MAX_FILE_BYTES,
+    DEFAULT_MEMORY_GRAPH_BUNDLE_ID, MemoryConfig, MemoryError, MemoryGraphAccess,
+    MemoryGraphCommunityOptions, MemoryGraphProjectionError, code_file_outline_from_source,
+    code_file_outline_from_workspace, code_graph_diff_overlay, code_graph_index_report,
+    code_graph_repos, code_graph_snapshot, code_graph_symbol_detail, code_graph_updated_event,
+    code_graph_workspace_diff_overlay, code_graph_workspace_snapshot, code_index_branch,
+    code_index_repository_is_git, code_index_target, index_code_repository_at,
+    index_code_repository_at_current_target, memory_completed_task_rows, memory_concept_detail,
+    memory_graph_bundles, memory_graph_communities_with_options,
+    memory_graph_search as search_memory_graph, memory_graph_snapshot_with_options,
 };
 
 pub mod action_handler;
@@ -2097,21 +2097,29 @@ async fn get_run_code_outline(
         }
         _ => None,
     };
-    if let Some(config) = selected_config.as_ref() {
-        let metadata = tokio::fs::metadata(&file_path).await.map_err(|_| {
-            code_graph_response(
-                StatusCode::NOT_FOUND,
-                "code_file_not_found",
-                "requested run file is not available",
-            )
-        })?;
-        if metadata.len() > config.code_intel.ast.max_file_bytes {
-            return Err(code_graph_response(
-                StatusCode::BAD_REQUEST,
-                "code_file_too_large",
-                "requested run file exceeds the repository code-intelligence limit",
-            ));
-        }
+    let max_file_bytes = selected_config
+        .as_ref()
+        .map(|config| config.code_intel.ast.max_file_bytes)
+        .or_else(|| {
+            state
+                .memory_config
+                .as_ref()
+                .map(|config| config.code_intel.ast.max_file_bytes)
+        })
+        .unwrap_or(DEFAULT_AST_MAX_FILE_BYTES);
+    let metadata = tokio::fs::metadata(&file_path).await.map_err(|_| {
+        code_graph_response(
+            StatusCode::NOT_FOUND,
+            "code_file_not_found",
+            "requested run file is not available",
+        )
+    })?;
+    if metadata.len() > max_file_bytes {
+        return Err(code_graph_response(
+            StatusCode::BAD_REQUEST,
+            "code_file_too_large",
+            "requested run file exceeds the repository code-intelligence limit",
+        ));
     }
     let run_identifier = issue.identifier.clone();
     if let (Some(repo_id), Some(config)) = (repo_id.clone(), selected_config.clone()) {
