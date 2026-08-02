@@ -2166,11 +2166,17 @@ impl RuntimeWorkerBackend {
                     .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
                 scoped.authorized_repositories = authorized_repositories.clone();
                 if let Some(grants) = &scoped.scope_grants {
-                    scoped.token = Some(grants.issue(
-                        &scoped.project,
-                        &scoped.execution_repo,
-                        authorized_repositories,
-                    ));
+                    scoped.token = Some(
+                        grants.issue(
+                            &scoped.project,
+                            &scoped.execution_repo,
+                            authorized_repositories,
+                            issue.identifier.as_str(),
+                            runtime_envelope
+                                .as_ref()
+                                .map(|envelope| envelope.checkout_generation.clone()),
+                        ),
+                    );
                 }
                 scoped.authorized_repositories_by_project.clear();
                 scoped

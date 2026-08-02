@@ -417,6 +417,11 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         reused.handle.workspace_path(),
         first.handle.workspace_path()
     );
+    assert_eq!(
+        reused.handle.checkout_generation(),
+        first.handle.checkout_generation(),
+        "reused verified checkouts must retain their generation marker"
+    );
 
     let outside_objects = temp_dir.path().join("outside-objects");
     std::fs::create_dir_all(&outside_objects).expect("outside objects should exist");

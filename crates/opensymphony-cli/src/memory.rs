@@ -1665,6 +1665,8 @@ pub(crate) struct MemoryScopeGrant {
     pub(crate) project: String,
     pub(crate) execution_repo: String,
     pub(crate) authorized_repositories: BTreeSet<String>,
+    pub(crate) issue: String,
+    pub(crate) checkout_generation: Option<String>,
 }
 
 impl MemoryScopeGrantRegistry {
@@ -1673,6 +1675,8 @@ impl MemoryScopeGrantRegistry {
         project: &str,
         execution_repo: &str,
         authorized_repositories: BTreeSet<String>,
+        issue: &str,
+        checkout_generation: Option<String>,
     ) -> String {
         let token = format!("opensymphony-worker-{}", Uuid::new_v4());
         self.grants
@@ -1684,6 +1688,8 @@ impl MemoryScopeGrantRegistry {
                     project: project.to_owned(),
                     execution_repo: execution_repo.to_owned(),
                     authorized_repositories,
+                    issue: issue.to_owned(),
+                    checkout_generation,
                 },
             );
         token
@@ -2523,12 +2529,16 @@ async fn call_memory_tool_with_workspace(
                 .get("currentIssue")
                 .and_then(|current| optional_string_arg(current, "identifier"))
         });
-        Some(resolve_code_intel_config(
-            config,
-            &scope,
-            workspace_root,
-            issue.as_deref(),
-        )?)
+        Some(
+            resolve_code_intel_config_async(
+                config,
+                &scope,
+                workspace_root,
+                issue.as_deref(),
+                worker_grant,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -2638,6 +2648,7 @@ async fn call_memory_tool_with_workspace(
                 config.clone(),
                 arguments.clone(),
                 workspace_root.map(Path::to_path_buf),
+                worker_grant,
             )
             .await
         }
@@ -2756,6 +2767,24 @@ fn validate_worker_memory_scope(
             "requested repository is outside the worker's project grant".to_owned(),
         ));
     }
+    if tool_name.starts_with("code.") {
+        let requested_issue = if tool_name == "code.graph.context" {
+            optional_string_arg(arguments, "runId")
+                .or_else(|| optional_string_arg(arguments, "run"))
+        } else {
+            optional_string_arg(arguments, "issue").or_else(|| {
+                arguments
+                    .get("currentIssue")
+                    .and_then(|current| optional_string_arg(current, "identifier"))
+            })
+        };
+        if requested_issue.as_deref() != Some(grant.issue.as_str()) {
+            return Err(MemoryError::InvalidInput(format!(
+                "worker memory grant is bound to issue `{}`; requested code scope is not permitted",
+                grant.issue
+            )));
+        }
+    }
     if arguments
         .get("projectSet")
         .is_some_and(|value| !value.is_null())
@@ -2771,7 +2800,10 @@ async fn call_code_graph_context_tool(
     config: MemoryConfig,
     arguments: Value,
     workspace_root: Option<PathBuf>,
+    worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<Value, MemoryError> {
+    let strict_checkout = worker_grant.is_some();
+    let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = optional_string_arg(&arguments, "repository")
             .or_else(|| optional_string_arg(&arguments, "repo"))
@@ -2801,6 +2833,8 @@ async fn call_code_graph_context_tool(
                     &repo_id,
                     &run_id,
                     &context_query,
+                    strict_checkout,
+                    checkout_generation.as_deref(),
                 )
             })
             .transpose()?;
@@ -2816,6 +2850,8 @@ fn resolve_code_graph_overlay(
     repo_id: &str,
     run_id: &str,
     context_query: &CodeGraphContextQuery,
+    strict_checkout: bool,
+    checkout_generation: Option<&str>,
 ) -> Result<CodeWorkspaceOverlay, MemoryError> {
     let workspace_root = workspace_root.ok_or_else(|| {
         MemoryError::InvalidInput(
@@ -2829,8 +2865,17 @@ fn resolve_code_graph_overlay(
                 path: workspace_root.to_path_buf(),
                 source,
             })?;
-    let workspace_candidate = workspace_path_for_root(&workspace_root, run_id)
-        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+    let workspace_candidate = if strict_checkout {
+        find_verified_checkout_for_code_intel(
+            &workspace_root,
+            Some(repo_id),
+            Some(run_id),
+            checkout_generation,
+        )?
+    } else {
+        workspace_path_for_root(&workspace_root, run_id)
+            .map_err(|error| MemoryError::InvalidInput(error.to_string()))?
+    };
     if let Ok(metadata) = fs::symlink_metadata(&workspace_candidate)
         && metadata.file_type().is_symlink()
     {
@@ -4625,6 +4670,7 @@ fn resolve_code_intel_config(
     scope: &MemoryScopeFilter,
     workspace_root: Option<&Path>,
     issue: Option<&str>,
+    checkout_generation: Option<&str>,
 ) -> Result<MemoryConfig, MemoryError> {
     let repo = scope.repo.as_deref().and_then(non_empty);
     let repo_root = if let Some(workspace_root) = workspace_root {
@@ -4634,7 +4680,12 @@ fn resolve_code_intel_config(
                     .to_owned(),
             )
         })?;
-        find_verified_checkout_for_code_intel(workspace_root, repo.as_deref(), Some(issue))?
+        find_verified_checkout_for_code_intel(
+            workspace_root,
+            repo.as_deref(),
+            Some(issue),
+            checkout_generation,
+        )?
     } else {
         repo.as_deref()
             .map(|repo| resolve_code_intel_repo(config, Some(repo)))
@@ -4645,10 +4696,40 @@ fn resolve_code_intel_config(
     Ok(scoped)
 }
 
+async fn resolve_code_intel_config_async(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+    workspace_root: Option<&Path>,
+    issue: Option<&str>,
+    worker_grant: Option<&MemoryScopeGrant>,
+) -> Result<MemoryConfig, MemoryError> {
+    let config = config.clone();
+    let scope = scope.clone();
+    let workspace_root = workspace_root.map(Path::to_path_buf);
+    let issue = issue.map(str::to_owned);
+    let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
+    tokio::task::spawn_blocking(move || {
+        resolve_code_intel_config(
+            &config,
+            &scope,
+            workspace_root.as_deref(),
+            issue.as_deref(),
+            checkout_generation.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "code-intelligence checkout discovery task failed: {error}"
+        ))
+    })?
+}
+
 fn find_verified_checkout_for_code_intel(
     workspace_root: &Path,
     repository_id: Option<&str>,
     issue: Option<&str>,
+    checkout_generation: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let canonical_root =
         workspace_root
@@ -4690,6 +4771,11 @@ fn find_verified_checkout_for_code_intel(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         {
+            continue;
+        }
+        if checkout_generation.is_some_and(|generation| {
+            checkout.get("generation").and_then(Value::as_str) != Some(generation)
+        }) {
             continue;
         }
         if let Some(issue) = issue
@@ -6544,6 +6630,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("overlay graph context");
@@ -6577,6 +6664,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("overlay diagnostic graph context");
@@ -6604,6 +6692,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("diagnostic-only overlay graph context");
@@ -6639,6 +6728,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("unanalyzed overlay graph context");
@@ -6698,6 +6788,8 @@ mod tests {
             "repo",
             "COE-544",
             &context_query,
+            false,
+            None,
         )
         .expect_err("foreign workspace must be rejected");
         assert!(foreign.to_string().contains("ownership"));
@@ -6712,6 +6804,8 @@ mod tests {
             "repo",
             "COE-544",
             &context_query,
+            false,
+            None,
         )
         .expect_err("symlinked workspace must be rejected");
         assert!(symlinked.to_string().contains("symlink"));
@@ -9441,7 +9535,7 @@ Public memory concept.
             ..Default::default()
         };
 
-        let resolved = resolve_code_intel_config(&config, &scope, None, None)
+        let resolved = resolve_code_intel_config(&config, &scope, None, None, None)
             .expect("explicit repository path should resolve");
         assert_eq!(
             resolved.repo_root,
@@ -9479,6 +9573,8 @@ Public memory concept.
             project: "project-alpha".to_owned(),
             execution_repo: "repo-alpha".to_owned(),
             authorized_repositories: BTreeSet::from(["repo-alpha".to_owned()]),
+            issue: "COE-549".to_owned(),
+            checkout_generation: Some("generation-1".to_owned()),
         };
         validate_worker_memory_scope(
             "memory.search",
@@ -9530,11 +9626,25 @@ Public memory concept.
         assert!(
             validate_worker_memory_scope(
                 "code.ast.context",
-                &json!({"repo": "repo-beta"}),
+                &json!({"repo": "repo-beta", "issue": "COE-549"}),
                 &project_grant,
             )
             .is_err()
         );
+        assert!(
+            validate_worker_memory_scope(
+                "code.ast.context",
+                &json!({"repo": "repo-alpha", "issue": "COE-544"}),
+                &grant,
+            )
+            .is_err()
+        );
+        validate_worker_memory_scope(
+            "code.ast.context",
+            &json!({"repo": "repo-alpha", "issue": "COE-549"}),
+            &grant,
+        )
+        .expect("code scope should remain bound to the worker issue");
     }
 
     #[test]
@@ -9546,6 +9656,7 @@ Public memory concept.
         std::fs::write(
             metadata.join("checkout.json"),
             serde_json::to_vec(&json!({
+                "generation": "generation",
                 "issue_id": "issue-123",
                 "identifier": "COE-123",
                 "workspace_path": checkout,
@@ -9562,6 +9673,7 @@ Public memory concept.
             workspace_root.path(),
             Some("github:github.com:repository:123"),
             Some("COE-123"),
+            Some("generation"),
         )
         .expect("canonical repository should resolve through the issue checkout");
         assert_eq!(
