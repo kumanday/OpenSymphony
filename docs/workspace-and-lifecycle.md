@@ -68,7 +68,9 @@ the remote fingerprint, target branch, non-shallow history, clean worktree,
 Git integrity, and instruction provenance, then publishes the generation with
 an atomic rename. Existing generations are reused only after the same checks;
 remote, branch, HEAD, instruction, or cleanliness drift is quarantined rather
-than reset in place.
+than reset in place. Startup cleanup also requires the matching durable
+staging-intent marker created before a clone; unrelated files and directories
+under `.opensymphony-staging` are preserved.
 
 The checkout manifest records the generation, binding, target commit,
 instruction path/hash/source commit, and verification timestamps. Runtime
@@ -80,7 +82,10 @@ resembles a published generation is not enough to authorize deletion: an
 incomplete published generation is swept only when its durable checkout
 manifest (or completed `after_create` receipt) claims the exact path and
 generation. Foreign or malformed generation-shaped directories are preserved.
-Checkout retention and deletion remain `WorkspaceManager` decisions.
+Checkout retention and deletion remain `WorkspaceManager` decisions. Generated
+tree instruction pruning asks Git only for tracked `AGENTS.md` paths, so a
+large vendored tree with unrelated tracked files does not become an unbounded
+instruction-discovery traversal.
 
 ## 4. Workspace directory layout
 

@@ -3911,6 +3911,7 @@ fn validate_worker_memory_scope(
             | "memory.context"
             | "memory.search"
             | "memory.related"
+            | "memory.show"
             | "memory.docs"
             | "memory.status"
     );
@@ -12635,6 +12636,14 @@ Public memory concept.
         );
         assert!(
             validate_worker_memory_scope(
+                "memory.show",
+                &json!({"project": "project-beta", "repo": "repo-alpha"}),
+                &grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
                 "memory.related",
                 &json!({"project": "project-alpha", "repo": "repo-alpha", "allAccessible": true}),
                 &grant,
@@ -12654,6 +12663,12 @@ Public memory concept.
             &project_grant,
         )
         .expect("project grant should permit its other authorized repositories");
+        validate_worker_memory_scope(
+            "memory.show",
+            &json!({"project": "project-alpha", "repo": "repo-beta"}),
+            &project_grant,
+        )
+        .expect("direct capsule reads should remain project-scoped");
         assert!(
             validate_worker_memory_scope(
                 "memory.search",

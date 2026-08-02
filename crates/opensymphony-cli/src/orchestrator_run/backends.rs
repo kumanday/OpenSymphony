@@ -2088,28 +2088,12 @@ impl RuntimeWorkerBackend {
             let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
                 conversation_manifest_is_codex(manifest) != target_is_codex
             });
-            if switching_harness {
-                let previous = recovered_conversation
+            let superseded_harness_manifest = switching_harness.then(|| {
+                recovered_conversation
                     .as_ref()
-                    .expect("switching harness requires a prior conversation manifest");
-                if let Err(error) = retire_superseded_harness_session(
-                    &workspace_manager,
-                    &ensured.handle,
-                    previous,
-                    target_is_codex,
-                    openhands_conversation_store.as_ref(),
-                    &codex_bin,
-                    &checkout_credential_envs,
-                )
-                .await
-                {
-                    report_launch_failure(
-                        &mut launch_tx,
-                        format!("failed to retire previous harness session: {error}"),
-                    );
-                    return;
-                }
-            }
+                    .expect("switching harness requires a prior conversation manifest")
+                    .clone()
+            });
             let persisted_conversation_binding = recovered_conversation
                 .as_ref()
                 .filter(|_| !switching_harness)
@@ -2524,6 +2508,21 @@ impl RuntimeWorkerBackend {
                     recovered,
                 )
                 .await;
+                if let Some(previous) = superseded_harness_manifest.as_ref()
+                    && let Err(error) = retire_replaced_harness_session_if_durable(
+                        &workspace_manager,
+                        &ensured.handle,
+                        previous,
+                        target_is_codex,
+                        runtime_envelope.as_ref(),
+                        openhands_conversation_store.as_ref(),
+                        &codex_bin,
+                        &checkout_credential_envs,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "failed to retire replaced harness session after replacement");
+                }
                 let _ = updates_tx.send(WorkerUpdate::Finished {
                     worker_id: finished_worker_id.clone(),
                     outcome,
@@ -2579,6 +2578,21 @@ impl RuntimeWorkerBackend {
                     Some(error.to_string()),
                 ),
             };
+            if let Some(previous) = superseded_harness_manifest.as_ref()
+                && let Err(error) = retire_replaced_harness_session_if_durable(
+                    &workspace_manager,
+                    &ensured.handle,
+                    previous,
+                    target_is_codex,
+                    runtime_envelope.as_ref(),
+                    openhands_conversation_store.as_ref(),
+                    &codex_bin,
+                    &checkout_credential_envs,
+                )
+                .await
+            {
+                tracing::warn!(%error, "failed to retire replaced harness session after replacement");
+            }
             let _ = updates_tx.send(WorkerUpdate::Finished {
                 worker_id: finished_worker_id.clone(),
                 outcome,
@@ -4858,6 +4872,52 @@ async fn retire_superseded_harness_session(
         )
         .await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retire_replaced_harness_session_if_durable(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    previous: &IssueConversationManifest,
+    target_is_codex: bool,
+    expected_envelope: Option<&TerminalRuntimeEnvelope>,
+    openhands_conversation_store: Option<&OpenHandsConversationStorePaths>,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), String> {
+    let Some(expected_envelope) = expected_envelope else {
+        return Ok(());
+    };
+    let Some(raw) = workspace_manager
+        .read_text_artifact(workspace, &workspace.conversation_manifest_path())
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let Ok(replacement) = serde_json::from_str::<IssueConversationManifest>(&raw) else {
+        return Ok(());
+    };
+    let Some(replacement_envelope) = replacement.runtime_envelope.as_ref() else {
+        return Ok(());
+    };
+    if conversation_manifest_is_codex(&replacement) != target_is_codex
+        || replacement_envelope != expected_envelope
+        || replacement_envelope.conversation_binding.as_deref()
+            != Some(replacement.conversation_id.as_str())
+    {
+        return Ok(());
+    }
+    retire_superseded_harness_session(
+        workspace_manager,
+        workspace,
+        previous,
+        target_is_codex,
+        openhands_conversation_store,
+        codex_bin,
+        checkout_credential_envs,
+    )
+    .await
 }
 
 async fn update_codex_conversation_manifest(

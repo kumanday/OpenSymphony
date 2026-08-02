@@ -708,6 +708,10 @@ Terminal OpenHands archival uses the retry verification mode for the checkout.
 That mode still requires the recorded generation, repository binding, ancestry,
 and instruction provenance, while permitting ordinary worker commits or dirty
 worktree changes that a terminal worker legitimately left behind.
+When a route switches between OpenHands and Codex, the previous session remains
+active until the replacement manifest has been durably written with the expected
+runtime envelope and conversation binding; a failed replacement therefore does
+not destroy the session needed for recovery.
 
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after

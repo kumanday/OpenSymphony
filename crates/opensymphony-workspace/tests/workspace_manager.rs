@@ -367,20 +367,47 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let mut issue = sample_issue("COE-549/terminal");
     issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
 
-    let abandoned_staging = temp_dir
-        .path()
-        .join("workspaces/.opensymphony-staging/orphan-generation");
+    let abandoned_staging = temp_dir.path().join(
+        "workspaces/.opensymphony-staging/orphan-generation--0123456789abcdef0123456789abcdef",
+    );
     tokio::fs::create_dir_all(&abandoned_staging)
         .await
         .expect("abandoned staging generation should be created");
     tokio::fs::write(abandoned_staging.join("partial-clone"), b"incomplete")
         .await
         .expect("abandoned staging marker should be written");
+    let abandoned_marker = abandoned_staging
+        .parent()
+        .expect("abandoned staging root should exist")
+        .join("orphan-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        &abandoned_marker,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "orphan-generation",
+            "staging_path": abandoned_staging.clone()
+        }))
+        .expect("staging intent should encode"),
+    )
+    .await
+    .expect("staging intent should be written");
+    let foreign_staging = abandoned_staging
+        .parent()
+        .expect("abandoned staging root should exist")
+        .join("foreign-data");
+    tokio::fs::create_dir_all(&foreign_staging)
+        .await
+        .expect("foreign staging directory should be created");
+    tokio::fs::write(foreign_staging.join("must-survive"), b"foreign")
+        .await
+        .expect("foreign staging data should be written");
     manager
         .recover_abandoned_staging_checkouts()
         .await
         .expect("workspace discovery should sweep abandoned staging generations");
     assert!(!abandoned_staging.exists());
+    assert!(foreign_staging.join("must-survive").exists());
 
     let first = manager
         .ensure_with_run_id(&issue, Some("run-terminal-1"))

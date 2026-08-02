@@ -16,7 +16,7 @@ use rustix::{
     io::Errno,
     process::{Pid, Signal, kill_process_group},
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tokio::{
     fs,
@@ -117,6 +117,14 @@ fn checkout_time_remaining(deadline: Option<Instant>) -> Option<Duration> {
 enum HookCommandOutput {
     Completed(std::process::Output),
     TimedOut { stdout: String, stderr: String },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct StagingIntentMarker {
+    schema_version: u32,
+    generation: String,
+    workspace_key: String,
+    staging_path: PathBuf,
 }
 
 struct StagingCleanupGuard {
@@ -475,7 +483,28 @@ impl WorkspaceManager {
         )?;
         let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
         self.reject_symlinked_workspace_root(&staging_path).await?;
+        let staging_intent_path = staging_intent_marker_path(&staging_root, &staging_path);
+        let staging_intent = StagingIntentMarker {
+            schema_version: 1,
+            generation: generation.clone(),
+            workspace_key: workspace_key.clone(),
+            staging_path: staging_path.clone(),
+        };
+        let staging_intent_payload =
+            serde_json::to_vec_pretty(&staging_intent).map_err(|source| {
+                WorkspaceError::EncodeManifest {
+                    path: staging_intent_path.clone(),
+                    source,
+                }
+            })?;
+        fs::write(&staging_intent_path, staging_intent_payload)
+            .await
+            .map_err(|source| WorkspaceError::WriteManifest {
+                path: staging_intent_path.clone(),
+                source,
+            })?;
         let mut staging_cleanup = StagingCleanupGuard::new(staging_path.clone());
+        staging_cleanup.register(staging_intent_path);
         let clone_result = self
             .run_git_clone(
                 repository,
@@ -1216,11 +1245,32 @@ impl WorkspaceManager {
                         source,
                     })?;
             if file_type.is_dir() {
-                self.remove_incomplete_published_checkout(&path).await?;
-            } else {
+                if self
+                    .staging_intent_owns_path(&canonical_staging_root, &path)
+                    .await?
+                {
+                    let marker_path = staging_intent_marker_path(&staging_root, &path);
+                    self.remove_incomplete_published_checkout(&path).await?;
+                    match fs::remove_file(marker_path).await {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(source) => {
+                            return Err(WorkspaceError::RemoveWorkspace {
+                                path: path.clone(),
+                                source,
+                            });
+                        }
+                    }
+                }
+            } else if file_type.is_file()
+                && staging_intent_marker_for_path(&path).is_some()
+                && self
+                    .staging_intent_is_orphaned(&canonical_staging_root, &path)
+                    .await?
+            {
                 match fs::remove_file(&path).await {
                     Ok(()) => {}
-                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(source) => {
                         return Err(WorkspaceError::RemoveWorkspace { path, source });
                     }
@@ -1228,6 +1278,67 @@ impl WorkspaceManager {
             }
         }
         Ok(())
+    }
+
+    async fn staging_intent_owns_path(
+        &self,
+        canonical_staging_root: &Path,
+        staging_path: &Path,
+    ) -> Result<bool, WorkspaceError> {
+        let Some((workspace_key, generation)) = staging_generation_identity(staging_path) else {
+            return Ok(false);
+        };
+        let marker_path = staging_intent_marker_path(
+            staging_path.parent().unwrap_or_else(|| Path::new(".")),
+            staging_path,
+        );
+        if matches!(
+            fs::symlink_metadata(&marker_path).await,
+            Ok(metadata) if metadata.file_type().is_symlink()
+        ) {
+            return Ok(false);
+        }
+        let Ok(raw) = fs::read_to_string(&marker_path).await else {
+            return Ok(false);
+        };
+        let Ok(marker) = serde_json::from_str::<StagingIntentMarker>(&raw) else {
+            return Ok(false);
+        };
+        let canonical_path = self.canonicalize_path(staging_path).await?;
+        ensure_descendant(canonical_staging_root, &canonical_path)?;
+        Ok(marker.schema_version == 1
+            && marker.generation == generation
+            && marker.workspace_key == workspace_key
+            && marker.staging_path == staging_path)
+    }
+
+    async fn staging_intent_is_orphaned(
+        &self,
+        canonical_staging_root: &Path,
+        marker_path: &Path,
+    ) -> Result<bool, WorkspaceError> {
+        let Some(staging_path) = staging_path_from_intent_marker(marker_path) else {
+            return Ok(false);
+        };
+        let Some((workspace_key, generation)) = staging_generation_identity(&staging_path) else {
+            return Ok(false);
+        };
+        let Ok(raw) = fs::read_to_string(marker_path).await else {
+            return Ok(false);
+        };
+        let Ok(marker) = serde_json::from_str::<StagingIntentMarker>(&raw) else {
+            return Ok(false);
+        };
+        let Some(marker_parent) = marker_path.parent() else {
+            return Ok(false);
+        };
+        let canonical_marker_parent = self.canonicalize_path(marker_parent).await?;
+        ensure_descendant(canonical_staging_root, &canonical_marker_parent)?;
+        Ok(marker.schema_version == 1
+            && marker.generation == generation
+            && marker.workspace_key == workspace_key
+            && marker.staging_path == staging_path
+            && !path_exists(&staging_path).await?)
     }
 
     /// Sweep staging generations once during orchestrator startup, before any
@@ -3864,7 +3975,7 @@ async fn tracked_instruction_tree(
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--cached", "--"])
-        .arg(relative);
+        .arg(format!(":(glob){}/**/AGENTS.md", relative.display()));
     for variable in checkout_credential_envs {
         command.env_remove(variable);
     }
@@ -4148,6 +4259,44 @@ fn published_checkout_generation(path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn staging_generation_identity(path: &Path) -> Option<(String, String)> {
+    let name = path.file_name()?.to_str()?;
+    let (workspace_key, generation) = name.rsplit_once("--")?;
+    if generation.len() != 32
+        || !generation
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some((workspace_key.to_owned(), generation.to_owned()))
+}
+
+fn staging_intent_marker_path(staging_root: &Path, staging_path: &Path) -> PathBuf {
+    staging_root.join(format!(
+        "{}.intent.json",
+        staging_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    ))
+}
+
+fn staging_intent_marker_for_path(path: &Path) -> Option<()> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.ends_with(".intent.json"))
+        .and_then(|name| name.strip_suffix(".intent.json"))
+        .and_then(|name| staging_generation_identity(Path::new(name)))
+        .map(|_| ())
+}
+
+fn staging_path_from_intent_marker(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?.strip_suffix(".intent.json")?;
+    staging_generation_identity(Path::new(name))?;
+    Some(path.parent()?.join(name))
+}
+
 fn is_checkout_generation_directory(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -4186,6 +4335,7 @@ mod tests {
     use super::{
         WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
         remote_contains_credentials, shell_single_quote, ssh_agent_socket_path_is_usable,
+        tracked_instruction_tree,
     };
 
     #[cfg(unix)]
@@ -4268,6 +4418,41 @@ mod tests {
             .await
             .expect("instruction discovery should succeed");
         assert_eq!(paths, vec![PathBuf::from("vendor/AGENTS.md")]);
+    }
+
+    #[tokio::test]
+    async fn discover_agents_ignores_generated_trees_with_only_tracked_non_instructions() {
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let tracked = root.path().join("vendor").join("README.md");
+        tokio::fs::create_dir_all(tracked.parent().expect("tracked parent should exist"))
+            .await
+            .expect("tracked parent should exist");
+        tokio::fs::write(&tracked, "tracked vendor data")
+            .await
+            .expect("tracked file should exist");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init should launch");
+        assert!(status.success(), "git init should succeed");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["add", "--", "vendor/README.md"])
+            .status()
+            .expect("git add should launch");
+        assert!(status.success(), "git add should succeed");
+
+        assert!(
+            !tracked_instruction_tree(
+                root.path(),
+                PathBuf::from("vendor").as_path(),
+                &std::collections::BTreeSet::new(),
+            )
+            .await
+        );
     }
 
     #[cfg(unix)]
