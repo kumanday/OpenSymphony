@@ -20,6 +20,39 @@ Create immutable, verified checkout generations for bound terminal tasks and
 launch OpenHands or Codex with only that checkout's pinned instructions and
 runtime envelope.
 
+## COE-547 Code Baseline
+
+Start from these code and test ownership points:
+
+- `crates/opensymphony-cli/src/orchestrator_run/config.rs` owns
+  `CentralRepositoryFile`, `CentralInstructionsFile`, `ResolvedCentralConfig`,
+  and `RunRuntimeConfig`. Extend their resolved repository and instruction
+  identities after OSYM-885 binding; do not add a parallel configuration path.
+- `crates/opensymphony-workspace/src/models.rs` owns `WorkspaceHandle`,
+  `RunManifest`, and `ConversationManifest`; add checkout generation,
+  instruction provenance, binding, and policy compatibility to those durable
+  records.
+- `crates/opensymphony-cli/src/orchestrator_run/mod.rs` owns runtime-root
+  acquisition and process-incarnation marker recovery. Checkout generations
+  must compose with that ownership rather than introducing another process-root
+  lock.
+- `crates/opensymphony-cli/src/orchestrator_run/backends.rs` owns recovered run
+  selection, persisted retry/interrupt state, Codex turn recovery, and
+  OpenHands attach. Gate those paths on the expanded durable envelope instead
+  of forking their recovery state machines.
+- `crates/opensymphony-openhands/src/session.rs::recover_with_observer` and
+  `recovery_baseline_event_ids` are the OpenHands prepared/trigger-pending
+  reconciliation boundary.
+
+Preserve the regressions
+`central_config_rejects_repository_instruction_symlink_escape`,
+`explicit_config_selection_does_not_depend_on_repository_checkout`,
+`recover_workspaces_reattaches_ambiguous_prepared_openhands_runs`,
+`recover_workspaces_reattaches_prepared_codex_run_with_active_turn`, and
+`codex_stdio_worker_recovery_reconciles_without_starting_a_new_turn`.
+These are compatibility foundations, not the terminal multi-repository
+envelope this task still owns.
+
 ## Scope
 
 ### In scope
@@ -39,17 +72,20 @@ runtime envelope.
   commit.
 - Compose per-job prompts without instructions from another inventory
   repository.
-- Persist the terminal runtime envelope: binding, config/inventory generations,
-  checkout provenance, instruction hash, target commit, harness/model profile,
-  conversation binding, and cleanup intent.
+- Extend the existing run and conversation manifests into the terminal runtime
+  envelope: binding, config/inventory generations, checkout provenance,
+  instruction hash, target commit, harness/model profile, conversation binding,
+  and cleanup intent.
 - Launch both current harness adapters with `cwd` equal to the verified checkout
   and record the requested execution scope and effective containment.
-- Resume a conversation only when repository, checkout generation, policy, and
-  instruction identity remain compatible.
+- Gate the inherited reattachment paths on repository, checkout generation,
+  policy, and instruction compatibility for both harnesses.
 - Route terminal retention and deletion decisions through `WorkspaceManager`.
 
 ### Out of scope
 
+- Reworking COE-547 central-config migration, generic retry accounting,
+  interrupt acknowledgement, or legacy single-repository recovery.
 - Parent execution roots or multi-checkout harness scopes.
 - Cross-repository integration checks.
 - Hosted workspace isolation.
@@ -57,9 +93,11 @@ runtime envelope.
 ## Deliverables
 
 - Typed checkout-generation and verification operations.
-- Durable provenance and terminal runtime-envelope schemas.
+- Durable provenance and terminal runtime-envelope extensions to the existing
+  run and conversation manifests.
 - Repository-specific instruction loader and prompt composition.
-- OpenHands and Codex launch/reattach integration.
+- OpenHands and Codex launch/reattach integration gated by the complete terminal
+  envelope.
 - Quarantine, crash-recovery, instruction-isolation, and secret-canary tests.
 
 ## Acceptance Criteria
@@ -76,6 +114,9 @@ runtime envelope.
       errors, or process-display strings.
 - [ ] Restart reuses only a compatible checkout and harness conversation;
       mismatches enter a typed blocked or superseded state.
+- [ ] The inherited COE-547 prepared/trigger-pending and retry-recovery
+      regressions remain green without duplicating prompts or redefining legacy
+      terminal semantics.
 - [ ] OpenHands and Codex record their effective containment without claiming
       sandboxing in the current trusted-host profiles.
 - [ ] No backend deletes a terminal workspace directly.
@@ -86,8 +127,9 @@ runtime envelope.
   shallow history, target branches, dirty state, symlink escapes, and quarantine.
 - Add prompt tests with contradictory repository instructions and native nested
   `AGENTS.md` discovery metadata.
-- Add OpenHands and Codex launch/resume tests for `cwd`, envelope compatibility,
-  conversation reuse, and containment receipts.
+- Extend the COE-547 recovery fixtures with OpenHands and Codex launch/resume
+  tests for `cwd`, full-envelope compatibility, conversation reuse, mismatch
+  quarantine, and containment receipts.
 - Run focused workspace, workflow, orchestrator-run, OpenHands, and Codex tests,
   `cargo fmt --check`, `cargo clippy-system-duckdb`, and `git diff --check`.
 
@@ -99,16 +141,28 @@ runtime envelope.
   `crates/opensymphony-cli/src/orchestrator_run/{backends,mod}.rs`,
   `crates/opensymphony-openhands/src/session.rs`, and
   `crates/opensymphony-codex/src/lib.rs`.
+- Trace the named COE-547 types and regressions before changing run, retry,
+  reattachment, marker, or retention state.
+- After COE-547 closeout is indexed, `memory.context` scoped to issue `COE-547`
+  and areas `workspace-lifecycle`, `workflow`, `openhands-runtime`, and
+  `codex-runtime` may supply provenance and rationale; verify it against the
+  named source and tests.
 - Preserve current one-conversation-per-issue behavior when its full envelope is
   compatible.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [x] The COE-547 compatibility baseline and non-reimplementation boundary are
+      explicit.
+- [x] Required files, docs, and remaining terminal-envelope ownership are
+      explicitly referenced.
+- [ ] OSYM-885 is merged and its canonical binding contract is available to the
+      checkout and harness-envelope implementation.
 
 ## Notes
 
 Do not add a command broker. Terminal workers need one checkout, so the existing
 native harness tools plus truthful containment metadata are sufficient.
+Treat a review request to redesign generic legacy recovery as COE-547 follow-up
+work unless the terminal envelope cannot be implemented through a narrow
+compatibility extension.

@@ -33,6 +33,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -41,10 +42,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:security
@@ -60,6 +64,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   ai-pr-review-human-setup:
     title: OpenHands PR Review - Human Setup Guide
@@ -101,6 +106,7 @@ areas:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -124,6 +130,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -139,11 +146,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -172,6 +181,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   cli:
@@ -193,6 +203,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -208,11 +219,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -241,6 +254,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   code-intelligence:
@@ -259,6 +273,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -267,10 +282,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -290,6 +308,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   code-review:
     title: Code Review
@@ -307,6 +326,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -314,9 +334,12 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:template
@@ -328,6 +351,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   codex:
     title: Codex
@@ -346,6 +370,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -361,11 +386,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -394,6 +421,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   codex-app-server:
@@ -434,6 +462,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -443,10 +472,13 @@ areas:
       - area:graph-view
       - area:harness-runtime
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -467,6 +499,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   configuration:
     title: Configuration
@@ -480,6 +513,14 @@ areas:
       docs:
       - docs/configuration.md
       linear_labels:
+      - area:configuration
+      - area:linear
+      - area:mcp
+      - area:memory
+      - area:migration
+      - area:orchestrator
+      - area:planning
+      - area:workflow
       - configuration
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -490,6 +531,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -512,6 +554,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -527,11 +570,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -560,6 +605,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   debugging:
@@ -575,15 +621,19 @@ areas:
       - area:accessibility
       - area:code-intelligence
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:testing
@@ -592,6 +642,7 @@ areas:
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   deployment-modes:
     title: Deployment Modes
@@ -625,6 +676,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -640,11 +692,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -673,6 +727,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   developer-experience:
@@ -693,6 +748,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -708,11 +764,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -740,6 +798,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   development:
@@ -798,6 +857,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -813,11 +873,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -846,6 +908,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   documentation:
@@ -863,6 +926,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -870,10 +934,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:target-repo-bootstrap
@@ -888,6 +955,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   duckdb:
     title: Duckdb
@@ -906,6 +974,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -921,11 +990,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -954,6 +1025,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   elixir-hierarchy-changes:
@@ -982,6 +1054,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -990,10 +1063,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1012,6 +1088,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   gateway:
     title: Gateway
@@ -1030,6 +1107,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1045,11 +1123,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1078,6 +1158,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   graph-view:
@@ -1096,6 +1177,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -1104,10 +1186,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1127,6 +1212,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   harness-runtime:
     title: Harness Runtime
@@ -1146,6 +1232,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1161,11 +1248,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1193,6 +1282,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   host-client-architecture:
@@ -1290,6 +1380,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1305,11 +1396,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1337,6 +1430,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   linear:
@@ -1356,6 +1450,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1371,11 +1466,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1404,6 +1501,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   linear-and-tools:
@@ -1438,6 +1536,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1453,11 +1552,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1485,6 +1586,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   memory:
@@ -1510,6 +1612,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1525,11 +1628,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1558,6 +1663,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -1565,6 +1671,26 @@ areas:
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
+  migration:
+    title: Migration
+    docs_target: docs/migration.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - migration
+    source_refs:
+      linear_labels:
+      - area:configuration
+      - area:linear
+      - area:mcp
+      - area:memory
+      - area:migration
+      - area:orchestrator
+      - area:planning
+      - area:workflow
+      linear_milestones:
+      - 'M12.95: Multi-Repository Foundations'
   migration-1-0-0:
     title: OpenSymphony 1.0.0 Migration Guide
     docs_target: docs/migration-1.0.0.md
@@ -1594,6 +1720,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1609,11 +1736,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1641,6 +1770,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   okf:
@@ -1660,6 +1790,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1675,11 +1806,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1707,6 +1840,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   openhands-agent-server:
@@ -1753,6 +1887,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -1761,11 +1896,14 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1786,6 +1924,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   operations:
     title: Operations
@@ -1806,6 +1945,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1821,11 +1961,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1855,6 +1997,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -1879,6 +2022,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -1894,11 +2038,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1927,8 +2073,25 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
+  planning:
+    title: Planning
+    docs_target: docs/planning.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - planning
+    source_refs:
+      linear_labels:
+      - area:configuration
+      - area:mcp
+      - area:memory
+      - area:planning
+      linear_milestones:
+      - 'M12.95: Multi-Repository Foundations'
   prerequisites:
     title: Prerequisites
     docs_target: docs/prerequisites.md
@@ -1961,6 +2124,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -1969,10 +2133,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -1991,6 +2158,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   release:
     title: Release
@@ -2006,6 +2174,7 @@ areas:
       - area:cli
       - area:code-intelligence
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2013,9 +2182,12 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:testing
@@ -2025,6 +2197,7 @@ areas:
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   repository-layout:
     title: Repository Layout
@@ -2058,15 +2231,19 @@ areas:
       - area:accessibility
       - area:code-intelligence
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:testing
@@ -2075,6 +2252,7 @@ areas:
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   runtime:
     title: Runtime
@@ -2093,6 +2271,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -2108,11 +2287,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2141,6 +2322,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   rust:
@@ -2158,6 +2340,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2166,10 +2349,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2190,6 +2376,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   security:
     title: Security
@@ -2208,6 +2395,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -2223,11 +2411,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2256,6 +2446,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   sources:
@@ -2277,6 +2468,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M6: Gateway And Stream Contract'
       - 'M9: Collaborative Planning Alpha'
   symphony-spec-alignment:
@@ -2306,6 +2498,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2313,9 +2506,12 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:target-repo-bootstrap
@@ -2328,6 +2524,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   template:
     title: Template
@@ -2343,6 +2540,7 @@ areas:
       - area:cli
       - area:code-intelligence
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2350,9 +2548,12 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:template
@@ -2364,6 +2565,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   testing:
     title: Testing
@@ -2382,6 +2584,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -2397,11 +2600,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2430,6 +2635,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   testing-and-operations:
@@ -2477,6 +2683,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2485,10 +2692,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:security
@@ -2507,6 +2717,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   threejs:
     title: Threejs
@@ -2523,6 +2734,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2531,10 +2743,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:security
@@ -2551,6 +2766,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   tui:
     title: Tui
@@ -2569,6 +2785,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -2584,11 +2801,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2616,6 +2835,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   ui:
@@ -2635,6 +2855,7 @@ areas:
       - area:code-review
       - area:codex
       - area:codex-runtime
+      - area:configuration
       - area:control
       - area:debugging
       - area:desktop
@@ -2650,11 +2871,13 @@ areas:
       - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:model-configuration
       - area:okf
       - area:openhands-runtime
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2682,6 +2905,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M9.5: Developer Build Acceleration'
   ui-frankentui:
@@ -2712,15 +2936,19 @@ areas:
       - area:accessibility
       - area:code-intelligence
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:testing
@@ -2729,6 +2957,7 @@ areas:
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   websocket-runtime:
     title: WebSocket Runtime Contract
@@ -2760,6 +2989,7 @@ areas:
       - area:code-intelligence
       - area:code-review
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
@@ -2768,10 +2998,13 @@ areas:
       - area:gateway
       - area:graph-view
       - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:operations
       - area:orchestrator
+      - area:planning
       - area:query-packs
       - area:release
       - area:run-detail
@@ -2792,6 +3025,7 @@ areas:
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
@@ -2821,15 +3055,19 @@ areas:
       - area:accessibility
       - area:code-intelligence
       - area:codex-runtime
+      - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:orchestrator
+      - area:planning
       - area:release
       - area:run-detail
       - area:testing
@@ -2838,6 +3076,7 @@ areas:
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
 redaction:
   deny_patterns: []

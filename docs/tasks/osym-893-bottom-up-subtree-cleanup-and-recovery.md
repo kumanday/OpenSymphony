@@ -19,6 +19,39 @@ Finalize parent runs through durable, lease-aware, Git-aware bottom-up cleanup
 that survives partial failure and preserves any checkout still needed by a
 higher ancestor or diagnostic hold.
 
+## COE-547 Code Baseline
+
+Begin at these cleanup and recovery boundaries:
+
+- `crates/opensymphony-workspace/src/manager.rs` owns `cleanup`,
+  `cleanup_failed_terminal_workspace`, and
+  `cleanup_with_terminal_removal`. The last function currently performs the
+  final `remove_dir_all`; place lease, worktree, receipt, and tombstone
+  eligibility ahead of that destructive boundary.
+- `crates/opensymphony-workspace/src/models.rs` owns `CleanupConfig`,
+  `CleanupDecision`, `CleanupOutcome`, hook receipts, and `RunManifest`. Extend
+  these durable records for generation-specific cleanup intent rather than
+  creating an unrelated cleanup store.
+- `crates/opensymphony-cli/src/orchestrator_run/backends.rs` owns
+  `cleanup_workspace_with_policy`, failed-workspace cleanup, retry-exhaustion
+  persistence, and recovery from existing run manifests.
+- `crates/opensymphony-orchestrator/src/scheduler.rs` owns retry exhaustion,
+  tracker-reactivation, interrupt acknowledgement, and terminal recovery.
+  Parent cleanup consumes those decisions; it must not redefine them.
+- `crates/opensymphony-domain/src/state_machine.rs` and
+  `crates/opensymphony-cli/src/orchestrator_run/snapshot.rs` preserve release
+  reasons and tracker-terminal precedence.
+
+Preserve the regressions
+`retry_exhausted_cleanup_policy_survives_terminal_transition`,
+`inactive_retry_exhaustion_retries_failed_workspace_cleanup`,
+`failed_terminal_interrupt_is_retried_before_cleanup`,
+`terminal_recovery_honors_failed_workspace_retention`,
+`retry_exhausted_release_preserves_explicit_reason`, and
+`terminal_tracker_state_overrides_a_failed_worker_outcome`. They describe one
+issue workspace; this task adds ancestor leases, integration worktrees,
+bottom-up release, generation tombstones, and subtree cleanup intent.
+
 ## Scope
 
 ### In scope
@@ -43,13 +76,16 @@ higher ancestor or diagnostic hold.
 
 ### Out of scope
 
+- Redesigning COE-547 retry accounting, tracker-completion semantics,
+  interrupt acknowledgement, or generic failed-workspace retention.
 - Storage quotas or automatic diagnostic-hold expiry policy tuning.
 - Hosted remote workspace deletion.
 - Cleaning unrelated legacy workspaces during migration.
 
 ## Deliverables
 
-- Cleanup-intent, eligibility, receipt, retry, and tombstone persistence.
+- Parent/subtree cleanup-intent, eligibility, receipt, retry, and tombstone
+  persistence layered on the existing single-issue recovery state.
 - Git-aware integration-worktree and parent-root removal.
 - Bottom-up lease release and higher-ancestor preservation.
 - Failed/canceled retention and diagnostic-hold behavior.
@@ -65,6 +101,9 @@ higher ancestor or diagnostic hold.
       visible and retryable without losing ownership evidence.
 - [ ] Restart resumes only incomplete cleanup steps and does not rerun a
       successfully receipted hook or deletion.
+- [ ] Parent cleanup consumes the inherited retry and retention state without
+      reclassifying an active Linear issue as completed or duplicating generic
+      terminal cleanup.
 - [ ] A missing path is accepted only with a matching generation tombstone.
 - [ ] Failed and canceled runs follow explicit retention policy.
 - [ ] No worker or scheduler backend calls direct recursive deletion.
@@ -73,6 +112,8 @@ higher ancestor or diagnostic hold.
 
 - Add temporary-worktree tests for ordered removal, active leases, higher
   ancestors, hook-once behavior, missing paths, and generation mismatch.
+- Reuse the COE-547 retry, terminal-state, interrupt, retention, and runtime-root
+  regressions as the single-issue baseline.
 - Inject failure before/after each cleanup receipt and tombstone write.
 - Add failed/canceled/diagnostic-hold cases and disk-permission failures.
 - Run focused workspace and orchestrator tests, `cargo fmt --check`,
@@ -84,15 +125,25 @@ higher ancestor or diagnostic hold.
   15.3, 16, and 21.5.
 - Inspect `crates/opensymphony-workspace/src/{manager,models}.rs` and every
   `remove_terminal_workspaces`/direct-deletion caller before changing cleanup.
+- Trace the named workspace, backend, scheduler, and snapshot symbols and tests
+  before adding parent cleanup state.
+- After COE-547 closeout is indexed, `memory.context` scoped to issue `COE-547`
+  and areas `workspace-lifecycle`, `orchestrator`, and `recovery` may supply
+  provenance and rationale; verify it against the named source and tests.
 - Preserve the Codex thread-retention and archive behavior delivered by
   OSYM-877 and OSYM-878.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [x] The COE-547 single-issue recovery baseline and parent/subtree ownership
+      boundary are explicit.
+- [x] Required files, docs, and remaining cleanup state are explicitly
+      referenced.
+- [ ] OSYM-892 is merged and its final parent evidence and repair contract is
+      available to cleanup eligibility.
 
 ## Notes
 
 Cleanup is the final state-machine phase, not an eager child-worker action.
+Generic issue retry and retention are inherited inputs; this task owns only the
+lease-aware parent/subtree cleanup protocol.

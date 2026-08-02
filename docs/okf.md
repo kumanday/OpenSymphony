@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-23T15:32:29.522793+00:00
 
 ## Current model
 
-- COE-546 contributed: PR #217: Code Graph bootstrap indexing UX and E2E validation (merge `5cc1e83`)
+- COE-550 contributed: PR #230: Per-instance memory catalog and canonical source migration (merge `4e6cae8`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-23T15:32:29.522793+00:00
 
 ## Recent changes
 
-- COE-546: Code Graph Bootstrap UX And End-To-End Validation
+- COE-550: Per-Instance Memory Catalog And Source Migration
 
 ## Source refs
 
-- COE-546
+- COE-550
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

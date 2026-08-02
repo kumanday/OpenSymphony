@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: duckdb
+area: planning
 visibility: public
-last_memory_sync: 2026-06-28T06:08:14.398767+00:00
+last_memory_sync: 2026-07-31T10:05:00.869005+00:00
 ---
 
-# Duckdb
+# Planning
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

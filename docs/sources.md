@@ -229,8 +229,7 @@ Key takeaways carried forward:
 
 ## Current model
 
-- COE-540 contributed: PR #206: feat(codex): reuse canonical issue threads (merge `e49e5ab`)
-- COE-541 contributed: PR #208: fix(codex): retain terminal retries and reuse lifecycle session (merge `58ee232`)
+- COE-550 contributed: PR #230: Per-instance memory catalog and canonical source migration (merge `4e6cae8`)
 
 ## Important invariants
 
@@ -247,12 +246,10 @@ Key takeaways carried forward:
 
 ## Recent changes
 
-- COE-540: Canonical Codex Thread Reuse And Workspace Retention
-- COE-541: Durable Codex Thread Archive And Debug Recovery
+- COE-550: Per-Instance Memory Catalog And Source Migration
 
 ## Source refs
 
-- COE-540
-- COE-541
+- COE-550
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

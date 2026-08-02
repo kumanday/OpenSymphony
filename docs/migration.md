@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: duckdb
+area: migration
 visibility: public
-last_memory_sync: 2026-06-28T06:08:14.398767+00:00
+last_memory_sync: 2026-07-30T23:13:45.229665+00:00
 ---
 
-# Duckdb
+# Migration
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
