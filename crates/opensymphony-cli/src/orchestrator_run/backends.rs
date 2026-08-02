@@ -3258,6 +3258,7 @@ async fn try_run_codex_stdio_issue(
         None
     };
     let mut resume_terminal = None;
+    let mut recovered_active_turn = false;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
         Some(mut manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
@@ -3333,20 +3334,20 @@ async fn try_run_codex_stdio_issue(
                 .filter(|turn_id| !turn_id.trim().is_empty())
                 .or_else(|| read_state.pending_turn_id.take())
                 .or_else(|| codex_active_turn_id_from_resume_response(&resume_response));
-            if recovered
-                && let Some(turn_id) = resume_turn_id.as_deref()
-                && manifest.last_turn_id.as_deref() != Some(turn_id)
-            {
-                persist_codex_turn_id(workspace_manager, workspace, &mut manifest, turn_id)
-                    .await
-                    .map_err(|error| {
-                        codex_lifecycle_error(
-                            issue,
-                            Some(&conversation_id),
-                            "recovered turn id persistence",
-                            error,
-                        )
-                    })?;
+            if recovered && let Some(turn_id) = resume_turn_id.as_deref() {
+                recovered_active_turn = true;
+                if manifest.last_turn_id.as_deref() != Some(turn_id) {
+                    persist_codex_turn_id(workspace_manager, workspace, &mut manifest, turn_id)
+                        .await
+                        .map_err(|error| {
+                            codex_lifecycle_error(
+                                issue,
+                                Some(&conversation_id),
+                                "recovered turn id persistence",
+                                error,
+                            )
+                        })?;
+                }
             }
             resume_terminal = resume_turn_id.as_deref().and_then(|turn_id| {
                 codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
@@ -3559,7 +3560,7 @@ async fn try_run_codex_stdio_issue(
             )
         }
     };
-    if recovered {
+    if recovered_active_turn {
         let turn_id = manifest
             .last_turn_id
             .clone()
@@ -3721,7 +3722,7 @@ async fn try_run_codex_stdio_issue(
                 with_codex_stderr(error, &stderr_tail),
             )
         })?;
-    if !recovered {
+    if !recovered_active_turn {
         persist_codex_run_started(
             workspace_manager,
             workspace,
@@ -7398,6 +7399,99 @@ mod tests {
         assert!(!log.contains(r#""method":"thread/start""#));
         assert!(!log.contains(r#""method":"thread/archive""#));
         assert!(!log.contains(r#""method":"turn/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_recovery_restarts_prepared_run_without_turn_id() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-codex-without-turn", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+
+        let mut conversation_manifest = sample_conversation_manifest("fake-thread");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.persistence_dir = ensured.handle.metadata_dir();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        conversation_manifest.runtime_contract_version =
+            Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        conversation_manifest.active_run_id = Some(run_manifest.run_id.clone());
+        conversation_manifest.last_turn_id = None;
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-prepared-recovery")
+                .expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-prepared-recovery.log");
+        let fake_codex = tempdir.path().join("fake-codex-prepared-recovery");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            None,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            true,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
+        assert!(log.contains(r#""method":"turn/start""#));
     }
 
     #[cfg(unix)]

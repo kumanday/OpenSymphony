@@ -271,6 +271,7 @@ and login -> Enable device code authorization for Codex before retrying.
 - condenser replacement evidence persistence and post-retirement clearing
 - identifier-derived workspace-key supersession for same-ID tracker changes
 - same-harness Codex supersession evidence and harness-specific persistence paths
+- prepared Codex recovery without a persisted turn id resumes with `turn/start`
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
 - recreation of a missing conversation with persisted history
