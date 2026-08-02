@@ -465,6 +465,15 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     ));
     std::fs::remove_file(&alternates).expect("alternates file should be removed");
 
+    let grafts = first.handle.workspace_path().join(".git/info/grafts");
+    std::fs::write(&grafts, b"").expect("grafts file should be written");
+    assert!(matches!(
+        manager.verify_checkout(&first.handle).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("grafts")
+    ));
+    std::fs::remove_file(&grafts).expect("grafts file should be removed");
+
     let outside_worktree = temp_dir.path().join("outside-worktree");
     std::fs::create_dir_all(&outside_worktree).expect("outside worktree should exist");
     git(
@@ -1101,6 +1110,47 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     assert!(
         !owned_published_path.exists(),
         "owned incomplete published generations should be swept during discovery"
+    );
+
+    let intent_owned_path =
+        sweep_root.join("intent-owned-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(intent_owned_path.join(".opensymphony"))
+        .await
+        .expect("intent-owned published generation directory should exist");
+    let intent_staging_path = sweep_root
+        .join(".opensymphony-staging")
+        .join("intent-owned-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(
+        intent_staging_path
+            .parent()
+            .expect("staging root should have a parent"),
+    )
+    .await
+    .expect("staging root should exist");
+    let intent_marker_path = intent_staging_path
+        .parent()
+        .expect("staging root should exist")
+        .join("intent-owned-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        intent_marker_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "intent-owned-generation",
+            "staging_path": intent_staging_path,
+            "published_path": intent_owned_path,
+        }))
+        .expect("published staging intent should encode"),
+    )
+    .await
+    .expect("published staging intent should be written");
+    sweep_manager
+        .list_all_workspaces()
+        .await
+        .expect("published staging intent should prove ownership during recovery");
+    assert!(
+        !intent_owned_path.exists(),
+        "a published generation claimed by a staging intent should be swept after a publish crash"
     );
 }
 

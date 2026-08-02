@@ -125,6 +125,8 @@ struct StagingIntentMarker {
     generation: String,
     workspace_key: String,
     staging_path: PathBuf,
+    #[serde(default)]
+    published_path: Option<PathBuf>,
 }
 
 struct StagingCleanupGuard {
@@ -489,6 +491,7 @@ impl WorkspaceManager {
             generation: generation.clone(),
             workspace_key: workspace_key.clone(),
             staging_path: staging_path.clone(),
+            published_path: Some(published_path.clone()),
         };
         let staging_intent_payload =
             serde_json::to_vec_pretty(&staging_intent).map_err(|source| {
@@ -1340,6 +1343,14 @@ impl WorkspaceManager {
         };
         let canonical_marker_parent = self.canonicalize_path(marker_parent).await?;
         ensure_descendant(canonical_staging_root, &canonical_marker_parent)?;
+        if let Some(published_path) = marker.published_path.as_deref()
+            && path_exists(published_path).await?
+            && self
+                .staging_intent_claims_published_path(published_path)
+                .await?
+        {
+            return Ok(false);
+        }
         Ok(marker.schema_version == 1
             && marker.generation == generation
             && marker.workspace_key == workspace_key
@@ -1758,6 +1769,21 @@ impl WorkspaceManager {
         }
         self.verify_git_object_alternates(checkout, &canonical_checkout)
             .await?;
+        let grafts_path = self
+            .git(checkout, &["rev-parse", "--git-path", "info/grafts"])
+            .await?;
+        let grafts_path = PathBuf::from(&grafts_path);
+        let grafts_path = if grafts_path.is_absolute() {
+            grafts_path
+        } else {
+            canonical_checkout.join(grafts_path)
+        };
+        if path_exists(&grafts_path).await? {
+            return Err(checkout_verification(
+                checkout,
+                "Git grafts are not permitted in a verified checkout",
+            ));
+        }
         let expected = SafeRemoteFingerprint::from_remote(
             &repository.provider,
             repository.provider_id.as_deref(),
@@ -3078,6 +3104,9 @@ impl WorkspaceManager {
                 Some(generation) => {
                     self.published_checkout_ownership_marker(&canonical_workspace, generation)
                         .await
+                        || self
+                            .staging_intent_claims_published_path(&canonical_workspace)
+                            .await?
                 }
                 None => false,
             };
@@ -3242,6 +3271,42 @@ impl WorkspaceManager {
             && !manifest.quarantined
             && manifest.generation == generation
             && path_matches
+    }
+
+    async fn staging_intent_claims_published_path(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<bool, WorkspaceError> {
+        let Some((workspace_key, generation)) = staging_generation_identity(workspace_path) else {
+            return Ok(false);
+        };
+        let staging_root = self.config.root.join(".opensymphony-staging");
+        let staging_path = staging_root.join(
+            workspace_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        );
+        let marker_path = staging_intent_marker_path(&staging_root, &staging_path);
+        let Ok(raw) = fs::read_to_string(marker_path).await else {
+            return Ok(false);
+        };
+        let Ok(marker) = serde_json::from_str::<StagingIntentMarker>(&raw) else {
+            return Ok(false);
+        };
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let canonical_workspace = self.canonicalize_path(workspace_path).await?;
+        let canonical_published = if let Some(path) = marker.published_path.as_deref() {
+            Some(self.canonicalize_path(path).await?)
+        } else {
+            None
+        };
+        Ok(marker.schema_version == 1
+            && marker.generation == generation
+            && marker.workspace_key == workspace_key
+            && marker.staging_path == staging_path
+            && canonical_published.as_deref() == Some(canonical_workspace.as_path())
+            && ensure_descendant(&canonical_root, &canonical_workspace).is_ok())
     }
 
     async fn checkout_generation_ownership_is_proven(

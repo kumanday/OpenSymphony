@@ -1006,8 +1006,6 @@ impl LinearClient {
                 for (index, project_id) in self.config.project_ids.iter().enumerate() {
                     project_slugs[index] = if self.config.project_id_slug_fallbacks[index] {
                         project_slugs[index].clone()
-                    } else if index == 0 && self.config.project_id.is_some() {
-                        self.project_slug_for_queries().await?
                     } else {
                         self.fetch_project_slug_by_id(project_id, None).await?
                     };

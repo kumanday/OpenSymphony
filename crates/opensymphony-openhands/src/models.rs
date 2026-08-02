@@ -231,6 +231,24 @@ pub struct Conversation {
     pub stats: Option<Value>,
 }
 
+impl Conversation {
+    pub fn without_mcp_credentials(&self) -> Self {
+        let mut redacted = self.clone();
+        if let Some(mcp_config) = redacted.agent.mcp_config.as_mut()
+            && let Some(servers) = mcp_config
+                .get_mut("mcpServers")
+                .and_then(Value::as_object_mut)
+        {
+            for server in servers.values_mut() {
+                if let Some(server) = server.as_object_mut() {
+                    server.remove("headers");
+                }
+            }
+        }
+        redacted
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TextContent {
     pub r#type: String,
@@ -548,6 +566,28 @@ mod tests {
                 .get("headers")
                 .is_none()
         }));
+
+        let conversation = Conversation {
+            conversation_id: request_with_memory.conversation_id,
+            workspace: request_with_memory.workspace.clone(),
+            persistence_dir: request_with_memory.persistence_dir.clone(),
+            max_iterations: request_with_memory.max_iterations,
+            stuck_detection: request_with_memory.stuck_detection,
+            execution_status: "idle".to_owned(),
+            confirmation_policy: request_with_memory.confirmation_policy.clone(),
+            agent: request_with_memory.agent.clone(),
+            stats: None,
+        };
+        let redacted_conversation = conversation.without_mcp_credentials();
+        assert!(
+            redacted_conversation
+                .agent
+                .mcp_config
+                .as_ref()
+                .is_some_and(|config| config["mcpServers"]["opensymphony-memory"]
+                    .get("headers")
+                    .is_none())
+        );
     }
 
     #[test]

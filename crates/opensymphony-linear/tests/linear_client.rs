@@ -332,6 +332,29 @@ async fn unresolved_configured_project_id_fails_closed() {
 }
 
 #[tokio::test]
+async fn stale_first_project_id_does_not_fall_back_to_configured_slug() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        r#"{"data":{"projects":{"nodes":[]}}}"#,
+    )])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["stale-project-id".to_owned()];
+    config.project_slugs = vec!["configured-project-slug".to_owned()];
+    config.project_id_slug_fallbacks = vec![false];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("a stale non-fallback project ID should fail closed");
+    assert!(
+        matches!(error, LinearError::InvalidConfiguration(message) if message.contains("stale-project-id"))
+    );
+    assert_eq!(server.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
 async fn candidate_issue_summaries_use_lightweight_dispatch_query() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
         "fixtures/candidate_issues_page.json"

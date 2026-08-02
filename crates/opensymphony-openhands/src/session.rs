@@ -3968,7 +3968,7 @@ fn conversation_snapshot(stream: &RuntimeEventStream) -> Conversation {
     if let Some(status) = stream.state_mirror().execution_status() {
         conversation.execution_status = status.to_string();
     }
-    conversation
+    conversation.without_mcp_credentials()
 }
 
 fn build_summary_metadata(
