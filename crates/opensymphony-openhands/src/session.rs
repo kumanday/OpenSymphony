@@ -97,10 +97,9 @@ pub struct MemoryWorkerAccess {
     pub project_set: Option<String>,
     pub execution_repo: Option<String>,
     pub authorized_repositories: Vec<String>,
-    /// The token is issued by this process's memory server and cannot be
-    /// refreshed on an existing OpenHands conversation. Such conversations
-    /// must be superseded before the next turn so the new token is installed
-    /// in the create payload.
+    /// The token is issued by this process's memory server. The orchestrator
+    /// refreshes the corresponding issue grant in place before each retry, so
+    /// reusable conversations can keep the same MCP bearer across turns.
     pub requires_fresh_conversation: bool,
 }
 

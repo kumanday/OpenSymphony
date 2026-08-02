@@ -1961,7 +1961,7 @@ pub(crate) struct MemoryScopeGrant {
 }
 
 impl MemoryScopeGrantRegistry {
-    pub(crate) fn issue(
+    pub(crate) fn issue_or_refresh(
         &self,
         project: &str,
         execution_repo: &str,
@@ -1969,28 +1969,30 @@ impl MemoryScopeGrantRegistry {
         issue: &str,
         checkout_generation: Option<String>,
     ) -> String {
-        let token = format!("opensymphony-worker-{}", Uuid::new_v4());
-        self.grants
-            .write()
-            .expect("memory grant registry poisoned")
-            .insert(
-                token.clone(),
-                MemoryScopeGrant {
-                    project: project.to_owned(),
-                    execution_repo: execution_repo.to_owned(),
-                    authorized_repositories,
-                    issue: issue.to_owned(),
-                    checkout_generation,
-                },
-            );
-        token
-    }
+        let mut grants = self.grants.write().expect("memory grant registry poisoned");
+        if let Some((token, grant)) = grants.iter_mut().find(|(_, grant)| grant.issue == issue) {
+            *grant = MemoryScopeGrant {
+                project: project.to_owned(),
+                execution_repo: execution_repo.to_owned(),
+                authorized_repositories,
+                issue: issue.to_owned(),
+                checkout_generation,
+            };
+            return token.clone();
+        }
 
-    fn revoke(&self, token: &str) {
-        self.grants
-            .write()
-            .expect("memory grant registry poisoned")
-            .remove(token);
+        let token = format!("opensymphony-worker-{}", Uuid::new_v4());
+        grants.insert(
+            token.clone(),
+            MemoryScopeGrant {
+                project: project.to_owned(),
+                execution_repo: execution_repo.to_owned(),
+                authorized_repositories,
+                issue: issue.to_owned(),
+                checkout_generation,
+            },
+        );
+        token
     }
 
     fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
@@ -2001,23 +2003,6 @@ impl MemoryScopeGrantRegistry {
                 .get(token)
                 .cloned()
         })
-    }
-}
-
-pub(crate) struct MemoryScopeGrantLease {
-    registry: MemoryScopeGrantRegistry,
-    token: String,
-}
-
-impl MemoryScopeGrantLease {
-    pub(crate) fn new(registry: MemoryScopeGrantRegistry, token: String) -> Self {
-        Self { registry, token }
-    }
-}
-
-impl Drop for MemoryScopeGrantLease {
-    fn drop(&mut self) {
-        self.registry.revoke(&self.token);
     }
 }
 
@@ -12750,22 +12735,32 @@ Public memory concept.
     }
 
     #[test]
-    fn worker_memory_grant_lease_revokes_bearer_on_drop() {
+    fn worker_memory_grant_refresh_preserves_bearer_for_conversation_reuse() {
         let registry = MemoryScopeGrantRegistry::default();
-        let token = registry.issue(
+        let token = registry.issue_or_refresh(
             "project-alpha",
             "repo-alpha",
             BTreeSet::from(["repo-alpha".to_owned()]),
             "COE-549",
             Some("generation-1".to_owned()),
         );
-        assert!(registry.get(Some(&token)).is_some());
+        let refreshed = registry.issue_or_refresh(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-2".to_owned()),
+        );
 
-        let lease = super::MemoryScopeGrantLease::new(registry.clone(), token.clone());
-        assert!(registry.get(Some(&token)).is_some());
-        drop(lease);
-
-        assert!(registry.get(Some(&token)).is_none());
+        assert_eq!(refreshed, token);
+        assert_eq!(
+            registry
+                .get(Some(&token))
+                .expect("refreshed worker grant should remain valid")
+                .checkout_generation
+                .as_deref(),
+            Some("generation-2")
+        );
     }
 
     #[test]

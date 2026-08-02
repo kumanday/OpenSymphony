@@ -8,7 +8,6 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use super::super::memory::MemoryScopeGrantLease;
 use crate::opensymphony_cli::BlockedEnvironment;
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
@@ -2246,7 +2245,6 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let mut _worker_grant_lease: Option<MemoryScopeGrantLease> = None;
             let worker_memory_env = memory_env.as_ref().map(|memory| {
                 let mut scoped = memory.clone();
                 scoped.project = worker_memory_project(&issue, &memory.project);
@@ -2274,7 +2272,7 @@ impl RuntimeWorkerBackend {
                     .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
                 scoped.authorized_repositories = authorized_repositories.clone();
                 if let Some(grants) = &scoped.scope_grants {
-                    let token = grants.issue(
+                    let token = grants.issue_or_refresh(
                         &scoped.project,
                         &scoped.execution_repo,
                         authorized_repositories,
@@ -2284,7 +2282,6 @@ impl RuntimeWorkerBackend {
                             .map(|envelope| envelope.checkout_generation.clone()),
                     );
                     scoped.token = Some(token.clone());
-                    _worker_grant_lease = Some(MemoryScopeGrantLease::new(grants.clone(), token));
                 }
                 scoped.authorized_repositories_by_project.clear();
                 scoped
@@ -2908,7 +2905,10 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
         project: Some(memory.project.clone()),
         execution_repo: Some(memory.execution_repo.clone()),
         authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
-        requires_fresh_conversation: memory.scope_grants.is_some(),
+        // The registry refreshes the issue-scoped grant in place before each
+        // retry, so the MCP bearer already stored in a reusable conversation
+        // remains valid without forcing a fresh conversation.
+        requires_fresh_conversation: false,
         project_set: memory.project_set.clone(),
     }
 }
