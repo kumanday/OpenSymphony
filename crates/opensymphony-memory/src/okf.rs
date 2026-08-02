@@ -1768,6 +1768,7 @@ fn legacy_frontmatter_to_opensymphony_metadata(
             url: string_extra(frontmatter, "linear_url"),
             repo_id: None,
             symbol_key: None,
+            registration_source_id: None,
         });
     }
     for source_ref in legacy_source_refs(frontmatter) {
@@ -1943,6 +1944,7 @@ fn legacy_source_refs_from_extra(
                         url,
                         repo_id: None,
                         symbol_key: None,
+                        registration_source_id: None,
                     },
                 );
             }
@@ -1958,6 +1960,7 @@ fn legacy_source_refs_from_extra(
                         url: None,
                         repo_id: None,
                         symbol_key: None,
+                        registration_source_id: None,
                     },
                 );
             }
@@ -1974,6 +1977,7 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
             url: None,
             repo_id: None,
             symbol_key: None,
+            registration_source_id: None,
         };
     }
     if let Some(id) = token.strip_prefix("github:merge:") {
@@ -1983,6 +1987,7 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
             url: None,
             repo_id: None,
             symbol_key: None,
+            registration_source_id: None,
         };
     }
     if let Some(id) = token.strip_prefix("linear:") {
@@ -1992,6 +1997,7 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
             url: None,
             repo_id: None,
             symbol_key: None,
+            registration_source_id: None,
         };
     }
     MemorySourceRef {
@@ -2000,6 +2006,7 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
         url: None,
         repo_id: None,
         symbol_key: None,
+        registration_source_id: None,
     }
 }
 

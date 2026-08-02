@@ -91,6 +91,7 @@ pub struct MemoryWorkerAccess {
     pub endpoint: String,
     pub token: Option<String>,
     pub project: Option<String>,
+    pub project_set: Option<String>,
     pub execution_repo: Option<String>,
 }
 
@@ -3422,7 +3423,9 @@ async fn fetch_memory_context_from_server(
     if let Value::Object(map) = &mut arguments {
         if let Some(project) = &memory.project {
             map.insert("project".to_string(), json!(project));
-            map.insert("projectSet".to_string(), json!(project));
+        }
+        if let Some(project_set) = &memory.project_set {
+            map.insert("projectSet".to_string(), json!(project_set));
         }
         if let Some(repo) = &memory.execution_repo {
             map.insert("repo".to_string(), json!(repo));
@@ -4140,6 +4143,7 @@ mod tests {
             endpoint: format!("http://{address}/mcp"),
             token: Some("read-token".to_string()),
             project: Some("project-alpha".to_string()),
+            project_set: Some("set-alpha".to_string()),
             execution_repo: Some("/tmp/repo-alpha".to_string()),
         };
 
@@ -4203,10 +4207,7 @@ mod tests {
             "COE-100"
         );
         assert_eq!(request["params"]["arguments"]["project"], "project-alpha");
-        assert_eq!(
-            request["params"]["arguments"]["projectSet"],
-            "project-alpha"
-        );
+        assert_eq!(request["params"]["arguments"]["projectSet"], "set-alpha");
         assert_eq!(request["params"]["arguments"]["repo"], "/tmp/repo-alpha");
         task.abort();
     }

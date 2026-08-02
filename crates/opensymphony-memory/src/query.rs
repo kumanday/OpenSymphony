@@ -1,24 +1,208 @@
 pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryError> {
+    brief_with_scope(config, issue_key, &MemoryScopeFilter::default())
+}
+
+pub fn load_issue_capsule(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryError> {
+    load_issue_capsule_with_scope(config, issue_key, &MemoryScopeFilter::default())
+}
+
+pub fn load_issue_capsule_with_scope(
+    config: &MemoryConfig,
+    issue_key: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
-    Ok(render_indexed_brief(config, &indexed))
+    if !indexed_issue_matches_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested scope"
+        )));
+    }
+    for path in indexed_capsule_paths(config, &indexed) {
+        match fs::read_to_string(&path) {
+            Ok(contents) => return Ok(contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(MemoryError::ReadFile { path, source }),
+        }
+    }
+    Ok(indexed.body)
 }
 
-fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
+pub fn brief_with_scope(
+    config: &MemoryConfig,
+    issue_key: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
+    let issue_key = normalize_issue_key(issue_key);
+    let indexed = find_indexed_issue(config, &issue_key)?
+        .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    if !indexed_issue_matches_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested scope"
+        )));
+    }
+    Ok(render_indexed_brief(config, &indexed, scope))
+}
+
+fn render_indexed_brief(
+    config: &MemoryConfig,
+    indexed: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> String {
     let mut output = String::new();
     output.push_str(&format!("# {}: {}\n\n", indexed.issue_key, indexed.title));
     output.push_str(&format!(
         "- Capsule: {}\n",
-        display_path(&config.repo_root, &indexed.capsule_path)
+        display_capsule_path(config, indexed, scope)
     ));
     output.push_str(&format!("- Visibility: {}\n", indexed.visibility));
-    if !indexed.areas().is_empty() {
-        output.push_str(&format!("- Areas: {}\n", indexed.areas().join(", ")));
+    let areas = indexed.areas_for_scope(config, scope);
+    if !areas.is_empty() {
+        output.push_str(&format!("- Areas: {}\n", areas.join(", ")));
     }
     output.push('\n');
     output.push_str(&compact_capsule_body(&indexed.body));
     output
+}
+
+fn display_capsule_path(
+    config: &MemoryConfig,
+    indexed: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> String {
+    let source_ref_repositories = indexed
+        .source_refs
+        .iter()
+        .filter_map(|source| source.repo_id.as_deref())
+        .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .collect::<BTreeSet<_>>();
+    let scope_repositories = indexed
+        .scope_refs
+        .iter()
+        .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+        .map(|scope| scope.id.as_str())
+        .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .collect::<BTreeSet<_>>();
+    let path_repositories = config
+        .repository_sources
+        .iter()
+        .filter(|(_, source)| indexed.capsule_path.strip_prefix(&source.root).is_ok())
+        .map(|(repository_id, _)| repository_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let requested_repository_id = requested_repository_id(config, scope);
+    let repository_id = if let Some(requested_repository_id) = requested_repository_id.as_deref()
+    {
+        let owns_requested_repository = indexed_issue_matches_repo(config, indexed, requested_repository_id);
+        (owns_requested_repository
+            && (path_repositories.is_empty()
+                || path_repositories.contains(requested_repository_id)))
+            .then_some(requested_repository_id)
+    } else if path_repositories.len() == 1 {
+        path_repositories.iter().next().copied()
+    } else if path_repositories.is_empty() {
+        let mut candidates = source_ref_repositories;
+        candidates.extend(scope_repositories);
+        (candidates.len() == 1)
+            .then(|| candidates.into_iter().next().expect("one repository candidate"))
+    } else {
+        None
+    };
+    let bundle_relative_path = repository_id
+        .and_then(|repository_id| config.repository_sources.get(repository_id))
+        .and_then(|source| indexed.capsule_path.strip_prefix(&source.root).ok())
+        .or_else(|| indexed.capsule_path.strip_prefix(&config.memory_root).ok())
+        .or_else(|| indexed.capsule_path.strip_prefix(&config.repo_root).ok())
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            indexed
+                .capsule_path
+                .is_relative()
+                .then(|| indexed.capsule_path.display().to_string())
+        })
+        .or_else(|| {
+            indexed
+                .capsule_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "memory-capsule".to_string());
+
+    repository_id
+        .map(|repository_id| format!("{repository_id}:{bundle_relative_path}"))
+        .unwrap_or(bundle_relative_path)
+}
+
+fn requested_repository_id(config: &MemoryConfig, scope: &MemoryScopeFilter) -> Option<String> {
+    let requested = scope.repo.as_deref().and_then(normalize_optional)?;
+    if config.repository_sources.contains_key(&requested) {
+        return Some(requested);
+    }
+    let requested_root = Path::new(&requested).canonicalize().ok()?;
+    config
+        .repository_sources
+        .iter()
+        .find(|(_, source)| source.root.canonicalize().ok().as_ref() == Some(&requested_root))
+        .map(|(repository_id, _)| repository_id.clone())
+}
+
+fn indexed_capsule_paths(config: &MemoryConfig, indexed: &IndexedIssue) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let add_path = |paths: &mut Vec<PathBuf>, path: PathBuf| {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    let mut owning_repositories = indexed
+        .source_refs
+        .iter()
+        .filter_map(|source| source.repo_id.as_deref())
+        .filter(|repository_id| config.repository_sources.contains_key(*repository_id))
+        .collect::<BTreeSet<_>>();
+    owning_repositories.extend(
+        indexed
+            .scope_refs
+            .iter()
+            .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+            .map(|scope| scope.id.as_str())
+            .filter(|repository_id| config.repository_sources.contains_key(*repository_id)),
+    );
+    let mut allowed_roots = vec![config.memory_root.clone()];
+    if owning_repositories.len() == 1
+        && let Some(repository_id) = owning_repositories.iter().next()
+        && let Some(source) = config.repository_sources.get(*repository_id)
+    {
+        allowed_roots.push(source.root.clone());
+    }
+    if indexed.capsule_path.is_absolute() {
+        if let Ok(resolved_path) = indexed.capsule_path.canonicalize()
+            && allowed_roots
+                .iter()
+                .filter_map(|root| root.canonicalize().ok())
+                .any(|root| resolved_path.starts_with(root))
+        {
+            add_path(&mut paths, resolved_path);
+        }
+    } else {
+        if owning_repositories.len() == 1 {
+            let repository_id = owning_repositories
+                .into_iter()
+                .next()
+                .expect("one owning repository");
+            if let Some(source) = config.repository_sources.get(repository_id) {
+                let candidate = source.root.join(&indexed.capsule_path);
+                if ensure_repo_contained(&source.root, &candidate).is_ok() {
+                    add_path(&mut paths, candidate);
+                }
+            }
+        }
+        let candidate = config.memory_root.join(&indexed.capsule_path);
+        if ensure_repo_contained(&config.memory_root, &candidate).is_ok() {
+            add_path(&mut paths, candidate);
+        }
+    }
+    paths
 }
 
 pub fn search(
@@ -45,7 +229,7 @@ pub fn search_with_scope(
     let mut scored = Vec::new();
     for indexed in load_indexed_issues(config)?
         .into_iter()
-        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
         let haystack = format!(
             "{} {} {} {}",
@@ -65,8 +249,8 @@ pub fn search_with_scope(
                 SearchResult {
                     issue_key: indexed.issue_key.clone(),
                     title: indexed.title.clone(),
-                    capsule_path: indexed.capsule_path.clone(),
-                    areas: indexed.areas(),
+                    capsule_path: PathBuf::from(display_capsule_path(config, &indexed, scope)),
+                    areas: indexed.areas_for_scope(config, scope),
                     snippet: snippet_for_terms(&indexed.body, &terms),
                 },
             ));
@@ -102,16 +286,21 @@ pub fn related_by_issue_with_scope(
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    if !indexed_issue_visible_in_scope(config, &indexed, scope) {
+        return Err(MemoryError::InvalidInput(format!(
+            "no capsule found for {issue_key} in the requested scope"
+        )));
+    }
     let mut related = Vec::new();
-    let indexed_areas = indexed.areas();
+    let indexed_areas = indexed.areas_for_scope(config, scope);
     for candidate in load_indexed_issues(config)?
         .into_iter()
-        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
         if candidate.issue_key == issue_key {
             continue;
         }
-        let candidate_areas = candidate.areas();
+        let candidate_areas = candidate.areas_for_scope(config, scope);
         let overlap = candidate_areas
             .iter()
             .filter(|area| indexed_areas.contains(area))
@@ -122,7 +311,7 @@ pub fn related_by_issue_with_scope(
                 SearchResult {
                     issue_key: candidate.issue_key.clone(),
                     title: candidate.title.clone(),
-                    capsule_path: candidate.capsule_path.clone(),
+                    capsule_path: PathBuf::from(display_capsule_path(config, &candidate, scope)),
                     areas: candidate_areas,
                     snippet: first_interesting_line(&candidate.body),
                 },
@@ -160,14 +349,14 @@ pub fn related_by_area_with_scope(
     let mut results = Vec::new();
     for candidate in load_indexed_issues(config)?
         .into_iter()
-        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .filter(|issue| indexed_issue_visible_in_scope(config, issue, scope))
     {
-        let areas = candidate.areas();
+        let areas = candidate.areas_for_scope(config, scope);
         if areas.iter().any(|candidate_area| candidate_area == &area) {
             results.push(SearchResult {
                 issue_key: candidate.issue_key.clone(),
                 title: candidate.title.clone(),
-                capsule_path: candidate.capsule_path.clone(),
+                capsule_path: PathBuf::from(display_capsule_path(config, &candidate, scope)),
                 areas,
                 snippet: first_interesting_line(&candidate.body),
             });
@@ -225,7 +414,38 @@ pub fn docs_for_area_with_scope(
         let mut scoped = scope.clone();
         scoped.area = Some(area.slug.clone());
         let issues = load_indexed_issues(config)?;
-        if !issues
+        let selected_repository = config
+            .repository_sources
+            .values()
+            .find(|source| source.root == config.repo_root)
+            .map(|source| source.repository_id.clone());
+        if scoped.repo.is_none() {
+            scoped.repo = selected_repository.clone();
+        }
+        let area_issues = issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .areas_for_scope(config, &scoped)
+                    .iter()
+                    .any(|candidate| candidate == &area.slug)
+            })
+            .collect::<Vec<_>>();
+        let scoped_area_issues = selected_repository
+            .as_deref()
+            .map(|repository_id| {
+                area_issues
+                    .iter()
+                    .copied()
+                    .filter(|issue| {
+                        let mut repository_scope = scoped.clone();
+                        repository_scope.repo = Some(repository_id.to_string());
+                        indexed_issue_matches_scope(config, issue, &repository_scope)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| area_issues.clone());
+        if !scoped_area_issues
             .iter()
             .any(|issue| indexed_issue_matches_scope(config, issue, &scoped))
         {
@@ -234,12 +454,26 @@ pub fn docs_for_area_with_scope(
                 area.slug
             )));
         }
+        if (scope.project.is_some() || scope.project_set.is_some())
+            && scoped_area_issues
+                .iter()
+                .any(|issue| !indexed_issue_matches_scope(config, issue, &scoped))
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "topic doc for area `{}` contains memory outside the requested project scope",
+                area.slug
+            )));
+        }
     }
     read_to_string(&area.docs_target)
 }
 
 fn docs_scope_requires_index_check(scope: &MemoryScopeFilter) -> bool {
-    scope.issue.is_some() || scope.milestone.is_some() || scope.repo.is_some()
+    scope.project_set.is_some()
+        || scope.project.is_some()
+        || scope.issue.is_some()
+        || scope.milestone.is_some()
+        || scope.repo.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +482,7 @@ pub struct MemoryContextOptions {
     pub explicit_includes: Vec<String>,
     pub paths: Vec<PathBuf>,
     pub limit: usize,
+    pub scope: MemoryScopeFilter,
 }
 
 impl MemoryContextOptions {
@@ -257,6 +492,7 @@ impl MemoryContextOptions {
             explicit_includes: Vec::new(),
             paths: Vec::new(),
             limit,
+            scope: MemoryScopeFilter::default(),
         }
     }
 }
@@ -437,7 +673,7 @@ pub fn context_for_issue_with_options(
                 continue;
             }
             if indexed
-                .areas()
+                .areas_for_scope(config, &options.scope)
                 .iter()
                 .any(|area| current_areas.contains(area))
             {
@@ -453,7 +689,12 @@ pub fn context_for_issue_with_options(
     }
 
     if !options.paths.is_empty() {
-        for result in related_by_paths(config, &options.paths, ContextBucket::PathMatches.cap())? {
+        for result in related_by_paths_with_scope(
+            config,
+            &options.paths,
+            ContextBucket::PathMatches.cap(),
+            &options.scope,
+        )? {
             add_context_candidate(
                 &mut candidates,
                 ContextBucket::PathMatches,
@@ -482,7 +723,14 @@ pub fn context_for_issue_with_options(
             let Some(indexed) = indexed_by_key.get(&candidate.issue_key) else {
                 continue;
             };
-            let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(config, indexed));
+            if !indexed_issue_matches_scope(config, indexed, &options.scope) {
+                continue;
+            }
+            let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(
+                config,
+                indexed,
+                &options.scope,
+            ));
             documentation_paths.extend(docs);
             selected.push(SelectedContextBrief {
                 bucket,
@@ -686,9 +934,9 @@ pub fn status_with_scope(
     scope: &MemoryScopeFilter,
 ) -> Result<StatusReport, MemoryError> {
     let mut issues = load_indexed_issues(config)?;
-    issues.retain(|issue| indexed_issue_matches_scope(config, issue, scope));
+    issues.retain(|issue| indexed_issue_visible_in_scope(config, issue, scope));
     if let Some(area) = selection.area.as_ref().map(|area| slugify(area)) {
-        issues.retain(|issue| issue.areas().contains(&area));
+        issues.retain(|issue| issue.areas_for_scope(config, scope).contains(&area));
     }
     if let Some(milestone) = selection
         .milestone
@@ -706,13 +954,14 @@ pub fn status_with_scope(
     let status_issues = issues
         .into_iter()
         .map(|issue| {
-            let areas = issue.areas();
+            let areas = issue.areas_for_scope(config, scope);
+            let capsule_path = PathBuf::from(display_capsule_path(config, &issue, scope));
             StatusIssue {
                 issue_key: issue.issue_key,
                 title: issue.title,
                 state: issue.state,
                 milestone: issue.milestone,
-                capsule_path: issue.capsule_path,
+                capsule_path,
                 visibility: issue.visibility,
                 areas,
                 docs_sync_status: issue.docs_sync_status,
@@ -739,13 +988,27 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
+    let requested_repo = scope
+        .repo
+        .as_ref()
+        .and_then(|value| normalize_optional(value));
+    for (kind, requested) in [
+        (KnowledgeScopeKind::ProjectSet, scope.project_set.as_ref()),
+        (KnowledgeScopeKind::Project, scope.project.as_ref()),
+    ] {
+        if let Some(requested) = requested.and_then(|value| normalize_optional(value))
+            && !issue_scope_matches_request(config, issue, requested_repo.as_deref(), kind, &requested)
+        {
+            return false;
+        }
+    }
     if let Some(milestone) = scope.milestone.as_ref().and_then(|value| normalize_optional(value))
         && issue.milestone.as_deref() != Some(milestone.as_str())
     {
         return false;
     }
     if let Some(area) = scope.area.as_ref().map(|area| slugify(area))
-        && !issue.areas().contains(&area)
+        && !issue.areas_for_scope(config, scope).contains(&area)
     {
         return false;
     }
@@ -757,7 +1020,77 @@ fn indexed_issue_matches_scope(
     true
 }
 
+fn issue_scope_matches_request(
+    config: &MemoryConfig,
+    issue: &IndexedIssue,
+    repository_id: Option<&str>,
+    kind: KnowledgeScopeKind,
+    requested: &str,
+) -> bool {
+    if let Some(repository_id) = repository_id {
+        let owned_scopes = issue
+            .source_scope_refs
+            .iter()
+            .filter(|(source_id, _)| issue_source_belongs_to_repository(issue, source_id, repository_id))
+            .flat_map(|(_, scopes)| scopes.iter())
+            .collect::<Vec<_>>();
+        if !owned_scopes.is_empty() {
+            return owned_scopes
+                .iter()
+                .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(requested));
+        }
+        if let Some(source) = config.repository_sources.get(repository_id)
+            && kind == KnowledgeScopeKind::Project
+            && !source.project_scope_ids.is_empty()
+        {
+            return source
+                .project_scope_ids
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(requested))
+                && issue.scope_refs.iter().any(|scope| {
+                    scope.kind == kind && scope.id.eq_ignore_ascii_case(requested)
+                });
+        }
+    }
+    issue
+        .scope_refs
+        .iter()
+        .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(requested))
+}
+
+fn issue_source_belongs_to_repository(
+    issue: &IndexedIssue,
+    source_id: &str,
+    repository_id: &str,
+) -> bool {
+    source_id == format!("__live_capture__:{repository_id}")
+        || source_id.starts_with(&format!("{repository_id}:"))
+        || issue.source_refs.iter().any(|source| {
+            source.repo_id.as_deref() == Some(repository_id)
+                && (source.registration_source_id.as_deref() == Some(source_id)
+                    || source.id == source_id)
+        })
+}
+
+fn indexed_issue_visible_in_scope(
+    config: &MemoryConfig,
+    issue: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> bool {
+    indexed_issue_matches_scope(config, issue, scope)
+}
+
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
+    if !config.repository_sources.is_empty() {
+        return issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == repo
+        });
+    }
+    if issue.scope_refs.iter().any(|scope| {
+        scope.kind == KnowledgeScopeKind::Repository && scope.id == repo
+    }) {
+        return true;
+    }
     let repo = repo_scope_prefix(config, repo);
     if repo.is_empty() || repo == "." {
         return true;

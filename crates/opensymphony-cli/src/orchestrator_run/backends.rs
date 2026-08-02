@@ -1447,11 +1447,38 @@ impl RuntimeWorkerBackend {
     }
 
     fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
+        let issue = request.issue.clone();
+        let mut runner_config = self.runner_config.clone();
+        let mut worker_env = self.worker_env.clone();
+        if let Some(memory) = runner_config.memory.as_mut() {
+            if let Some(repository_id) = issue
+                .repository_binding
+                .as_ref()
+                .and_then(|binding| binding.repository_id())
+            {
+                let repository_id = repository_id.to_string();
+                memory.execution_repo = Some(repository_id.clone());
+                worker_env.insert(
+                    "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
+                    repository_id,
+                );
+            } else if memory.project_set.is_some() {
+                memory.execution_repo = None;
+                worker_env.remove("OPENSYMPHONY_MEMORY_EXECUTION_REPO");
+            }
+            if let Some(project) = issue.project_id.as_ref().or(issue.project_slug.as_ref()) {
+                memory.project = Some(project.clone());
+                worker_env.insert("OPENSYMPHONY_MEMORY_PROJECT".to_string(), project.clone());
+            } else if memory.project_set.is_some() {
+                memory.project = None;
+                worker_env.remove("OPENSYMPHONY_MEMORY_PROJECT");
+            }
+        }
         let mut runner = IssueSessionRunner::with_environment(
             self.client.clone(),
-            self.runner_config.clone(),
+            runner_config,
             OverlayEnvironment {
-                overrides: self.worker_env.clone(),
+                overrides: worker_env.clone(),
             },
         );
         if let Some(source) = self.workpad_comment_source.clone() {
@@ -1473,10 +1500,8 @@ impl RuntimeWorkerBackend {
             );
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
-        let worker_env = self.worker_env.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let codex_interrupts = Arc::clone(&self.codex_interrupts);
-        let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
@@ -1841,14 +1866,18 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
         "OPENSYMPHONY_MEMORY_PROJECT".to_string(),
         memory.project.clone(),
     );
-    env.insert(
-        "OPENSYMPHONY_MEMORY_PROJECT_SET".to_string(),
-        memory.project.clone(),
-    );
-    env.insert(
-        "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
-        memory.execution_repo.clone(),
-    );
+    if let Some(project_set) = &memory.project_set {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_PROJECT_SET".to_string(),
+            project_set.clone(),
+        );
+    }
+    if let Some(execution_repo) = &memory.execution_repo {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
+            execution_repo.clone(),
+        );
+    }
     if let Some(token) = &memory.token {
         env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
     }
@@ -1859,7 +1888,8 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
         endpoint: memory.endpoint.clone(),
         token: memory.token.clone(),
         project: Some(memory.project.clone()),
-        execution_repo: Some(memory.execution_repo.clone()),
+        project_set: memory.project_set.clone(),
+        execution_repo: memory.execution_repo.clone(),
     }
 }
 
@@ -6479,7 +6509,8 @@ mod tests {
             endpoint: "http://127.0.0.1:8765/mcp".to_string(),
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
-            execution_repo: "/tmp/project-alpha/services/api".to_string(),
+            project_set: None,
+            execution_repo: Some("/tmp/project-alpha/services/api".to_string()),
         };
         let mut env = BTreeMap::new();
 
@@ -6500,13 +6531,28 @@ mod tests {
         assert_eq!(
             env.get("OPENSYMPHONY_MEMORY_PROJECT_SET")
                 .map(String::as_str),
-            Some("project-alpha")
+            None
         );
         assert_eq!(
             env.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")
                 .map(String::as_str),
             Some("/tmp/project-alpha/services/api")
         );
+    }
+
+    #[test]
+    fn memory_scope_prefers_stable_project_id_over_slug() {
+        let mut issue = sample_issue();
+        issue.project_id = Some("project-stable-id".to_string());
+        issue.project_slug = Some("renamed-project".to_string());
+
+        let project = issue
+            .project_id
+            .as_ref()
+            .or(issue.project_slug.as_ref())
+            .cloned();
+
+        assert_eq!(project.as_deref(), Some("project-stable-id"));
     }
 
     #[tokio::test]
@@ -7235,6 +7281,8 @@ Run the scheduler.
             repository_routing: None,
             state_root: None,
             memory_catalog_root: None,
+            memory_sources: std::collections::BTreeMap::new(),
+            project_set_id: None,
             retain_failed: true,
             preserve_terminal_workspaces: true,
             memory: super::super::config::RunMemoryConfig {
