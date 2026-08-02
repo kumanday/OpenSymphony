@@ -30,7 +30,7 @@ use crate::opensymphony_openhands::{
     OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient, OpenHandsConversationStorePaths,
     OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
-    pending_conversation_manifest_path,
+    pending_conversation_manifest_path, superseded_conversation_manifests_path,
 };
 use crate::opensymphony_orchestrator::{
     RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
@@ -570,6 +570,55 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
+async fn archive_superseded_openhands_conversations(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    store: &OpenHandsConversationStorePaths,
+) -> Result<(), CliWorkspaceError> {
+    let path = superseded_conversation_manifests_path(workspace);
+    let Some(raw) = manager.read_text_artifact(workspace, &path).await? else {
+        return Ok(());
+    };
+    let Some(manifests) = serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
+        .ok()
+        .flatten()
+    else {
+        return Err(CliWorkspaceError::OpenHandsLifecycle(
+            "superseded OpenHands conversation evidence is malformed".to_owned(),
+        ));
+    };
+    for manifest in &manifests {
+        match store.move_conversation_to(
+            manifest.conversation_id.as_str(),
+            ConversationStoreKind::Archived,
+        ) {
+            Ok(ConversationMoveOutcome::Moved { from, .. }) => tracing::info!(
+                issue = %workspace.identifier(),
+                conversation_id = %manifest.conversation_id,
+                from = %from,
+                "moved superseded OpenHands conversation into the archived store"
+            ),
+            Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {}
+            Ok(ConversationMoveOutcome::Missing) => tracing::warn!(
+                issue = %workspace.identifier(),
+                conversation_id = %manifest.conversation_id,
+                "superseded OpenHands conversation was already absent before terminal cleanup"
+            ),
+            Err(error) => {
+                return Err(CliWorkspaceError::OpenHandsLifecycle(error.to_string()));
+            }
+        }
+    }
+    manager
+        .write_json_artifact_atomically(
+            workspace,
+            &path,
+            &Option::<Vec<IssueConversationManifest>>::None,
+        )
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) fn build_workspace_manager_config(
     workflow: &ResolvedWorkflow,
@@ -815,6 +864,13 @@ impl RuntimeWorkspaceBackend {
             let removes_workspace = force_remove
                 || self.manager.cleanup_decision(IssueLifecycleState::Terminal)
                     == crate::opensymphony_workspace::CleanupDecision::Remove;
+            let mut cleanup_run_manifest = self.manager.load_run_manifest(&handle).await?;
+            let _ = recovered_conversation_manifest(
+                &self.manager,
+                &handle,
+                cleanup_run_manifest.as_mut(),
+            )
+            .await?;
             let manifest_path = handle.conversation_manifest_path();
             if let Some(raw_manifest) = self
                 .manager
@@ -899,6 +955,12 @@ impl RuntimeWorkspaceBackend {
                             ));
                         }
                         if let Some(store) = self.openhands_conversation_store.as_ref() {
+                            archive_superseded_openhands_conversations(
+                                &self.manager,
+                                &handle,
+                                store,
+                            )
+                            .await?;
                             match store.move_conversation_to(
                                 manifest.conversation_id.as_str(),
                                 ConversationStoreKind::Archived,
@@ -1549,11 +1611,7 @@ async fn recovered_conversation_manifest(
     let Some(run_manifest) = run_manifest else {
         return Ok(None);
     };
-    if !matches!(
-        run_manifest.status,
-        RunStatus::Preparing | RunStatus::Prepared
-    ) || run_manifest.runtime_envelope.is_none()
-    {
+    if run_manifest.runtime_envelope.is_none() {
         return Ok(None);
     }
 
@@ -2074,6 +2132,9 @@ impl RuntimeWorkerBackend {
                     .as_ref()
                     .map(|envelope| envelope.repository_binding.repository.id.to_string())
                     .unwrap_or_else(|| memory.execution_repo.clone());
+                if let Some(grants) = &scoped.scope_grants {
+                    scoped.token = Some(grants.issue(&scoped.project, &scoped.execution_repo));
+                }
                 scoped
             });
             let mut worker_environment = worker_env.clone();
@@ -7907,6 +7968,7 @@ mod tests {
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
             execution_repo: "/tmp/project-alpha/services/api".to_string(),
+            scope_grants: None,
         };
         let mut env = BTreeMap::new();
 

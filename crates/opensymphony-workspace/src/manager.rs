@@ -2411,6 +2411,34 @@ impl WorkspaceManager {
                     )
                     .await?;
                 }
+                Err(error @ WorkspaceError::ManagedPathSymlink { .. })
+                    if is_checkout_generation_directory(&entry.path()) =>
+                {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "quarantining retained checkout generation with a symlinked managed manifest"
+                    );
+                    self.quarantine_checkout_path(
+                        &entry.path(),
+                        "retained checkout generation contains a symlinked managed manifest",
+                    )
+                    .await?;
+                }
+                Err(error @ WorkspaceError::WorkspacePathSymlink { .. })
+                    if is_checkout_generation_directory(&entry.path()) =>
+                {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "quarantining retained checkout generation with a symlinked workspace path"
+                    );
+                    self.quarantine_checkout_path(
+                        &entry.path(),
+                        "retained checkout generation contains a symlinked workspace path",
+                    )
+                    .await?;
+                }
                 Err(error) => return Err(error),
             }
         }

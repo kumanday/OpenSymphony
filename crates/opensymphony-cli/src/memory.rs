@@ -1,11 +1,11 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -22,6 +22,7 @@ use tokio::{
     sync::{Mutex, OwnedMutexGuard, watch},
     task::JoinHandle,
 };
+use uuid::Uuid;
 
 use crate::{
     opensymphony_code_intel::{
@@ -1651,6 +1652,45 @@ struct MemoryServerState {
     resolved_workflow: Option<ResolvedWorkflow>,
     config_generation: Option<String>,
     writer_gate: MemoryWriterGate,
+    scope_grants: MemoryScopeGrantRegistry,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MemoryScopeGrantRegistry {
+    grants: Arc<RwLock<HashMap<String, MemoryScopeGrant>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryScopeGrant {
+    pub(crate) project: String,
+    pub(crate) repo: String,
+}
+
+impl MemoryScopeGrantRegistry {
+    pub(crate) fn issue(&self, project: &str, repo: &str) -> String {
+        let token = format!("opensymphony-worker-{}", Uuid::new_v4());
+        self.grants
+            .write()
+            .expect("memory grant registry poisoned")
+            .insert(
+                token.clone(),
+                MemoryScopeGrant {
+                    project: project.to_owned(),
+                    repo: repo.to_owned(),
+                },
+            );
+        token
+    }
+
+    fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
+        token.and_then(|token| {
+            self.grants
+                .read()
+                .expect("memory grant registry poisoned")
+                .get(token)
+                .cloned()
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1704,6 +1744,7 @@ pub(crate) struct MemoryServerHandle {
     task: Option<JoinHandle<Result<(), String>>>,
     shutdown: watch::Sender<bool>,
     writer_gate: MemoryWriterGate,
+    scope_grants: MemoryScopeGrantRegistry,
 }
 
 impl Drop for MemoryServerHandle {
@@ -1719,6 +1760,10 @@ impl MemoryServerHandle {
 
     pub(crate) fn writer_gate(&self) -> Option<MemoryWriterGate> {
         (!self.is_finished()).then(|| Arc::clone(&self.writer_gate))
+    }
+
+    pub(crate) fn scope_grant_registry(&self) -> MemoryScopeGrantRegistry {
+        self.scope_grants.clone()
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -1874,6 +1919,7 @@ async fn start_memory_server_with_auth(
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
     let writer_gate = Arc::new(Mutex::new(Some(coordination_lock)));
+    let scope_grants = MemoryScopeGrantRegistry::default();
     let state = MemoryServerState {
         config,
         auth,
@@ -1882,6 +1928,7 @@ async fn start_memory_server_with_auth(
         resolved_workflow,
         config_generation,
         writer_gate: Arc::clone(&writer_gate),
+        scope_grants: scope_grants.clone(),
     };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
@@ -1906,6 +1953,7 @@ async fn start_memory_server_with_auth(
         task: Some(task),
         shutdown,
         writer_gate,
+        scope_grants,
     })
 }
 
@@ -2086,12 +2134,25 @@ async fn memory_server_mcp(
     headers: axum::http::HeaderMap,
     axum::Json(request): axum::Json<MemoryMcpRequest>,
 ) -> (axum::http::StatusCode, axum::Json<Value>) {
-    if let Err(response) = authorize_memory_request(
+    let bearer = bearer_token(&headers);
+    let scoped_grant = state.scope_grants.get(bearer);
+    let required_access = required_access_for_request(&request, &state.auth);
+    if let Err(response) = authorize_memory_request_with_scoped_grant(
         &headers,
         &state.auth,
-        required_access_for_request(&request, &state.auth),
+        required_access,
+        scoped_grant.is_some(),
     ) {
         return response;
+    }
+    if state.workspace_root.is_some()
+        && request.method == "tools/call"
+        && required_access == MemoryServerAccess::Read
+        && scoped_grant.is_none()
+    {
+        return memory_scope_forbidden(
+            "strict memory workers require a server-issued per-worker scope grant",
+        );
     }
     let id = request.id.clone();
     let writer_request = request.method == "tools/call"
@@ -2122,6 +2183,7 @@ async fn memory_server_mcp(
                 state.workspace_root.as_deref(),
                 state.central_config_path.as_deref(),
                 state.resolved_workflow.as_ref(),
+                scoped_grant.as_ref(),
             ),
         )
         .await
@@ -2277,10 +2339,20 @@ fn ast_tools_enabled(config: &MemoryConfig) -> bool {
     config.code_intel.enabled && config.code_intel.ast.enabled
 }
 
+#[cfg(test)]
 fn authorize_memory_request(
     headers: &axum::http::HeaderMap,
     auth: &MemoryServerAuth,
     required_access: MemoryServerAccess,
+) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
+    authorize_memory_request_with_scoped_grant(headers, auth, required_access, false)
+}
+
+fn authorize_memory_request_with_scoped_grant(
+    headers: &axum::http::HeaderMap,
+    auth: &MemoryServerAuth,
+    required_access: MemoryServerAccess,
+    scoped_grant: bool,
 ) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
@@ -2297,12 +2369,12 @@ fn authorize_memory_request(
             })),
         ));
     }
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+    let bearer = bearer_token(headers);
     let authorized = match required_access {
         MemoryServerAccess::Read => {
+            if scoped_grant {
+                return Ok(());
+            }
             let read_token = non_empty_str(auth.read_token.as_deref());
             let admin_token = non_empty_str(auth.admin_token.as_deref());
             match (read_token, admin_token) {
@@ -2344,6 +2416,25 @@ fn authorize_memory_request(
     }
 }
 
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+fn memory_scope_forbidden(message: &str) -> (axum::http::StatusCode, axum::Json<Value>) {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        axum::Json(json!({
+            "error": {
+                "code": "memory_scope_forbidden",
+                "message": message,
+            }
+        })),
+    )
+}
+
 fn non_empty_str(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -2363,7 +2454,7 @@ fn origin_is_localhost(origin: &str) -> bool {
 
 #[cfg(test)]
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
-    call_memory_tool_with_workspace(config, params, None, None, None).await
+    call_memory_tool_with_workspace(config, params, None, None, None, None).await
 }
 
 async fn call_memory_tool_with_workspace(
@@ -2372,12 +2463,16 @@ async fn call_memory_tool_with_workspace(
     workspace_root: Option<&Path>,
     central_config_path: Option<&Path>,
     resolved_workflow: Option<&ResolvedWorkflow>,
+    worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| MemoryError::InvalidInput("tools/call requires params.name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if let Some(worker_grant) = worker_grant {
+        validate_worker_memory_scope(name, &arguments, worker_grant)?;
+    }
     if central_config_path.is_some() && resolved_workflow.is_none() && name == "memory.context" {
         let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
     }
@@ -2595,6 +2690,52 @@ async fn call_memory_tool_with_workspace(
             "unsupported memory tool `{other}`"
         ))),
     }
+}
+
+fn validate_worker_memory_scope(
+    tool_name: &str,
+    arguments: &Value,
+    grant: &MemoryScopeGrant,
+) -> Result<(), MemoryError> {
+    if bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible") {
+        return Err(MemoryError::InvalidInput(
+            "worker memory grants cannot request all accessible records".to_owned(),
+        ));
+    }
+    let requested_project = optional_string_arg(arguments, "project");
+    let requested_repo = optional_string_arg(arguments, "repo")
+        .or_else(|| optional_string_arg(arguments, "repository"));
+    let project_required = matches!(
+        tool_name,
+        "memory.context" | "memory.search" | "memory.related" | "memory.docs" | "memory.status"
+    );
+    if project_required && requested_project.as_deref() != Some(grant.project.as_str()) {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant permits project `{}`; requested scope is not permitted",
+            grant.project
+        )));
+    }
+    if requested_project
+        .as_deref()
+        .is_some_and(|project| project != grant.project)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant permits project `{}`; requested scope is not permitted",
+            grant.project
+        )));
+    }
+    if requested_repo.as_deref() != Some(grant.repo.as_str()) {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant permits repository `{}`; requested scope is not permitted",
+            grant.repo
+        )));
+    }
+    if optional_string_arg(arguments, "projectSet").is_some() {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant does not permit project-set scope for `{tool_name}`"
+        )));
+    }
+    Ok(())
 }
 
 async fn call_code_graph_context_tool(
@@ -5967,15 +6108,17 @@ fn print_search_results(
 #[cfg(test)]
 mod tests {
     use super::{
-        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
-        authorize_memory_request, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
-        call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
+        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryScopeGrant,
+        MemoryScopeGrantRegistry, MemoryServerAccess, MemoryServerAuth, MemoryServerState,
+        RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock, authorize_memory_request,
+        call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
+        call_memory_tool_with_workspace, context_source_from_mcp,
         find_verified_checkout_for_code_intel, load_memory_config, memory_server_health,
         memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
         parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
         required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_config,
         resolve_code_intel_repo, run_init, trim_auto_memory_status_log,
+        validate_worker_memory_scope,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -9221,6 +9364,7 @@ Public memory concept.
             resolved_workflow: None,
             config_generation: Some("sha256:pinned-generation".to_string()),
             writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            scope_grants: MemoryScopeGrantRegistry::default(),
         };
 
         let axum::Json(payload) = memory_server_health(axum::extract::State(state)).await;
@@ -9287,6 +9431,7 @@ Public memory concept.
             Some(repo.path()),
             None,
             None,
+            None,
         )
         .await
         .expect_err("strict context must reject an unscoped worker request");
@@ -9294,6 +9439,36 @@ Public memory concept.
             error
                 .to_string()
                 .contains("worker's project or repository grant")
+        );
+    }
+
+    #[test]
+    fn worker_memory_grant_rejects_foreign_and_unscoped_requests() {
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            repo: "repo-alpha".to_owned(),
+        };
+        validate_worker_memory_scope(
+            "memory.search",
+            &json!({"project": "project-alpha", "repo": "repo-alpha"}),
+            &grant,
+        )
+        .expect("exact worker scope should be accepted");
+        assert!(
+            validate_worker_memory_scope(
+                "memory.search",
+                &json!({"project": "project-beta", "repo": "repo-alpha"}),
+                &grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "memory.related",
+                &json!({"project": "project-alpha", "repo": "repo-alpha", "allAccessible": true}),
+                &grant,
+            )
+            .is_err()
         );
     }
 

@@ -1848,11 +1848,17 @@ impl IssueSessionRunner {
                                 envelope.conversation_binding.as_deref()
                                     != Some(manifest.conversation_id.as_str())
                             }) => {
+                            self.preserve_superseded_conversation_manifest(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                            )
+                            .await?;
                             tracing::warn!(
                                 conversation_id = %manifest.conversation_id,
                                 "skipping retirement of conversation with mismatched runtime envelope binding"
                             );
-                            self.create_fresh_session(
+                            let replacement = self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
                                 run_manifest,
@@ -1861,7 +1867,15 @@ impl IssueSessionRunner {
                                 workflow,
                                 Some("conversation runtime envelope binding changed; superseding conversation".into()),
                             )
-                            .await
+                            .await?;
+                            self.retire_replaced_conversation(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                                &replacement,
+                            )
+                            .await;
+                            Ok(replacement)
                         }
                     Some(manifest)
                         if run_manifest.runtime_envelope.as_ref().is_some_and(|expected| {
@@ -1869,11 +1883,17 @@ impl IssueSessionRunner {
                                 actual != expected
                             })
                         }) => {
+                            self.preserve_superseded_conversation_manifest(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                            )
+                            .await?;
                             tracing::warn!(
                                 conversation_id = %manifest.conversation_id,
                                 "skipping retirement of conversation with an untrusted runtime envelope"
                             );
-                            self.create_fresh_session(
+                            let replacement = self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
                                 run_manifest,
@@ -1882,7 +1902,15 @@ impl IssueSessionRunner {
                                 workflow,
                                 Some("terminal runtime envelope changed; superseding conversation".into()),
                             )
-                            .await
+                            .await?;
+                            self.retire_replaced_conversation(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                                &replacement,
+                            )
+                            .await;
+                            Ok(replacement)
                         }
                     Some(manifest) => match self
                         .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
@@ -1890,6 +1918,12 @@ impl IssueSessionRunner {
                     {
                         ReuseSession::Active(session) => Ok(Step::Continue(*session)),
                         ReuseSession::Reset { reason, manifest } => {
+                            self.preserve_superseded_conversation_manifest(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                            )
+                            .await?;
                             let replacement = self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
@@ -1900,7 +1934,13 @@ impl IssueSessionRunner {
                                 Some(reason),
                             )
                             .await?;
-                            self.retire_replaced_conversation(&manifest, &replacement).await;
+                            self.retire_replaced_conversation(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                                &replacement,
+                            )
+                            .await;
                             Ok(replacement)
                         }
                     },
@@ -1938,6 +1978,12 @@ impl IssueSessionRunner {
                     )
                 });
                 if let Some(manifest) = loaded.manifest.as_ref() {
+                    self.preserve_superseded_conversation_manifest(
+                        workspace_manager,
+                        workspace,
+                        manifest,
+                    )
+                    .await?;
                     if !safe_to_retire {
                         tracing::warn!(
                             conversation_id = %manifest.conversation_id,
@@ -1963,7 +2009,13 @@ impl IssueSessionRunner {
                 if safe_to_retire
                     && let Some(manifest) = loaded.manifest.as_ref()
                 {
-                    self.retire_replaced_conversation(manifest, &replacement).await;
+                    self.retire_replaced_conversation(
+                        workspace_manager,
+                        workspace,
+                        manifest,
+                        &replacement,
+                    )
+                    .await;
                 }
                 Ok(replacement)
             }
@@ -2386,6 +2438,61 @@ impl IssueSessionRunner {
         })
     }
 
+    async fn preserve_superseded_conversation_manifest(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        manifest: &IssueConversationManifest,
+    ) -> Result<(), IssueSessionError> {
+        let path = superseded_conversation_manifests_path(workspace);
+        let mut manifests = workspace_manager
+            .read_text_artifact(workspace, &path)
+            .await?
+            .and_then(|raw| {
+                serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(raw.as_str()).ok()
+            })
+            .flatten()
+            .unwrap_or_default();
+        if manifests
+            .iter()
+            .all(|existing| existing.conversation_id != manifest.conversation_id)
+        {
+            manifests.push(manifest.clone());
+        }
+        workspace_manager
+            .write_json_artifact_atomically(workspace, &path, &Some(&manifests))
+            .await?;
+        Ok(())
+    }
+
+    async fn clear_superseded_conversation_manifest(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        conversation_id: &ConversationId,
+    ) -> Result<(), IssueSessionError> {
+        let path = superseded_conversation_manifests_path(workspace);
+        let Some(raw) = workspace_manager
+            .read_text_artifact(workspace, &path)
+            .await?
+        else {
+            return Ok(());
+        };
+        let Some(mut manifests) =
+            serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
+                .ok()
+                .flatten()
+        else {
+            return Ok(());
+        };
+        manifests.retain(|manifest| &manifest.conversation_id != conversation_id);
+        let replacement = (!manifests.is_empty()).then_some(&manifests);
+        workspace_manager
+            .write_json_artifact_atomically(workspace, &path, &replacement)
+            .await?;
+        Ok(())
+    }
+
     async fn try_reuse_session(
         &self,
         workspace_manager: &WorkspaceManager,
@@ -2491,6 +2598,8 @@ impl IssueSessionRunner {
 
     async fn retire_replaced_conversation(
         &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
         manifest: &IssueConversationManifest,
         replacement: &Step<ActiveSession>,
     ) {
@@ -2508,6 +2617,21 @@ impl IssueSessionRunner {
                 conversation_id = %manifest.conversation_id,
                 %error,
                 "failed to retire superseded conversation after durable replacement"
+            );
+            return;
+        }
+        if let Err(error) = self
+            .clear_superseded_conversation_manifest(
+                workspace_manager,
+                workspace,
+                &manifest.conversation_id,
+            )
+            .await
+        {
+            tracing::warn!(
+                conversation_id = %manifest.conversation_id,
+                %error,
+                "failed to clear retired superseded conversation evidence"
             );
         }
     }
@@ -4177,6 +4301,12 @@ fn create_conversation_request_path(workspace: &WorkspaceHandle) -> PathBuf {
 
 pub fn pending_conversation_manifest_path(workspace: &WorkspaceHandle) -> PathBuf {
     workspace.openhands_dir().join("pending-conversation.json")
+}
+
+pub fn superseded_conversation_manifests_path(workspace: &WorkspaceHandle) -> PathBuf {
+    workspace
+        .openhands_dir()
+        .join("superseded-conversations.json")
 }
 
 fn last_conversation_state_path(workspace: &WorkspaceHandle) -> PathBuf {

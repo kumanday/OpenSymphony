@@ -1052,6 +1052,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
         execution_repo: runtime.target_repo.display().to_string(),
+        scope_grants: Some(server.scope_grant_registry()),
     });
     if let Some(env) = &memory_env {
         info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
@@ -1461,12 +1462,13 @@ fn linear_oauth_credentials_from_env() -> Option<(String, String)> {
     (!client_id.is_empty() && !client_secret.is_empty()).then_some((client_id, client_secret))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct RuntimeMemoryEnv {
     pub(super) endpoint: String,
     pub(super) token: Option<String>,
     pub(super) project: String,
     pub(super) execution_repo: String,
+    pub(super) scope_grants: Option<super::memory::MemoryScopeGrantRegistry>,
 }
 
 async fn start_runtime_memory_server(
