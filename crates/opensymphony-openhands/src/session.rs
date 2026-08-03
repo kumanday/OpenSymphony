@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -2787,7 +2789,30 @@ impl IssueSessionRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn create_fresh_session(
+    fn create_fresh_session<'a>(
+        &'a self,
+        workspace_manager: &'a WorkspaceManager,
+        workspace: &'a WorkspaceHandle,
+        run_manifest: &'a mut RunManifest,
+        observed_run: &'a RunAttempt,
+        issue: &'a NormalizedIssue,
+        workflow: &'a ResolvedWorkflow,
+        reset_reason: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<Step<ActiveSession>, IssueSessionError>> + Send + 'a>>
+    {
+        Box::pin(self.create_fresh_session_inner(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            observed_run,
+            issue,
+            workflow,
+            reset_reason,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_fresh_session_inner(
         &self,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
